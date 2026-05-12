@@ -89,6 +89,22 @@ export async function runAcpAgent(
   // we wait here to keep the first session's tool surface consistent with
   // the legacy synchronous behavior.
   await config.waitForMcpReady();
+  // Surface MCP failures to stderr. ACP's stdout is the protocol channel
+  // so info/log writes are already redirected to stderr below, but we
+  // emit this BEFORE that redirection takes effect to keep the message
+  // visible regardless of how the host process is wired.
+  // Defensive against tests that pass a stubbed Config without
+  // `getFailedMcpServerNames`.
+  const failedMcpServers =
+    typeof config.getFailedMcpServerNames === 'function'
+      ? config.getFailedMcpServerNames()
+      : [];
+  if (failedMcpServers.length > 0) {
+    process.stderr.write(
+      `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+        `Continuing with built-in tools and any servers that did connect.\n`,
+    );
+  }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;

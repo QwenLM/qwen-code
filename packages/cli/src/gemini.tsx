@@ -16,6 +16,7 @@ import {
   setStartupEventSink,
   type Config,
   createDebugLogger,
+  writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -67,6 +68,7 @@ import {
   recordStartupEvent,
   setInteractiveMode,
   finalizeStartupProfile,
+  isStartupProfilerEnabled,
 } from './utils/startupProfiler.js';
 import {
   relaunchAppInChildProcess,
@@ -219,6 +221,27 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+
+  // Write a small runtime.json sidecar next to the chat log so external
+  // tools (terminal multiplexers, IDE integrations, status daemons) can
+  // map the running PID back to its session id and work directory.
+  // Best-effort: a read-only filesystem must not prevent the UI from
+  // starting up. Marking the runtime status as enabled is what arms the
+  // session-swap refresh in `Config.refreshSessionId()` — without this
+  // call, the sidecar would never update on `/clear` or `/resume`.
+  try {
+    const sessionId = config.getSessionId();
+    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
+    await writeRuntimeStatus(runtimeStatusPath, {
+      sessionId,
+      workDir: config.getTargetDir(),
+      qwenVersion: version,
+    });
+    config.markRuntimeStatusEnabled();
+  } catch {
+    // ignored: best-effort, never block UI startup.
+  }
+
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
@@ -330,8 +353,13 @@ export async function startInteractiveUI(
       isScreenReaderEnabled: config.getScreenReader(),
     },
   );
-  // Records the moment Ink has produced its first frame. AppContainer's mount
-  // effect runs after this — it carries the `config_initialize_*` and
+  // Records the moment Ink's `render()` call has returned, which is
+  // synchronous and happens before React reconciliation actually pushes
+  // bytes to the terminal. We intentionally keep the legacy name
+  // `first_paint` for backward compatibility with previously-collected
+  // profile files; the value is best read as "render call returned"
+  // rather than literal pixel paint. AppContainer's mount effect runs
+  // after this — it carries the `config_initialize_*` and
   // `input_enabled` checkpoints that complete the first-screen picture.
   profileCheckpoint('first_paint');
 
@@ -364,10 +392,15 @@ export async function startInteractiveUI(
 export async function main() {
   profileCheckpoint('main_entry');
   // Bridge core-package startup events (Config.initialize, MCP discovery,
-  // GeminiClient.setTools) into the cli's startup profiler. No-op when
-  // QWEN_CODE_PROFILE_STARTUP is unset because `recordStartupEvent` returns
-  // early in that case.
-  setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
+  // GeminiClient.setTools) into the cli's startup profiler. Gated on
+  // `isStartupProfilerEnabled()` so that when QWEN_CODE_PROFILE_STARTUP is
+  // unset (the common case) every core-side `recordStartupEvent()` call
+  // sees a null sink and short-circuits at the first comparison, instead
+  // of going through this arrow wrapper and the profiler's own enabled
+  // check.
+  if (isStartupProfilerEnabled()) {
+    setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
+  }
   setupUnhandledRejectionHandler();
 
   if (process.argv.includes('--bare')) {
@@ -756,25 +789,58 @@ export async function main() {
       }
     }
 
-    // For non-stream-json mode, initialize config here
+    // For non-stream-json mode, initialize config here. Stream-json defers
+    // `config.initialize()` to inside `Session.ensureConfigInitialized`
+    // because the initial control_request may register SDK MCP servers
+    // that must be in place before discovery runs (see session.ts).
     if (inputFormat !== InputFormat.STREAM_JSON) {
       profileCheckpoint('config_initialize_start');
       await config.initialize();
       profileCheckpoint('config_initialize_end');
+      // Non-interactive paths feed a prompt to the model immediately after
+      // init. Under PR-A's progressive MCP availability,
+      // `config.initialize()` returns BEFORE MCP servers settle, so
+      // without this wait the first sendMessage would see only built-in
+      // tools — a silent regression versus the legacy synchronous
+      // behavior. Interactive paths skip this (AppContainer's batch-flush
+      // subscriber updates the tool list as MCP servers come online).
+      await config.waitForMcpReady();
+      // Surface MCP server failures on stderr so non-interactive runs
+      // (--prompt / piped stdin / scripts) don't silently regress to
+      // built-in-tools-only when a server cannot connect. The legacy
+      // synchronous MCP path was visibly noisy on failures because
+      // per-server errors logged to stderr during the blocking
+      // `discoverAllMcpTools` call; PR-A moves discovery to a
+      // background promise whose per-server errors are caught inside
+      // `discoverAllMcpToolsIncremental` and never reach a TTY. This
+      // helper closes that gap without re-introducing blocking.
+      // Defensive against tests that pass a stubbed Config without
+      // `getFailedMcpServerNames` — the warning is best-effort visibility
+      // and never gates startup.
+      const failedMcpServers =
+        typeof config.getFailedMcpServerNames === 'function'
+          ? config.getFailedMcpServerNames()
+          : [];
+      if (failedMcpServers.length > 0) {
+        writeStderrLine(
+          `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+            `Continuing with built-in tools and any servers that did connect. ` +
+            `Re-run with QWEN_CODE_DEBUG=1 to see per-server reasons.`,
+        );
+      }
+      // Finalize the non-interactive startup profile here so MCP events
+      // emitted during initialize() / waitForMcpReady() are captured.
+      // Subsequent stdin reads / auth checks / prompt execution are not
+      // part of the "first-screen" budget.
+      //
+      // For stream-json we deliberately do NOT finalize here: the profile
+      // is finalized inside Session.ensureConfigInitialized() after MCP
+      // settles, so its `config_initialize_*` and MCP events make it into
+      // the file. Finalizing here would write an empty profile and the
+      // module-level `finalized` guard would suppress every subsequent
+      // event.
+      finalizeStartupProfile(config.getSessionId());
     }
-    // Non-interactive paths feed a prompt to the model immediately after
-    // init. Under PR-A's progressive MCP availability, `config.initialize()`
-    // returns BEFORE MCP servers settle, so without this wait the first
-    // sendMessage would see only built-in tools — a silent regression
-    // versus the legacy synchronous behavior. Interactive paths skip this
-    // (AppContainer's batch-flush subscriber updates the tool list as MCP
-    // servers come online; the UI is already visible).
-    await config.waitForMcpReady();
-    // Finalize the non-interactive startup profile here so MCP events emitted
-    // during initialize() / waitForMcpReady() are captured. Subsequent stdin
-    // reads / auth checks / prompt execution are not part of the
-    // "first-screen" budget.
-    finalizeStartupProfile(config.getSessionId());
 
     // Only read stdin if NOT in stream-json mode
     // In stream-json mode, stdin is used for protocol messages (control requests, etc.)
@@ -800,6 +866,7 @@ export async function main() {
       await runNonInteractiveStreamJson(
         nonInteractiveConfig,
         trimmedInput.length > 0 ? trimmedInput : '',
+        settings,
       );
       await runExitCleanup();
       // `runNonInteractiveStreamJson` doesn't return an explicit exit

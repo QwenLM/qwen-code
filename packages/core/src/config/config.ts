@@ -46,7 +46,11 @@ import { GitService } from '../services/gitService.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
-import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
+import {
+  MCPServerStatus,
+  getMCPServerStatus,
+  type SendSdkMcpMessage,
+} from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
@@ -1295,12 +1299,22 @@ export class Config {
    * the init path in tests that don't exercise MCP at all.
    */
   private startMcpDiscoveryInBackground(): void {
-    const registry = this.toolRegistry as ToolRegistry & {
-      getMcpClientManager?: () => {
-        discoverAllMcpToolsIncremental: (cfg: Config) => Promise<void>;
-      };
-    };
-    const manager = registry.getMcpClientManager?.();
+    // `getMcpClientManager` is a public method on `ToolRegistry` (added
+    // alongside this PR), so we call it directly — no defensive cast.
+    // The earlier `as ToolRegistry & { getMcpClientManager?: ... }` cast
+    // hid the call site from TypeScript and meant a future rename
+    // wouldn't flag it. The defensive guard below remains because some
+    // tests (e.g. those using `createMockToolRegistry`) stub
+    // ToolRegistry as a plain object — calling a method that doesn't
+    // exist on the stub would crash the init path even when the test
+    // doesn't exercise MCP.
+    const manager = (
+      this.toolRegistry as ToolRegistry & {
+        getMcpClientManager?: () => ReturnType<
+          ToolRegistry['getMcpClientManager']
+        >;
+      }
+    ).getMcpClientManager?.();
     if (!manager) {
       this.debugLogger.debug(
         'Skipping background MCP discovery: ToolRegistry has no MCP client manager',
@@ -1356,6 +1370,44 @@ export class Config {
     if (this.mcpDiscoveryPromise) {
       await this.mcpDiscoveryPromise;
     }
+  }
+
+  /**
+   * Returns the names of configured (non-disabled) MCP servers whose
+   * discovery did NOT end in a CONNECTED state. Intended to be called by
+   * non-interactive entry points AFTER {@link waitForMcpReady} resolves,
+   * so they can surface a single user-visible warning summarizing which
+   * servers failed.
+   *
+   * The legacy synchronous MCP path surfaced these failures visibly
+   * during `config.initialize()` (because they happened on the main
+   * thread and per-server errors logged to stderr). Under PR-A's
+   * progressive discovery, per-server errors are caught inside
+   * `McpClientManager.discoverAllMcpToolsIncremental` and routed to
+   * profiler events + `mcp-client-update` notifications — both of which
+   * are invisible to a non-interactive run with only built-in stderr.
+   * This helper closes that gap WITHOUT re-introducing the blocking
+   * behavior.
+   *
+   * Returns an empty array when MCP discovery was skipped (bare mode /
+   * legacy blocking / no servers configured) or when every configured
+   * server settled successfully.
+   */
+  getFailedMcpServerNames(): string[] {
+    const servers = this.getMcpServers();
+    if (!servers) {
+      return [];
+    }
+    const failed: string[] = [];
+    for (const name of Object.keys(servers)) {
+      if (this.isMcpServerDisabled(name)) {
+        continue;
+      }
+      if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
+        failed.push(name);
+      }
+    }
+    return failed;
   }
 
   async refreshHierarchicalMemory(): Promise<void> {

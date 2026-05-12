@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode } from './config.js';
+import { Config, ApprovalMode, MCPServerConfig } from './config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
@@ -507,6 +507,29 @@ describe('Server Config (config.ts)', () => {
       const config = new Config({ ...baseParams, checkpointing: false });
       await config.initialize();
       await expect(config.waitForMcpReady()).resolves.toBeUndefined();
+    });
+
+    it('getFailedMcpServerNames returns an empty array when no MCP servers are configured', () => {
+      // The helper underpins the non-interactive "Warning: MCP server(s)
+      // failed to start" emission. Must be a no-op when there's nothing
+      // to warn about, otherwise --prompt runs with no MCP config would
+      // emit a spurious warning every time.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('getFailedMcpServerNames skips disabled servers', () => {
+      // A user-disabled server is not "failed" — the user explicitly
+      // turned it off. Treating it as failed would generate noise on
+      // every non-interactive run. Disablement is tracked via
+      // `excludedMcpServers` (see `isMcpServerDisabled`).
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: { off: new MCPServerConfig() },
+        excludedMcpServers: ['off'],
+      } as ConfigParameters);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
     });
   });
 
