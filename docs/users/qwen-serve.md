@@ -3,6 +3,8 @@
 Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, CI scripts, custom CLIs) share one agent session over HTTP + Server-Sent Events instead of each spawning their own subprocess.
 
 > **Status:** Stage 1 (experimental). The protocol surface is locked at the §04 routes table from issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803). Stage 1.5 (`qwen --serve` flag — TUI co-hosts the same HTTP server) and Stage 2 (in-process refactor + `mDNS`/OpenAPI/WebSocket/Prometheus polish) are immediately downstream.
+>
+> **Scope honesty:** Stage 1 is sized for **developers prototyping clients against the protocol surface** and for **local single-user / small-team collaboration**. Production-grade multi-client / long-running / network-flaky workloads (mobile companions, IM bots reaching 1000+ chats, IDE extensions across many windows) need Stage 1.5+ guarantees that aren't in this release — see the [Stage 1.5+ runtime guarantees](#stage-15-runtime-guarantees) section below for the gap list and #3803 for the convergence roadmap.
 
 ## What it gives you
 
@@ -158,6 +160,42 @@ A single `qwen serve` process can manage sessions for any workspace path passed 
 > **Subscribe BEFORE posting `modelServiceId` on attach.** When a client `POST /session` with a `modelServiceId` and the workspace already has a session running a different model, the daemon issues an internal `setSessionModel` call — failures are NOT propagated as an HTTP error (the session stays operational on its current model). The visible failure signal is a `model_switch_failed` event on the session's SSE stream. If you call `POST /session` and only THEN open `GET /session/:id/events`, you'll miss the failure event and silently keep talking to the wrong model. Open the SSE stream first, or pass `Last-Event-ID: 0` on subscribe to replay the ring's oldest available event.
 
 To handle multiple **users** (each with their own quota, audit log, sandbox) or to scale beyond one process's reach (cold-start budget, FD count, RSS), you spawn multiple daemon instances behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
+
+## Durability model
+
+**Sessions are ephemeral in Stage 1.** Plan accordingly:
+
+- A child process crash publishes `session_died` and removes the session from the daemon's maps. There is **no resume** — clients must `POST /session` again.
+- A daemon restart loses every in-flight session. ACP's `loadSession` / `unstable_resumeSession` are **not exposed via HTTP** in Stage 1; sessions don't outlive the daemon.
+- Long client disconnects (>5 min on a chatty turn) can outrun the SSE replay ring (default 4000 frames) — `Last-Event-ID` reconnect succeeds but state may be incoherent. For mobile / flaky-network clients, plan to re-create the session and re-open SSE on long drops.
+- File operations (`writeTextFile`) are atomic across crashes (write-then-rename); they aren't atomic across daemon restarts in the sense of replaying — the file write either landed or it didn't.
+
+If your integration needs cross-restart durability, you need either Stage 1.5+ (`loadSession` over HTTP, persistence layer) or your own application-level state recovery. Don't hold long-running, restart-sensitive state inside the daemon's session.
+
+## Stage 1.5+ runtime guarantees
+
+Stage 1's contract is sized for prototyping. Per [#3889 chiga0 downstream-consumer review](https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427875644), the following are **not** in Stage 1 — production-grade integrations need Stage 1.5+ before relying on them:
+
+**Blockers for serious downstream use:**
+
+1. **Per-request `sessionScope` override** on `POST /session` — today the daemon-wide default is the only setting; a VSCode extension can't say "I want a private session for this window" against a daemon configured for shared sessions.
+2. **`loadSession` / `unstable_resumeSession` over HTTP** — without this, no integration can survive a child crash or daemon restart, and the "1 daemon = 1 session, just spawn another" model is internally inconsistent (orchestrators can't recover state either).
+3. **Persistent client identity (pair tokens + per-client revocation)** — Stage 1 uses one shared bearer; a leaked token revokes everyone, and `originatorClientId` is client-self-declared rather than daemon-stamped from authenticated identity.
+
+**Reliability baseline:**
+
+4. **Client-initiated heartbeat path** — distinguish "agent thinking" from "daemon dead" without waiting for the 15s server heartbeat.
+5. **`permission_already_resolved` event** when a vote loses the first-responder race — currently UIs have to infer state from a `404`.
+6. **Larger / per-session-configurable replay ring** — default 4000 covers short drops; mobile / chatty-turn workloads need 8000+ or per-session config.
+7. **`slow_client_warning` event before `client_evicted`** — soft backpressure so well-behaved slow clients can self-throttle (trim render depth, drop chunks) before being terminated.
+
+**Integration ergonomics:**
+
+8. **`POST /session/:id/_meta` for IM-style context** — per-session key-value attached to subsequent prompts (chat id, sender, thread id) replaces the per-channel improvisation.
+9. **`/capabilities` actual feature negotiation** — `protocol_versions: { acp: '0.14.x', daemon_envelope: 1 }` so clients can detect drift instead of falling through to "unknown frame, ignore".
+10. **First-class durability documentation** (this section) — already shipped above.
+
+The full convergence roadmap is tracked on [#3803](https://github.com/QwenLM/qwen-code/issues/3803).
 
 ## What's next
 

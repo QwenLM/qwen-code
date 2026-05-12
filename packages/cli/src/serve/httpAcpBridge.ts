@@ -249,6 +249,15 @@ export interface BridgeOptions {
    * §03 decision §1. `single` shares one session per workspace across HTTP
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
+   *
+   * FIXME(stage-1.5, chiga0 must-have 1):
+   * Today this is a daemon-wide setting — clients can't override per
+   * request. A VSCode extension that wants a private session per
+   * window can't ask for it against a daemon configured for `single`.
+   * Stage 1.5 should accept `sessionScope` on the `POST /session`
+   * body, treating the daemon-wide value as a hint not a hard rule.
+   * Reference:
+   * https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427875644
    */
   sessionScope?: 'single' | 'thread';
   /** Channel factory; defaults to spawning `qwen --acp` as a child process. */
