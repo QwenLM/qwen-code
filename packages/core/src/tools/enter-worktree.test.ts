@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import * as path from 'node:path';
 import { EnterWorktreeTool } from './enter-worktree.js';
 import { ExitWorktreeTool } from './exit-worktree.js';
 import type { Config } from '../config/config.js';
@@ -79,9 +80,14 @@ describe('GitWorktreeService.getUserWorktreesDir / getUserWorktreePath', () => {
     // Use the cwd (which exists) so simple-git's existence check passes.
     const root = process.cwd();
     const service = new GitWorktreeService(root);
-    expect(service.getUserWorktreesDir()).toBe(`${root}/.qwen/worktrees`);
+    // Build expected paths via path.join so the separator matches the
+    // platform — the implementation uses path.join, so on Windows the
+    // separator is `\`, not `/`.
+    expect(service.getUserWorktreesDir()).toBe(
+      path.join(root, '.qwen', 'worktrees'),
+    );
     expect(service.getUserWorktreePath('feat-x')).toBe(
-      `${root}/.qwen/worktrees/feat-x`,
+      path.join(root, '.qwen', 'worktrees', 'feat-x'),
     );
   });
 });
