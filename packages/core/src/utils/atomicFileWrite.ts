@@ -75,9 +75,21 @@ export async function atomicWriteFile(
   const encoding = options?.encoding ?? 'utf-8';
 
   // Resolve symlinks so tmp lives on the same volume as the real target.
+  // Use lstat+readlink instead of realpath to handle broken symlinks
+  // (where the target doesn't exist yet).
   let targetPath: string;
   try {
-    targetPath = await fs.realpath(filePath);
+    const lstats = await fs.lstat(filePath);
+    if (lstats.isSymbolicLink()) {
+      targetPath = await fs.readlink(filePath);
+      // Resolve relative symlink targets against the symlink's directory.
+      if (!targetPath.startsWith('/')) {
+        const { dirname, resolve } = await import('node:path');
+        targetPath = resolve(dirname(filePath), targetPath);
+      }
+    } else {
+      targetPath = filePath;
+    }
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;
@@ -87,17 +99,18 @@ export async function atomicWriteFile(
 
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
-  // Stat the target to preserve permissions.
-  let targetMode: number | undefined;
+  // Stat the target to preserve existing permissions.
+  let existingMode: number | undefined;
   try {
     const stat = await fs.stat(targetPath);
-    targetMode = stat.mode;
+    existingMode = stat.mode;
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;
     }
-    targetMode = options?.mode;
   }
+
+  const desiredMode = existingMode ?? options?.mode;
 
   try {
     const writeOptions: {
@@ -111,16 +124,16 @@ export async function atomicWriteFile(
     if (flush) {
       writeOptions.flush = true;
     }
-    // For new files, set mode atomically during write if provided.
-    if (targetMode === undefined && options?.mode !== undefined) {
-      writeOptions.mode = options.mode;
+    // Set mode during write to avoid a permission window on new files.
+    if (desiredMode !== undefined) {
+      writeOptions.mode = desiredMode;
     }
 
     await fs.writeFile(tmpPath, data, writeOptions);
 
-    // Apply original permissions to the temp file before rename.
-    if (targetMode !== undefined) {
-      await fs.chmod(tmpPath, targetMode);
+    // chmod to ensure permissions match (writeFile mode is masked by umask).
+    if (desiredMode !== undefined) {
+      await fs.chmod(tmpPath, desiredMode);
     }
 
     await renameWithRetry(tmpPath, targetPath, retries, delayMs);
@@ -134,7 +147,6 @@ export async function atomicWriteFile(
 
     // EXDEV: cross-device rename not supported — fall back to direct write.
     if (isNodeError(error) && error.code === 'EXDEV') {
-      const effectiveMode = targetMode ?? options?.mode;
       const fallbackOptions: {
         encoding?: BufferEncoding;
         flush?: boolean;
@@ -146,12 +158,12 @@ export async function atomicWriteFile(
       if (flush) {
         fallbackOptions.flush = true;
       }
-      if (effectiveMode !== undefined) {
-        fallbackOptions.mode = effectiveMode;
+      if (desiredMode !== undefined) {
+        fallbackOptions.mode = desiredMode;
       }
       await fs.writeFile(targetPath, data, fallbackOptions);
-      if (effectiveMode !== undefined) {
-        await fs.chmod(targetPath, effectiveMode);
+      if (desiredMode !== undefined) {
+        await fs.chmod(targetPath, desiredMode);
       }
       return;
     }

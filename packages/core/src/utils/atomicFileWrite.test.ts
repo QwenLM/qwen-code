@@ -165,6 +165,24 @@ describe('atomicWriteFile', () => {
     expect(content).toBe('updated via symlink');
   });
 
+  it('should write through a broken symlink without replacing it', async () => {
+    const realFile = path.join(tmpDir, 'target.txt');
+    const linkFile = path.join(tmpDir, 'broken-link.txt');
+
+    // Create a symlink whose target does not exist yet.
+    await fs.symlink(realFile, linkFile);
+
+    await atomicWriteFile(linkFile, 'created via broken symlink');
+
+    // The symlink should still exist and point to the target.
+    const linkTarget = await fs.readlink(linkFile);
+    expect(linkTarget).toBe(realFile);
+
+    // The real target file should have been created with the content.
+    const content = await fs.readFile(realFile, 'utf-8');
+    expect(content).toBe('created via broken symlink');
+  });
+
   it('should throw if parent directory does not exist', async () => {
     const filePath = path.join(tmpDir, 'no', 'such', 'dir', 'file.txt');
     await expect(atomicWriteFile(filePath, 'data')).rejects.toThrow();
