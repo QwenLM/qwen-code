@@ -1,0 +1,63 @@
+name: 'Release Test (Fork)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version, e.g. v0.0.0-pr3828-test.1'
+        required: true
+        type: 'string'
+      ref:
+        description: 'Branch or commit SHA to build from'
+        required: true
+        type: 'string'
+        default: 'main'
+
+jobs:
+  build_and_release:
+    name: 'Build Standalone Archives and Release'
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'write'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+        with:
+          ref: '${{ github.event.inputs.ref }}'
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Build bundle'
+        run: 'npm run build && npm run bundle'
+
+      - name: 'Build Standalone Archives (all platforms)'
+        env:
+          RELEASE_VERSION: '${{ github.event.inputs.version }}'
+        run: |
+          VERSION="${RELEASE_VERSION#v}"
+          npm run package:standalone:release -- --version "${VERSION}" --out-dir dist/standalone
+
+      - name: 'Verify release assets'
+        run: 'npm run verify:installation-release -- --dir dist/standalone'
+
+      - name: 'Create GitHub Release'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          RELEASE_TAG: '${{ github.event.inputs.version }}'
+        run: |
+          gh release create "${RELEASE_TAG}" \
+            dist/standalone/qwen-code-*.tar.gz \
+            dist/standalone/qwen-code-*.zip \
+            dist/standalone/SHA256SUMS \
+            --target '${{ github.event.inputs.ref }}' \
+            --title "Test Release ${RELEASE_TAG}" \
+            --notes "Installer test build for PR #3828. Not for production use." \
+            --prerelease

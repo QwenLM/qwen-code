@@ -491,7 +491,48 @@ function createArchive(outputExtension, outputPath, cwd) {
     return;
   }
 
-  run('tar', ['-czf', outputPath, '-C', cwd, 'qwen-code']);
+  // On macOS Sequoia+, every file inherits an immovable `com.apple.provenance`
+  // xattr that bsdtar embeds into pax extended headers. Linux GNU tar then
+  // emits one `Ignoring unknown extended header keyword` warning per file at
+  // extract time. bsdtar's `--no-mac-metadata` is silently ignored in older
+  // libarchive (3.5.x), and `xattr -d com.apple.provenance` is rejected by
+  // SIP. The reliable fix is to use GNU tar, which does not write xattrs
+  // unless `--xattrs` is passed.
+  const tarBin = pickTarBinary();
+  run(tarBin, ['-czf', outputPath, '-C', cwd, 'qwen-code']);
+}
+
+function pickTarBinary() {
+  if (process.platform !== 'darwin') return 'tar';
+  // Try common gtar paths (homebrew arm/intel + gnubin shim).
+  const candidates = [
+    '/opt/homebrew/bin/gtar',
+    '/usr/local/bin/gtar',
+    '/opt/homebrew/opt/gnu-tar/libexec/gnubin/tar',
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {
+      // continue
+    }
+  }
+  // PATH lookup via /bin/sh -c "command -v gtar".
+  try {
+    const out = execFileSync('/bin/sh', ['-c', 'command -v gtar'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf8',
+    }).trim();
+    if (out) return out;
+  } catch {
+    // not found
+  }
+  console.warn(
+    'WARNING: GNU tar (gtar) not found on macOS. Falling back to bsdtar; ' +
+      'archives will include com.apple.provenance pax headers that emit ' +
+      'noisy warnings on Linux extract. Install with: brew install gnu-tar',
+  );
+  return 'tar';
 }
 
 function createZipArchive(outputPath, cwd) {

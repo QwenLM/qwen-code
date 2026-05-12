@@ -151,7 +151,14 @@ describe('installation scripts', () => {
     expect(script).not.toContain('InstallNodeJSDirectly');
     expect(script).not.toContain('node-v!NODE_VERSION!');
     expect(script).not.toContain('msiexec');
-    expect(script).not.toContain('Invoke-WebRequest');
+    // Invoke-WebRequest is now used in :DownloadFile so the user sees a
+    // progress bar while the standalone tarball downloads. Net.WebClient is
+    // silent and was previously preferred, but the UX hit (the user thinks
+    // the install is hung on slow GitHub release CDN) outweighed the small
+    // PS5 startup overhead. The :UrlExists / :RaceMirrorHead helpers still
+    // use Net.WebRequest for HEAD probes since those are sub-second and
+    // benefit from the leaner cold-start path.
+    expect(script).toContain('Invoke-WebRequest');
     expect(script).not.toContain('PowerShell (Administrator)');
     expect(script).not.toContain('echo INFO: Installation source: %SOURCE%');
     expect(script).not.toMatch(/^\s*call\s+qwen\s*$/m);

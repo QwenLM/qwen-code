@@ -8,8 +8,10 @@ setlocal enabledelayedexpansion
 set "SOURCE=unknown"
 set "METHOD="
 if defined QWEN_INSTALL_METHOD set "METHOD=!QWEN_INSTALL_METHOD!"
-set "MIRROR=github"
+set "MIRROR=auto"
 if defined QWEN_INSTALL_MIRROR set "MIRROR=!QWEN_INSTALL_MIRROR!"
+set "NO_MODIFY_PATH=0"
+if defined QWEN_NO_MODIFY_PATH set "NO_MODIFY_PATH=!QWEN_NO_MODIFY_PATH!"
 set "BASE_URL="
 if defined QWEN_INSTALL_BASE_URL set "BASE_URL=!QWEN_INSTALL_BASE_URL!"
 set "ARCHIVE_PATH="
@@ -112,6 +114,11 @@ if /i "%~1"=="--registry" (
     shift
     goto parse_args
 )
+if /i "%~1"=="--no-modify-path" (
+    set "NO_MODIFY_PATH=1"
+    shift
+    goto parse_args
+)
 if /i "%~1"=="-h" goto usage
 if /i "%~1"=="--help" goto usage
 
@@ -141,6 +148,35 @@ if /i not "!METHOD!"=="npm" (
 if /i not "!METHOD!"=="standalone" echo INFO: npm registry: !NPM_REGISTRY!
 if not "!SOURCE!"=="unknown" echo INFO: Installation source: !SOURCE!
 echo.
+
+REM Discover all qwen executables on disk BEFORE we install. We can't
+REM reliably simulate the user's PATH ordering, so enumerate well-known
+REM per-tool bin directories plus everything `where qwen` returns.
+set "PRE_INSTALL_QWENS_FILE=%TEMP%\qwen-pre-install-%RANDOM%-%RANDOM%.txt"
+del /f /q "!PRE_INSTALL_QWENS_FILE!" >nul 2>&1
+for /f "delims=" %%i in ('where qwen 2^>nul') do echo %%i>>"!PRE_INSTALL_QWENS_FILE!"
+for %%c in (
+    "!USERPROFILE!\.opencode\bin\qwen.cmd"
+    "!APPDATA!\npm\qwen.cmd"
+    "!USERPROFILE!\.bun\bin\qwen.cmd"
+    "!LOCALAPPDATA!\bun\bin\qwen.cmd"
+    "!LOCALAPPDATA!\qwen-code\bin\qwen.cmd"
+) do if exist %%c echo %%~c>>"!PRE_INSTALL_QWENS_FILE!"
+for /f "delims=" %%i in ('npm prefix -g 2^>nul') do (
+    if exist "%%i\qwen.cmd" echo %%i\qwen.cmd>>"!PRE_INSTALL_QWENS_FILE!"
+)
+set "PRE_INSTALL_QWENS_LIST="
+if exist "!PRE_INSTALL_QWENS_FILE!" (
+    for /f "delims=" %%i in ('sort "!PRE_INSTALL_QWENS_FILE!" 2^>nul ^| findstr /v "^$"') do (
+        if "!PRE_INSTALL_QWENS_LIST!"=="" (
+            set "PRE_INSTALL_QWENS_LIST=%%i"
+        ) else (
+            echo !PRE_INSTALL_QWENS_LIST! | findstr /i /c:"%%i" >nul 2>&1
+            if errorlevel 1 set "PRE_INSTALL_QWENS_LIST=!PRE_INSTALL_QWENS_LIST!|%%i"
+        )
+    )
+    del /f /q "!PRE_INSTALL_QWENS_FILE!" >nul 2>&1
+)
 
 REM Dispatch after validation; detect falls back to npm only when unavailable.
 if /i "!METHOD!"=="standalone" (
@@ -200,12 +236,16 @@ echo Options:
 echo   -s, --source SOURCE      Record the installation source.
 echo                            Only letters, numbers, dot, underscore, and dash are allowed.
 echo   --method METHOD          Install method: detect, standalone, or npm.
-echo   --mirror MIRROR          Standalone archive mirror: github or aliyun.
+echo   --mirror MIRROR          Standalone archive mirror: auto, github, or aliyun.
+echo                            Defaults to QWEN_INSTALL_MIRROR or auto, which picks
+echo                            whichever responds first via a HEAD probe.
 echo   --base-url URL           Override standalone archive base URL.
 echo   --archive PATH           Install from a local standalone archive.
 echo   --version VERSION        Standalone release version. Defaults to latest.
 echo   --registry REGISTRY      npm registry to use.
 echo                            Defaults to QWEN_NPM_REGISTRY or https://registry.npmmirror.com
+echo   --no-modify-path         Do not prepend INSTALL_BIN_DIR to user PATH even
+echo                            when a shadowing 'qwen' is detected.
 echo   -h, --help               Show this help message.
 exit /b 0
 
@@ -279,7 +319,8 @@ exit /b 1
 :validate_method_ok
 if /i "!MIRROR!"=="github" goto validate_mirror_ok
 if /i "!MIRROR!"=="aliyun" goto validate_mirror_ok
-echo ERROR: --mirror must be github or aliyun.
+if /i "!MIRROR!"=="auto" goto validate_mirror_ok
+echo ERROR: --mirror must be auto, github, or aliyun.
 exit /b 1
 
 :validate_mirror_ok
@@ -341,6 +382,36 @@ if /i "!VERSION_PATH:~0,1!"=="v" exit /b 0
 set "VERSION_PATH=v!VERSION_PATH!"
 exit /b 0
 
+:GithubBaseUrlForVersion
+rem args: %~1=version_path  → sets QWEN_GH_BASE_URL
+if /i "%~1"=="latest" (
+    set "QWEN_GH_BASE_URL=https://github.com/QwenLM/qwen-code/releases/latest/download"
+) else (
+    set "QWEN_GH_BASE_URL=https://github.com/QwenLM/qwen-code/releases/download/%~1"
+)
+exit /b 0
+
+:AliyunBaseUrlForVersion
+rem args: %~1=version_path  → sets QWEN_OSS_BASE_URL
+set "QWEN_OSS_BASE_URL=https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/%~1"
+exit /b 0
+
+:RaceMirrorHead
+rem args: %~1=timeout_seconds %~2=gh_url %~3=oss_url
+rem Sets QWEN_RACE_RESULT to "aliyun" or "github". Sequential (OSS first, GH
+rem fallback) keeps the PowerShell snippet small; a true parallel race adds a
+rem lot of escaping for marginal speedup since OSS HEAD is sub-second when
+rem reachable. Default fallback: github.
+set "QWEN_RACE_TIMEOUT=%~1"
+set "QWEN_RACE_GH_URL=%~2"
+set "QWEN_RACE_OSS_URL=%~3"
+set "QWEN_RACE_RESULT=github"
+for /f "delims=" %%r in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $t=[int]$env:QWEN_RACE_TIMEOUT; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; function Probe($url) { try { $r = [Net.WebRequest]::Create($url); $r.Method = 'HEAD'; $r.Timeout = $t * 1000; $resp = $r.GetResponse(); $resp.Close(); return $true } catch { return $false } }; if (Probe $env:QWEN_RACE_OSS_URL) { Write-Output 'aliyun'; exit 0 } elseif (Probe $env:QWEN_RACE_GH_URL) { Write-Output 'github'; exit 0 } else { Write-Output 'github'; exit 0 }"') do set "QWEN_RACE_RESULT=%%r"
+set "QWEN_RACE_TIMEOUT="
+set "QWEN_RACE_GH_URL="
+set "QWEN_RACE_OSS_URL="
+exit /b 0
+
 :StandaloneBaseUrl
 if not "!BASE_URL!"=="" (
     set "STANDALONE_BASE_URL=!BASE_URL!"
@@ -348,18 +419,42 @@ if not "!BASE_URL!"=="" (
 )
 
 call :ReleaseVersionPath
+
+if /i "!MIRROR!"=="auto" (
+    call :GithubBaseUrlForVersion "!VERSION_PATH!"
+    call :AliyunBaseUrlForVersion "!VERSION_PATH!"
+    call :RaceMirrorHead 2 "!QWEN_GH_BASE_URL!/SHA256SUMS" "!QWEN_OSS_BASE_URL!/SHA256SUMS"
+    set "MIRROR=!QWEN_RACE_RESULT!"
+    echo INFO: Mirror auto-selected via HEAD probe: !MIRROR!
+    set "QWEN_GH_BASE_URL="
+    set "QWEN_OSS_BASE_URL="
+    set "QWEN_RACE_RESULT="
+)
+
 if /i "!MIRROR!"=="aliyun" (
-    set "STANDALONE_BASE_URL=https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/!VERSION_PATH!"
+    call :AliyunBaseUrlForVersion "!VERSION_PATH!"
+    set "STANDALONE_BASE_URL=!QWEN_OSS_BASE_URL!"
+    set "QWEN_OSS_BASE_URL="
     exit /b 0
 )
 
-if /i "!VERSION_PATH!"=="latest" (
-    set "STANDALONE_BASE_URL=https://github.com/QwenLM/qwen-code/releases/latest/download"
-    exit /b 0
-)
-
-set "STANDALONE_BASE_URL=https://github.com/QwenLM/qwen-code/releases/download/!VERSION_PATH!"
+call :GithubBaseUrlForVersion "!VERSION_PATH!"
+set "STANDALONE_BASE_URL=!QWEN_GH_BASE_URL!"
+set "QWEN_GH_BASE_URL="
 exit /b 0
+
+:MaybeUpdateUserPath
+rem args: %~1=install_bin_dir
+rem Prepend the install dir to the user-level PATH (HKCU\Environment) via
+rem [Environment]::SetEnvironmentVariable. Idempotent: skips if the dir is
+rem already on the user PATH. Uses PowerShell rather than `setx` because setx
+rem truncates PATH at 1024 chars, which can silently mangle long PATHs.
+set "QWEN_NEW_BIN=%~1"
+if "!QWEN_NEW_BIN!"=="" exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$bin = $env:QWEN_NEW_BIN; $userPath = [Environment]::GetEnvironmentVariable('Path', 'User'); if ([string]::IsNullOrEmpty($userPath)) { $userPath = '' }; $entries = $userPath -split ';' | Where-Object { $_ -ne '' }; if ($entries -contains $bin) { Write-Output ('INFO: User PATH already contains ' + $bin + ' (skipping).'); exit 0 }; $newPath = (@($bin) + $entries) -join ';'; [Environment]::SetEnvironmentVariable('Path', $newPath, 'User'); Write-Output ('SUCCESS: Prepended ' + $bin + ' to your user PATH.'); Write-Output 'INFO: Open a NEW command prompt for the change to take effect.'"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_NEW_BIN="
+exit /b %PS_STATUS%
 
 :UrlExists
 set "QWEN_CHECK_URL=%~1"
@@ -372,8 +467,10 @@ exit /b %PS_STATUS%
 :DownloadFile
 set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
-rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $client = New-Object Net.WebClient; $client.DownloadFile($env:QWEN_DOWNLOAD_URL, $env:QWEN_DOWNLOAD_DEST); exit 0 } catch { exit 1 }"
+rem Use Invoke-WebRequest so the user sees a progress bar (Net.WebClient is silent).
+rem ProgressPreference defaults to 'Continue' which renders a bar in interactive
+rem PowerShell. Tls12+Tls13 with fallback for older .NET Framework.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing; exit 0 } catch { exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -842,7 +939,12 @@ exit /b 0
 
 :PrintFinalInstructions
 set "EXTRA_BIN=%~1"
-if not "!EXTRA_BIN!"=="" set "PATH=!EXTRA_BIN!;!PATH!"
+
+set "INSTALLED_BIN="
+if not "!EXTRA_BIN!"=="" (
+    set "INSTALLED_BIN=!EXTRA_BIN!\qwen.cmd"
+    set "PATH=!EXTRA_BIN!;!PATH!"
+)
 
 echo.
 echo ===========================================
@@ -850,35 +952,83 @@ echo Installation completed!
 echo ===========================================
 echo.
 
+set "INSTALLED_VERSION=unknown"
+if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
+    for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
+)
+
+if not "!INSTALLED_BIN!"=="" (
+    echo SUCCESS: Installed at !INSTALLED_BIN!: !INSTALLED_VERSION!
+) else (
+    echo SUCCESS: Qwen Code installed: !INSTALLED_VERSION!
+)
+
+rem Build OTHER_QWENS = PRE_INSTALL_QWENS_LIST minus the install we just made.
+set "OTHER_QWENS="
+if defined PRE_INSTALL_QWENS_LIST (
+    for %%i in ("!PRE_INSTALL_QWENS_LIST:|=" "!") do (
+        set "ENTRY=%%~i"
+        if not "!ENTRY!"=="" if /i not "!ENTRY!"=="!INSTALLED_BIN!" (
+            if "!OTHER_QWENS!"=="" (
+                set "OTHER_QWENS=!ENTRY!"
+            ) else (
+                set "OTHER_QWENS=!OTHER_QWENS!|!ENTRY!"
+            )
+        )
+    )
+)
+
+if defined OTHER_QWENS (
+    echo.
+    echo WARNING: Other 'qwen' executables exist on this system. Depending on
+    echo WARNING: your PATH order, one of these may run instead of the install above:
+    for %%i in ("!OTHER_QWENS:|=" "!") do (
+        set "OQ=%%~i"
+        if not "!OQ!"=="" echo WARNING:   !OQ!
+    )
+    echo.
+    if /i "!NO_MODIFY_PATH!"=="1" (
+        echo Skipped user PATH update because --no-modify-path is set.
+        echo To make this install win, add this to your user PATH manually:
+        echo   !EXTRA_BIN!
+    ) else (
+        call :MaybeUpdateUserPath "!EXTRA_BIN!"
+        echo.
+        echo If you prefer not to modify user PATH, rerun with --no-modify-path
+        echo and pick one of:
+        echo   - npm uninstall -g @qwen-code/qwen-code   ^(if the shadow is an npm install^)
+        echo   - invoke directly: "!INSTALLED_BIN!"
+    )
+    exit /b 0
+)
+
 where qwen >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    for /f "delims=" %%i in ('qwen --version 2^>nul') do set "QWEN_VERSION=%%i"
-    echo SUCCESS: Qwen Code is ready to use: !QWEN_VERSION!
+if %ERRORLEVEL% NEQ 0 (
+    echo WARNING: Qwen Code was installed, but qwen is not on PATH in this prompt.
     echo.
-    echo You can now run: qwen
-    echo.
-    echo INFO: Run qwen in your project directory to start an interactive session.
+    echo Restart your command prompt, then run: qwen
+    if not "!EXTRA_BIN!"=="" (
+        echo.
+        echo Or add this directory to PATH:
+        echo   !EXTRA_BIN!
+        echo Then run:
+        echo   qwen
+        exit /b 0
+    )
+
+    for /f "delims=" %%i in ('npm prefix -g 2^>nul') do set "NPM_PREFIX=%%i"
+    if not "!NPM_PREFIX!"=="" (
+        echo.
+        echo Or add this npm global directory to PATH:
+        echo   !NPM_PREFIX!
+        echo Then run:
+        echo   qwen
+    )
     exit /b 0
 )
 
-echo WARNING: Qwen Code was installed, but qwen is not on PATH in this prompt.
 echo.
-echo Restart your command prompt, then run: qwen
-if not "!EXTRA_BIN!"=="" (
-    echo.
-    echo Or add this directory to PATH:
-    echo   !EXTRA_BIN!
-    echo Then run:
-    echo   qwen
-    exit /b 0
-)
-
-for /f "delims=" %%i in ('npm prefix -g 2^>nul') do set "NPM_PREFIX=%%i"
-if not "!NPM_PREFIX!"=="" (
-    echo.
-    echo Or add this npm global directory to PATH:
-    echo   !NPM_PREFIX!
-    echo Then run:
-    echo   qwen
-)
+echo You can now run: qwen
+echo.
+echo INFO: Run qwen in your project directory to start an interactive session.
 exit /b 0
