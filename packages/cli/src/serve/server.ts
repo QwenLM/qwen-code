@@ -182,9 +182,17 @@ export function createServeApp(
       // through Express's default error handler.
       if (!res.writable) {
         if (!session.attached) {
-          bridge.killSession(session.sessionId).catch(() => {
-            // Best-effort cleanup; channel.exited will eventually reap.
-          });
+          // `requireZeroAttaches: true` closes the BQ9tV race: if
+          // a second client called `spawnOrAttach` for the same
+          // workspace between our `await` resolving and this reap
+          // dispatching, the bridge will see `attachCount > 0` and
+          // skip the kill. Without the flag, that second client's
+          // session would die mid-prompt.
+          bridge
+            .killSession(session.sessionId, { requireZeroAttaches: true })
+            .catch(() => {
+              // Best-effort cleanup; channel.exited will eventually reap.
+            });
         }
         return;
       }

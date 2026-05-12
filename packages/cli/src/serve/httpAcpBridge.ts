@@ -152,7 +152,20 @@ export interface HttpAcpBridge {
    * even though no caller will ever know the sessionId). Idempotent —
    * unknown / already-dead sessions are no-ops.
    */
-  killSession(sessionId: string): Promise<void>;
+  /**
+   * Tear down a session — kill the child, drop from maps, publish
+   * `session_died`. Idempotent on already-dead sessions.
+   *
+   * `requireZeroAttaches: true` makes the call a no-op when at
+   * least one other client has called `spawnOrAttach` for this
+   * entry and got `attached: true`. Used by the disconnect-reaper
+   * in `server.ts` so a fast reattach by client B doesn't lose its
+   * session to client A's "I disconnected mid-spawn" cleanup.
+   */
+  killSession(
+    sessionId: string,
+    opts?: { requireZeroAttaches?: boolean },
+  ): Promise<void>;
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
@@ -272,6 +285,20 @@ interface SessionEntry {
    * outcome.cancelled).
    */
   pendingPermissionIds: Set<string>;
+  /**
+   * Count of times `spawnOrAttach` has returned `attached: true` for
+   * this entry — i.e. a second-or-subsequent client claimed this
+   * session under `sessionScope: 'single'`. Used by the disconnect-
+   * reaper in `server.ts`: if the spawn-owner client disconnected
+   * during the spawn handshake but another client has already
+   * attached, the reaper must NOT tear the session down (option 1
+   * from PR #3889 review BQ9tV — "track an attached-after-spawn
+   * counter and skip kill if any other client attached"). The
+   * increment + the killSession-skip-check both happen in the
+   * synchronous portion of their respective async functions, so the
+   * counter is observed atomically across the awaiting boundary.
+   */
+  attachCount: number;
 }
 
 interface PendingPermission {
@@ -575,6 +602,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         promptQueue: Promise.resolve(),
         modelChangeQueue: Promise.resolve(),
         pendingPermissionIds: new Set(),
+        attachCount: 0,
       };
       byWorkspace.set(workspaceKey, entry);
       byId.set(entry.sessionId, entry);
@@ -831,6 +859,12 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
               initTimeoutMs,
             ).catch(() => {});
           }
+          // Bump attach counter so the spawn-owner's disconnect
+          // reaper (server.ts: `requireZeroAttaches: true`) can see
+          // that another client picked up this session and skip the
+          // tear-down. Increment is synchronous → atomic against the
+          // killSession sync-prefix check.
+          existing.attachCount++;
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
@@ -858,6 +892,13 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
               ).catch(() => {});
             }
           }
+          // Same attach-counter bump as the direct-attach branch
+          // above so the spawn-owner's disconnect reaper sees this
+          // late-arriving attach. The in-flight branch is the more
+          // common race target (the second caller actively waited
+          // on the first caller's spawn).
+          const attachedEntry = byId.get(session.sessionId);
+          if (attachedEntry) attachedEntry.attachCount++;
           return { ...session, attached: true };
         }
       }
@@ -1141,9 +1182,17 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       return response;
     },
 
-    async killSession(sessionId) {
+    async killSession(sessionId, opts) {
       const entry = byId.get(sessionId);
       if (!entry) return;
+      // BQ9tV race guard: skip the reap if any other client already
+      // attached to this entry. The disconnect-reaper in server.ts
+      // sets `requireZeroAttaches: true` because it only wants to
+      // reap when the spawn-owner that disconnected truly was the
+      // sole client. Counter increment + this check both run
+      // synchronously, so no microtask boundary lets a race slip
+      // through.
+      if (opts?.requireZeroAttaches && entry.attachCount > 0) return;
       // Remove from the maps eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down. The
       // `channel.exited` cleanup at line 461-484 also removes from

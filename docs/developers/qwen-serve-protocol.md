@@ -129,6 +129,19 @@ Response:
 
 Concurrent `POST /session` calls for the same workspace are **coalesced** to one spawn — both callers get the same `sessionId`, exactly one reports `attached: false`. If the underlying spawn fails (init timeout, malformed agent output, OOM), **all coalesced callers receive the same error** — the in-flight slot is cleared so a follow-up call can retry from scratch.
 
+> ⚠️ **`modelServiceId` rejection on a fresh session is silent on the
+> HTTP response.** A bad `modelServiceId` (typo, unconfigured service)
+> does NOT 500 the create — the session stays operational on the
+> agent's default model so the caller still gets a `sessionId` they
+> can retry the model switch against (via `POST /session/:id/model`).
+> The visible failure signal is a `model_switch_failed` event on the
+> session's SSE stream, fired between the spawn handshake and your
+> first subscribe. **Subscribers that need to observe this event
+> should pass `Last-Event-ID: 0` on their first `GET
+/session/:id/events`** to replay from the ring's oldest available
+> event (covers the spawn-time `model_switch_failed` even if the
+> subscribe lands a few ms after the create response).
+
 ### `GET /workspace/:id/sessions`
 
 List all live sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd).

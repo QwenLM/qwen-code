@@ -196,7 +196,18 @@ function parseFrame(raw: string): DaemonEvent | undefined {
   if (dataLines.length === 0) return undefined;
   const dataText = dataLines.join('\n');
   try {
-    return JSON.parse(dataText) as DaemonEvent;
+    const parsed = JSON.parse(dataText);
+    // `JSON.parse('null')` / `JSON.parse('42')` etc. parse cleanly
+    // but aren't `DaemonEvent`-shaped. Casting them through would
+    // hand consumers a value that violates the generator's
+    // `AsyncGenerator<DaemonEvent>` contract (e.g. `null` where
+    // `ev.type` is supposed to be readable). The daemon itself
+    // never emits non-object frames — `formatSseFrame` always
+    // serializes a populated object — so this guard exists for
+    // defense-in-depth against misbehaving proxies / alternate
+    // implementations.
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    return parsed as DaemonEvent;
   } catch {
     return undefined;
   }

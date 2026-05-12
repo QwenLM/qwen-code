@@ -23,5 +23,12 @@ export const LOOPBACK_BINDS: ReadonlySet<string> = new Set([
 ]);
 
 export function isLoopbackBind(hostname: string): boolean {
-  return LOOPBACK_BINDS.has(hostname);
+  // Lowercase the operator-supplied hostname so `--hostname Localhost`
+  // / `--hostname LOCALHOST` are treated identically to `localhost`.
+  // The Host-header allowlist (auth.ts) already lowercases the
+  // request-side string before comparing; this aligns boot-time
+  // detection with the runtime check so a valid loopback bind isn't
+  // forced to require a token just because the operator typed a
+  // capital. All entries in `LOOPBACK_BINDS` are already lowercase.
+  return LOOPBACK_BINDS.has(hostname.toLowerCase());
 }

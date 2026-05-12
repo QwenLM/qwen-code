@@ -130,9 +130,16 @@ export function bearerAuth(token: string | undefined): RequestHandler {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    // Skip any extra whitespace between scheme and credentials.
+    // Skip any extra whitespace between scheme and credentials. RFC
+    // 7230 §3.2.6 BWS allows both SP (0x20) and HTAB (0x09); accept
+    // both so a client emitting `Authorization: Bearer\t<token>`
+    // doesn't 401 on a spec-legal header.
     let credStart = schemeEnd + 1;
-    while (credStart < header.length && header.charCodeAt(credStart) === 0x20) {
+    while (
+      credStart < header.length &&
+      (header.charCodeAt(credStart) === 0x20 ||
+        header.charCodeAt(credStart) === 0x09)
+    ) {
       credStart++;
     }
     const credentials = header.slice(credStart);

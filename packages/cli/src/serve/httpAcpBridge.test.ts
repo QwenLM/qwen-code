@@ -1843,6 +1843,50 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('killSession({requireZeroAttaches:true}) skips reap when another client attached (BQ9tV)', async () => {
+      // Race: client A spawned (attached:false), then disconnected.
+      // Before A's disconnect-reaper runs, client B POSTs /session
+      // for the same workspace and gets attached:true. Without the
+      // race guard, A's reaper would tear down B's session.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(a.attached).toBe(false);
+      // Simulate client B's attach in the race window.
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      // Client A's disconnect-reaper fires now.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      // Session must SURVIVE — client B is still using it.
+      const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(c.attached).toBe(true);
+      expect(c.sessionId).toBe(a.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('killSession({requireZeroAttaches:true}) DOES reap when no other client attached (BQ9tV)', async () => {
+      // Counterpart to the above: when the spawn-owner truly was
+      // alone, the reaper must still reap. This pins the guard's
+      // negative path so a future change can't accidentally make
+      // it always-skip.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(a.attached).toBe(false);
+      expect(bridge.sessionCount).toBe(1);
+      // No second attach. Reaper fires.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
     it('maxSessions: 0 disables the cap', async () => {
       // Distinct sessionIdPrefix per spawn so each call gets a unique
       // sessionId (otherwise they'd collide in `byId` and only the
