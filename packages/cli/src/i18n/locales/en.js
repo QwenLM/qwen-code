@@ -132,6 +132,9 @@ export default {
     'Rename the current conversation. --auto lets the fast model pick a title.',
   'Rewind conversation to a previous turn':
     'Rewind conversation to a previous turn',
+  'Rewind Conversation': 'Rewind Conversation',
+  'No user turns to rewind to.': 'No user turns to rewind to.',
+  'Rewind to: ': 'Rewind to: ',
   'Restore code and conversation': 'Restore code and conversation',
   'Restore conversation only': 'Restore conversation only',
   'Restore code only': 'Restore code only',

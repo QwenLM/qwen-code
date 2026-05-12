@@ -126,6 +126,9 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '重命名当前对话。--auto 会让快速模型自动生成标题。',
   'Rewind conversation to a previous turn': '将对话回退到之前的某一轮',
+  'Rewind Conversation': '回退对话',
+  'No user turns to rewind to.': '没有可回退的用户对话轮次。',
+  'Rewind to: ': '回退到：',
   'Restore code and conversation': '恢复代码和对话',
   'Restore conversation only': '仅恢复对话',
   'Restore code only': '仅恢复代码',

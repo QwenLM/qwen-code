@@ -125,6 +125,9 @@ export default {
     'Renomear a conversa atual. --auto permite que o modelo rápido escolha um título.',
   'Rewind conversation to a previous turn':
     'Voltar a conversa para um turno anterior',
+  'Rewind Conversation': 'Rebobinar conversa',
+  'No user turns to rewind to.': 'Nenhum turno de usuário para rebobinar.',
+  'Rewind to: ': 'Rebobinar para: ',
   'Restore code and conversation': 'Restaurar código e conversa',
   'Restore conversation only': 'Restaurar apenas a conversa',
   'Restore code only': 'Restaurar apenas o código',

@@ -131,6 +131,9 @@ export default {
     'Canviar el nom de la conversa actual. --auto permet que el model ràpid triï un títol.',
   'Rewind conversation to a previous turn':
     'Rebobinar la conversa fins a un torn anterior',
+  'Rewind Conversation': 'Rebobinar la conversa',
+  'No user turns to rewind to.': "No hi ha torns d'usuari per rebobinar.",
+  'Rewind to: ': 'Rebobinar a: ',
   'Restore code and conversation': 'Restaura el codi i la conversa',
   'Restore conversation only': 'Restaura només la conversa',
   'Restore code only': 'Restaura només el codi',

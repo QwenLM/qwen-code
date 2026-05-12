@@ -130,6 +130,10 @@ export default {
     'Renommer la conversation en cours. --auto laisse le modèle rapide choisir un titre.',
   'Rewind conversation to a previous turn':
     'Revenir à un tour précédent de la conversation',
+  'Rewind Conversation': 'Rembobiner la conversation',
+  'No user turns to rewind to.':
+    'Aucun tour utilisateur vers lequel rembobiner.',
+  'Rewind to: ': 'Rembobiner vers : ',
   'Restore code and conversation': 'Restaurer le code et la conversation',
   'Restore conversation only': 'Restaurer la conversation uniquement',
   'Restore code only': 'Restaurer le code uniquement',

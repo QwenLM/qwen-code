@@ -110,6 +110,9 @@ export default {
     'Die aktuelle Unterhaltung umbenennen. Mit --auto lässt du das schnelle Modell einen Titel wählen.',
   'Rewind conversation to a previous turn':
     'Die Unterhaltung auf einen früheren Gesprächsschritt zurücksetzen',
+  'Rewind Conversation': 'Unterhaltung zurückspulen',
+  'No user turns to rewind to.': 'Keine Benutzerrunden zum Zurückspulen.',
+  'Rewind to: ': 'Zurückspulen zu: ',
   'Restore code and conversation': 'Code und Unterhaltung wiederherstellen',
   'Restore conversation only': 'Nur Unterhaltung wiederherstellen',
   'Restore code only': 'Nur Code wiederherstellen',

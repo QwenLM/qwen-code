@@ -91,6 +91,9 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '現在の会話の名前を変更する。--auto を使うと高速モデルがタイトルを決めます。',
   'Rewind conversation to a previous turn': '会話を前のターンまで巻き戻す',
+  'Rewind Conversation': '会話を巻き戻す',
+  'No user turns to rewind to.': '巻き戻せるユーザーターンがありません。',
+  'Rewind to: ': '巻き戻し先：',
   'Restore code and conversation': 'コードと会話を復元',
   'Restore conversation only': '会話のみ復元',
   'Restore code only': 'コードのみ復元',
