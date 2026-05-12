@@ -3341,6 +3341,17 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
+  it('does not crash when safeSetStatus throws on the success path', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      throwSpanSetStatus: true,
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(spanRecord.statusCalls).toEqual([]);
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
+    expect(spanRecord.ended).toBe(true);
+  });
+
   it('leaves successful tool calls to be marked OK by withSpan', async () => {
     const { spanRecord, completedCalls } = await runSingleTool();
 
