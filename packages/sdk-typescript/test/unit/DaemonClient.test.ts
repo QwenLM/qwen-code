@@ -548,6 +548,55 @@ describe('DaemonClient', () => {
       expect(elapsed).toBeLessThan(2000);
     });
 
+    it('aborts when the response BODY stalls after headers (BRN1o)', async () => {
+      // Pre-fix bug: `fetchWithTimeout` cleared the timer the moment
+      // `fetch` resolved (i.e. headers received). If the body then
+      // stalled (proxy half-buffered, daemon hung mid-write), the
+      // subsequent `await res.json()` had no deadline and could hang
+      // indefinitely. Now the body-read happens INSIDE the timer
+      // scope (via the `consume` callback), so this test exercises
+      // the timer firing during body consumption.
+      const fetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+        // Build a Response whose body never delivers data and never
+        // closes on its own — the only way `res.json()` ever
+        // returns is if the timer aborts via the composed signal.
+        // Wire the abort to `controller.error(...)` (NOT
+        // `body.cancel()` — that throws on a locked stream once
+        // `res.json()` has started reading) so the in-flight read
+        // rejects naturally.
+        const body = new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => {
+              try {
+                controller.error(
+                  new DOMException('The operation timed out', 'TimeoutError'),
+                );
+              } catch {
+                /* stream already errored / closed */
+              }
+            });
+          },
+        });
+        return Promise.resolve(
+          new Response(body, {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      }) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 80,
+      });
+      const before = Date.now();
+      await expect(client.health()).rejects.toThrow();
+      const elapsed = Date.now() - before;
+      // Pre-fix: this would hang for the test's outer timeout (5s+).
+      // Post-fix: the timer fires ~80ms in, body read rejects.
+      expect(elapsed).toBeLessThan(2000);
+    });
+
     it('composeAbortSignals forwards the first abort, with or without native AbortSignal.any', async () => {
       // Direct-unit test on the helper — `subscribeEvents` bypasses
       // `fetchWithTimeout` entirely (it calls `_fetch` directly with

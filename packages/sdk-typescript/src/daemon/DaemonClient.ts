@@ -136,12 +136,25 @@ export class DaemonClient {
    * to skip the timeout — long-lived SSE connections must not be killed
    * by it.
    */
-  private async fetchWithTimeout(
+  private async fetchWithTimeout<T = Response>(
     url: string,
     init: RequestInit = {},
-  ): Promise<Response> {
+    consume?: (res: Response) => Promise<T>,
+  ): Promise<T> {
+    // BRN1o: when `consume` is provided, the timer must remain
+    // armed through the entire callback (body read + parse). The
+    // previous `Response`-returning shape cleared the timer the
+    // moment headers arrived, so `await res.json()` against a
+    // proxy that stalled mid-body could hang indefinitely past
+    // `fetchTimeoutMs`. Pass the body-reading code as a callback
+    // so its execution is included in the timer scope; the
+    // composed abort signal still flows through to fetch's body
+    // stream, so an in-progress `res.json()` rejects cleanly when
+    // the timer fires.
     if (!this.fetchTimeoutMs || !Number.isFinite(this.fetchTimeoutMs)) {
-      return await this._fetch(url, init);
+      const res = await this._fetch(url, init);
+      if (consume) return consume(res);
+      return res as unknown as T;
     }
     // Use AbortController + cancellable setTimeout instead of
     // `AbortSignal.timeout()` (the polyfill `abortTimeout` is the
@@ -150,7 +163,8 @@ export class DaemonClient {
     // pending timer keeps the event loop registration alive even
     // after the fetch already returned. High request volume × long
     // timeout = accumulating timers + retained closures. Clearing
-    // in `finally` releases each timer the moment its fetch settles.
+    // in `finally` releases each timer the moment its fetch (and
+    // body consume callback, if any) settles.
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
       ctrl.abort(new DOMException('The operation timed out', 'TimeoutError'));
@@ -163,7 +177,9 @@ export class DaemonClient {
       ? composeAbortSignals([callerSignal, ctrl.signal])
       : ctrl.signal;
     try {
-      return await this._fetch(url, { ...init, signal });
+      const res = await this._fetch(url, { ...init, signal });
+      if (consume) return await consume(res);
+      return res as unknown as T;
     } finally {
       clearTimeout(timer as Parameters<typeof clearTimeout>[0]);
     }
@@ -208,19 +224,25 @@ export class DaemonClient {
   // -- Lifecycle / discovery ---------------------------------------------
 
   async health(): Promise<{ status: string }> {
-    const res = await this.fetchWithTimeout(`${this.baseUrl}/health`, {
-      headers: this.headers(),
-    });
-    if (!res.ok) throw await this.failOnError(res, 'GET /health');
-    return (await res.json()) as { status: string };
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/health`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /health');
+        return (await res.json()) as { status: string };
+      },
+    );
   }
 
   async capabilities(): Promise<DaemonCapabilities> {
-    const res = await this.fetchWithTimeout(`${this.baseUrl}/capabilities`, {
-      headers: this.headers(),
-    });
-    if (!res.ok) throw await this.failOnError(res, 'GET /capabilities');
-    return (await res.json()) as DaemonCapabilities;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/capabilities`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /capabilities');
+        return (await res.json()) as DaemonCapabilities;
+      },
+    );
   }
 
   // -- Sessions ----------------------------------------------------------
@@ -228,16 +250,21 @@ export class DaemonClient {
   async createOrAttachSession(
     req: CreateSessionRequest,
   ): Promise<DaemonSession> {
-    const res = await this.fetchWithTimeout(`${this.baseUrl}/session`, {
-      method: 'POST',
-      headers: this.headers({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({
-        cwd: req.workspaceCwd,
-        ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
-      }),
-    });
-    if (!res.ok) throw await this.failOnError(res, 'POST /session');
-    return (await res.json()) as DaemonSession;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          cwd: req.workspaceCwd,
+          ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'POST /session');
+        return (await res.json()) as DaemonSession;
+      },
+    );
   }
 
   /**
@@ -247,15 +274,19 @@ export class DaemonClient {
   async listWorkspaceSessions(
     workspaceCwd: string,
   ): Promise<DaemonSessionSummary[]> {
-    const res = await this.fetchWithTimeout(
+    return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/${encodeURIComponent(workspaceCwd)}/sessions`,
       { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/:id/sessions');
+        }
+        const body = (await res.json()) as {
+          sessions: DaemonSessionSummary[];
+        };
+        return body.sessions;
+      },
     );
-    if (!res.ok) {
-      throw await this.failOnError(res, 'GET /workspace/:id/sessions');
-    }
-    const body = (await res.json()) as { sessions: DaemonSessionSummary[] };
-    return body.sessions;
   }
 
   /**
@@ -267,16 +298,20 @@ export class DaemonClient {
     sessionId: string,
     modelId: string,
   ): Promise<SetModelResult> {
-    const res = await this.fetchWithTimeout(
+    return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/model`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ modelId }),
       },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/model');
+        }
+        return (await res.json()) as SetModelResult;
+      },
     );
-    if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/model');
-    return (await res.json()) as SetModelResult;
   }
 
   /**
@@ -308,17 +343,26 @@ export class DaemonClient {
   }
 
   async cancel(sessionId: string): Promise<void> {
-    const res = await this.fetchWithTimeout(
+    await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
         body: '{}',
       },
+      async (res) => {
+        if (!res.ok && res.status !== 204) {
+          throw await this.failOnError(res, 'POST /session/:id/cancel');
+        }
+        // Drain so undici doesn't keep the socket pinned waiting for
+        // the consumer (matches the respondToPermission rationale).
+        try {
+          await res.body?.cancel();
+        } catch {
+          /* body already consumed or no body */
+        }
+      },
     );
-    if (!res.ok && res.status !== 204) {
-      throw await this.failOnError(res, 'POST /session/:id/cancel');
-    }
   }
 
   // -- Events stream -----------------------------------------------------
@@ -414,37 +458,39 @@ export class DaemonClient {
     requestId: string,
     response: PermissionResponse,
   ): Promise<boolean> {
-    const res = await this.fetchWithTimeout(
+    return await this.fetchWithTimeout(
       `${this.baseUrl}/permission/${encodeURIComponent(requestId)}`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(response),
       },
+      async (res) => {
+        if (res.status === 200) {
+          // Drain the body so undici doesn't keep the underlying socket
+          // pinned waiting for the consumer. On long-running clients with
+          // frequent permission votes this would exhaust the connection
+          // pool. Use `res.body?.cancel()` rather than `await res.json()`
+          // because the daemon returns `{}` (no useful payload here) and
+          // cancel is cheaper than a parse round-trip.
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return true;
+        }
+        if (res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return false;
+        }
+        throw await this.failOnError(res, 'POST /permission/:requestId');
+      },
     );
-    if (res.status === 200) {
-      // Drain the body so undici doesn't keep the underlying socket
-      // pinned waiting for the consumer. On long-running clients with
-      // frequent permission votes this would exhaust the connection
-      // pool. Use `res.body?.cancel()` rather than `await res.json()`
-      // because the daemon returns `{}` (no useful payload here) and
-      // cancel is cheaper than a parse round-trip.
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* body already consumed or no body */
-      }
-      return true;
-    }
-    if (res.status === 404) {
-      try {
-        await res.body?.cancel();
-      } catch {
-        /* body already consumed or no body */
-      }
-      return false;
-    }
-    throw await this.failOnError(res, 'POST /permission/:requestId');
   }
 }
 
