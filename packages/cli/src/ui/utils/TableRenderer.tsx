@@ -15,6 +15,7 @@ import {
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
+  labelMayDeceive,
   osc8Close,
   osc8Open,
   sanitizeForOsc,
@@ -308,7 +309,13 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
           // would still spoof the rendered text inside the clickable region.
           const safeLabel = sanitizeForOsc(labelText);
           const visibleLabel = applyColor(safeLabel || url, theme.text.link);
-          rendered = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
+          const envelope = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
+          // When the label looks like a (mismatched) URL, keep the `(url)`
+          // suffix so the user can see where the click actually goes — same
+          // mitigation as the React renderer.
+          rendered = labelMayDeceive(safeLabel, url)
+            ? `${envelope} ${applyColor(`(${url})`, theme.text.link)}`
+            : envelope;
         } else {
           rendered = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;
         }

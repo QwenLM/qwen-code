@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   HYPERLINK_ENV_KEYS,
   isSafeOscScheme,
+  labelMayDeceive,
   osc8Close,
   osc8Hyperlink,
   osc8Open,
@@ -161,6 +162,33 @@ describe('osc8 helpers', () => {
       'just text',
     ])('rejects %s', (url) => {
       expect(isSafeOscScheme(url)).toBe(false);
+    });
+  });
+
+  describe('labelMayDeceive', () => {
+    it('flags labels containing a different URL than the target', () => {
+      // The classic spoof: label looks like one host, target is another.
+      expect(
+        labelMayDeceive('https://google.com', 'https://attacker.com'),
+      ).toBe(true);
+      expect(
+        labelMayDeceive('Visit https://safe.com now', 'https://evil.com/x'),
+      ).toBe(true);
+      // Scheme-only label still trips the heuristic — defensively
+      // permissive: a bare `mailto:` label that doesn't equal the URL is
+      // suspicious enough to keep the `(url)` suffix visible.
+      expect(labelMayDeceive('mailto:friend', 'mailto:other')).toBe(true);
+    });
+
+    it('does NOT flag when the label equals the target', () => {
+      const url = 'https://example.com/x';
+      expect(labelMayDeceive(url, url)).toBe(false);
+    });
+
+    it('does NOT flag plain-text labels', () => {
+      expect(labelMayDeceive('click here', 'https://example.com')).toBe(false);
+      expect(labelMayDeceive('docs', 'https://example.com')).toBe(false);
+      expect(labelMayDeceive('', 'https://example.com')).toBe(false);
     });
   });
 

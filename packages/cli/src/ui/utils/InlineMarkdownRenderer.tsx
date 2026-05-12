@@ -14,6 +14,7 @@ import {
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
+  labelMayDeceive,
   osc8Close,
   osc8Open,
   sanitizeForOsc,
@@ -172,11 +173,21 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
           // legacy `label (url)` branch leaves the label intact so today's
           // unsupported-terminal output stays byte-identical.
           const safeLabel = wrapOsc8 ? sanitizeForOsc(linkText) : linkText;
+          // Keep the `(url)` suffix visible when the label itself looks
+          // like a (mismatched) URL — pre-OSC-8 rendering always showed the
+          // target; eliding it now would let `[https://google.com](https://attacker.com)`
+          // present a clickable "google.com" that resolves elsewhere.
+          const showUrlSuffix = wrapOsc8 && labelMayDeceive(safeLabel, url);
           renderedNode = wrapOsc8 ? (
-            <Text key={key} color={theme.text.link}>
-              {osc8Open(url)}
-              {safeLabel || url}
-              {osc8Close()}
+            <Text key={key}>
+              <Text color={theme.text.link}>
+                {osc8Open(url)}
+                {safeLabel || url}
+                {osc8Close()}
+              </Text>
+              {showUrlSuffix ? (
+                <Text color={theme.text.link}> ({url})</Text>
+              ) : null}
             </Text>
           ) : (
             <Text key={key}>

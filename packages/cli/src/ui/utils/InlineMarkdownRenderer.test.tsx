@@ -296,6 +296,40 @@ describe('<RenderInline />', () => {
       expect(out).not.toContain('\u202e');
     });
 
+    it('keeps the `(url)` suffix when the label looks like a mismatched URL', () => {
+      // Anti-spoof: if the model emits `[https://google.com](https://evil.com)`
+      // the OSC 8 branch must NOT hide the actual target, or the user sees
+      // a clickable "google.com" that resolves to evil.com.
+      enableHyperlinks();
+      const target = 'https://attacker.com/phish';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline
+          text={`click [https://google.com/auth](${target}) end`}
+        />,
+      );
+      const out = lastFrame() ?? '';
+      // Envelope is still emitted so the label is clickable.
+      expect(out).toContain(`\x1b]8;;${target}\x07`);
+      // Visible label remains.
+      expect(out).toContain('https://google.com/auth');
+      // The real target stays visible right next to the link.
+      expect(out).toContain(`(${target})`);
+    });
+
+    it('elides `(url)` when label==url (no deception risk)', () => {
+      // The model echoing a URL as both label and target is fine — the user
+      // sees the URL either way, no deception. Keep the existing elision.
+      enableHyperlinks();
+      const url = 'https://example.com/page';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`see [${url}](${url}) end`} />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${url}\x07`);
+      // No duplicated `(url)` suffix — the label already shows the URL.
+      expect(out).not.toContain(`(${url})`);
+    });
+
     it('non-TTY fallback is byte-identical to the legacy `label (url)` form', () => {
       // Pin the contract from the PR: when the terminal does not advertise
       // OSC 8 support, output must contain no OSC 8 envelope bytes and the

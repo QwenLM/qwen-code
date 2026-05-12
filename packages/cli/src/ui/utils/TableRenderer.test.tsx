@@ -681,6 +681,19 @@ describe('<TableRenderer />', () => {
       expect(stripAnsi(output).replace(/\s+/g, ' ')).toContain(url);
     });
 
+    it('keeps `(url)` suffix in cells when label looks like a mismatched URL', () => {
+      enableHyperlinks();
+      const target = 'https://attacker.com/phish';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['x', `[https://google.com](${target})`]],
+        80,
+      );
+      expect(output).toContain(`\x1b]8;;${target}\x07`);
+      // Real target stays visible next to the clickable label.
+      expect(stripAnsi(output)).toContain(`(${target})`);
+    });
+
     it('sanitizes bidi controls in a cell label', () => {
       enableHyperlinks();
       const url = 'https://example.com/page';

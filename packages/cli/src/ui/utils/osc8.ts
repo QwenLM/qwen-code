@@ -380,6 +380,26 @@ export function shouldWrapMarkdownLink(
   return canHyperlink && isSafeOscScheme(url) && !/\s/.test(url);
 }
 
+/**
+ * True if the visible label could deceive the user about where the link
+ * actually points. The OSC 8 branch hides the URL target behind a clickable
+ * label, so a model-emitted `[https://google.com](https://attacker.com)`
+ * shows a label that *looks* like a different host than the click resolves
+ * to — pre-OSC-8 rendering always kept `(url)` visible, so the deception
+ * couldn't land. The fix is: when the label contains a URL-shaped substring
+ * AND it doesn't equal the actual target, keep the `(url)` suffix visible
+ * even though OSC 8 wrapping is otherwise active. The label is still
+ * clickable (envelope is still emitted), but the user sees the real target.
+ *
+ * Heuristic is intentionally permissive (`://` substring) — false positives
+ * just mean an extra `(url)` suffix on niche labels like `mailto://x`, which
+ * is harmless. False negatives let a real spoof through.
+ */
+export function labelMayDeceive(label: string, url: string): boolean {
+  if (label === url) return false;
+  return /:\/\//.test(label) || /^[a-z][a-z0-9+.-]*:/i.test(label.trim());
+}
+
 // ── Test helpers ─────────────────────────────────────────────────────────
 
 /**
