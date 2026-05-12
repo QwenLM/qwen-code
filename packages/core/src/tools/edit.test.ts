@@ -40,6 +40,7 @@ describe('EditTool', () => {
   let geminiClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
+  let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -47,6 +48,7 @@ describe('EditTool', () => {
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
     fileReadCache = new FileReadCache();
+    mockFileHistoryService = { trackEdit: vi.fn() };
 
     geminiClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
@@ -84,7 +86,7 @@ describe('EditTool', () => {
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
-      getFileHistoryService: () => ({ trackEdit: vi.fn() }),
+      getFileHistoryService: () => mockFileHistoryService,
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -496,6 +498,7 @@ describe('EditTool', () => {
         /Showing lines \d+-\d+ of \d+ from the edited file:/,
       );
       expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);

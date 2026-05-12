@@ -40,6 +40,7 @@ let mockGeminiClientInstance: Mocked<GeminiClient>;
 // Mock Config
 const fsService = new StandardFileSystemService();
 const fileReadCache = new FileReadCache();
+const mockFileHistoryService = { trackEdit: vi.fn() };
 const mockConfigInternal = {
   getTargetDir: () => rootDir,
   getProjectRoot: () => rootDir,
@@ -72,7 +73,7 @@ const mockConfigInternal = {
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
-  getFileHistoryService: () => ({ trackEdit: vi.fn() }),
+  getFileHistoryService: () => mockFileHistoryService,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -352,6 +353,7 @@ describe('WriteFileTool', () => {
       expect(result.llmContent).toMatch(
         /Successfully created and wrote to new file/,
       );
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       expect(fs.existsSync(filePath)).toBe(true);
       const { content: writtenContent } = await fsService.readTextFile({
         path: filePath,
