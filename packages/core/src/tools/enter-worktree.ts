@@ -153,6 +153,9 @@ export class EnterWorktreeTool extends BaseDeclarativeTool<
       },
       true, // isOutputMarkdown
       false, // canUpdateOutput
+      true, // shouldDefer — only invoked when the user explicitly asks for a worktree
+      false, // alwaysLoad
+      'worktree git isolated branch new',
     );
   }
 

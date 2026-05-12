@@ -119,6 +119,20 @@ describe('EnterWorktreeTool metadata', () => {
   });
 });
 
+describe('ExitWorktreeTool default permission', () => {
+  it("returns 'ask' when action is 'remove'", async () => {
+    const tool = new ExitWorktreeTool(makeMockConfig());
+    const inv = tool.build({ name: 'foo', action: 'remove' });
+    expect(await inv.getDefaultPermission()).toBe('ask');
+  });
+
+  it("returns 'allow' when action is 'keep'", async () => {
+    const tool = new ExitWorktreeTool(makeMockConfig());
+    const inv = tool.build({ name: 'foo', action: 'keep' });
+    expect(await inv.getDefaultPermission()).toBe('allow');
+  });
+});
+
 describe('ExitWorktreeTool metadata and validation', () => {
   it('exposes the correct tool name', () => {
     const tool = new ExitWorktreeTool(makeMockConfig());

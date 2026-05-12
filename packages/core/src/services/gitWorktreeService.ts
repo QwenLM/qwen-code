@@ -951,11 +951,22 @@ export class GitWorktreeService {
 
   /**
    * Removes a user worktree, optionally deleting its branch.
+   *
+   * Branch deletion uses `-d` by default (refuses to drop branches that
+   * have commits not merged into HEAD), so a worktree whose tree was
+   * left "clean" because the agent committed its work doesn't lose
+   * those commits when the cleanup helper sweeps it. Set
+   * `forceDeleteBranch: true` to bypass — callers must have already
+   * confirmed there is nothing of value on the branch.
    */
   async removeUserWorktree(
     slug: string,
-    options: { deleteBranch?: boolean } = {},
-  ): Promise<{ success: boolean; error?: string }> {
+    options: { deleteBranch?: boolean; forceDeleteBranch?: boolean } = {},
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    branchPreserved?: boolean;
+  }> {
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = `worktree-${slug}`;
 
@@ -964,14 +975,72 @@ export class GitWorktreeService {
       return removed;
     }
 
-    if (options.deleteBranch) {
+    if (!options.deleteBranch) {
+      return { success: true };
+    }
+
+    // Try a safe (non-force) delete first. `git branch -d` refuses to
+    // remove branches whose tip is not reachable from HEAD or any
+    // upstream — preserving any commits the subagent made before
+    // ending with a clean working tree.
+    try {
+      await this.git.branch(['-d', branchName]);
+      return { success: true };
+    } catch {
+      // Fall through to forced delete or preservation.
+    }
+
+    if (options.forceDeleteBranch) {
       try {
         await this.git.branch(['-D', branchName]);
+        return { success: true };
       } catch {
-        // Best-effort: branch may have been deleted already, or may not exist.
+        // Best-effort: branch may have been deleted already, or may not
+        // exist (a no-op).
       }
     }
-    return { success: true };
+
+    // Reached here when the branch had unmerged commits and the caller
+    // did not opt into force-delete. Surface this so callers can leave
+    // a note for the user.
+    return { success: true, branchPreserved: true };
+  }
+
+  /**
+   * Reports whether the tip of a user worktree's branch is reachable
+   * only from itself — i.e. the branch carries commits that no other
+   * local branch or remote ref points at, so dropping the branch would
+   * silently destroy them. Used by callers that want to decide whether
+   * removing the worktree would lose work the subagent committed but
+   * never merged or pushed.
+   *
+   * Fail-closed: returns `true` on any git error.
+   */
+  async hasUnmergedWorktreeCommits(slug: string): Promise<boolean> {
+    const branchName = `worktree-${slug}`;
+    try {
+      const tipSha = (await this.git.revparse([branchName])).trim();
+      if (!tipSha) return true;
+      // List every local branch and remote-tracking ref whose tip is at
+      // or above the worktree branch's tip. If anything other than the
+      // worktree branch itself appears, the commits are covered.
+      const refs = (
+        await this.git.raw([
+          'for-each-ref',
+          '--contains',
+          tipSha,
+          '--format=%(refname)',
+          'refs/heads',
+          'refs/remotes',
+        ])
+      )
+        .split('\n')
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && s !== `refs/heads/${branchName}`);
+      return refs.length === 0;
+    } catch {
+      return true;
+    }
   }
 
   /**

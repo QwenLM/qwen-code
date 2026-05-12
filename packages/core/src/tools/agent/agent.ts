@@ -1170,59 +1170,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
-      // Resolve the subagent's permission mode before creating it
-      const resolvedMode = resolveSubagentApprovalMode(
-        this.config.getApprovalMode(),
-        subagentConfig.approvalMode,
-        this.config.isTrustedFolder(),
-      );
-      const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      // ALWAYS produce a child Config via Object.create, even when the
-      // approval mode is identical to the parent. Subagents must run
-      // against an isolated FileReadCache so a parent's prior_read
-      // entries cannot satisfy enforcement on a path the subagent's
-      // transcript never contained — see the per-Config own-property
-      // machinery in `Config.getFileReadCache()`. Reusing
-      // `this.config` directly here would short-circuit that
-      // isolation for the same-mode path, which is the common case.
-      //
-      // The override also rebuilds its own tool registry so core
-      // tools (`EditTool` / `WriteFileTool` / `ReadFileTool`) are
-      // bound to the override Config rather than the parent. Without
-      // that rebuild, the parent's cached tool instances continue to
-      // resolve `this.config` to the parent, reaching the parent's
-      // FileReadCache rather than the subagent's. See
-      // `createApprovalModeOverride` above for details.
-      const agentConfig = await createApprovalModeOverride(
-        this.config,
-        resolvedApprovalMode,
-      );
-
-      // Create the subagent. Fork bypasses SubagentManager because its
-      // runtime configs are synthesized from the parent's cache-safe params.
-      let subagent: AgentHeadless;
-      let taskPrompt: string;
-
-      if (isFork) {
-        const fork = await this.createForkSubagent(agentConfig);
-        subagent = fork.subagent;
-        taskPrompt = fork.taskPrompt;
-      } else {
-        subagent = await this.subagentManager.createAgentHeadless(
-          subagentConfig,
-          agentConfig,
-          { eventEmitter: this.eventEmitter },
-        );
-        taskPrompt = this.params.prompt;
-      }
-
-      // ── Optional worktree isolation ──────────────────────────────
-      // When `isolation: 'worktree'` is requested, provision a temporary
-      // worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> and
-      // prepend a notice to the task prompt telling the subagent to
-      // operate inside that path. After the subagent completes, the
-      // cleanup helper removes the worktree if no changes were made,
-      // or preserves it (and reports its path/branch) if there are.
+      // ── Optional worktree isolation (Phase 1: provision) ──────────
+      // Provision the worktree BEFORE creating the agent Config so the
+      // override below can rebind `getTargetDir()` to the worktree path
+      // before the subagent's tools are registered. Without this,
+      // tools that resolve relative paths via `config.getTargetDir()`
+      // (Shell default cwd, Edit/Write/Read workspace checks, Glob /
+      // Grep / Ls roots) would silently operate on the parent project
+      // tree and the cleanup helper would then see a "clean" worktree
+      // and remove it — destroying any evidence of the leak.
       let worktreeIsolation: {
         slug: string;
         path: string;
@@ -1266,40 +1222,142 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           path: created.worktree.path,
           branch: created.worktree.branch,
         };
-        const notice = buildWorktreeNotice(projectRoot, created.worktree.path);
+      }
+
+      // Resolve the subagent's permission mode before creating it
+      const resolvedMode = resolveSubagentApprovalMode(
+        this.config.getApprovalMode(),
+        subagentConfig.approvalMode,
+        this.config.isTrustedFolder(),
+      );
+      const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
+      // ALWAYS produce a child Config via Object.create, even when the
+      // approval mode is identical to the parent. Subagents must run
+      // against an isolated FileReadCache so a parent's prior_read
+      // entries cannot satisfy enforcement on a path the subagent's
+      // transcript never contained — see the per-Config own-property
+      // machinery in `Config.getFileReadCache()`. Reusing
+      // `this.config` directly here would short-circuit that
+      // isolation for the same-mode path, which is the common case.
+      //
+      // The override also rebuilds its own tool registry so core
+      // tools (`EditTool` / `WriteFileTool` / `ReadFileTool`) are
+      // bound to the override Config rather than the parent. Without
+      // that rebuild, the parent's cached tool instances continue to
+      // resolve `this.config` to the parent, reaching the parent's
+      // FileReadCache rather than the subagent's. See
+      // `createApprovalModeOverride` above for details.
+      const agentConfig = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode,
+      );
+
+      // ── Optional worktree isolation (Phase 2: rebind cwd) ─────────
+      // Rebind every "where am I?" getter on the agent's Config override
+      // to the worktree path. Edit/Write/Read use `getTargetDir()` for
+      // workspace-membership checks and relative-path resolution; Shell
+      // uses it as its default cwd when the model omits `directory`;
+      // Glob/Grep/Ls use it as the search root. Overriding all three
+      // getters (targetDir/cwd/workingDir) on the prototype-delegation
+      // Config keeps the subagent's tools confined to the worktree
+      // even when the model emits relative paths or unqualified shell
+      // commands.
+      if (worktreeIsolation) {
+        const wtPath = worktreeIsolation.path;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ov = agentConfig as any;
+        ov.getTargetDir = () => wtPath;
+        ov.getCwd = () => wtPath;
+        ov.getWorkingDir = () => wtPath;
+      }
+
+      // Create the subagent. Fork bypasses SubagentManager because its
+      // runtime configs are synthesized from the parent's cache-safe params.
+      let subagent: AgentHeadless;
+      let taskPrompt: string;
+
+      if (isFork) {
+        const fork = await this.createForkSubagent(agentConfig);
+        subagent = fork.subagent;
+        taskPrompt = fork.taskPrompt;
+      } else {
+        subagent = await this.subagentManager.createAgentHeadless(
+          subagentConfig,
+          agentConfig,
+          { eventEmitter: this.eventEmitter },
+        );
+        taskPrompt = this.params.prompt;
+      }
+
+      // ── Optional worktree isolation (Phase 3: notice to prompt) ───
+      // Prepend a notice to the task prompt telling the subagent it is
+      // operating in an isolated worktree. The mechanical isolation
+      // above guarantees correctness; the notice reduces user-visible
+      // surprises when the model summarises file paths.
+      if (worktreeIsolation) {
+        const notice = buildWorktreeNotice(
+          this.config.getTargetDir(),
+          worktreeIsolation.path,
+        );
         taskPrompt = `${notice}\n\n${taskPrompt}`;
       }
 
       // Cleanup helper invoked after the subagent terminates (success,
-      // failure, or cancel). Removes the worktree when no changes were
-      // made; preserves it (and returns its info) when there are changes.
+      // failure, or cancel).
+      //
+      // Two independent reasons to preserve the worktree:
+      //   1. The working tree is not clean (uncommitted edits).
+      //   2. The branch carries commits not reachable from any other
+      //      ref — `git status` would call this "clean", but dropping
+      //      the worktree+branch would silently destroy the commits.
+      //
+      // Removing the worktree always uses `git branch -d` (safe delete);
+      // if git refuses because of unmerged commits, `branchPreserved`
+      // is surfaced so the caller can tell the user.
       const cleanupWorktreeIsolation = async (): Promise<{
         preservedPath?: string;
         preservedBranch?: string;
       }> => {
         if (!worktreeIsolation) return {};
         const wtService = new GitWorktreeService(this.config.getTargetDir());
+        const isolation = worktreeIsolation;
         let hasChanges = true;
         try {
-          hasChanges = await wtService.hasWorktreeChanges(
-            worktreeIsolation.path,
-          );
+          hasChanges = await wtService.hasWorktreeChanges(isolation.path);
         } catch {
           // Fail-closed: assume changes exist.
         }
-        if (hasChanges) {
+        let hasUnmerged = true;
+        try {
+          hasUnmerged = await wtService.hasUnmergedWorktreeCommits(
+            isolation.slug,
+          );
+        } catch {
+          // Fail-closed: assume there is uncovered work.
+        }
+        if (hasChanges || hasUnmerged) {
           return {
-            preservedPath: worktreeIsolation.path,
-            preservedBranch: worktreeIsolation.branch,
+            preservedPath: isolation.path,
+            preservedBranch: isolation.branch,
           };
         }
         try {
-          await wtService.removeUserWorktree(worktreeIsolation.slug, {
+          const result = await wtService.removeUserWorktree(isolation.slug, {
             deleteBranch: true,
           });
+          if (result.branchPreserved) {
+            // The status check said "clean" and the ref check said
+            // "fully covered", but the safe-delete still refused —
+            // a race or an oddly-shaped ref. Be loud rather than
+            // silently force-deleting.
+            return {
+              preservedPath: isolation.path,
+              preservedBranch: isolation.branch,
+            };
+          }
         } catch (error) {
           debugLogger.warn(
-            `[Agent] Failed to remove ephemeral worktree ${worktreeIsolation.path}: ${error}`,
+            `[Agent] Failed to remove ephemeral worktree ${isolation.path}: ${error}`,
           );
         }
         return {};
@@ -1813,11 +1871,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
+      // Tracks whether the cleanup helper has already run, so the
+      // finally block can skip a duplicate call when the try block
+      // already ran it. Without this, a worktree provisioned for an
+      // isolation run would leak when `runFramed()` throws — the catch
+      // path is the outer execute() catch, which is too far away to
+      // see the closure.
+      let worktreeCleanupRan = false;
       try {
         await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
+        worktreeCleanupRan = true;
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {
             llmContent: (finalText || 'Subagent execution failed.') + wtSuffix,
@@ -1849,6 +1915,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           returnDisplay: this.currentDisplay!,
         };
       } finally {
+        // Mirror the background path: ensure the isolation worktree is
+        // reaped on every termination shape (success, failure, cancel,
+        // and any uncaught throw inside runFramed). The success path
+        // already invoked the helper; this fallback only fires when
+        // the try block bailed before reaching it.
+        if (!worktreeCleanupRan) {
+          try {
+            await cleanupWorktreeIsolation();
+          } catch {
+            // Helper logs its own failures; never mask the original
+            // error path with cleanup noise.
+          }
+        }
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
         signal?.removeEventListener('abort', onParentAbort);

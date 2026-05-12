@@ -1236,6 +1236,26 @@ export class Config {
 
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
+
+    // Fire-and-forget sweep of stale ephemeral worktrees left behind by
+    // earlier `agent` runs that exited before their cleanup helper ran
+    // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
+    // is fail-closed against tracked changes or unpushed commits — so
+    // running it on every startup cannot destroy user work. We do not
+    // await this: it is a hygiene task that must never delay the
+    // first model turn.
+    if (!this.getBareMode()) {
+      void import('../services/worktreeCleanup.js')
+        .then(({ cleanupStaleAgentWorktrees }) =>
+          cleanupStaleAgentWorktrees(this.targetDir),
+        )
+        .catch((error: unknown) => {
+          this.debugLogger.debug(
+            `Stale worktree sweep failed (non-fatal): ${error}`,
+          );
+        });
+    }
   }
 
   async refreshHierarchicalMemory(): Promise<void> {

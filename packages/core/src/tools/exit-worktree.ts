@@ -7,6 +7,7 @@
 import type { ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import * as fs from 'node:fs/promises';
@@ -69,6 +70,17 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       : `Keep worktree "${this.params.name}"`;
   }
 
+  /**
+   * `action: 'remove'` deletes a worktree directory and (when safe) its
+   * branch. Other destructive tools (`edit`, `write_file`,
+   * `run_shell_command`) prompt by default; this tool should too. The
+   * `keep` action is non-destructive (it only restores the original
+   * working directory) and falls back to the framework default.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return this.params.action === 'remove' ? 'ask' : 'allow';
+  }
+
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const projectRoot = this.config.getTargetDir();
     const service = new GitWorktreeService(projectRoot);
@@ -105,7 +117,16 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       };
     }
 
-    // action === 'remove'
+    // action === 'remove' — two independent guards:
+    //
+    // 1. Uncommitted edits (working tree dirty). Bypassed by
+    //    `discard_changes: true`.
+    // 2. Commits on the worktree branch that no other local branch or
+    //    remote ref points at. Deleting the branch would lose them, so
+    //    we refuse unconditionally — the user must merge, push, or
+    //    rename the branch elsewhere first. There is no "discard
+    //    commits" flag because losing committed work is rarely what the
+    //    user means by "remove worktree".
     if (!this.params.discard_changes) {
       const counts = await service.countWorktreeChanges(worktreePath);
       if (counts === null) {
@@ -124,11 +145,44 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       }
     }
 
+    let hasUnmerged = true;
+    try {
+      hasUnmerged = await service.hasUnmergedWorktreeCommits(this.params.name);
+    } catch {
+      // Fall through; surfaced as the conservative "refuse" path below.
+    }
+    if (hasUnmerged) {
+      return errorResult(
+        `Refusing to remove worktree "${this.params.name}" — its branch ` +
+          `\`${branch}\` has commits that no other branch or remote ref ` +
+          `points at, and deleting the branch would lose them. Merge, ` +
+          `push, or rename the branch first, then call ${ToolNames.EXIT_WORKTREE} again.`,
+      );
+    }
+
     const result = await service.removeUserWorktree(this.params.name, {
       deleteBranch: true,
     });
     if (!result.success) {
       return errorResult(result.error ?? 'Failed to remove worktree.');
+    }
+    if (result.branchPreserved) {
+      // Status check passed and unmerged check passed, but the safe
+      // delete still refused — most likely a race where new commits
+      // landed between the checks. Be loud rather than force-deleting.
+      const output: ExitWorktreeOutput = {
+        action: 'remove',
+        worktreePath,
+        worktreeBranch: branch,
+        message:
+          `Removed worktree directory "${this.params.name}" but kept branch ${branch} ` +
+          `(git refused a safe delete at the last moment — possibly a race with another ` +
+          `process). Recover with \`git branch -D ${branch}\` if you really want to discard it.`,
+      };
+      return {
+        llmContent: JSON.stringify(output),
+        returnDisplay: `Removed worktree directory **${this.params.name}**, branch \`${branch}\` preserved`,
+      };
     }
 
     debugLogger.debug(
@@ -194,6 +248,9 @@ export class ExitWorktreeTool extends BaseDeclarativeTool<
       },
       true, // isOutputMarkdown
       false, // canUpdateOutput
+      true, // shouldDefer — only invoked when the user explicitly asks to leave a worktree
+      false, // alwaysLoad
+      'worktree exit leave remove keep cleanup',
     );
   }
 
