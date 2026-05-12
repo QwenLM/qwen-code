@@ -157,4 +157,30 @@ describe('Storage.getRuntimeStatusPath', () => {
     expect(p.endsWith(path.join('chats', 'abc-123.runtime.json'))).toBe(true);
     expect(p.startsWith(storage.getProjectDir())).toBe(true);
   });
+
+  it('accepts the randomUUID shape', () => {
+    const storage = new Storage(tmpDir);
+    expect(() =>
+      storage.getRuntimeStatusPath('aaaaaaaa-1111-2222-3333-aaaaaaaaaaaa'),
+    ).not.toThrow();
+  });
+
+  // Defense-in-depth: --resume <id> and Config.startNewSession(id) accept
+  // user-supplied strings. These would resolve outside chats/ via
+  // path.join, so reject them at the boundary.
+  it.each([
+    ['empty string', ''],
+    ['parent traversal', '../foo'],
+    ['nested parent traversal', 'a/../b'],
+    ['forward slash', 'foo/bar'],
+    ['backslash', 'foo\\bar'],
+    ['leading dot', '.hidden'],
+    ['NUL byte', 'foo\0bar'],
+    ['whitespace', 'foo bar'],
+  ])('rejects %s', (_label, sessionId) => {
+    const storage = new Storage(tmpDir);
+    expect(() => storage.getRuntimeStatusPath(sessionId)).toThrow(
+      /unsafe sessionId/,
+    );
+  });
 });

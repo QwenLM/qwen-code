@@ -30,8 +30,12 @@
  *   (e.g. a hypothetical future mode-switch). Not currently invoked.
  *
  * The file is written atomically (tmp-file + rename) and contains a
- * small, stable schema. External consumers should treat unknown fields
- * as forward-compatible additions.
+ * small, stable schema. Within a given `schema_version` external
+ * consumers should ignore unknown fields so future producers can add
+ * new keys without breaking older readers. A bump of `schema_version`
+ * is itself a breaking change — the reader rejects mismatches outright
+ * rather than guessing forward compatibility — so the version is bumped
+ * only when a field's meaning or required-set actually changes.
  */
 
 import * as crypto from 'node:crypto';

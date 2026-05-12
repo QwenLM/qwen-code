@@ -1525,6 +1525,15 @@ export class Config {
   }
 
   /**
+   * Path to the runtime.json sidecar for `sessionId` (or the current
+   * session if omitted). Thin pass-through to `Storage` so callers
+   * outside `core` don't reach into `config.storage` directly.
+   */
+  getRuntimeStatusPath(sessionId: string = this.sessionId): string {
+    return this.storage.getRuntimeStatusPath(sessionId);
+  }
+
+  /**
    * Returns the resumed session data if this session was resumed from a previous one.
    */
   getResumedSessionData(): ResumedSessionData | undefined {

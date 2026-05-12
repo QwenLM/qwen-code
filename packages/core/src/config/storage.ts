@@ -249,8 +249,16 @@ export class Storage {
    * `<projectDir>/chats/<sessionId>.runtime.json` so external observers
    * (terminal multiplexers, IDE integrations, status daemons) can scan
    * the same directory used for chat history to find live sessions.
+   *
+   * `sessionId` is normally a `randomUUID()`, but `--resume <id>` and
+   * `Config.startNewSession(sessionId)` accept user-supplied strings.
+   * Defense-in-depth: reject anything that could escape the `chats/`
+   * directory (path separators, `..`, NUL, leading dot) before joining.
    */
   getRuntimeStatusPath(sessionId: string): string {
+    if (!isSafeSessionId(sessionId)) {
+      throw new Error(`unsafe sessionId for runtime status path: ${sessionId}`);
+    }
     return path.join(
       this.getProjectDir(),
       'chats',
@@ -291,4 +299,18 @@ export class Storage {
   getHistoryFilePath(): string {
     return path.join(this.getProjectTempDir(), 'shell_history');
   }
+}
+
+// Path-component safety for ids that we use as filename stems.
+// Accept the same shape `randomUUID()` produces (hex + hyphens) plus the
+// underscore for hand-rolled ids, and reject anything that contains a
+// path separator, traversal, NUL, or a leading dot/space. Conservative
+// by design: legitimate consumers won't trip it.
+function isSafeSessionId(sessionId: string): boolean {
+  if (typeof sessionId !== 'string') return false;
+  if (sessionId.length === 0 || sessionId.length > 128) return false;
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) return false;
+  if (sessionId.includes('..')) return false;
+  if (sessionId.startsWith('.')) return false;
+  return true;
 }

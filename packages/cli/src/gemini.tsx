@@ -225,7 +225,7 @@ export async function startInteractiveUI(
   // starting up.
   try {
     const sessionId = config.getSessionId();
-    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
+    const runtimeStatusPath = config.getRuntimeStatusPath(sessionId);
     await writeRuntimeStatus(runtimeStatusPath, {
       sessionId,
       workDir: config.getTargetDir(),
