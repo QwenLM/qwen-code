@@ -141,6 +141,7 @@ export default {
   'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Cannot restore files: this turn was created before file checkpointing was enabled.',
+  'No files needed restoration.': 'No files needed restoration.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ to navigate · Enter to select · Esc to go back',
   '↑↓ to navigate · Enter to select · Esc to cancel':

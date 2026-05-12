@@ -1998,6 +1998,8 @@ export const AppContainer = (props: AppContainerProps) => {
               fileRestoreMessage = t('Restored {{count}} file(s).', {
                 count: String(filesChanged.length),
               });
+            } else {
+              fileRestoreMessage = t('No files needed restoration.');
             }
           } catch (error) {
             fileRestoreError = t('Failed to restore files: {{error}}', {

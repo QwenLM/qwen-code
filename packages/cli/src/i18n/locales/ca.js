@@ -141,6 +141,7 @@ export default {
     'Error en restaurar els fitxers: {{error}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'No es poden restaurar els fitxers: aquest torn es va crear abans que el punt de control de fitxers estigués habilitat.',
+  'No files needed restoration.': 'Cap fitxer necessitava restauració.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ per navegar · Enter per seleccionar · Esc per tornar',
   '↑↓ to navigate · Enter to select · Esc to cancel':

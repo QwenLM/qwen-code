@@ -140,6 +140,8 @@ export default {
     'Échec de la restauration des fichiers : {{error}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     "Impossible de restaurer les fichiers : ce tour a été créé avant l'activation des points de contrôle de fichiers.",
+  'No files needed restoration.':
+    "Aucun fichier n'a eu besoin d'être restauré.",
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ naviguer · Enter sélectionner · Esc retour',
   '↑↓ to navigate · Enter to select · Esc to cancel':

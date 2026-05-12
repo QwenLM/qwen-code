@@ -229,7 +229,7 @@ async function computeDiffStatsForFile(
 
     filesChanged.push(originalFile);
 
-    const changes = diffLines(originalContent ?? '', backupContent ?? '');
+    const changes = diffLines(backupContent ?? '', originalContent ?? '');
     for (const c of changes) {
       if (c.added) insertions += c.count || 0;
       if (c.removed) deletions += c.count || 0;
@@ -418,6 +418,12 @@ export class FileHistoryService {
 
     debugLogger.debug(`FileHistory: Rewinding to snapshot for ${promptId}`);
     const filesChanged = await this.applySnapshot(targetSnapshot);
+
+    const targetIdx = this.state.snapshots.indexOf(targetSnapshot);
+    if (targetIdx >= 0) {
+      this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
+    }
+
     debugLogger.debug(`FileHistory: Finished rewinding to ${promptId}`);
     return filesChanged;
   }

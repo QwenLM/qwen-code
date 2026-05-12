@@ -135,6 +135,7 @@ export default {
     'Falha ao restaurar arquivos: {{error}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Não é possível restaurar arquivos: este turno foi criado antes do checkpoint de arquivos ser ativado.',
+  'No files needed restoration.': 'Nenhum arquivo precisou ser restaurado.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ navegar · Enter selecionar · Esc voltar',
   '↑↓ to navigate · Enter to select · Esc to cancel':

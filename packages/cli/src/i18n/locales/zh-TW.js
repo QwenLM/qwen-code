@@ -122,6 +122,7 @@ export default {
   'Failed to restore files: {{error}}': '恢復檔案失敗：{{error}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     '無法恢復檔案：該輪對話建立時尚未啟用檔案檢查點功能。',
+  'No files needed restoration.': '沒有檔案需要恢復。',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ 導覽 · Enter 選取 · Esc 返回',
   '↑↓ to navigate · Enter to select · Esc to cancel':
