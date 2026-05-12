@@ -41,13 +41,23 @@ import type {
  * Stage 1 HTTP→ACP bridge.
  *
  * Per design §08 (Roadmap, Stage 1) and the issue body's Caveat:
- *   - Each session spawns its own `qwen --acp` child process.
+ *   - One `qwen --acp` child PER WORKSPACE; multiple sessions on the same
+ *     workspace multiplex onto that child via `connection.newSession()`
+ *     (the agent's native `sessions: Map<string, Session>` — see
+ *     `acp-integration/acpAgent.ts:194`). Sessions share the child's
+ *     process / OAuth state / `FileReadCache` / hierarchy-memory parse.
  *   - HTTP request bodies are forwarded as ACP NDJSON over the child's stdin.
  *   - Child stdout NDJSON notifications publish onto each session's
  *     `EventBus`; HTTP SSE subscribers (`GET /session/:id/events`) drain
  *     it. Cross-client fan-out + `Last-Event-ID` reconnect supported.
  *   - Multi-client requests against the same session serialize through this
  *     bridge (FIFO; honors ACP's "one active prompt per session" invariant).
+ *     Different sessions on the same channel can prompt concurrently —
+ *     the ACP layer demultiplexes by sessionId.
+ *   - Cross-workspace channel sharing is intentionally NOT done. Different
+ *     workspaces have different `loadSettings(cwd)` state; one child would
+ *     step on the previous workspace's settings. One channel per workspace
+ *     is the safe scope.
  *
  * Stage 2 replaces the spawn step with an in-process call into core's
  * ACP-equivalent API. The `HttpAcpBridge` interface stays the same so HTTP
@@ -426,12 +436,55 @@ interface SessionEntry {
    * counter is observed atomically across the awaiting boundary.
    */
   attachCount: number;
+  /**
+   * BkwQP: tombstone for the spawn-owner-disconnect path. When the
+   * spawn owner's HTTP response can't be written and they call
+   * `killSession({ requireZeroAttaches: true })` but the bail
+   * triggers (because some other client already bumped
+   * `attachCount`), set this flag — it remembers the spawn owner
+   * wanted the session reaped. A later `detachClient()` that brings
+   * `attachCount` back to 0 then completes the deferred reap. Stays
+   * `false` for sessions the spawn owner never tried to kill, so
+   * `detachClient` of a transient attach doesn't reap a still-valid
+   * session.
+   */
+  spawnOwnerWantedKill: boolean;
 }
 
 interface PendingPermission {
   requestId: string;
   sessionId: string;
   resolve: (resp: RequestPermissionResponse) => void;
+  /**
+   * BkwQI: the option IDs the agent originally offered to clients in
+   * the `permission_request` event. `respondToPermission` validates
+   * the voter's `optionId` against this set so an authenticated
+   * client can't smuggle in a hidden outcome (e.g.
+   * `ProceedAlwaysProject` when the prompt's
+   * `hideAlwaysAllow` / forced-ask policy intentionally omitted it).
+   * Stored as a Set for O(1) membership check.
+   */
+  allowedOptionIds: ReadonlySet<string>;
+}
+
+/**
+ * BkwQI: thrown by `bridge.respondToPermission` when the voter's
+ * `optionId` isn't in the set of options the agent originally
+ * offered. Server route catches this and returns 400 (distinct from
+ * 404 unknown-requestId).
+ */
+export class InvalidPermissionOptionError extends Error {
+  readonly requestId: string;
+  readonly optionId: string;
+  constructor(requestId: string, optionId: string) {
+    super(
+      `Permission ${requestId}: optionId "${optionId}" is not in the ` +
+        `set of options the agent offered.`,
+    );
+    this.name = 'InvalidPermissionOptionError';
+    this.requestId = requestId;
+    this.optionId = optionId;
+  }
 }
 
 /**
@@ -533,10 +586,22 @@ class BridgeClient implements Client {
         resolve(response);
       };
 
+      // BkwQI: snapshot the option-id set the agent is offering for
+      // this prompt. `respondToPermission` checks the voter's
+      // `optionId` against this set so a malicious client can't
+      // forge an option (e.g. `ProceedAlways*`) the agent
+      // intentionally hid.
+      const allowedOptionIds = new Set(
+        params.options.map((o: { optionId?: unknown }) =>
+          String(o.optionId ?? ''),
+        ),
+      );
+      allowedOptionIds.delete('');
       this.registerPending({
         requestId,
         sessionId: entry.sessionId,
         resolve: settleOnce,
+        allowedOptionIds,
       });
       // `publish()` returns `undefined` on a closed bus — the
       // shutdown path closes per-session buses BEFORE awaiting
@@ -666,8 +731,44 @@ class BridgeClient implements Client {
     // UUID and create exclusively (`flag: 'wx'`) so any residual
     // collision fails before content is overwritten.
     const tmp = `${realTarget}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+    // BkwQW: preserve the existing target's mode bits (and owner/group
+    // where possible) so editing a `0600` secret doesn't downgrade
+    // it to `0644` via the process umask, and an executable file
+    // doesn't lose its `+x` bit. Snapshot before write — if the
+    // target doesn't exist yet, fall through to umask defaults
+    // (which is correct for a new file).
+    let preserveMode: { mode: number; uid: number; gid: number } | undefined;
+    try {
+      const targetStat = await fs.stat(realTarget);
+      preserveMode = {
+        mode: targetStat.mode & 0o7777,
+        uid: targetStat.uid,
+        gid: targetStat.gid,
+      };
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? (err as { code?: unknown }).code
+          : undefined;
+      if (code !== 'ENOENT') throw err;
+      // New file — accept umask defaults.
+    }
     try {
       await fs.writeFile(tmp, params.content, { encoding: 'utf8', flag: 'wx' });
+      if (preserveMode) {
+        // chmod first so the rename atomically swaps in a file
+        // with the right permissions. Skip on Windows where mode
+        // semantics differ (Node's chmod is a no-op for most bits).
+        await fs.chmod(tmp, preserveMode.mode).catch(() => {
+          /* chmod failed (Windows / fs without permission bits) */
+        });
+        // chown is owner-restricted on POSIX; non-root daemons hit
+        // EPERM here. Silent ignore — preserving mode is the
+        // first-order goal, ownership is a stretch goal.
+        await fs.chown(tmp, preserveMode.uid, preserveMode.gid).catch(() => {
+          /* expected EPERM for non-root operators */
+        });
+      }
       await fs.rename(tmp, realTarget);
     } catch (err) {
       // Best-effort cleanup if the write succeeded but rename failed
@@ -1049,23 +1150,41 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     // (see `acp-integration/acpAgent.ts:194`).
     // newSession on an established channel can fail (auth, config,
     // etc.) without the channel dying. We DON'T kill the channel on
-    // newSession failure: other sessions on it may still be live —
-    // they'd lose their work for a problem orthogonal to them. The
-    // edge case of "newSession fails on a freshly-created channel
-    // with no live sessions" leaks an empty channel until something
-    // else (channel.exited / shutdown) cleans it up; that's much
-    // better than killing other live sessions, and the
-    // empty-sessionIds set lets the NEXT caller retry through that
-    // same channel if it's still healthy.
+    // newSession failure when OTHER sessions are still using it —
+    // they'd lose their work for a problem orthogonal to them.
+    //
+    // BkwQA: when the failed newSession was the channel's ONLY
+    // attempt (sessionIds.size === 0), the empty channel must NOT
+    // linger — it would sit in `byWorkspaceChannel` invisible to
+    // `sessionCount` / `maxSessions` (both backed by `byId`), and
+    // repeated failing creates would still find this channel via
+    // `getOrCreateChannel`, never spawning a fresh one. Tear down
+    // the empty channel so the next attempt gets a clean spawn.
     const channelInfo = await getOrCreateChannel(workspaceKey);
-    const newSessionResp = await withTimeout(
-      channelInfo.connection.newSession({
-        cwd: workspaceKey,
-        mcpServers: [],
-      }),
-      initTimeoutMs,
-      'newSession',
-    );
+    let newSessionResp: { sessionId: string };
+    try {
+      newSessionResp = await withTimeout(
+        channelInfo.connection.newSession({
+          cwd: workspaceKey,
+          mcpServers: [],
+        }),
+        initTimeoutMs,
+        'newSession',
+      );
+    } catch (err) {
+      // Only reap when this newSession was the channel's first/only
+      // attempt — a populated channel keeps running for its other
+      // live sessions.
+      if (channelInfo.sessionIds.size === 0) {
+        if (byWorkspaceChannel.get(workspaceKey) === channelInfo) {
+          byWorkspaceChannel.delete(workspaceKey);
+        }
+        await channelInfo.channel.kill().catch(() => {
+          /* best-effort — channel.exited handler still runs */
+        });
+      }
+      throw err;
+    }
 
     // Late-shutdown re-check (BUy4U): shutdown() may have flipped
     // while we were in `connection.newSession` (~1s on cold start).
@@ -1084,6 +1203,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       modelChangeQueue: Promise.resolve(),
       pendingPermissionIds: new Set(),
       attachCount: 0,
+      spawnOwnerWantedKill: false,
     };
     channelInfo.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
@@ -1551,6 +1671,25 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     },
 
     respondToPermission(requestId, response) {
+      // BkwQI: validate the voter's optionId against the original
+      // options the agent advertised. The route already enforces
+      // "non-empty string" structurally; this layer enforces
+      // semantic membership in the agent-published set so a
+      // malicious client can't forge hidden outcomes (e.g.
+      // `ProceedAlways*` when the prompt's `hideAlwaysAllow`
+      // policy intentionally suppressed them).
+      if (response.outcome.outcome === 'selected') {
+        const pending = pendingPermissions.get(requestId);
+        if (
+          pending &&
+          !pending.allowedOptionIds.has(response.outcome.optionId)
+        ) {
+          throw new InvalidPermissionOptionError(
+            requestId,
+            response.outcome.optionId,
+          );
+        }
+      }
       return resolvePending(requestId, response);
     },
 
@@ -1668,7 +1807,16 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // sole client. Counter increment + this check both run
       // synchronously, so no microtask boundary lets a race slip
       // through.
-      if (opts?.requireZeroAttaches && entry.attachCount > 0) return;
+      // BkwQP: when bailing because of an attach, set the tombstone
+      // so a later `detachClient` (that brings attachCount back to
+      // 0) can complete the deferred reap. Without this, both
+      // spawn-owner-and-attach disconnecting leaves the session
+      // orphaned forever (spawn owner's reap bails here, attach's
+      // detach does nothing structural).
+      if (opts?.requireZeroAttaches && entry.attachCount > 0) {
+        entry.spawnOwnerWantedKill = true;
+        return;
+      }
       // Remove from the maps eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
       if (byWorkspace.get(entry.workspaceCwd) === entry) {
@@ -1724,23 +1872,27 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // attaching client itself disconnected. This is the symmetric
       // rollback the server's `!res.writable && session.attached`
       // path calls into.
+      //
+      // BkwQP: detachClient ONLY decrements; it does NOT reap on
+      // its own. Reaping is the spawn-owner's responsibility, and
+      // the spawn owner's `killSession({ requireZeroAttaches: true })`
+      // sets `spawnOwnerWantedKill` if they had to bail because we
+      // already had `attachCount > 0`. Only when that tombstone is
+      // set do we complete the deferred reap from here. Without
+      // this restraint, a transient attach disconnecting would
+      // reap a still-valid session whose spawn owner is alive but
+      // hasn't opened SSE yet.
       const entry = byId.get(sessionId);
       if (!entry) return;
       if (entry.attachCount > 0) entry.attachCount--;
-      // If nobody is left (no other attaches pending, no live SSE
-      // subscribers), reap the session so an orphan agent child
-      // doesn't leak. A still-active C client either:
-      //   - holds attachCount > 0 via their own attach, or
-      //   - holds entry.events.subscriberCount > 0 via SSE.
-      // Either way we don't reap. A C client between attach response
-      // and SSE open isn't covered here, but the spawn-owner's
-      // disconnect-reaper path (`requireZeroAttaches`) is what
-      // protects them — the moment THIS client (B) finishes detach,
-      // any subsequent A-owner reaper attempt can correctly fire.
-      if (entry.attachCount === 0 && entry.events.subscriberCount === 0) {
-        // Re-use killSession's reap logic. No `requireZeroAttaches`
-        // — the check we already did is stronger (we ALSO require
-        // zero subscribers).
+      if (
+        entry.spawnOwnerWantedKill &&
+        entry.attachCount === 0 &&
+        entry.events.subscriberCount === 0
+      ) {
+        // Defer-completed reap. Re-use killSession's logic; pass
+        // `requireZeroAttaches: false` (default) because we've
+        // already validated all the conditions ourselves.
         await this.killSession(sessionId).catch(() => {
           /* best-effort; channel.exited will eventually reap anyway */
         });

@@ -12,6 +12,7 @@ import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   createHttpAcpBridge,
+  InvalidPermissionOptionError,
   SessionLimitExceededError,
   SessionNotFoundError,
   type HttpAcpBridge,
@@ -388,10 +389,28 @@ export function createServeApp(
       });
       return;
     }
-    const accepted = bridge.respondToPermission(requestId, {
-      ...(body as object),
-      outcome,
-    } as Parameters<HttpAcpBridge['respondToPermission']>[1]);
+    let accepted: boolean;
+    try {
+      accepted = bridge.respondToPermission(requestId, {
+        ...(body as object),
+        outcome,
+      } as Parameters<HttpAcpBridge['respondToPermission']>[1]);
+    } catch (err) {
+      // BkwQI: voter's `optionId` wasn't in the option set the agent
+      // originally offered (e.g. forging `ProceedAlways*` when the
+      // prompt's `hideAlwaysAllow` policy suppressed it). 400, not
+      // 404 — the requestId IS known, but the chosen option isn't.
+      if (err instanceof InvalidPermissionOptionError) {
+        res.status(400).json({
+          error: err.message,
+          code: 'invalid_option_id',
+          requestId: err.requestId,
+          optionId: err.optionId,
+        });
+        return;
+      }
+      throw err;
+    }
     if (!accepted) {
       // Either the requestId never existed or another client already won
       // the race. Stage 1 doesn't distinguish — both surface as 404.

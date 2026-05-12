@@ -2204,19 +2204,14 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
-    it('detachClient rolls back a fictitious attach + reaps when alone (tanzhenxin issue 2)', async () => {
-      // Pre-fix bug: `attachCount` is monotonic. Once B's
-      // `spawnOrAttach` bumps it (synchronously, before the route
-      // handler can see `!res.writable`), the spawn-owner A's
-      // disconnect-reaper would see attachCount > 0 and skip the
-      // reap — permanently. If B then ALSO disconnects, both
-      // route handlers return without doing anything, and the agent
-      // child is orphaned with no client knowing the sessionId.
-      //
-      // Fix: B's route handler calls `detachClient` when
-      // `!res.writable`, decrementing the counter. The bridge then
-      // checks both attachCount AND subscriberCount and reaps if
-      // both are zero.
+    it('detachClient does NOT reap when spawn owner is still alive (BkwQP)', async () => {
+      // BkwQP refinement: the BX (tanzhenxin issue 2) detach-reap path
+      // was eager and killed live sessions. Scenario: A spawns
+      // (attached: false, hasn't opened SSE yet); B attaches
+      // (attachCount: 1); B disconnects → detachClient. detachClient
+      // must NOT kill A's still-valid session. Reap is only safe
+      // when the spawn owner ALSO indicated they want it (via the
+      // killSession-bail tombstone).
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = createHttpAcpBridge({
         channelFactory: factory,
@@ -2227,10 +2222,37 @@ describe('createHttpAcpBridge', () => {
       const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(b.attached).toBe(true);
       expect(bridge.sessionCount).toBe(1);
-      // B disconnects — calls detach.
+      // B disconnects — but A is alive. detachClient must NOT reap.
       await bridge.detachClient(b.sessionId);
-      // After detach: attachCount returns to 0, no SSE subscribers,
-      // → session is reaped.
+      // Session survives — A would have 404'd on every subsequent
+      // request otherwise.
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('detachClient completes deferred reap when spawn owner ALSO disconnected (BkwQP+tanzhenxin issue 2)', async () => {
+      // Scenario: A spawns + disconnects (spawn-owner reap bails
+      // because B already bumped attachCount); B attaches +
+      // disconnects (detachClient decrements). With the tombstone
+      // set during the spawn-owner bail, B's detach now completes
+      // the deferred reap.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(a.attached).toBe(false);
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      expect(bridge.sessionCount).toBe(1);
+      // A's disconnect-reaper fires: requireZeroAttaches:true bails
+      // (attachCount===1 from B) but sets `spawnOwnerWantedKill`.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1); // bailed, no reap
+      // B disconnects: detachClient decrements attachCount→0 AND
+      // sees the tombstone → completes the deferred reap.
+      await bridge.detachClient(b.sessionId);
       expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
