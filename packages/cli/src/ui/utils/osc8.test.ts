@@ -210,6 +210,19 @@ describe('osc8 helpers', () => {
       ).toBe(false);
     });
 
+    it('does NOT flag email-style labels matching the mailto target', () => {
+      // `new URL('mailto:x@y').hostname` is empty; the implementation has to
+      // pull the host from after the `@` or every mailto link with a
+      // bare-email label would be falsely flagged.
+      expect(
+        labelMayDeceive('support@example.com', 'mailto:support@example.com'),
+      ).toBe(false);
+      // …but a mismatched mailto domain IS deceptive.
+      expect(
+        labelMayDeceive('support@example.com', 'mailto:abuse@evil.com'),
+      ).toBe(true);
+    });
+
     it('flags same-host different-path labels', () => {
       // `[https://google.com/safe](https://google.com/evil)` — same host but
       // the label hides which path. The `://` pattern fires here and the

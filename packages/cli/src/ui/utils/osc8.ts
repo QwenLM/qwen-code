@@ -410,8 +410,17 @@ const HOST_LIKE_RE =
 
 function targetHostname(url: string): string | undefined {
   try {
-    const h = new URL(url).hostname.toLowerCase();
-    return h || undefined;
+    const u = new URL(url);
+    // `mailto:` URLs report an empty `hostname` — pull the domain out of
+    // the email address after the `@` so labels like `[support@example.com]
+    // (mailto:support@example.com)` don't trip the bare-host check.
+    if (u.protocol === 'mailto:') {
+      const at = u.pathname.lastIndexOf('@');
+      return at >= 0
+        ? u.pathname.slice(at + 1).toLowerCase() || undefined
+        : undefined;
+    }
+    return u.hostname.toLowerCase() || undefined;
   } catch {
     return undefined;
   }
@@ -422,9 +431,6 @@ export function labelMayDeceive(label: string, url: string): boolean {
   if (/:\/\//.test(label) || /^[a-z][a-z0-9+.-]*:/i.test(label.trim())) {
     return true;
   }
-  // Re-set lastIndex defensively — exported regex literals reuse state
-  // across calls when matched with `.exec` elsewhere.
-  HOST_LIKE_RE.lastIndex = 0;
   const labelHosts = label.toLowerCase().match(HOST_LIKE_RE);
   if (!labelHosts || labelHosts.length === 0) return false;
   const target = targetHostname(url);
