@@ -263,23 +263,36 @@ export async function runQwenServe(
             // the bridge was still tearing children down — orphaning
             // any that hadn't yet hit `KILL_HARD_DEADLINE_MS`.
             let settled = false;
+            // BV-qW: track bridge.shutdown failures so close()
+            // doesn't silently report success when the bridge
+            // teardown itself failed. The contract says "resolves
+            // when the listener has fully closed and the bridge is
+            // drained" — propagating the failure lets `onSignal`
+            // exit 1 instead of 0, and lets embedders react.
+            let bridgeShutdownError: Error | undefined;
             const finish = (err?: Error | null) => {
               if (settled) return;
               settled = true;
               // Drain finished (or timed out) — safe to detach now.
               process.removeListener('SIGINT', onSignal);
               process.removeListener('SIGTERM', onSignal);
-              if (err) rej(err);
+              // Server.close error takes precedence (operator-visible
+              // listener problem); fall back to the bridge error
+              // captured during shutdown if any.
+              const finalErr = err ?? bridgeShutdownError;
+              if (finalErr) rej(finalErr);
               else res();
             };
 
             bridge
               .shutdown()
-              .catch((err) =>
+              .catch((err) => {
                 writeStderrLine(
                   `qwen serve: bridge shutdown error: ${String(err)}`,
-                ),
-              )
+                );
+                bridgeShutdownError =
+                  err instanceof Error ? err : new Error(String(err));
+              })
               .finally(() => {
                 // Phase 2: arm the force timer NOW so it only races
                 // server.close, not the bridge tear-down above.
@@ -332,6 +345,18 @@ export async function runQwenServe(
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
 
+      // BX9_i: swap the boot-error listener for a runtime-error one
+      // before resolving. `server.once('error', reject)` at the
+      // bottom only catches errors BEFORE listening; post-listen
+      // errors (EMFILE after FD exhaustion, runtime errors on the
+      // listener) would be unhandled and crash the daemon. Use a
+      // persistent listener that logs to stderr instead.
+      server.removeAllListeners('error');
+      server.on('error', (err) => {
+        writeStderrLine(
+          `qwen serve: server error: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
       resolve(handle);
     });
     server.once('error', reject);

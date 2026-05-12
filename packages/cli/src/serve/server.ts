@@ -684,12 +684,32 @@ function isValidOutcome(
 function parseLastEventId(raw: unknown): number | undefined {
   // Stricter than Number.parseInt: only accept pure decimal digits to avoid
   // values like "1abc" or "1.5e10z" silently parsing to 1.
-  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    // BX9_I: log a breadcrumb for the operator when a non-empty
+    // header is rejected. The client resumed from event 0 instead
+    // of where they meant to — without this line, the loss of
+    // every event buffered during their disconnect was invisible.
+    // Skip the log for missing / empty headers (the common case of
+    // "first connect, no resume").
+    if (typeof raw === 'string' && raw.length > 0) {
+      writeStderrLine(
+        `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+          `(not a decimal integer)`,
+      );
+    }
+    return undefined;
+  }
   const n = Number.parseInt(raw, 10);
   // Reject values that lose precision as a JS `number`. The bus's monotonic
   // ids are bounded by `Number.MAX_SAFE_INTEGER` (2^53 - 1); a client that
   // tries to resume from beyond that is either malicious or broken.
-  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) return undefined;
+  if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) {
+    writeStderrLine(
+      `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+        `(exceeds Number.MAX_SAFE_INTEGER)`,
+    );
+    return undefined;
+  }
   return n;
 }
 

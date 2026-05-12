@@ -233,9 +233,17 @@ function parseFrame(raw: string): DaemonEvent | undefined {
     // break Last-Event-ID resume logic on the consumer side (which
     // does numeric comparisons). Reject the frame entirely so the
     // consumer's id-monotonicity invariant holds.
+    //
+    // BX8Y1: also require `id >= 1`. The daemon's `Last-Event-ID`
+    // parser only accepts decimal digits (positive integers ≥ 0)
+    // and the EventBus emits monotonic ids starting at 1. A client
+    // that persisted `id = -1` from a malformed frame would later
+    // send `Last-Event-ID: -1`, which the daemon silently ignores
+    // → replay diverges. Fail loud at parse time instead.
     const rawId = (parsed as { id?: unknown }).id;
-    if (rawId !== undefined && !Number.isSafeInteger(rawId)) {
-      return undefined;
+    if (rawId !== undefined) {
+      if (!Number.isSafeInteger(rawId)) return undefined;
+      if ((rawId as number) < 1) return undefined;
     }
     return parsed as DaemonEvent;
   } catch {

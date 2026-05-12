@@ -123,8 +123,15 @@ interface ChannelHandle {
   channel: AcpChannel;
   agent: FakeAgent;
   killed: boolean;
-  /** Resolve `channel.exited` without going through `kill()`. */
-  crash: () => void;
+  /**
+   * Resolve `channel.exited` without going through `kill()`. Optionally
+   * supply exit info so the bridge's `session_died` event carries the
+   * same `exitCode` / `signalCode` it would in a real crash (BX9_P).
+   */
+  crash: (info?: {
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+  }) => void;
 }
 
 /**
@@ -137,8 +144,15 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
   const ba = new TransformStream<Uint8Array, Uint8Array>();
   const clientStream = ndJsonStream(ab.writable, ba.readable);
   const agentStream = ndJsonStream(ba.writable, ab.readable);
-  let resolveExited: (() => void) | undefined;
-  const exited = new Promise<void>((res) => {
+  let resolveExited:
+    | ((info?: {
+        exitCode: number | null;
+        signalCode: NodeJS.Signals | null;
+      }) => void)
+    | undefined;
+  const exited = new Promise<
+    { exitCode: number | null; signalCode: NodeJS.Signals | null } | undefined
+  >((res) => {
     resolveExited = res;
   });
   const handle: ChannelHandle = {
@@ -146,7 +160,10 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
     agent: new FakeAgent(opts),
     killed: false,
     /** Test hook: simulate an unexpected child crash. */
-    crash: () => resolveExited!(),
+    crash: (info?: {
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+    }) => resolveExited!(info),
   };
   // Spin up the fake agent on the agent side.
   new AgentSideConnection(() => handle.agent, agentStream);
@@ -558,7 +575,10 @@ describe('createHttpAcpBridge', () => {
         handles.push(handle);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {
             handle.killed = true;
           },
@@ -820,7 +840,10 @@ describe('createHttpAcpBridge', () => {
         conn = new AgentSideConnection(() => fakeAgent, agentStream);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };
@@ -894,7 +917,10 @@ describe('createHttpAcpBridge', () => {
         new AgentSideConnection(() => augmented as Agent, agentStream);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };
@@ -1087,7 +1113,10 @@ describe('createHttpAcpBridge', () => {
         new AgentSideConnection(() => augmented as Agent, agentStream);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };
@@ -1163,7 +1192,10 @@ describe('createHttpAcpBridge', () => {
         new AgentSideConnection(() => augmented as Agent, agentStream);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };
@@ -1228,7 +1260,10 @@ describe('createHttpAcpBridge', () => {
         new AgentSideConnection(() => augmented as Agent, agentStream);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };
@@ -1284,8 +1319,11 @@ describe('createHttpAcpBridge', () => {
       // Build a channel whose `prompt()` never resolves naturally;
       // exposing the `crash()` hook lets us trigger channel.exited.
       let resolveExited: (() => void) | undefined;
-      const exited = new Promise<void>((r) => {
-        resolveExited = r;
+      const exited = new Promise<
+        | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+        | undefined
+      >((r) => {
+        resolveExited = () => r(undefined);
       });
       const factory: ChannelFactory = async () => {
         const ab = new TransformStream<Uint8Array, Uint8Array>();
@@ -1455,7 +1493,10 @@ describe('createHttpAcpBridge', () => {
         );
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };
@@ -1564,6 +1605,87 @@ describe('createHttpAcpBridge', () => {
         });
       } finally {
         await fsp.rm(sparse, { force: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('readTextFile rejects non-regular files even when size=0 (BX8YO)', async () => {
+      // Char devices / FIFOs / procfs entries report size=0 but
+      // produce unbounded data on read. Use a FIFO as the portable
+      // probe (chrdev / procfs not always available).
+      const { bridge, conn } = await setupForFs();
+      const fifoPath = path.join(
+        os.tmpdir(),
+        `qwen-bridge-fifo-${randomBytes(8).toString('hex')}`,
+      );
+      const { execFileSync } = await import('node:child_process');
+      try {
+        execFileSync('mkfifo', [fifoPath]);
+      } catch {
+        // Skip on platforms without mkfifo (Windows). Test is
+        // pinning POSIX behavior; Stage 2 in-process refactor will
+        // make this moot anyway.
+        await bridge.shutdown();
+        return;
+      }
+      try {
+        await expect(
+          (
+            conn as unknown as {
+              readTextFile(p: {
+                path: string;
+                sessionId: string;
+              }): Promise<unknown>;
+            }
+          ).readTextFile({ sessionId: 'unused', path: fifoPath }),
+        ).rejects.toMatchObject({
+          data: { details: expect.stringMatching(/not a regular file/) },
+        });
+      } finally {
+        await fsp.rm(fifoPath, { force: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('writeTextFile preserves symlinks (BX8Yw)', async () => {
+      // Pre-fix: rename replaced the symlink with a regular file,
+      // leaving the original target unchanged. Verify the target's
+      // content is what was written and the symlink is preserved.
+      const { bridge, conn } = await setupForFs();
+      const dir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-symlink-'),
+      );
+      const target = path.join(dir, 'target.txt');
+      const link = path.join(dir, 'link.txt');
+      await fsp.writeFile(target, 'original target', 'utf8');
+      await fsp.symlink(target, link);
+      try {
+        await (
+          conn as unknown as {
+            writeTextFile(p: {
+              path: string;
+              content: string;
+              sessionId: string;
+            }): Promise<unknown>;
+          }
+        ).writeTextFile({
+          sessionId: 'unused',
+          path: link,
+          content: 'updated through symlink',
+        });
+        // Target got the new content.
+        expect(await fsp.readFile(target, 'utf8')).toBe(
+          'updated through symlink',
+        );
+        // Link is still a symlink, not a regular file.
+        const linkStat = await fsp.lstat(link);
+        expect(linkStat.isSymbolicLink()).toBe(true);
+        // Reading through the link still goes to the target.
+        expect(await fsp.readFile(link, 'utf8')).toBe(
+          'updated through symlink',
+        );
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
         await bridge.shutdown();
       }
     });
@@ -1732,7 +1854,10 @@ describe('createHttpAcpBridge', () => {
         new AgentSideConnection(() => augmented as Agent, agentStream);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };
@@ -1814,7 +1939,10 @@ describe('createHttpAcpBridge', () => {
         capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
         return {
           stream: clientStream,
-          exited: new Promise<void>(() => {}),
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
           kill: async () => {},
         };
       };

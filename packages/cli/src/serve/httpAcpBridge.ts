@@ -237,8 +237,21 @@ export interface AcpChannel {
    * The bridge subscribes to this so a SessionEntry whose underlying
    * channel dies between requests is removed from `byWorkspace`/`byId`
    * instead of lingering as a stuck session.
+   *
+   * Resolves to `{ exitCode, signalCode }` when the spawn factory can
+   * capture them (the standard `child.on('exit', code, signal)` path),
+   * or `undefined` when termination didn't go through the OS exit path
+   * (programmatic kill via the in-process channel, channel-factory
+   * error path, etc.). The bridge threads this through the
+   * `session_died` event so an operator triaging a crash doesn't need
+   * to grep stderr for the pid (BX9_P).
    */
-  exited: Promise<void>;
+  exited: Promise<AcpChannelExitInfo | undefined>;
+}
+
+export interface AcpChannelExitInfo {
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
 }
 
 export type ChannelFactory = (workspaceCwd: string) => Promise<AcpChannel>;
@@ -471,10 +484,29 @@ class BridgeClient implements Client {
     // gap). The tmp file lives in the same directory so the rename
     // can't cross filesystem boundaries (which would degrade to a
     // copy + race re-emerges).
-    const tmp = `${params.path}.${process.pid}.${Date.now()}.tmp`;
+    //
+    // BX8Yw: rename would replace a symlink at the target path with a
+    // regular file, leaving the original symlink target unchanged
+    // while the write appears successful. Resolve symlinks via
+    // `realpath` first so the atomic write lands at the actual file.
+    // Non-existent paths bypass realpath (nothing to resolve); falls
+    // through to the original target.
+    let realTarget = params.path;
     try {
-      await fs.writeFile(tmp, params.content, 'utf8');
-      await fs.rename(tmp, params.path);
+      realTarget = await fs.realpath(params.path);
+    } catch {
+      /* path doesn't exist yet — write through directly */
+    }
+    // BX8Yp + BX9_h: temp filename must include random bytes —
+    // PID+ms alone collides under `sessionScope: 'thread'` (two
+    // concurrent sessions writing the same path in the same ms) AND
+    // can collide between concurrent prompts in one session. Add a
+    // UUID and create exclusively (`flag: 'wx'`) so any residual
+    // collision fails before content is overwritten.
+    const tmp = `${realTarget}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
+    try {
+      await fs.writeFile(tmp, params.content, { encoding: 'utf8', flag: 'wx' });
+      await fs.rename(tmp, realTarget);
     } catch (err) {
       // Best-effort cleanup if the write succeeded but rename failed
       // (e.g. permission change between calls). Swallow cleanup
@@ -502,8 +534,25 @@ class BridgeClient implements Client {
     // lines. Stage 2's in-process refactor will replace this proxy
     // with a streaming readline implementation that stops at the
     // requested range; until then the cap is the cheapest defense.
+    //
+    // BX8YO: also reject non-regular files. Character devices, named
+    // pipes (FIFOs), procfs / sysfs entries, sockets etc. can report
+    // `stats.size === 0` while producing unbounded data on read, so
+    // a size-only cap doesn't protect against `/dev/zero` /
+    // `/dev/urandom` / `/proc/kcore`-style inputs. ACP's contract
+    // for `readTextFile` is "regular file"; everything else is an
+    // operator-supplied path mistake or an adversarial-prompt
+    // attempt and should fail loud.
     const READ_FILE_SIZE_CAP = 100 * 1024 * 1024;
     const stats = await fs.stat(params.path);
+    if (!stats.isFile()) {
+      throw new Error(
+        `readTextFile: ${params.path} is not a regular file ` +
+          `(reported as ${describeStatKind(stats)}). ` +
+          `Pipe / device / proc-like inputs can produce unbounded data ` +
+          `and aren't supported by the bridge fs proxy.`,
+      );
+    }
     if (stats.size > READ_FILE_SIZE_CAP) {
       throw new Error(
         `readTextFile: ${params.path} is ${stats.size} bytes, ` +
@@ -735,7 +784,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // `session_died` event so live SSE subscribers learn the session is
       // gone, close the bus, drop from maps).
       const liveEntry = entry;
-      void channel.exited.then(() => {
+      void channel.exited.then((info) => {
         if (byId.get(liveEntry.sessionId) !== liveEntry) return;
         cancelPendingForSession(liveEntry.sessionId);
         try {
@@ -744,6 +793,12 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
             data: {
               sessionId: liveEntry.sessionId,
               reason: 'channel_closed',
+              // BX9_P: thread `exitCode` / `signalCode` from the
+              // spawn factory through so operators triaging a crash
+              // can read the cause from the SSE frame instead of
+              // grepping stderr for the pid.
+              exitCode: info?.exitCode ?? null,
+              signalCode: info?.signalCode ?? null,
             },
           });
         } catch {
@@ -963,8 +1018,19 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // `requireZeroAttaches: true`) sees this attach even when
           // we yield on the model-switch below. Increment is
           // synchronous → atomic against the killSession
-          // sync-prefix check. Out-of-order increments don't matter
-          // (the counter is monotonic; we never decrement).
+          // sync-prefix check.
+          //
+          // BVryk + BWGSL: counter is NOT strictly monotonic any
+          // more — `detachClient()` decrements it to roll back an
+          // attach whose HTTP response couldn't be written
+          // (tanzhenxin issue 2). The race-guard invariant we still
+          // hold is "attachCount reflects the number of attaching
+          // clients whose response was written or is about to be
+          // written"; decrementing is the symmetric cleanup for
+          // attaches that turned out to be fictitious. The
+          // ordering guarantee that matters for the killSession
+          // race is "bump runs before any await inside this
+          // microtask," which is what we get here.
           existing.attachCount++;
           // If the caller passed a modelServiceId on attach, the session
           // may currently be running a DIFFERENT model. Honor the request
@@ -1013,7 +1079,20 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // flagged in BRSCi.
           const attachedEntry = byId.get(session.sessionId);
           if (attachedEntry) attachedEntry.attachCount++;
-          if (req.modelServiceId && attachedEntry) {
+          // BX9_U: even with the BRSCi bump-before-await ordering,
+          // there are still adversarial paths where the entry could
+          // be torn down between `await inFlight` resolving and our
+          // continuation running (e.g. channel.exited firing during
+          // a crash spawn, or a direct bridge.killSession call from
+          // outside the route handler). In those cases byId.get()
+          // returned undefined; we'd otherwise return
+          // `{ attached: true, sessionId: <zombie> }` and every
+          // subsequent prompt/cancel call would 404. Fail loud
+          // instead so the caller can retry into a fresh spawn.
+          if (!attachedEntry) {
+            throw new SessionNotFoundError(session.sessionId);
+          }
+          if (req.modelServiceId) {
             // Same swallow as above — we picked up an in-flight
             // spawn, the session is real, model-switch failure
             // shouldn't deny us the sessionId.
@@ -1438,6 +1517,23 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
 }
 
 /**
+ * Human-readable label for a `fs.Stats` object's kind, used in the
+ * `readTextFile` "not a regular file" rejection message (BX8YO).
+ * Sockets, pipes, char-devices etc. all report `size: 0` but stream
+ * unbounded data; the operator wants to know which one they hit so
+ * the path-mistake is obvious.
+ */
+function describeStatKind(stats: import('node:fs').Stats): string {
+  if (stats.isDirectory()) return 'directory';
+  if (stats.isSymbolicLink()) return 'symlink';
+  if (stats.isCharacterDevice()) return 'character device';
+  if (stats.isBlockDevice()) return 'block device';
+  if (stats.isFIFO()) return 'named pipe (FIFO)';
+  if (stats.isSocket()) return 'socket';
+  return 'non-regular file';
+}
+
+/**
  * Extract the line range `[startLine, endLine)` (0-based) from a string
  * without allocating a per-line array. Equivalent to
  * `content.split('\n').slice(startLine, endLine).join('\n')` but
@@ -1719,15 +1815,17 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // `error` as termination — without an `error` listener Node would treat
   // an async spawn failure (ENOMEM, EACCES, …) as an unhandled error and
   // crash the whole daemon.
-  const exited = new Promise<void>((resolve) => {
+  const exited = new Promise<AcpChannelExitInfo | undefined>((resolve) => {
     let resolved = false;
-    const finish = () => {
+    const finish = (info?: AcpChannelExitInfo) => {
       if (resolved) return;
       resolved = true;
-      resolve();
+      resolve(info);
     };
-    child.once('exit', finish);
-    child.once('error', finish);
+    child.once('exit', (code, signal) =>
+      finish({ exitCode: code, signalCode: signal }),
+    );
+    child.once('error', () => finish(undefined));
   });
 
   if (!child.stdin || !child.stdout) {

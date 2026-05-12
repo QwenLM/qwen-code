@@ -117,15 +117,17 @@ describe('parseSseStream', () => {
       'data: {"id":"1","v":1,"type":"x","data":"ok"}\n\n' + // string id
         'data: {"id":1.5,"v":1,"type":"x","data":"ok"}\n\n' + // float id
         'data: {"id":9007199254740993,"v":1,"type":"x","data":"ok"}\n\n' + // > MAX_SAFE_INTEGER
-        'data: {"id":-1,"v":1,"type":"x","data":"ok"}\n\n' + // negative — passes
+        'data: {"id":-1,"v":1,"type":"x","data":"ok"}\n\n' + // negative — BX8Y1 rejects (id < 1)
+        'data: {"id":0,"v":1,"type":"x","data":"ok"}\n\n' + // zero — BX8Y1 rejects (id < 1)
         'data: {"v":1,"type":"x","data":"ok"}\n\n' + // no id — passes
         'data: {"id":42,"v":1,"type":"x","data":"ok"}\n\n', // ok
     );
     const events = await collect(parseSseStream(stream));
-    // Only the negative-id, no-id, and 42-id frames pass. (Negative
-    // is technically a safe integer; the daemon never emits negative
-    // ids but the guard isn't responsible for that constraint.)
-    expect(events.map((e) => e.id)).toEqual([-1, undefined, 42]);
+    // BX8Y1: id must be a safe integer ≥ 1 (the daemon's
+    // Last-Event-ID parser only accepts non-negative decimals and
+    // EventBus emits monotonic ids starting at 1; negative / zero
+    // would diverge from the daemon's resume math).
+    expect(events.map((e) => e.id)).toEqual([undefined, 42]);
   });
 
   it('skips non-DaemonEvent JSON (null/primitive/array/shape-mismatch) — BQ9ze+BREsR guards', async () => {
