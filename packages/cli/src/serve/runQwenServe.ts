@@ -76,6 +76,22 @@ export async function runQwenServe(
       : undefined;
   const opts: ServeOptions = { ...optsIn, token };
 
+  // BU-sh: catch the `--hostname localhost:4170` / `127.0.0.1:4170`
+  // typo BEFORE the loopback / token check so the operator sees a
+  // useful "did you mean --port?" message instead of "Refusing to
+  // bind localhost:4170:0 without a bearer token". Unbracketed input
+  // with exactly one `:` is the unambiguous host:port shape — raw
+  // IPv6 literals always have two-or-more `:` (the shortest is `::`),
+  // and bracketed IPv6 is handled by its own form check below.
+  if (!opts.hostname.startsWith('[') && opts.hostname.split(':').length === 2) {
+    const [host, port] = opts.hostname.split(':');
+    throw new Error(
+      `Invalid --hostname "${opts.hostname}": looks like a "host:port" ` +
+        `combination. Use --port for the port, e.g. ` +
+        `"--hostname ${host} --port ${port}".`,
+    );
+  }
+
   if (!isLoopbackBind(opts.hostname) && !token) {
     throw new Error(
       `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +

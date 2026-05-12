@@ -997,6 +997,36 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/Invalid --hostname/);
   });
 
+  it('rejects unbracketed host:port typo with a useful error (BU-sh)', async () => {
+    // Without the upfront check, `localhost:4170` would flow into
+    // `formatHostForUrl` (treated as IPv6 because of the `:`) and
+    // produce a misleading `[localhost:4170]:port` URL, then fail
+    // at `app.listen()` with ENOTFOUND. Catch upstream.
+    await expect(
+      runQwenServe({
+        hostname: 'localhost:4170',
+        port: 0,
+        mode: 'http-bridge',
+      }),
+    ).rejects.toThrow(
+      /Invalid --hostname "localhost:4170".*looks like a "host:port" combination/,
+    );
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1:4170',
+        port: 0,
+        mode: 'http-bridge',
+      }),
+    ).rejects.toThrow(/Invalid --hostname "127\.0\.0\.1:4170"/);
+    // But raw IPv6 (multiple colons) still works.
+    handle = await runQwenServe({
+      hostname: '::1',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    expect(handle.url).toMatch(/^http:\/\/\[::1\]:\d+$/);
+  });
+
   it('rejects empty-bracket `[]` --hostname (would bind to all interfaces)', async () => {
     // Node's `listen('')` is interpreted as "all interfaces". An operator
     // typing `[]` clearly meant something specific, not wildcard — fail
