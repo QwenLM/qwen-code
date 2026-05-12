@@ -1299,15 +1299,19 @@ export class Config {
    * the init path in tests that don't exercise MCP at all.
    */
   private startMcpDiscoveryInBackground(): void {
-    // `getMcpClientManager` is a public method on `ToolRegistry` (added
-    // alongside this PR), so we call it directly — no defensive cast.
-    // The earlier `as ToolRegistry & { getMcpClientManager?: ... }` cast
-    // hid the call site from TypeScript and meant a future rename
-    // wouldn't flag it. The defensive guard below remains because some
-    // tests (e.g. those using `createMockToolRegistry`) stub
-    // ToolRegistry as a plain object — calling a method that doesn't
-    // exist on the stub would crash the init path even when the test
-    // doesn't exercise MCP.
+    // `getMcpClientManager` is a public method on `ToolRegistry`. The
+    // cast below is NOT defensive against the production type — it
+    // exists only because some tests (e.g. those using
+    // `createMockToolRegistry`) stub `ToolRegistry` as a plain object
+    // that doesn't implement the method. The optional-chaining call
+    // (`?.()`) means the stubbed path resolves to `undefined` instead
+    // of crashing `initialize()` for tests that never exercise MCP.
+    //
+    // Crucially, the inner shape is `ReturnType<ToolRegistry['getMcpClientManager']>`
+    // — not a hand-rolled `{ discoverAllMcpToolsIncremental: ... }` — so
+    // a future rename of `getMcpClientManager` on `ToolRegistry` still
+    // surfaces here as a type error rather than silently falling
+    // through to the `if (!manager) return` branch.
     const manager = (
       this.toolRegistry as ToolRegistry & {
         getMcpClientManager?: () => ReturnType<
