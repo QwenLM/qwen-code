@@ -375,6 +375,70 @@ describe('Logger', () => {
       expect(trackerAfterSkip?.type).toBe(MessageSenderType.USER);
     });
 
+    it('removeLastUserMessage targets the duplicate-skipped row, not the older USER', async () => {
+      // Identity contract: when `_updateLogFile` returns null on a USER
+      // write, the tracker advances to the new entry — and that 5-tuple
+      // must match the row that actually IS on disk so a follow-up
+      // `removeLastUserMessage()` deletes the duplicate-skipped row
+      // rather than wiping out the prior USER prompt.
+      //
+      // Set up by manually seeding disk with [first (msgId 0), second
+      // (msgId 1)] and stubbing `_updateLogFile` for the second call to
+      // mimic what the duplicate-skip branch does: align
+      // newEntryObject.messageId with the disk row (1) and return null.
+      await logger.logMessage(MessageSenderType.USER, 'first');
+      const firstOnDisk = (await readLogFile())[0]!;
+      expect(firstOnDisk.message).toBe('first');
+
+      vi.advanceTimersByTime(1000);
+      const secondTimestamp = new Date().toISOString();
+      const secondRow: LogEntry = {
+        sessionId: testSessionId,
+        messageId: 1,
+        timestamp: secondTimestamp,
+        type: MessageSenderType.USER,
+        message: 'second',
+      };
+      await fs.writeFile(
+        testLogFilePath,
+        JSON.stringify([firstOnDisk, secondRow], null, 2),
+        'utf-8',
+      );
+
+      // Drive the duplicate-skip branch: _updateLogFile mutates
+      // newEntryObject to match the disk row (messageId 1, same
+      // timestamp), then returns null. logMessage's
+      // `else if (type === USER)` branch will then assign
+      // lastLoggedUserEntry = newEntryObject — the same 5-tuple as
+      // secondRow.
+      vi.spyOn(
+        logger as unknown as {
+          _updateLogFile: (e: LogEntry) => Promise<LogEntry | null>;
+        },
+        '_updateLogFile',
+      ).mockImplementationOnce(async (entry: LogEntry) => {
+        entry.messageId = secondRow.messageId;
+        entry.timestamp = secondRow.timestamp;
+        return null;
+      });
+      await logger.logMessage(MessageSenderType.USER, 'second');
+
+      // Sanity: tracker points at the secondRow 5-tuple.
+      const tracker = logger['lastLoggedUserEntry'];
+      expect(tracker).toMatchObject({
+        messageId: secondRow.messageId,
+        timestamp: secondRow.timestamp,
+        message: 'second',
+      });
+
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(true);
+
+      // 'second' removed, 'first' untouched.
+      const after = await readLogFile();
+      expect(after.map((e) => e.message)).toEqual(['first']);
+    });
+
     it('should not throw, not increment messageId, and log error if writing to file fails', async () => {
       vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
       const initialMessageId = logger['messageId'];

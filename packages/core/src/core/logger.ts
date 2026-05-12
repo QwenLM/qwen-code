@@ -104,7 +104,13 @@ export class Logger {
    * queue, which is why callers should share one Logger per session.
    */
   private serialize<T>(op: () => Promise<T>): Promise<T> {
-    const next = this.writeQueue.then(op, op);
+    // The queue's tail is always sourced from `.catch(() => undefined)`
+    // below, so writeQueue never rejects — `.then(op)` is sufficient and
+    // the earlier `then(op, op)` would have wrongly implied "retry op on
+    // rejection". `op`'s return Promise is what propagates to the
+    // caller; the queue itself swallows errors so subsequent ops run
+    // regardless of any earlier failure.
+    const next = this.writeQueue.then(() => op());
     this.writeQueue = next.catch(() => undefined);
     return next;
   }

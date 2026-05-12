@@ -1539,6 +1539,107 @@ describe('useGeminiStream', () => {
       expect(cancelSubmitSpy).toHaveBeenCalled();
     });
 
+    it("attaches the cancelled turn's user prompt to onCancelSubmit info.lastTurnUserItem for normal UserQuery", async () => {
+      // The ownership guard in AppContainer's auto-restore depends on
+      // useGeminiStream emitting the just-added USER history item via
+      // `info.lastTurnUserItem`. The AppContainer tests fabricate this
+      // value — pin the producer side here so a regression that drops
+      // `lastTurnUserItemRef.current = { text: trimmedQuery }` cannot
+      // sneak through.
+      const cancelSubmitSpy = vi.fn();
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          mockConfig.getGeminiClient(),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          cancelSubmitSpy,
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        result.current.submitQuery('what time is it?');
+      });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(cancelSubmitSpy).toHaveBeenCalledTimes(1);
+      const info = cancelSubmitSpy.mock.calls[0][0];
+      expect(info?.lastTurnUserItem).toEqual({ text: 'what time is it?' });
+    });
+
+    it('emits lastTurnUserItem: null for paths that do NOT add a user history item (Notification)', async () => {
+      // Cron / Notification / slash submit_prompt go through submitQuery
+      // without writing a `user` item to history. The ref must stay
+      // null so AppContainer's auto-restore guard can't wrongly target
+      // an older user prompt on top of a non-USER turn cancel.
+      const cancelSubmitSpy = vi.fn();
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Part 1' };
+        await new Promise(() => {});
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          mockConfig.getGeminiClient(),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          cancelSubmitSpy,
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      await act(async () => {
+        result.current.submitQuery(
+          'background agent done',
+          SendMessageType.Notification,
+        );
+      });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      expect(cancelSubmitSpy).toHaveBeenCalledTimes(1);
+      const info = cancelSubmitSpy.mock.calls[0][0];
+      expect(info?.lastTurnUserItem).toBeNull();
+    });
+
     it('should call setShellInputFocused(false) when cancelOngoingRequest is called', async () => {
       const setShellInputFocusedSpy = vi.fn();
       const mockStream = (async function* () {
