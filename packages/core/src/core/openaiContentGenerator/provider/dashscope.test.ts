@@ -22,6 +22,16 @@ import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
+const mockDebugLogger = vi.hoisted(() => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock('../../../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
+
 // Mock OpenAI
 vi.mock('openai', () => ({
   default: vi.fn().mockImplementation((config) => ({
@@ -217,6 +227,28 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const result =
         DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
       expect(result).toBe(false);
+    });
+
+    it('should debug log when baseUrl does not match DASHSCOPE_PROXY_BASE_URL', () => {
+      vi.stubEnv(
+        'DASHSCOPE_PROXY_BASE_URL',
+        'https://your-proxy.com/dashscope',
+      );
+
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://other-proxy.com/dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+
+      expect(result).toBe(false);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining(
+          "DASHSCOPE_PROXY_BASE_URL is configured as 'https://your-proxy.com/dashscope'",
+        ),
+      );
     });
 
     it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL with trailing slash', () => {

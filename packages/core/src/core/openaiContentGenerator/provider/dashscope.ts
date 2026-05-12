@@ -16,6 +16,7 @@ import type {
   ChatCompletionToolWithCache,
 } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
@@ -51,6 +52,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       normalizedProxyUrl &&
         normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
     );
+
+    if (normalizedProxyUrl && !isDashscopeOrigin && !isProxyConfigured) {
+      createDebugLogger('DashScopeOpenAICompatibleProvider').debug(
+        `DASHSCOPE_PROXY_BASE_URL is configured as '${normalizedProxyUrl}', but the request baseUrl '${normalizedBaseUrl}' does not match. DashScope headers/cache control will be skipped.`,
+      );
+    }
 
     return isDashscopeOrigin || isProxyConfigured;
   }
