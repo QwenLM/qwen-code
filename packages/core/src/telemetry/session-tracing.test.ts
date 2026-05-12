@@ -171,7 +171,7 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.statuses[0]!.message).toBe('something went wrong');
     });
 
-    it('ends interaction span with cancelled status', () => {
+    it('ends interaction span with cancelled status as OK', () => {
       const config = createMockConfig();
       startInteractionSpan(config, {
         promptId: 'prompt-3',
@@ -181,8 +181,7 @@ describe('session-tracing', () => {
 
       endInteractionSpan('cancelled');
 
-      expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
-      expect(mockSpans[0]!.statuses[0]!.message).toBe('cancelled');
+      expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.OK);
     });
 
     it('is idempotent — ending twice does not double-end', () => {
@@ -304,6 +303,15 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.attributes['llm_request.context']).toBe(
         'standalone',
       );
+    });
+
+    it('treats missing metadata as OK status', () => {
+      const span = startLLMRequestSpan('test-model', 'prompt-no-meta');
+
+      endLLMRequestSpan(span);
+
+      expect(mockSpans[0]!.ended).toBe(true);
+      expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.OK);
     });
 
     it('returns NOOP span when SDK is not initialized', () => {

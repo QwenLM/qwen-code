@@ -68,6 +68,7 @@ const activeSpans = new Map<string, WeakRef<SpanContext>>();
 const strongSpans = new Map<string, SpanContext>();
 
 let interactionSequence = 0;
+let lastInteractionCtx: SpanContext | undefined;
 let cleanupIntervalStarted = false;
 const SPAN_TTL_MS = 30 * 60 * 1000;
 
@@ -82,7 +83,10 @@ function ensureCleanupInterval(): void {
         activeSpans.delete(spanId);
         strongSpans.delete(spanId);
       } else if (ctx.startTime < cutoff) {
-        if (!ctx.ended) ctx.span.end();
+        if (!ctx.ended) {
+          ctx.ended = true;
+          ctx.span.end();
+        }
         activeSpans.delete(spanId);
         strongSpans.delete(spanId);
       }
@@ -134,6 +138,8 @@ export function startInteractionSpan(
     type: 'interaction',
   };
   activeSpans.set(spanId, new WeakRef(spanContextObj));
+  strongSpans.set(spanId, spanContextObj);
+  lastInteractionCtx = spanContextObj;
   interactionContext.enterWith(spanContextObj);
 }
 
@@ -141,10 +147,11 @@ export function endInteractionSpan(
   status: InteractionStatus,
   metadata?: EndInteractionOptions,
 ): void {
-  const spanCtx = interactionContext.getStore();
+  const spanCtx = interactionContext.getStore() ?? lastInteractionCtx;
   if (!spanCtx || spanCtx.ended) return;
 
   spanCtx.ended = true;
+  lastInteractionCtx = undefined;
 
   const duration = Date.now() - spanCtx.startTime;
   spanCtx.span.setAttributes({
@@ -152,17 +159,19 @@ export function endInteractionSpan(
     'qwen-code.turn_status': status,
   });
 
-  if (status === 'ok') {
-    spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-  } else {
+  if (status === 'error') {
     spanCtx.span.setStatus({
       code: SpanStatusCode.ERROR,
-      message: metadata?.errorMessage ?? status,
+      message: metadata?.errorMessage ?? 'unknown error',
     });
+  } else {
+    spanCtx.span.setStatus({ code: SpanStatusCode.OK });
   }
 
   spanCtx.span.end();
-  activeSpans.delete(getSpanId(spanCtx.span));
+  const spanId = getSpanId(spanCtx.span);
+  activeSpans.delete(spanId);
+  strongSpans.delete(spanId);
   interactionContext.enterWith(undefined);
 }
 
@@ -227,12 +236,12 @@ export function endLLMRequestSpan(
 
   span.setAttributes(endAttributes);
 
-  if (metadata?.success) {
+  if (metadata === undefined || metadata.success) {
     span.setStatus({ code: SpanStatusCode.OK });
   } else {
     span.setStatus({
       code: SpanStatusCode.ERROR,
-      message: metadata?.error ?? 'unknown error',
+      message: metadata.error ?? 'unknown error',
     });
   }
 
@@ -375,4 +384,5 @@ export function clearSessionTracingForTesting(): void {
   strongSpans.clear();
   interactionContext.enterWith(undefined);
   interactionSequence = 0;
+  lastInteractionCtx = undefined;
 }

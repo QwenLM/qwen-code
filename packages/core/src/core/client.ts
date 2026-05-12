@@ -934,508 +934,524 @@ export class GeminiClient {
       });
     }
 
-    if (
-      messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron
-    ) {
-      if (this.config.getManagedAutoMemoryEnabled()) {
-        const recallAbortController = new AbortController();
-        const rawRecallPromise = this.config
-          .getMemoryManager()
-          .recall(this.config.getProjectRoot(), partToString(request), {
-            config: this.config,
-            excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-            abortSignal: recallAbortController.signal,
-          })
-          .catch((error: unknown) => {
-            if (error instanceof DOMException && error.name === 'AbortError') {
-              debugLogger.debug(
-                'Auto-memory recall aborted by deadline.',
-                error,
-              );
-            } else {
-              debugLogger.warn(
-                'Managed auto-memory recall prefetch failed.',
-                error,
-              );
-            }
-            return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-          });
-        this.pendingRecallAbortController = recallAbortController;
-        // Race the recall against the deadline at initiation time so the 2.5s
-        // budget is not consumed by intermediate work (microcompact, compression,
-        // token checks, IDE context) between initiation and consumption.
-        relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
-          rawRecallPromise,
-          () => recallAbortController.abort(),
+    try {
+      if (
+        messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Cron
+      ) {
+        if (this.config.getManagedAutoMemoryEnabled()) {
+          const recallAbortController = new AbortController();
+          const rawRecallPromise = this.config
+            .getMemoryManager()
+            .recall(this.config.getProjectRoot(), partToString(request), {
+              config: this.config,
+              excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+              abortSignal: recallAbortController.signal,
+            })
+            .catch((error: unknown) => {
+              if (
+                error instanceof DOMException &&
+                error.name === 'AbortError'
+              ) {
+                debugLogger.debug(
+                  'Auto-memory recall aborted by deadline.',
+                  error,
+                );
+              } else {
+                debugLogger.warn(
+                  'Managed auto-memory recall prefetch failed.',
+                  error,
+                );
+              }
+              return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+            });
+          this.pendingRecallAbortController = recallAbortController;
+          // Race the recall against the deadline at initiation time so the 2.5s
+          // budget is not consumed by intermediate work (microcompact, compression,
+          // token checks, IDE context) between initiation and consumption.
+          relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
+            rawRecallPromise,
+            () => recallAbortController.abort(),
+          );
+        }
+
+        // Track prompt count for commit attribution. Only the user typing a
+        // fresh prompt should bump the counter — `ToolResult` (tool-call
+        // continuation), `Retry`, `Hook`, `Cron`, and `Notification` are all
+        // model-driven or background-driven re-entries of the same logical
+        // turn. Counting them inflates the "N-shotted" label in the PR
+        // attribution trailer (one user message becomes "10-shotted" when it
+        // triggered ten tool calls).
+        const attributionService = CommitAttributionService.getInstance();
+        if (messageType === SendMessageType.UserQuery) {
+          attributionService.incrementPromptCount();
+        }
+
+        // record user/cron message for session management
+        if (messageType === SendMessageType.Cron) {
+          this.config
+            .getChatRecordingService()
+            ?.recordCronPrompt(request, options?.notificationDisplayText);
+        } else {
+          this.config.getChatRecordingService()?.recordUserMessage(request);
+        }
+
+        // Idle cleanup: clear old tool results when idle > threshold.
+        // Runs on user and cron messages (not tool result submissions or
+        // retries/hooks) so that model latency during a tool-call loop
+        // doesn't count as user idle time.
+        const mcResult = microcompactHistory(
+          this.getChat().getHistory(),
+          this.lastApiCompletionTimestamp,
+          this.config.getClearContextOnIdle(),
         );
+        if (mcResult.meta) {
+          this.getChat().setHistory(mcResult.history);
+          // Microcompaction replaces old compactable tool outputs
+          // (including read_file) with a placeholder, but the
+          // FileReadCache still records the prior full Reads as "seen in
+          // this conversation". A follow-up Read of an unchanged file
+          // would then return the file_unchanged placeholder pointing at
+          // bytes the model can no longer retrieve from history. Drop the
+          // cache so post-microcompaction Reads re-emit the bytes,
+          // mirroring the post-compaction clear in tryCompressChat.
+          debugLogger.debug('[FILE_READ_CACHE] clear after microcompaction');
+          this.config.getFileReadCache().clear();
+          const m = mcResult.meta;
+          debugLogger.debug(
+            `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+              `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
+              `kept last ${m.toolsKept}`,
+          );
+        }
       }
 
-      // Track prompt count for commit attribution. Only the user typing a
-      // fresh prompt should bump the counter — `ToolResult` (tool-call
-      // continuation), `Retry`, `Hook`, `Cron`, and `Notification` are all
-      // model-driven or background-driven re-entries of the same logical
-      // turn. Counting them inflates the "N-shotted" label in the PR
-      // attribution trailer (one user message becomes "10-shotted" when it
-      // triggered ten tool calls).
-      const attributionService = CommitAttributionService.getInstance();
-      if (messageType === SendMessageType.UserQuery) {
-        attributionService.incrementPromptCount();
-      }
-
-      // record user/cron message for session management
-      if (messageType === SendMessageType.Cron) {
+      if (messageType !== SendMessageType.Retry) {
+        // Snapshot on every non-retry turn. ToolResult turns run right after
+        // tool execution, so their snapshot captures edits that a prior
+        // UserQuery turn scheduled. Without this, a resumed session only sees
+        // the UserQuery-time snapshot (empty) and loses tool-driven edits.
         this.config
           .getChatRecordingService()
-          ?.recordCronPrompt(request, options?.notificationDisplayText);
-      } else {
-        this.config.getChatRecordingService()?.recordUserMessage(request);
-      }
+          ?.recordAttributionSnapshot(
+            CommitAttributionService.getInstance().toSnapshot(),
+          );
 
-      // Idle cleanup: clear old tool results when idle > threshold.
-      // Runs on user and cron messages (not tool result submissions or
-      // retries/hooks) so that model latency during a tool-call loop
-      // doesn't count as user idle time.
-      const mcResult = microcompactHistory(
-        this.getChat().getHistory(),
-        this.lastApiCompletionTimestamp,
-        this.config.getClearContextOnIdle(),
-      );
-      if (mcResult.meta) {
-        this.getChat().setHistory(mcResult.history);
-        // Microcompaction replaces old compactable tool outputs
-        // (including read_file) with a placeholder, but the
-        // FileReadCache still records the prior full Reads as "seen in
-        // this conversation". A follow-up Read of an unchanged file
-        // would then return the file_unchanged placeholder pointing at
-        // bytes the model can no longer retrieve from history. Drop the
-        // cache so post-microcompaction Reads re-emit the bytes,
-        // mirroring the post-compaction clear in tryCompressChat.
-        debugLogger.debug('[FILE_READ_CACHE] clear after microcompaction');
-        this.config.getFileReadCache().clear();
-        const m = mcResult.meta;
-        debugLogger.debug(
-          `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-            `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
-            `kept last ${m.toolsKept}`,
-        );
-      }
-    }
+        this.sessionTurnCount++;
 
-    if (messageType !== SendMessageType.Retry) {
-      // Snapshot on every non-retry turn. ToolResult turns run right after
-      // tool execution, so their snapshot captures edits that a prior
-      // UserQuery turn scheduled. Without this, a resumed session only sees
-      // the UserQuery-time snapshot (empty) and loses tool-driven edits.
-      this.config
-        .getChatRecordingService()
-        ?.recordAttributionSnapshot(
-          CommitAttributionService.getInstance().toSnapshot(),
-        );
-
-      this.sessionTurnCount++;
-
-      if (
-        this.config.getMaxSessionTurns() > 0 &&
-        this.sessionTurnCount > this.config.getMaxSessionTurns()
-      ) {
-        this.pendingRecallAbortController?.abort();
-        this.pendingRecallAbortController = undefined;
-        yield { type: GeminiEventType.MaxSessionTurns };
-        if (isTopLevelInteraction)
-          endInteractionSpan('error', {
-            errorMessage: 'max session turns exceeded',
-          });
-        return new Turn(this.getChat(), prompt_id);
-      }
-    }
-
-    // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-    const boundedTurns = Math.min(turns, MAX_TURNS);
-    if (!boundedTurns) {
-      this.pendingRecallAbortController?.abort();
-      this.pendingRecallAbortController = undefined;
-      if (isTopLevelInteraction)
-        endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
-      return new Turn(this.getChat(), prompt_id);
-    }
-
-    // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
-    // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
-    // still calls tryCompressChat directly for the full reset (env refresh +
-    // forceFullIdeContext flip).
-    const sessionTokenLimit = this.config.getSessionTokenLimit();
-    if (sessionTokenLimit > 0) {
-      const lastPromptTokenCount = uiTelemetryService.getLastPromptTokenCount();
-      if (lastPromptTokenCount > sessionTokenLimit) {
-        this.pendingRecallAbortController?.abort();
-        this.pendingRecallAbortController = undefined;
-        yield {
-          type: GeminiEventType.SessionTokenLimitExceeded,
-          value: {
-            currentTokens: lastPromptTokenCount,
-            limit: sessionTokenLimit,
-            message:
-              `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
-              'Please start a new session or increase the sessionTokenLimit in your settings.json.',
-          },
-        };
-        if (isTopLevelInteraction)
-          endInteractionSpan('error', {
-            errorMessage: 'session token limit exceeded',
-          });
-        return new Turn(this.getChat(), prompt_id);
-      }
-    }
-
-    // Prevent context updates from being sent while a tool call is
-    // waiting for a response. The Qwen API requires that a functionResponse
-    // part from the user immediately follows a functionCall part from the model
-    // in the conversation history . The IDE context is not discarded; it will
-    // be included in the next regular message sent to the model.
-    const history = this.getHistory();
-    const lastMessage =
-      history.length > 0 ? history[history.length - 1] : undefined;
-    const hasPendingToolCall =
-      !!lastMessage &&
-      lastMessage.role === 'model' &&
-      (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
-
-    if (this.config.getIdeMode() && !hasPendingToolCall) {
-      const { contextParts, newIdeContext } = this.getIdeContextParts(
-        this.forceFullIdeContext || history.length === 0,
-      );
-      if (contextParts.length > 0) {
-        this.getChat().addHistory({
-          role: 'user',
-          parts: [{ text: contextParts.join('\n') }],
-        });
-      }
-      this.lastSentIdeContext = newIdeContext;
-      this.forceFullIdeContext = false;
-    }
-
-    // Check for arena control signal before starting a new turn
-    const arenaAgentClient = this.config.getArenaAgentClient();
-    if (arenaAgentClient) {
-      const controlSignal = await arenaAgentClient.checkControlSignal();
-      if (controlSignal) {
-        debugLogger.info(
-          `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
-        );
-        await arenaAgentClient.reportCancelled();
-        this.pendingRecallAbortController?.abort();
-        this.pendingRecallAbortController = undefined;
-        if (isTopLevelInteraction) endInteractionSpan('cancelled');
-        return new Turn(this.getChat(), prompt_id);
-      }
-    }
-
-    const turn = new Turn(this.getChat(), prompt_id);
-
-    // Determine the model to use for this turn
-    const model = options?.modelOverride ?? this.config.getModel();
-
-    // append system reminders to the request
-    let requestToSent = await flatMapTextParts(request, async (text) => [text]);
-    if (
-      messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron
-    ) {
-      const systemReminders = [];
-      // The recall promise was already raced against the 2.5s deadline at
-      // initiation time; this await just collects the result.
-      this.pendingRecallAbortController = undefined;
-      const relevantAutoMemory = relevantAutoMemoryPromise
-        ? await relevantAutoMemoryPromise
-        : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-      const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
-
-      if (relevantAutoMemoryPrompt) {
-        systemReminders.push(relevantAutoMemoryPrompt);
-        for (const doc of relevantAutoMemory.selectedDocs) {
-          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        if (
+          this.config.getMaxSessionTurns() > 0 &&
+          this.sessionTurnCount > this.config.getMaxSessionTurns()
+        ) {
+          this.pendingRecallAbortController?.abort();
+          this.pendingRecallAbortController = undefined;
+          yield { type: GeminiEventType.MaxSessionTurns };
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', {
+              errorMessage: 'max session turns exceeded',
+            });
+          return new Turn(this.getChat(), prompt_id);
         }
       }
 
-      // add subagent system reminder if there are subagents
-      const hasAgentTool = await this.config
-        .getToolRegistry()
-        .ensureTool(ToolNames.AGENT);
-      const subagents = (await this.config.getSubagentManager().listSubagents())
-        .filter((subagent) => subagent.level !== 'builtin')
-        .map((subagent) => subagent.name);
-
-      if (hasAgentTool && subagents.length > 0) {
-        systemReminders.push(getSubagentSystemReminder(subagents));
+      // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
+      const boundedTurns = Math.min(turns, MAX_TURNS);
+      if (!boundedTurns) {
+        this.pendingRecallAbortController?.abort();
+        this.pendingRecallAbortController = undefined;
+        if (isTopLevelInteraction)
+          endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
+        return new Turn(this.getChat(), prompt_id);
       }
 
-      // add plan mode system reminder if approval mode is plan
-      if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-        systemReminders.push(
-          getPlanModeSystemReminder(this.config.getSdkMode()),
-        );
-      }
-
-      // add arena system reminder if an arena session is active
-      const arenaManager = this.config.getArenaManager();
-      if (arenaManager) {
-        try {
-          const sessionDir = arenaManager.getArenaSessionDir();
-          const configPath = `${sessionDir}/config.json`;
-          systemReminders.push(getArenaSystemReminder(configPath));
-        } catch {
-          // Arena config not yet initialized — skip
-        }
-      }
-
-      requestToSent = [...systemReminders, ...requestToSent];
-    }
-
-    const resultStream = turn.run(model, requestToSent, signal);
-    for await (const event of resultStream) {
-      if (!this.config.getSkipLoopDetection()) {
-        if (this.loopDetector.addAndCheck(event)) {
-          const loopType = this.loopDetector.getLastLoopType();
+      // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
+      // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
+      // still calls tryCompressChat directly for the full reset (env refresh +
+      // forceFullIdeContext flip).
+      const sessionTokenLimit = this.config.getSessionTokenLimit();
+      if (sessionTokenLimit > 0) {
+        const lastPromptTokenCount =
+          uiTelemetryService.getLastPromptTokenCount();
+        if (lastPromptTokenCount > sessionTokenLimit) {
+          this.pendingRecallAbortController?.abort();
+          this.pendingRecallAbortController = undefined;
           yield {
-            type: GeminiEventType.LoopDetected,
-            ...(loopType && { value: { loopType } }),
+            type: GeminiEventType.SessionTokenLimitExceeded,
+            value: {
+              currentTokens: lastPromptTokenCount,
+              limit: sessionTokenLimit,
+              message:
+                `Session token limit exceeded: ${lastPromptTokenCount} tokens > ${sessionTokenLimit} limit. ` +
+                'Please start a new session or increase the sessionTokenLimit in your settings.json.',
+            },
           };
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', {
+              errorMessage: 'session token limit exceeded',
+            });
+          return new Turn(this.getChat(), prompt_id);
+        }
+      }
+
+      // Prevent context updates from being sent while a tool call is
+      // waiting for a response. The Qwen API requires that a functionResponse
+      // part from the user immediately follows a functionCall part from the model
+      // in the conversation history . The IDE context is not discarded; it will
+      // be included in the next regular message sent to the model.
+      const history = this.getHistory();
+      const lastMessage =
+        history.length > 0 ? history[history.length - 1] : undefined;
+      const hasPendingToolCall =
+        !!lastMessage &&
+        lastMessage.role === 'model' &&
+        (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
+
+      if (this.config.getIdeMode() && !hasPendingToolCall) {
+        const { contextParts, newIdeContext } = this.getIdeContextParts(
+          this.forceFullIdeContext || history.length === 0,
+        );
+        if (contextParts.length > 0) {
+          this.getChat().addHistory({
+            role: 'user',
+            parts: [{ text: contextParts.join('\n') }],
+          });
+        }
+        this.lastSentIdeContext = newIdeContext;
+        this.forceFullIdeContext = false;
+      }
+
+      // Check for arena control signal before starting a new turn
+      const arenaAgentClient = this.config.getArenaAgentClient();
+      if (arenaAgentClient) {
+        const controlSignal = await arenaAgentClient.checkControlSignal();
+        if (controlSignal) {
+          debugLogger.info(
+            `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
+          );
+          await arenaAgentClient.reportCancelled();
+          this.pendingRecallAbortController?.abort();
+          this.pendingRecallAbortController = undefined;
+          if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          return new Turn(this.getChat(), prompt_id);
+        }
+      }
+
+      const turn = new Turn(this.getChat(), prompt_id);
+
+      // Determine the model to use for this turn
+      const model = options?.modelOverride ?? this.config.getModel();
+
+      // append system reminders to the request
+      let requestToSent = await flatMapTextParts(request, async (text) => [
+        text,
+      ]);
+      if (
+        messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Cron
+      ) {
+        const systemReminders = [];
+        // The recall promise was already raced against the 2.5s deadline at
+        // initiation time; this await just collects the result.
+        this.pendingRecallAbortController = undefined;
+        const relevantAutoMemory = relevantAutoMemoryPromise
+          ? await relevantAutoMemoryPromise
+          : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+        const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
+
+        if (relevantAutoMemoryPrompt) {
+          systemReminders.push(relevantAutoMemoryPrompt);
+          for (const doc of relevantAutoMemory.selectedDocs) {
+            this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+          }
+        }
+
+        // add subagent system reminder if there are subagents
+        const hasAgentTool = await this.config
+          .getToolRegistry()
+          .ensureTool(ToolNames.AGENT);
+        const subagents = (
+          await this.config.getSubagentManager().listSubagents()
+        )
+          .filter((subagent) => subagent.level !== 'builtin')
+          .map((subagent) => subagent.name);
+
+        if (hasAgentTool && subagents.length > 0) {
+          systemReminders.push(getSubagentSystemReminder(subagents));
+        }
+
+        // add plan mode system reminder if approval mode is plan
+        if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+          systemReminders.push(
+            getPlanModeSystemReminder(this.config.getSdkMode()),
+          );
+        }
+
+        // add arena system reminder if an arena session is active
+        const arenaManager = this.config.getArenaManager();
+        if (arenaManager) {
+          try {
+            const sessionDir = arenaManager.getArenaSessionDir();
+            const configPath = `${sessionDir}/config.json`;
+            systemReminders.push(getArenaSystemReminder(configPath));
+          } catch {
+            // Arena config not yet initialized — skip
+          }
+        }
+
+        requestToSent = [...systemReminders, ...requestToSent];
+      }
+
+      const resultStream = turn.run(model, requestToSent, signal);
+      for await (const event of resultStream) {
+        if (!this.config.getSkipLoopDetection()) {
+          if (this.loopDetector.addAndCheck(event)) {
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: GeminiEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            if (arenaAgentClient) {
+              await arenaAgentClient.reportError('Loop detected');
+            }
+            this.lastApiCompletionTimestamp = Date.now();
+            if (isTopLevelInteraction)
+              endInteractionSpan('error', { errorMessage: 'loop detected' });
+            return turn;
+          }
+        }
+        // Update arena status on Finished events — stats are derived
+        // automatically from uiTelemetryService by the reporter.
+        if (arenaAgentClient && event.type === GeminiEventType.Finished) {
+          await arenaAgentClient.updateStatus();
+        }
+
+        // Re-send a full IDE context blob on the next regular message — auto
+        // compaction inside chat.sendMessageStream may have summarized away
+        // the previous IDE-context turn.
+        if (event.type === GeminiEventType.ChatCompressed) {
+          this.forceFullIdeContext = true;
+        }
+
+        yield event;
+        if (event.type === GeminiEventType.Error) {
           if (arenaAgentClient) {
-            await arenaAgentClient.reportError('Loop detected');
+            const errorMsg =
+              event.value instanceof Error
+                ? event.value.message
+                : 'Unknown error';
+            await arenaAgentClient.reportError(errorMsg);
           }
           this.lastApiCompletionTimestamp = Date.now();
-          if (isTopLevelInteraction)
-            endInteractionSpan('error', { errorMessage: 'loop detected' });
+          if (isTopLevelInteraction) {
+            const errMsg =
+              event.value instanceof Error
+                ? event.value.message
+                : 'unknown error';
+            endInteractionSpan('error', { errorMessage: errMsg });
+          }
           return turn;
         }
       }
-      // Update arena status on Finished events — stats are derived
-      // automatically from uiTelemetryService by the reporter.
-      if (arenaAgentClient && event.type === GeminiEventType.Finished) {
-        await arenaAgentClient.updateStatus();
-      }
 
-      // Re-send a full IDE context blob on the next regular message — auto
-      // compaction inside chat.sendMessageStream may have summarized away
-      // the previous IDE-context turn.
-      if (event.type === GeminiEventType.ChatCompressed) {
-        this.forceFullIdeContext = true;
-      }
+      // Track API completion time for thinking block idle cleanup
+      this.lastApiCompletionTimestamp = Date.now();
 
-      yield event;
-      if (event.type === GeminiEventType.Error) {
-        if (arenaAgentClient) {
-          const errorMsg =
-            event.value instanceof Error
-              ? event.value.message
-              : 'Unknown error';
-          await arenaAgentClient.reportError(errorMsg);
-        }
-        this.lastApiCompletionTimestamp = Date.now();
-        if (isTopLevelInteraction) {
-          const errMsg =
-            event.value instanceof Error
-              ? event.value.message
-              : 'unknown error';
-          endInteractionSpan('error', { errorMessage: errMsg });
-        }
-        return turn;
-      }
-    }
-
-    // Track API completion time for thinking block idle cleanup
-    this.lastApiCompletionTimestamp = Date.now();
-
-    // Fire Stop hook through MessageBus (only if hooks are enabled and registered)
-    // This must be done before any early returns to ensure hooks are always triggered
-    if (
-      hooksEnabled &&
-      messageBus &&
-      !turn.pendingToolCalls.length &&
-      signal &&
-      !signal.aborted &&
-      this.config.hasHooksForEvent('Stop')
-    ) {
-      // Get response text from the chat history
-      const history = this.getHistory();
-      const lastModelMessage = history
-        .filter((msg) => msg.role === 'model')
-        .pop();
-      const responseText =
-        lastModelMessage?.parts
-          ?.filter((p): p is { text: string } => 'text' in p)
-          .map((p) => p.text)
-          .join('') || '[no response text]';
-
-      const response = await messageBus.request<
-        HookExecutionRequest,
-        HookExecutionResponse
-      >(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'Stop',
-          input: {
-            stop_hook_active: true,
-            last_assistant_message: responseText,
-          },
-          signal,
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-
-      // Check if aborted after hook execution
-      if (signal.aborted) {
-        if (isTopLevelInteraction) endInteractionSpan('cancelled');
-        return turn;
-      }
-
-      const hookOutput = response.output
-        ? createHookOutput('Stop', response.output)
-        : undefined;
-
-      const stopOutput = hookOutput as StopHookOutput | undefined;
-
-      // This should happen regardless of the hook's decision
-      if (stopOutput?.systemMessage) {
-        yield {
-          type: GeminiEventType.HookSystemMessage,
-          value: stopOutput.systemMessage,
-        };
-      }
-
-      // For Stop hooks, blocking/stop execution should force continuation
+      // Fire Stop hook through MessageBus (only if hooks are enabled and registered)
+      // This must be done before any early returns to ensure hooks are always triggered
       if (
-        stopOutput?.isBlockingDecision() ||
-        stopOutput?.shouldStopExecution()
+        hooksEnabled &&
+        messageBus &&
+        !turn.pendingToolCalls.length &&
+        signal &&
+        !signal.aborted &&
+        this.config.hasHooksForEvent('Stop')
       ) {
-        // Check if aborted before continuing
+        // Get response text from the chat history
+        const history = this.getHistory();
+        const lastModelMessage = history
+          .filter((msg) => msg.role === 'model')
+          .pop();
+        const responseText =
+          lastModelMessage?.parts
+            ?.filter((p): p is { text: string } => 'text' in p)
+            .map((p) => p.text)
+            .join('') || '[no response text]';
+
+        const response = await messageBus.request<
+          HookExecutionRequest,
+          HookExecutionResponse
+        >(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'Stop',
+            input: {
+              stop_hook_active: true,
+              last_assistant_message: responseText,
+            },
+            signal,
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+        // Check if aborted after hook execution
         if (signal.aborted) {
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return turn;
         }
 
-        const continueReason = stopOutput.getEffectiveReason();
+        const hookOutput = response.output
+          ? createHookOutput('Stop', response.output)
+          : undefined;
 
-        // Track stop hook iterations
-        const currentIterationCount =
-          (options?.stopHookState?.iterationCount ?? 0) + 1;
-        const currentReasons = [
-          ...(options?.stopHookState?.reasons ?? []),
-          continueReason,
-        ];
+        const stopOutput = hookOutput as StopHookOutput | undefined;
 
-        // Emit StopHookLoop event for iterations after the first one.
-        // The first iteration (currentIterationCount === 1) is the initial request,
-        // so there's no prior stop hook execution to report. We only emit this event
-        // when stop hooks have been executed multiple times (loop detected).
-        if (currentIterationCount > 1) {
+        // This should happen regardless of the hook's decision
+        if (stopOutput?.systemMessage) {
           yield {
-            type: GeminiEventType.StopHookLoop,
-            value: {
-              iterationCount: currentIterationCount,
-              reasons: currentReasons,
-              stopHookCount: response.stopHookCount ?? 1,
-            },
+            type: GeminiEventType.HookSystemMessage,
+            value: stopOutput.systemMessage,
           };
         }
 
-        const continueRequest = [{ text: continueReason }];
-        const hookTurn = yield* this.sendMessageStream(
-          continueRequest,
+        // For Stop hooks, blocking/stop execution should force continuation
+        if (
+          stopOutput?.isBlockingDecision() ||
+          stopOutput?.shouldStopExecution()
+        ) {
+          // Check if aborted before continuing
+          if (signal.aborted) {
+            if (isTopLevelInteraction) endInteractionSpan('cancelled');
+            return turn;
+          }
+
+          const continueReason = stopOutput.getEffectiveReason();
+
+          // Track stop hook iterations
+          const currentIterationCount =
+            (options?.stopHookState?.iterationCount ?? 0) + 1;
+          const currentReasons = [
+            ...(options?.stopHookState?.reasons ?? []),
+            continueReason,
+          ];
+
+          // Emit StopHookLoop event for iterations after the first one.
+          // The first iteration (currentIterationCount === 1) is the initial request,
+          // so there's no prior stop hook execution to report. We only emit this event
+          // when stop hooks have been executed multiple times (loop detected).
+          if (currentIterationCount > 1) {
+            yield {
+              type: GeminiEventType.StopHookLoop,
+              value: {
+                iterationCount: currentIterationCount,
+                reasons: currentReasons,
+                stopHookCount: response.stopHookCount ?? 1,
+              },
+            };
+          }
+
+          const continueRequest = [{ text: continueReason }];
+          const hookTurn = yield* this.sendMessageStream(
+            continueRequest,
+            signal,
+            prompt_id,
+            {
+              type: SendMessageType.Hook,
+              modelOverride: options?.modelOverride,
+              stopHookState: {
+                iterationCount: currentIterationCount,
+                reasons: currentReasons,
+              },
+            },
+            boundedTurns - 1,
+          );
+          if (isTopLevelInteraction)
+            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          return hookTurn;
+        }
+      }
+
+      if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
+        // Save cache-safe params here — before any early return — so that
+        // background extract/dream agents calling getCacheSafeParams() always
+        // see the current turn's history regardless of which path exits below.
+        try {
+          const chat = this.getChat();
+          const fullHistory = chat.getHistory(true);
+          const maxHistoryForCache = 40;
+          const cachedHistory =
+            fullHistory.length > maxHistoryForCache
+              ? fullHistory.slice(-maxHistoryForCache)
+              : fullHistory;
+          saveCacheSafeParams(
+            chat.getGenerationConfig(),
+            cachedHistory,
+            this.config.getModel(),
+          );
+        } catch {
+          // Best-effort — don't block the main flow
+        }
+
+        if (this.config.getSkipNextSpeakerCheck()) {
+          this.runManagedAutoMemoryBackgroundTasks(messageType);
+          if (arenaAgentClient) {
+            await arenaAgentClient.reportCompleted();
+          }
+          if (isTopLevelInteraction) endInteractionSpan('ok');
+          return turn;
+        }
+
+        const nextSpeakerCheck = await checkNextSpeaker(
+          this.getChat(),
+          this.config,
           signal,
           prompt_id,
-          {
-            type: SendMessageType.Hook,
-            modelOverride: options?.modelOverride,
-            stopHookState: {
-              iterationCount: currentIterationCount,
-              reasons: currentReasons,
-            },
-          },
-          boundedTurns - 1,
         );
-        if (isTopLevelInteraction)
-          endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
-        return hookTurn;
-      }
-    }
-
-    if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
-      // Save cache-safe params here — before any early return — so that
-      // background extract/dream agents calling getCacheSafeParams() always
-      // see the current turn's history regardless of which path exits below.
-      try {
-        const chat = this.getChat();
-        const fullHistory = chat.getHistory(true);
-        const maxHistoryForCache = 40;
-        const cachedHistory =
-          fullHistory.length > maxHistoryForCache
-            ? fullHistory.slice(-maxHistoryForCache)
-            : fullHistory;
-        saveCacheSafeParams(
-          chat.getGenerationConfig(),
-          cachedHistory,
-          this.config.getModel(),
+        logNextSpeakerCheck(
+          this.config,
+          new NextSpeakerCheckEvent(
+            prompt_id,
+            turn.finishReason?.toString() || '',
+            nextSpeakerCheck?.next_speaker || '',
+          ),
         );
-      } catch {
-        // Best-effort — don't block the main flow
-      }
+        if (nextSpeakerCheck?.next_speaker === 'model') {
+          const nextRequest = [{ text: 'Please continue.' }];
+          const continueTurn = yield* this.sendMessageStream(
+            nextRequest,
+            signal,
+            prompt_id,
+            options,
+            boundedTurns - 1,
+          );
+          if (isTopLevelInteraction)
+            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+          return continueTurn;
+        }
 
-      if (this.config.getSkipNextSpeakerCheck()) {
         this.runManagedAutoMemoryBackgroundTasks(messageType);
+
         if (arenaAgentClient) {
+          // No continuation needed — agent completed its task
           await arenaAgentClient.reportCompleted();
         }
-        if (isTopLevelInteraction) endInteractionSpan('ok');
-        return turn;
       }
 
-      const nextSpeakerCheck = await checkNextSpeaker(
-        this.getChat(),
-        this.config,
-        signal,
-        prompt_id,
-      );
-      logNextSpeakerCheck(
-        this.config,
-        new NextSpeakerCheckEvent(
-          prompt_id,
-          turn.finishReason?.toString() || '',
-          nextSpeakerCheck?.next_speaker || '',
-        ),
-      );
-      if (nextSpeakerCheck?.next_speaker === 'model') {
-        const nextRequest = [{ text: 'Please continue.' }];
-        const continueTurn = yield* this.sendMessageStream(
-          nextRequest,
-          signal,
-          prompt_id,
-          options,
-          boundedTurns - 1,
-        );
-        if (isTopLevelInteraction)
-          endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
-        return continueTurn;
+      // Report cancelled to arena when user cancelled mid-stream
+      if (signal?.aborted && arenaAgentClient) {
+        await arenaAgentClient.reportCancelled();
       }
 
-      this.runManagedAutoMemoryBackgroundTasks(messageType);
-
-      if (arenaAgentClient) {
-        // No continuation needed — agent completed its task
-        await arenaAgentClient.reportCompleted();
+      if (isTopLevelInteraction) {
+        endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
+      }
+      return turn;
+    } finally {
+      if (isTopLevelInteraction) {
+        endInteractionSpan(signal?.aborted ? 'cancelled' : 'error', {
+          errorMessage: 'unexpected exit',
+        });
       }
     }
-
-    // Report cancelled to arena when user cancelled mid-stream
-    if (signal?.aborted && arenaAgentClient) {
-      await arenaAgentClient.reportCancelled();
-    }
-
-    if (isTopLevelInteraction) {
-      endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
-    }
-    return turn;
   }
 
   async generateContent(
