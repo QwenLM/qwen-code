@@ -2991,6 +2991,75 @@ describe('GeminiChat', async () => {
       expect(match![1]).toContain('and then more content.');
     });
 
+    it('should neutralize a literal opening previous_response_suffix delimiter inside the tail', async () => {
+      // Mirrors the closing-tag delimiter-collision test, but verifies the
+      // opening-tag branch of `sanitizeRecoverySuffixTail`. If the model's own
+      // output contains a literal `<previous_response_suffix>` opening tag,
+      // the recovery prompt's structural scan must still see exactly one
+      // well-formed opening/closing pair (its own).
+      const previous =
+        'Tag: <previous_response_suffix> was emitted in the output here.';
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' continuation tail' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      const recoveryPayloads: string[] = [];
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async (params) => {
+          const contents = (params as { contents?: Content[] }).contents ?? [];
+          const lastTurn = contents[contents.length - 1];
+          if (lastTurn && lastTurn.role === 'user') {
+            const lastPart = lastTurn.parts?.[0];
+            if (
+              lastPart &&
+              typeof (lastPart as { text?: string }).text === 'string'
+            ) {
+              recoveryPayloads.push((lastPart as { text: string }).text);
+            }
+          }
+          return streams[callIndex++]!;
+        },
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a response that contains my opening delimiter' },
+        'prompt-recovery-delimiter-collision-open',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const recoveryMessage = recoveryPayloads.find((p) =>
+        p.includes('Output token limit hit'),
+      );
+      expect(recoveryMessage).toBeDefined();
+      // Exactly one opening and one closing delimiter — the recovery prompt's
+      // own pair. The model's literal opening tag inside the embedded tail
+      // must have been neutralized via a zero-width space.
+      const openCount = (
+        recoveryMessage!.match(/<previous_response_suffix>/g) ?? []
+      ).length;
+      const closeCount = (
+        recoveryMessage!.match(/<\/previous_response_suffix>/g) ?? []
+      ).length;
+      expect(openCount).toBe(1);
+      expect(closeCount).toBe(1);
+      // The neutralized variant (with a zero-width space between '<' and the
+      // tag name) must appear inside the embedded tail.
+      expect(recoveryMessage).toContain('<​previous_response_suffix>');
+      // The block must still parse with a single well-formed match and
+      // preserve the surrounding prose.
+      const match = recoveryMessage!.match(
+        /<previous_response_suffix>\n([\s\S]*)\n<\/previous_response_suffix>/,
+      );
+      expect(match).not.toBeNull();
+      expect(match![1]).toContain('Tag:');
+      expect(match![1]).toContain('was emitted in the output here.');
+    });
+
     it('should skip recovery when truncated turn has a functionCall', async () => {
       // Initial stream returns a functionCall + MAX_TOKENS. Escalated stream
       // returns the same (functionCall + MAX_TOKENS). Recovery must NOT run
