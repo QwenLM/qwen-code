@@ -103,6 +103,16 @@ export class SubscriberLimitExceededError extends Error {
   }
 }
 
+// FIXME(stage-1.5, chiga0 finding 2):
+// `EventBus` is currently private to the SSE route handler. Stage 1.5
+// should lift it to a top-level building block (likely
+// `packages/event-bus`) so other agent-exposing surfaces
+// (`channels/`, `dualOutput/`, `remoteInput/`, future TUI co-host
+// and WebSocket transports) subscribe through the same bus instead
+// of running parallel event streams. The `BridgeEvent` shape is
+// already close to what's needed; what's missing is the bus being
+// publicly addressable. Reference:
+// https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
 export class EventBus {
   private nextId = 1;
   private readonly ring: BridgeEvent[] = [];

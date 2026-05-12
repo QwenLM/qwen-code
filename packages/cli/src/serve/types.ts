@@ -82,6 +82,13 @@ export const CAPABILITIES_SCHEMA_VERSION = 1 as const;
  * `Stage1Feature` union catches typos at compile time. Annotating as
  * `readonly string[]` would erase the literal information.
  */
+// FIXME(stage-1.5, chiga0 finding 5):
+// `STAGE1_FEATURES` is a hard-coded constant — `extMethod` plugins
+// can't contribute to the capability set without editing the daemon.
+// Stage 1.5 should convert this to a registry that bridges and
+// plugins push into, alongside an `ext_*` event family + a
+// `POST /ext/:method` route. Tracked under #3803.
+// Reference: https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
 export const STAGE1_FEATURES = [
   'health',
   'capabilities',

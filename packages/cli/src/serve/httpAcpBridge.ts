@@ -226,6 +226,24 @@ export interface AcpChannel {
 
 export type ChannelFactory = (workspaceCwd: string) => Promise<AcpChannel>;
 
+// FIXME(stage-1.5, chiga0 finding 1 + 4):
+// Stage 1.5 should split this file's responsibilities into:
+//   - `AcpChannel` interface (sendPrompt/cancel/setModel/sessionUpdate)
+//     with `SpawnedAcpChannel` (Stage 1) + `InProcessAcpChannel`
+//     (Stage 2) implementations — lifted to `@qwen-code/acp-bridge`
+//     so `channels/base/AcpBridge.ts` can consume the same primitive
+//     (today both reimplement the child lifecycle independently).
+//   - `Transport` interface (`SseTransport` (Stage 1) +
+//     `WebSocketTransport` / `InProcessTransport` seams visible) so
+//     adding wire formats doesn't require rewriting the bridge.
+// Plus a `fileSystem?: FileSystemService` option to BridgeOptions
+// (finding 4) so the BridgeClient writeTextFile/readTextFile stop
+// reimplementing core's filesystem semantics — closes the Stage 1
+// known-divergence on BOM / non-UTF-8 / line-ending handling. Cost:
+// one constructor dep; benefit: Stage 1 clients see correct fs
+// semantics today instead of a wire-level break at Stage 2. Tracked
+// under #3803. Reference:
+// https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
 export interface BridgeOptions {
   /**
    * §03 decision §1. `single` shares one session per workspace across HTTP
@@ -341,6 +359,17 @@ class BridgeClient implements Client {
     private readonly rollbackPending: (requestId: string) => void,
   ) {}
 
+  // FIXME(stage-1.5, chiga0 finding 3):
+  // The first-responder permission flow here is a third permission
+  // model in the codebase (alongside ACP `requestPermission` direct
+  // and stream-json `ControlDispatcher`). Stage 1.5 should lift
+  // "permission request lifecycle" into a `PermissionMediator`
+  // interface with strategy-pluggable policies (`first-responder` |
+  // `designated` | `consensus` | `local-only`) so all four
+  // agent-exposing surfaces share one lifecycle. This is also the
+  // closure point for the prior chiga0 audit Risk 2 (first-responder
+  // lacks an authorization model). Reference:
+  // https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
   async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
