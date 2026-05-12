@@ -337,8 +337,8 @@ jobs:
 
           {
             printf '### Qwen PR review smoke test\n\n'
-            printf '- Target PR: #%s\n' "$PR_NUMBER"
-            printf '- Patch size: %s lines, %s bytes\n\n' "$diff_lines" "$diff_bytes"
+            printf '%s\n' "- Target PR: #$PR_NUMBER"
+            printf '%s\n\n' "- Patch size: $diff_lines lines, $diff_bytes bytes"
             printf '%s\n' "$smoke_result"
           } >> "$GITHUB_STEP_SUMMARY"
 
