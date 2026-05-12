@@ -10,11 +10,7 @@ import {
   type Config,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
-import {
-  buildResumedHistoryItems,
-  applyResumeDisplayPolicy,
-  createQuietRestoreSummaryItem,
-} from '../utils/resumeHistoryUtils.js';
+import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItem } from '../types.js';
 import {
@@ -114,21 +110,9 @@ export function useResumeCommand(
       setSessionName?.(customTitle ?? null);
 
       // Reset UI history.
-      const rawItems = buildResumedHistoryItems(sessionData, config);
-      const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
-        quietRestore: config.isQuietRestore(),
-      });
+      const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
       clearItems?.();
       loadHistory?.(uiHistoryItems);
-
-      if (config.isQuietRestore()) {
-        addItem?.(
-          createQuietRestoreSummaryItem(
-            sessionData.conversation.messages.length,
-          ),
-          Date.now(),
-        );
-      }
 
       // Update session history core.
       resetBackgroundStateForSessionSwitch(config);

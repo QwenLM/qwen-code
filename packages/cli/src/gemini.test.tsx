@@ -761,7 +761,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       includePartialMessages: undefined,
       continue: undefined,
       resume: undefined,
-      quietRestore: undefined,
       coreTools: undefined,
       excludeTools: undefined,
       disabledSlashCommands: undefined,

@@ -61,11 +61,7 @@ import {
   type WaitingToolCall,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
-import {
-  buildResumedHistoryItems,
-  applyResumeDisplayPolicy,
-  createQuietRestoreSummaryItem,
-} from './utils/resumeHistoryUtils.js';
+import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -490,27 +486,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
-        const rawItems = buildResumedHistoryItems(resumedSessionData, config);
-        const historyItems = applyResumeDisplayPolicy(rawItems, {
-          quietRestore: config.isQuietRestore(),
-        });
+        const historyItems = buildResumedHistoryItems(
+          resumedSessionData,
+          config,
+        );
         historyManager.loadHistory(historyItems);
-
-        if (config.isQuietRestore()) {
-          historyManager.addItem(
-            createQuietRestoreSummaryItem(
-              resumedSessionData.conversation.messages.length,
-            ),
-            Date.now(),
-          );
-        }
-
-        // Re-arm any `/goal` that was active when the prior session ended.
-        try {
-          restoreGoalFromHistory(historyItems, config, historyManager.addItem);
-        } catch {
-          // Restore is best-effort — never block resume on it.
-        }
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -1077,6 +1057,7 @@ export const AppContainer = (props: AppContainerProps) => {
   } = useSlashCommandProcessor(
     config,
     settings,
+    historyManager.history,
     historyManager.addItem,
     historyManager.clearItems,
     historyManager.loadHistory,

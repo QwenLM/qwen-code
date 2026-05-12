@@ -486,31 +486,14 @@ export function buildResumedHistoryItems(
 }
 
 /**
- * Applies the quiet-restore display policy to resumed history items.
- * When `quietRestore` is true, marks each item with
- * `display.suppressOnRestore` so the rendering layer skips them while
- * the canonical history (used by /rewind turn mapping) is preserved.
+ * Creates the summary INFO item shown when /history collapse suppresses
+ * the transcript display.
  */
-export function applyResumeDisplayPolicy(
-  items: HistoryItem[],
-  options: { quietRestore?: boolean },
-): HistoryItem[] {
-  if (!options.quietRestore) return items;
-  return items.map((item) => ({
-    ...item,
-    display: { ...item.display, suppressOnRestore: true },
-  }));
-}
-
-/**
- * Creates the summary INFO item shown when --quiet-restore suppresses
- * the restored transcript.
- */
-export function createQuietRestoreSummaryItem(
+export function createHistoryCollapseSummaryItem(
   messageCount: number,
 ): Omit<HistoryItem, 'id'> {
   return {
     type: MessageType.INFO,
-    text: `Resumed session with ${messageCount} message${messageCount !== 1 ? 's' : ''}. History display suppressed (--quiet-restore).`,
+    text: `History collapsed: ${messageCount} message${messageCount !== 1 ? 's' : ''} hidden. Use /history expand to show.`,
   };
 }

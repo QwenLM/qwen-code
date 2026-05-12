@@ -434,12 +434,6 @@ export interface AgentsCollabSettings {
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
-  /**
-   * If true, suppresses printing historical messages when resuming a session.
-   * A brief summary is shown instead. The conversation context is still
-   * fully loaded for the model.
-   */
-  quietRestore?: boolean;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -685,7 +679,6 @@ const DEFAULT_BARE_CORE_TOOLS = [
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
-  private quietRestore: boolean;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
@@ -851,7 +844,6 @@ export class Config {
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
     this.sessionData = params.sessionData;
-    this.quietRestore = params.quietRestore ?? false;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
@@ -1819,10 +1811,6 @@ export class Config {
    */
   getResumedSessionData(): ResumedSessionData | undefined {
     return this.sessionData;
-  }
-
-  isQuietRestore(): boolean {
-    return this.quietRestore;
   }
 
   shouldLoadMemoryFromIncludeDirectories(): boolean {

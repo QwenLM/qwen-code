@@ -119,6 +119,7 @@ export interface SlashCommandProcessorActions {
 export const useSlashCommandProcessor = (
   config: Config | null,
   settings: LoadedSettings,
+  history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
   clearItems: UseHistoryManagerReturn['clearItems'],
   loadHistory: UseHistoryManagerReturn['loadHistory'],
@@ -315,6 +316,7 @@ export const useSlashCommandProcessor = (
         logger,
       },
       ui: {
+        history,
         addItem,
         clear: () => {
           cancelBtw();
@@ -324,6 +326,7 @@ export const useSlashCommandProcessor = (
           setSessionName?.(null);
         },
         loadHistory,
+        refreshStatic,
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
         setPendingItem,
@@ -351,6 +354,7 @@ export const useSlashCommandProcessor = (
     [
       config,
       settings,
+      history,
       gitService,
       logger,
       loadHistory,

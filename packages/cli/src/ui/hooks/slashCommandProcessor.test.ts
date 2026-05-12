@@ -179,6 +179,7 @@ describe('useSlashCommandProcessor', () => {
       useSlashCommandProcessor(
         mockConfig,
         settings,
+        [], // mock history array
         mockAddItem,
         mockClearItems,
         mockLoadHistory,
@@ -989,6 +990,7 @@ describe('useSlashCommandProcessor', () => {
         useSlashCommandProcessor(
           mockConfig,
           mockSettings,
+          [], // mock history array
           mockAddItem,
           mockClearItems,
           mockLoadHistory,
@@ -1031,6 +1033,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,
@@ -1099,6 +1102,7 @@ describe('useSlashCommandProcessor', () => {
             return useSlashCommandProcessor(
               mockConfig,
               mockSettings,
+              [], // mock history array
               mockAddItem,
               mockClearItems,
               mockLoadHistory,
@@ -1157,6 +1161,7 @@ describe('useSlashCommandProcessor', () => {
           useSlashCommandProcessor(
             mockConfig,
             mockSettings,
+            [], // mock history array
             mockAddItem,
             mockClearItems,
             mockLoadHistory,

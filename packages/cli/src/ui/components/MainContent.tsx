@@ -96,10 +96,18 @@ export const MainContent = () => {
     historyRemountKey,
   } = uiState;
 
+  // Filter out items whose display is suppressed (e.g. /history collapse).
+  // Canonical consumers (/rewind, turn mapping) use the full historyManager.history;
+  // rendering consumers use this visible subset.
+  const visibleHistory = useMemo(
+    () => uiState.history.filter((item) => !item.display?.suppressOnRestore),
+    [uiState.history],
+  );
+
   // Set of callIds whose label is absorbed by a compact-mode tool_group header.
-  // Computed from RAW history (not merged) — force-expand status depends only
+  // Computed from visible history (not merged) — force-expand status depends only
   // on the tool_group's own state, and mergeable groups don't change force-
-  // expand status when merged. Iterating raw history avoids a circular
+  // expand status when merged. Iterating visible history avoids a circular
   // dependency with mergedHistory (which receives absorbedCallIds).
   //
   // In compact mode, non-force-expanded tool_groups render via
@@ -112,7 +120,7 @@ export const MainContent = () => {
   const absorbedCallIds = useMemo(() => {
     const absorbed = new Set<string>();
     if (!compactMode) return absorbed;
-    for (const item of uiState.history) {
+    for (const item of visibleHistory) {
       if (item.type !== 'tool_group') continue;
       if (
         isForceExpandGroup(
@@ -128,7 +136,7 @@ export const MainContent = () => {
     return absorbed;
   }, [
     compactMode,
-    uiState.history,
+    visibleHistory,
     uiState.embeddedShellFocused,
     uiState.activePtyId,
   ]);
@@ -137,31 +145,23 @@ export const MainContent = () => {
   // absorbed call IDs are dropped during merge so refreshStatic fires;
   // summaries for force-expanded (non-absorbed) groups pass through so
   // HistoryItemDisplay can render them as standalone `● <label>` lines.
-  const mergedHistory = useMemo(
+  const visibleMergedHistory = useMemo(
     () =>
       compactMode
         ? mergeCompactToolGroups(
-            uiState.history,
+            visibleHistory,
             uiState.embeddedShellFocused,
             uiState.activePtyId,
             absorbedCallIds,
           )
-        : uiState.history,
+        : visibleHistory,
     [
       compactMode,
-      uiState.history,
+      visibleHistory,
       uiState.embeddedShellFocused,
       uiState.activePtyId,
       absorbedCallIds,
     ],
-  );
-
-  // Filter out items whose display is suppressed (e.g. --quiet-restore).
-  // Canonical consumers (/rewind, turn mapping) use the full historyManager.history;
-  // rendering consumers use this visible subset.
-  const visibleMergedHistory = useMemo(
-    () => mergedHistory.filter((item) => !item.display?.suppressOnRestore),
-    [mergedHistory],
   );
 
   // Build a callId → summary lookup from `tool_use_summary` history items so
@@ -220,24 +220,24 @@ export const MainContent = () => {
   // Detection: if history length grew but mergedHistory length did NOT grow
   // proportionally (i.e., a merge consolidated items), trigger a refresh.
   const prevHistoryLengthRef = useRef(uiState.history.length);
-  const prevMergedLengthRef = useRef(mergedHistory.length);
+  const prevMergedLengthRef = useRef(visibleMergedHistory.length);
   useEffect(() => {
     if (!compactMode) {
       prevHistoryLengthRef.current = uiState.history.length;
-      prevMergedLengthRef.current = mergedHistory.length;
+      prevMergedLengthRef.current = visibleMergedHistory.length;
       return;
     }
     const prevHLen = prevHistoryLengthRef.current;
     const currHLen = uiState.history.length;
     const prevMLen = prevMergedLengthRef.current;
-    const currMLen = mergedHistory.length;
+    const currMLen = visibleMergedHistory.length;
     // History grew, but merged length stayed same or shrank → a merge happened.
     if (currHLen > prevHLen && currMLen <= prevMLen) {
       uiActions.refreshStatic();
     }
     prevHistoryLengthRef.current = currHLen;
     prevMergedLengthRef.current = currMLen;
-  }, [compactMode, uiState.history, mergedHistory, uiActions]);
+  }, [compactMode, uiState.history, visibleMergedHistory, uiActions]);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
