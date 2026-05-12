@@ -567,21 +567,46 @@ export const AppContainer = (props: AppContainerProps) => {
       finalizeStartupProfile(config.getSessionId());
     };
 
+    // Runs the pending batched setTools() immediately and clears the timer.
+    // Returns a promise that resolves when setTools() finishes so callers
+    // can sequence subsequent work after `gemini_tools_updated` is
+    // recorded into the startup profile.
+    const flushNow = (): Promise<void> => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      // GeminiClient.setTools() has no try/catch around warmAll() /
+      // getFunctionDeclarations() / getChat().setTools(). A silent
+      // discard here would make production tool-registration regressions
+      // invisible, so route the error through debugLogger.
+      return geminiClient.setTools().catch((err) => {
+        debugLogger.error(
+          `setTools() batch-flush failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    };
+
     const scheduleFlush = () => {
       if (flushTimer !== null) return;
       flushTimer = setTimeout(() => {
         flushTimer = null;
-        // setTools() emits `gemini_tools_updated` internally; we don't
-        // need to record anything from here. Errors are logged inside
-        // GeminiClient — never throw into the React tree.
-        void geminiClient.setTools().catch(() => {});
+        void flushNow();
       }, MCP_BATCH_FLUSH_MS);
     };
 
     const onMcpUpdate = () => {
-      scheduleFlush();
       if (manager.getDiscoveryState() === MCPDiscoveryState.COMPLETED) {
-        finalizeOnce();
+        // Discovery has settled. Flush the pending setTools() NOW (rather
+        // than waiting for the 16ms batch timer) and only finalize after
+        // it runs — `setTools()` emits the `gemini_tools_updated` event,
+        // and finalizing before it fires would drop that event because
+        // the module-level `finalized` guard suppresses every subsequent
+        // record. That dropped event is what `gemini_tools_lag` is
+        // derived from in the profile summary.
+        void flushNow().finally(finalizeOnce);
+      } else {
+        scheduleFlush();
       }
     };
 
@@ -686,6 +711,22 @@ export const AppContainer = (props: AppContainerProps) => {
     stdout.write(ansiEscapes.clearTerminal);
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
+
+  // Targeted repaint for resize events: move cursor to top-left and erase
+  // downward instead of a full clearTerminal, avoiding the full-screen
+  // flash. Ink's <Static> region is append-only, so when terminal width
+  // changes (tmux split, fullscreen toggle, font size change) we must
+  // explicitly re-emit the static history at the new width — otherwise
+  // header content stays at the old width and visibly tears.
+  const repaintStaticViewport = useCallback(() => {
+    stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
+    remountStaticHistory();
+  }, [remountStaticHistory, stdout]);
+
+  // Track previous terminal width across renders so we only repaint when
+  // the width actually changes. Initialized to the current width to avoid
+  // a spurious repaint on first mount.
+  const previousTerminalWidthRef = useRef(terminalWidth);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -1881,6 +1922,19 @@ export const AppContainer = (props: AppContainerProps) => {
       );
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
+
+  // Repaint static header on terminal resize. Without this, tmux pane
+  // resizes and fullscreen toggles leave the static region rendered at the
+  // old width — header content visibly tears until the next refreshStatic
+  // (e.g. /model). Cheap repaint (cursor-to + erase-down) rather than a
+  // full clearTerminal to avoid the full-screen flash.
+  useEffect(() => {
+    if (previousTerminalWidthRef.current === terminalWidth) {
+      return;
+    }
+    previousTerminalWidthRef.current = terminalWidth;
+    repaintStaticViewport();
+  }, [terminalWidth, repaintStaticViewport]);
 
   useEffect(() => {
     if (ideNeedsRestart) {
