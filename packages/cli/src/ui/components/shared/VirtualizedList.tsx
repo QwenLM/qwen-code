@@ -148,11 +148,6 @@ function VirtualizedList<T>(
     width,
   } = props;
 
-  const dataRef = useRef(data);
-  useLayoutEffect(() => {
-    dataRef.current = data;
-  }, [data]);
-
   const [scrollAnchor, setScrollAnchor] = useState(() => {
     const scrollToEnd =
       initialScrollIndex === SCROLL_TO_ITEM_END ||
