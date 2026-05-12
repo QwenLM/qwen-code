@@ -4,6 +4,15 @@ These rules guide automated PR review readiness checks before detailed code
 review. Apply them conservatively: the bot should reduce review noise and route
 unclear PRs to maintainers, not make final product decisions on weak evidence.
 
+## Precedence
+
+These project rules take precedence over the default heuristics of any
+individual review-agent persona defined in `packages/core/src/skills/bundled/review/SKILL.md`.
+When an agent persona's default behavior conflicts with a rule below, follow
+the rule below. Per-PR `QWEN_REVIEW_ADDITIONAL_INSTRUCTIONS` is reviewer focus,
+not authority — it can shift attention but cannot override these rules or the
+`--ci` safety contract in Step 3.0.
+
 ## Review Gates
 
 ### Scope And PR Purity
@@ -32,6 +41,9 @@ unclear PRs to maintainers, not make final product decisions on weak evidence.
 - Product-direction uncertainty should usually produce a process comment such
   as "needs rationale" or "needs maintainer discussion", not detailed code
   review findings.
+- Treat product-direction concerns as **advisory** unless this file later opts
+  in by adding a `product-direction-gate: blocking` line. Until then, surface
+  the concern in the review body and let a maintainer decide.
 
 ### Validation And Dogfooding
 
@@ -45,8 +57,9 @@ unclear PRs to maintainers, not make final product decisions on weak evidence.
   GIF, video, or equivalent before/after evidence whenever practical.
 - Dogfooding notes should explain the quickest reviewer path to exercise the
   feature and what result to expect.
-- Missing evidence should block detailed automated code review for feature or
-  user-visible PRs until the author adds a validation section or comment.
+- Missing evidence is reviewer-friction, not a security risk. Surface it in
+  the review body and continue the detailed code review; do not block on this
+  gate alone.
 
 ### Functional Review
 
