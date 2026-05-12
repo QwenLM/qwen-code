@@ -875,6 +875,18 @@ describe('runQwenServe', () => {
     expect(await res.json()).toEqual({ status: 'ok' });
   });
 
+  it('case-insensitive loopback: --hostname Localhost / LOCALHOST does NOT require a token (BQ92B)', async () => {
+    // The previous Set lookup was case-sensitive, so `Localhost` was
+    // treated as non-loopback and refused to boot without a token.
+    // Fix lowercases the operator-supplied hostname before lookup.
+    handle = await runQwenServe({
+      hostname: 'Localhost',
+      port: 0,
+      mode: 'http-bridge',
+    });
+    expect(handle.url).toMatch(/^http:\/\/Localhost:\d+$/);
+  });
+
   it('strips brackets from `[::1]` before passing to app.listen()', async () => {
     // Node's app.listen wants the unbracketed IPv6 literal — `[::1]`
     // would fail with ENOTFOUND. The fixup is in runQwenServe's

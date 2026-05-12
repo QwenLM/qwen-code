@@ -19,10 +19,19 @@ const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
  * authority. `host:port` is ambiguous when host contains `:`, so the URL
  * form requires `[host]:port` for IPv6. Pass-through for IPv4 and DNS
  * names. Already-bracketed input is left alone.
+ *
+ * RFC 6874 also requires the `%` in an IPv6 zone identifier (e.g.
+ * `fe80::1%lo0`) to be percent-encoded as `%25` so the printed URL is
+ * copy-paste-valid. We do that on raw IPv6 only — already-bracketed
+ * input is the operator's responsibility (don't double-encode if they
+ * pre-formed the URL part themselves).
  */
 function formatHostForUrl(host: string): string {
   if (host.startsWith('[')) return host;
-  if (host.includes(':')) return `[${host}]`;
+  if (host.includes(':')) {
+    const encoded = host.includes('%') ? host.replace(/%/g, '%25') : host;
+    return `[${encoded}]`;
+  }
   return host;
 }
 

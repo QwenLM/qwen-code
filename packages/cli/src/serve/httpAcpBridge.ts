@@ -450,12 +450,28 @@ const DEFAULT_MAX_SESSIONS = 20;
 export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   const sessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 20 (intentionally tight per #3803 N≈50 cliff).
-  // `0` or non-finite (Infinity / NaN) → unlimited.
-  // Positive finite → use as-is.
+  // `0` → explicitly unlimited (operator opt-out).
+  // `Infinity` → unlimited (programmatic opt-out — accepted as a
+  //              long-standing alias since the cap check is `>= max`).
+  // `NaN` / negative → throw. A typo / parse error in CLI/config
+  //                    silently disabling the daemon's only resource
+  //                    guard is fail-OPEN behavior; gpt-5.5 flagged
+  //                    this as critical (BRApy) — we'd rather fail
+  //                    boot than serve unbounded.
   let maxSessions: number;
   if (opts.maxSessions === undefined) {
     maxSessions = DEFAULT_MAX_SESSIONS;
-  } else if (opts.maxSessions <= 0 || !Number.isFinite(opts.maxSessions)) {
+  } else if (Number.isNaN(opts.maxSessions)) {
+    throw new TypeError(
+      `Invalid maxSessions: NaN. Must be a number >= 0 ` +
+        `(0 / Infinity = unlimited).`,
+    );
+  } else if (opts.maxSessions < 0) {
+    throw new TypeError(
+      `Invalid maxSessions: ${opts.maxSessions}. Must be >= 0 ` +
+        `(0 / Infinity = unlimited).`,
+    );
+  } else if (opts.maxSessions === 0 || opts.maxSessions === Infinity) {
     maxSessions = Infinity;
   } else {
     maxSessions = opts.maxSessions;
@@ -1515,6 +1531,17 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   if (child.stderr) {
     let buf = '';
     const prefix = `[serve pid=${child.pid} cwd=${workspaceCwd}] `;
+    // BRAp3 cap: a buggy child that writes a huge stderr line, or
+    // never emits `\n`, would otherwise grow `buf` per spawn
+    // unboundedly. 64 KiB is generous for the longest legitimate
+    // stack trace line we'd expect from a Node child; anything
+    // past that gets force-flushed with a `[truncated]` marker so
+    // the operator still sees a prefix-attributed log line and
+    // memory stays bounded. We DON'T drop content — we flush
+    // chunks at the cap. (Picking 64 KiB matches our SSE per-frame
+    // write budget; anything above this already implies the child
+    // is misbehaving.)
+    const STDERR_LINE_CAP_CHARS = 64 * 1024;
     const flush = (line: string) => {
       if (line.length > 0) process.stderr.write(prefix + line + '\n');
     };
@@ -1526,6 +1553,12 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
         flush(buf.slice(0, nl));
         buf = buf.slice(nl + 1);
         nl = buf.indexOf('\n');
+      }
+      // Force-flush the unterminated tail if it's grown past the cap
+      // — keeps memory bounded against a `\n`-less stderr storm.
+      while (buf.length > STDERR_LINE_CAP_CHARS) {
+        flush(buf.slice(0, STDERR_LINE_CAP_CHARS) + ' [truncated]');
+        buf = buf.slice(STDERR_LINE_CAP_CHARS);
       }
     });
     child.stderr.on('end', () => {

@@ -1363,6 +1363,23 @@ describe('createHttpAcpBridge', () => {
         /initializeTimeoutMs/,
       );
     });
+
+    it('rejects NaN maxSessions (BRApy: silent fail-OPEN guard)', () => {
+      // A typo / parse error in CLI / config that yields NaN must
+      // NOT silently disable the daemon's resource cap. We fail
+      // boot loud instead of serving unbounded.
+      expect(() => createHttpAcpBridge({ maxSessions: NaN })).toThrow(
+        /maxSessions: NaN/,
+      );
+      expect(() => createHttpAcpBridge({ maxSessions: -5 })).toThrow(
+        /maxSessions: -5/,
+      );
+      // Explicit zero or Infinity remain valid "unlimited" sentinels.
+      expect(() => createHttpAcpBridge({ maxSessions: 0 })).not.toThrow();
+      expect(() =>
+        createHttpAcpBridge({ maxSessions: Infinity }),
+      ).not.toThrow();
+    });
   });
 
   describe('concurrent spawn coalescing (single scope)', () => {

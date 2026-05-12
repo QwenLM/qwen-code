@@ -83,11 +83,19 @@ export function createServeApp(
   // CORS deny + Host allowlist still apply to `/health` in both
   // cases.
   // Shared handler so loopback (pre-auth) and non-loopback (post-auth)
-  // routes return the same shape. `?deep=1` opts into a probe that
-  // touches bridge state — if the bridge is wedged the property
-  // accesses throw and we surface 503 so k8s probes can distinguish
-  // a zombie daemon from a healthy one. Default (no query) stays
-  // cheap so high-frequency liveness probes don't load the bridge.
+  // routes return the same shape. `?deep=1` exposes bridge counters
+  // (`sessions`, `pendingPermissions`) for observability — it is
+  // INFORMATIONAL only, not a true liveness probe. Counter getters
+  // are size accessors that don't perform per-session/channel pings,
+  // so a wedged child (stuck on a request, leaked FD, etc.) won't
+  // change the response. We retain the try/catch + 503 as a
+  // defense-in-depth net for custom bridge impls whose getters MAY
+  // throw — but the real bridge's getters never do, so under normal
+  // operation the 503 path is unreachable. Per BQ-6F: the docs
+  // (`docs/users/qwen-serve.md` + `qwen-serve-protocol.md`) clarify
+  // that deep is for counters, not health verification. Default (no
+  // query) stays cheap so high-frequency liveness probes don't load
+  // the bridge.
   const healthHandler = (
     req: import('express').Request,
     res: import('express').Response,
