@@ -9,7 +9,7 @@ import { directoryCommand, expandHomeDir } from './directoryCommand.js';
 import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
 import type { CommandContext } from './types.js';
 import { MessageType } from '../types.js';
-import { SettingScope } from '../../config/settings.js';
+import { SettingScope, saveSettings } from '../../config/settings.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadServerHierarchicalMemory } from '@qwen-code/qwen-code-core';
@@ -26,6 +26,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       projectRoot: '/test',
     }),
     ConditionalRulesRegistry: vi.fn(),
+  };
+});
+
+vi.mock('../../config/settings.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../config/settings.js')>();
+  return {
+    ...actual,
+    saveSettings: vi.fn(),
   };
 });
 
@@ -94,7 +103,6 @@ describe('directoryCommand', () => {
         originalSettings: {},
       },
       setValue: vi.fn(),
-      setValueFullSave: vi.fn(),
       recomputeMerged: vi.fn(),
       forScope: vi.fn((scope: string) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -474,7 +482,6 @@ describe('directoryCommand', () => {
         setValue: vi.fn().mockImplementation(() => {
           throw settingsError;
         }),
-        setValueFullSave: vi.fn(),
         recomputeMerged: vi.fn(),
       };
       newSettings.forScope = vi.fn((scope: string) => {
@@ -666,10 +673,6 @@ describe('directoryCommand', () => {
           throw new Error('user scope write failed');
         }
       });
-      // setValueFullSave is called during disk rollback to restore the
-      // committed scope's disk file to its pre-mutation state.
-      mockSettings.setValueFullSave = vi.fn();
-
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
@@ -693,10 +696,13 @@ describe('directoryCommand', () => {
       ).toEqual(originalWorkspaceDirs);
 
       // Verify disk rollback was called for the committed workspace scope.
-      expect(mockSettings.setValueFullSave).toHaveBeenCalledWith(
-        SettingScope.Workspace,
-        'context.includeDirectories',
-        originalWorkspaceDirs,
+      expect(saveSettings).toHaveBeenCalledWith(
+        mockSettings.workspace,
+        expect.objectContaining({
+          context: expect.objectContaining({
+            includeDirectories: originalWorkspaceDirs,
+          }),
+        }),
       );
     });
 

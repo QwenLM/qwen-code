@@ -15,7 +15,7 @@ import {
   ConditionalRulesRegistry,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import { SettingScope } from '../../config/settings.js';
+import { SettingScope, saveSettings } from '../../config/settings.js';
 
 export function expandHomeDir(p: string): string {
   if (!p) {
@@ -495,28 +495,22 @@ export const directoryCommand: SlashCommand = {
             committed.push(change.scope);
           }
         } catch (error) {
-          // Roll back in-memory state for committed scopes.
+          // Roll back in-memory state and disk for committed scopes.
           for (const scope of committed) {
             if (scope === SettingScope.Workspace) {
               settings.workspace.settings = workspaceBefore.settings;
               settings.workspace.originalSettings =
                 workspaceBefore.originalSettings;
               // Re-write the disk file to match the restored in-memory state.
-              settings.setValueFullSave(
-                scope,
-                'context.includeDirectories',
-                workspaceBefore.originalSettings.context?.includeDirectories ??
-                  [],
+              saveSettings(
+                settings.workspace,
+                workspaceBefore.originalSettings,
               );
             } else {
               settings.user.settings = userBefore.settings;
               settings.user.originalSettings = userBefore.originalSettings;
               // Re-write the disk file to match the restored in-memory state.
-              settings.setValueFullSave(
-                scope,
-                'context.includeDirectories',
-                userBefore.originalSettings.context?.includeDirectories ?? [],
-              );
+              saveSettings(settings.user, userBefore.originalSettings);
             }
           }
           settings.recomputeMerged();
