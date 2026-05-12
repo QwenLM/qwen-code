@@ -77,6 +77,11 @@ import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { safeSetStatus, withSpan } from '../telemetry/tracer.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
+import {
+  addToolInputAttributes,
+  addToolResultAttributes,
+} from '../telemetry/detailed-span-attributes.js';
+import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -1867,6 +1872,13 @@ export class CoreToolScheduler {
           }
         }
 
+        addToolInputAttributes(
+          this.config,
+          span,
+          toolName,
+          safeJsonStringify(toolInput) ?? '{}',
+        );
+
         // Generate unique tool_use_id for hook tracking
         const toolUseId = generateToolUseId();
 
@@ -2141,6 +2153,15 @@ export class CoreToolScheduler {
               }
             }
 
+            addToolResultAttributes(
+              this.config,
+              span,
+              toolName,
+              typeof content === 'string'
+                ? content
+                : (safeJsonStringify(content) ?? ''),
+            );
+
             const response = convertToFunctionResponse(
               toolName,
               callId,
@@ -2180,6 +2201,13 @@ export class CoreToolScheduler {
                 errorMessage += `\n\n${failureHookResult.additionalContext}`;
               }
             }
+
+            addToolResultAttributes(
+              this.config,
+              span,
+              toolName,
+              `ERROR: ${errorMessage}`,
+            );
 
             const error = new Error(errorMessage);
             const errorResponse = createErrorResponse(

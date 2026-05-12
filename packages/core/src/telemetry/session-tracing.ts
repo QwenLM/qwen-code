@@ -21,6 +21,7 @@ import {
   SPAN_TOOL,
   SPAN_TOOL_EXECUTION,
 } from './constants.js';
+import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 
 type InteractionStatus = 'ok' | 'error' | 'cancelled';
@@ -387,6 +388,14 @@ export function endToolExecutionSpan(
   strongSpans.delete(spanId);
 }
 
+// --- Interaction Span Attribute Access ---
+
+export function getActiveInteractionSpan(): Span | undefined {
+  const ctx = interactionContext.getStore() ?? lastInteractionCtx;
+  if (!ctx || ctx.ended) return undefined;
+  return ctx.span;
+}
+
 // --- Testing Utilities ---
 
 export function clearSessionTracingForTesting(): void {
@@ -395,4 +404,5 @@ export function clearSessionTracingForTesting(): void {
   interactionContext.enterWith(undefined);
   interactionSequence = 0;
   lastInteractionCtx = undefined;
+  clearDetailedSpanState();
 }

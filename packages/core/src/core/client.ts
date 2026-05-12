@@ -62,6 +62,8 @@ import {
   logNextSpeakerCheck,
   startInteractionSpan,
   endInteractionSpan,
+  getActiveInteractionSpan,
+  addUserPromptAttributes,
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
@@ -932,6 +934,14 @@ export class GeminiClient {
         model: options?.modelOverride ?? this.config.getModel(),
         messageType,
       });
+      const interactionSpan = getActiveInteractionSpan();
+      if (interactionSpan) {
+        addUserPromptAttributes(
+          this.config,
+          interactionSpan,
+          partToString(request),
+        );
+      }
     }
 
     try {
