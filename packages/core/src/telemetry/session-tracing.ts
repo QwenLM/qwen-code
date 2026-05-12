@@ -372,6 +372,16 @@ export function endToolExecutionSpan(
   }
 
   spanCtx.span.setAttributes(endAttributes);
+
+  if (metadata?.success !== false) {
+    spanCtx.span.setStatus({ code: SpanStatusCode.OK });
+  } else {
+    spanCtx.span.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: metadata?.error ?? 'tool execution error',
+    });
+  }
+
   spanCtx.span.end();
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);

@@ -1243,10 +1243,9 @@ export class GeminiClient {
           }
           this.lastApiCompletionTimestamp = Date.now();
           if (isTopLevelInteraction) {
+            // Sanitize: do not pass raw API error messages to span status
             const errMsg =
-              event.value instanceof Error
-                ? event.value.message
-                : 'unknown error';
+              event.value instanceof Error ? '[API error]' : 'unknown error';
             endInteractionSpan('error', { errorMessage: errMsg });
           }
           return turn;
@@ -1420,7 +1419,7 @@ export class GeminiClient {
             nextRequest,
             signal,
             prompt_id,
-            options,
+            { ...options, type: SendMessageType.Hook },
             boundedTurns - 1,
           );
           if (isTopLevelInteraction)
