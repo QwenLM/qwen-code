@@ -7,13 +7,7 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { useDeleteCommand } from './useDeleteCommand.js';
-import type { Config } from '@qwen-code/qwen-code-core';
-
-interface RemoveSessionsResult {
-  removed: string[];
-  notFound: string[];
-  errors: Array<{ sessionId: string; error: Error }>;
-}
+import type { Config, RemoveSessionsResult } from '@qwen-code/qwen-code-core';
 
 function createConfig(opts: {
   currentSessionId: string;

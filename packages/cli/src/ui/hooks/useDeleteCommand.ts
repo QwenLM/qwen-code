@@ -91,7 +91,9 @@ export function useDeleteCommand(
             Date.now(),
           );
         }
-      } catch {
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('handleDelete failed:', error);
         addItem?.(
           {
             type: 'error',

@@ -100,6 +100,15 @@ export interface ListSessionsResult {
 }
 
 /**
+ * Result of removing multiple sessions.
+ */
+export interface RemoveSessionsResult {
+  removed: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+/**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
  */
@@ -753,11 +762,7 @@ export class SessionService {
    * @returns Per-id outcomes: which were removed, which were not found,
    *   and which threw an error.
    */
-  async removeSessions(sessionIds: string[]): Promise<{
-    removed: string[];
-    notFound: string[];
-    errors: Array<{ sessionId: string; error: Error }>;
-  }> {
+  async removeSessions(sessionIds: string[]): Promise<RemoveSessionsResult> {
     const removed: string[] = [];
     const notFound: string[] = [];
     const errors: Array<{ sessionId: string; error: Error }> = [];
