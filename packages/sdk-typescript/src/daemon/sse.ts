@@ -27,23 +27,28 @@ import type { DaemonEvent } from './types.js';
  * AbortSignal cancellation both clean up cleanly.
  */
 /**
- * Hard cap on accumulated unread UTF-16 code units (i.e. `buf.length`,
- * NOT bytes — see the byte-equivalence note below) before we abort
- * the stream as malformed. SSE frames are typically a few hundred
- * bytes; even a heavily-batched provider rarely crosses 64 KiB. A
- * buffer that grows past 16 Mi code units is a strong signal that
- * the upstream is NOT SSE — e.g. a misconfigured proxy returned a
- * non-streaming body, or the server never emits the `\n\n`
- * separator. Without a cap, `buf` grows until the consumer OOMs.
+ * Hard cap on accumulated unread UTF-16 code units (`buf.length`)
+ * before we abort the stream as malformed. SSE frames are typically a
+ * few hundred bytes; even a heavily-batched provider rarely crosses
+ * 64 KiB. A buffer that grows past 16 Mi code units is a strong
+ * signal that the upstream is NOT SSE — e.g. a misconfigured proxy
+ * returned a non-streaming body, or the server never emits the
+ * `\n\n` separator. Without a cap, `buf` grows until the consumer
+ * OOMs.
  *
- * Cap is in UTF-16 code units (`buf.length`), NOT bytes — `buf` is a
- * decoded JS string. For mostly-ASCII content (the daemon's JSON
- * envelope) one code unit ≈ one byte, so the cap behaves like a
- * ~16 MiB byte cap. Mixed BMP / supplementary content can push the
- * actual byte count up to ~64 MiB before tripping (one code unit per
- * UTF-16 unit, but UTF-8 bytes can be 1–4 per code point). Either way
- * the threshold's job is "stop runaway non-SSE bodies", not exact
- * accounting, so the proxy is intentional.
+ * The cap is **code units, not bytes** (BRker). JS strings are
+ * stored as UTF-16 (sometimes Latin-1 under the hood, depending on
+ * engine string representation), so `buf.length` is NOT a reliable
+ * byte-count proxy — a mostly-ASCII payload uses ~1 byte per code
+ * unit on V8's Latin-1 path, while supplementary code points (a
+ * single user-perceived character like an emoji) cost 2 code units
+ * per source byte after decode. We cap on what we can cheaply
+ * measure (`buf.length`); the *intent* is "stop runaway non-SSE
+ * bodies", not exact memory accounting. Operators that need a
+ * tighter byte-precise bound should put a reverse proxy in front of
+ * the daemon with a request-size limit. 16 Mi code units is generous
+ * enough that legitimate SSE traffic won't hit it under any sane
+ * encoding mix.
  */
 const MAX_BUF_CHARS = 16 * 1024 * 1024;
 
