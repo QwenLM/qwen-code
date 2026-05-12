@@ -339,11 +339,16 @@ export const MainContent = () => {
   // because it is gone from pendingHistoryItems but not yet in the Static
   // slice. Chunked replay is still used for large remount gaps (Ctrl+O on a
   // long session) where the gap is >> CHUNK_SIZE.
-  const visibleHistoryItemsWithSourceCopyOffsets =
-    historyItemsWithSourceCopyOffsets.length - replayCount <=
-    PROGRESSIVE_REPLAY_CHUNK_SIZE
-      ? historyItemsWithSourceCopyOffsets
-      : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
+  // Filter out hidden items (e.g. from --quiet-restore) so they are not
+  // rendered but remain in historyManager.history for /rewind turn mapping.
+  const visibleHistoryItemsWithSourceCopyOffsets = useMemo(() => {
+    const filtered = historyItemsWithSourceCopyOffsets.filter(
+      ({ item }) => !item.hidden,
+    );
+    return filtered.length - replayCount <= PROGRESSIVE_REPLAY_CHUNK_SIZE
+      ? filtered
+      : filtered.slice(0, replayCount);
+  }, [historyItemsWithSourceCopyOffsets, replayCount]);
 
   return (
     <>

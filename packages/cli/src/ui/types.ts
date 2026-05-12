@@ -90,6 +90,8 @@ export interface SummaryProps {
 
 export interface HistoryItemBase {
   text?: string; // Text content for user/gemini/info/error messages
+  /** If true, the item is kept in history for turn mapping but not rendered. */
+  hidden?: boolean;
 }
 
 export type HistoryItemUser = HistoryItemBase & {

@@ -111,8 +111,20 @@ export function useResumeCommand(
       setSessionName?.(customTitle ?? null);
 
       // Reset UI history.
+      const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
+
       if (config.isQuietRestore()) {
-        clearItems?.();
+        // Mark restored items as hidden so they are not rendered but
+        // remain in historyManager.history for /rewind turn mapping.
+        for (const item of uiHistoryItems) {
+          item.hidden = true;
+        }
+      }
+
+      clearItems?.();
+      loadHistory?.(uiHistoryItems);
+
+      if (config.isQuietRestore()) {
         const messageCount = sessionData.conversation.messages.length;
         addItem?.(
           {
@@ -121,10 +133,6 @@ export function useResumeCommand(
           } as Omit<HistoryItem, 'id'>,
           Date.now(),
         );
-      } else {
-        const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
-        clearItems?.();
-        loadHistory?.(uiHistoryItems);
       }
 
       // Update session history core.
