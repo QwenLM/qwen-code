@@ -201,6 +201,52 @@ Stage 1's contract is sized for prototyping. Per [#3889 chiga0 downstream-consum
 
 The full convergence roadmap is tracked on [#3803](https://github.com/QwenLM/qwen-code/issues/3803).
 
+## Stage 1 scope boundaries — what we won't fix in Stage 1.5
+
+Two structural choices are explicit non-goals for the Stage 1 / 1.5 / 2 main-line roadmap. If your use case depends on either, plan around them rather than waiting for us.
+
+### TUI is a super-client, not a remote-client peer
+
+The Stage 1.5 plan describes TUI as an in-process EventBus subscriber. In practice **TUI UI is strictly larger than the wire protocol** (per [LaZzyMan's review](https://github.com/QwenLM/qwen-code/pull/3889#pullrequestreview-4270256721)):
+
+- **Local-only UI** — the ~15 Ink dialog components (`ModelDialog`, `MemoryDialog`, `PermissionsDialog`, `SessionPicker`, `WelcomeBackDialog`, `FolderTrustDialog`, …) and the `local-jsx` slash commands (`/ide`, `/auth`, `/init`, `/resume`, `/rename`, `/delete`, `/language`, `/arena`, …) render terminal-specific Ink JSX. Remote clients on HTTP/SSE cannot equivalently render Ink, and these flows do not emit any wire event.
+- **Session-state mutations without wire events** — `/approval-mode`, `/memory add`, `/mcp add-server`, `/agents`, `/tools enable/disable`, `/auth`, `/init` (writing `CLAUDE.md`) all change what the agent does, but only `/model` currently publishes an event (`model_switched`). A remote client attached to a TUI session has no way to learn that the approval policy flipped or that an MCP server was added.
+
+**Stage 1 choice — option (A) from the review**: TUI is a "super-client," not "subscriber #0." Remote clients (mobile, web, IDE plugin) share the **agent ↔ user conversation** axis, NOT the full TUI session state. The "multi-client collaboration" framing is intentionally narrow:
+
+- ✅ Multiple clients see the same agent messages, tool calls, file diffs, permission prompts.
+- ❌ Multiple clients see the same approval-mode setting / memory / MCP server list / auth state.
+
+Why this and not (B) (promoting every TUI mutation to a `session_state_changed` event family): (B) is the more ambitious answer, but it locks Stage 1.5 into a substantially larger wire surface that must also pass cleanly through the planned in-process refactor. We'd rather walk the smaller scope honestly. The session-state-event taxonomy work — enumerating which TUI flows are local-only by design — moves to [#3803](https://github.com/QwenLM/qwen-code/issues/3803), not Stage 1.5 code.
+
+**Implication for client implementers**: if you need to reflect TUI session state in a remote UI, poll the relevant capability route at attach time (e.g. read the current model via `model_switched` replay through `Last-Event-ID: 0`) and **don't assume real-time mirroring** of TUI-side commands. Reconnect handshakes should re-fetch state, not rely on incremental events.
+
+### N parallel sessions cost N×
+
+The "1 daemon = 1 session" axiom is the simplifying choice that lets Stage 2's in-process refactor land without re-doing concurrency. Combined with `sessionScope: 'thread'` (or per-request override in Stage 1.5), this means N concurrent sessions on the same workspace = N daemons, with **no resource sharing between them** (per [LaZzyMan's comment](https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4428498510)).
+
+Concrete cost for "5 IDE windows on the same repo with 3 MCP servers":
+
+| Resource                             | Per session           | At N=5                                         |
+| ------------------------------------ | --------------------- | ---------------------------------------------- |
+| Daemon Node process                  | ~30–50 MB RSS         | **150–250 MB**                                 |
+| `qwen --acp` child + sandbox         | ~60–100 MB RSS        | **300–500 MB**                                 |
+| MCP server children                  | 3 per session         | **15 processes**                               |
+| DB pool / provider rate-limit budget | 1× per session        | 5× (anti-abuse risk on shared providers)       |
+| `FileReadCache` (in-daemon heap)     | independent           | same files cached 5×                           |
+| `CLAUDE.md` / hierarchy memory parse | independent           | 5× cold-start latency                          |
+| OAuth refresh-token state            | independent           | **5 parallel refreshes** (provider anti-abuse) |
+| Auto-memory learned facts            | independent           | learned 5×, knowledge fragments                |
+| Cold start                           | 1–3 s per new session | each new IDE window pays                       |
+
+**Stage 1 choice — option (iii) from the review**: explicit won't-fix on the main-line roadmap. qwen-code Stage 1 / 1.5 / 2 is sized for **single-session-at-a-time per user × machine × workspace**. If your workflow needs many parallel sessions, prefer in-session topic switching, separate workspaces, or accept the N× resource cost.
+
+The orchestrator path **structurally cannot** share these resources (MCP children, FileReadCache, OAuth state all live in daemon heap, not addressable from outside). The alternatives — intra-daemon multi-session ([#3803](https://github.com/QwenLM/qwen-code/issues/3803) §21 Path A/B) or in-project sidecar packages (`packages/mcp-relay`, `packages/workspace-cache-server`, `packages/token-broker`) — materially change the architecture in ways we won't commit to mid-Stage-1.
+
+**This isn't permanent.** If real-usage data after Stage 1.5 shows users sitting at N=5+ and complaining, §21 Path A/B can move out of "roadmap, not on main-line" into Stage 3+ work. Until then, the answer to "5 IDE windows on the same repo" is "expect 1–2.5 GB RSS or open fewer windows."
+
+Peer agents (Cursor, Continue, Claude Code, OpenCode, Gemini CLI) handle this with a single-process multi-session model. qwen-code's Stage 1 design diverges, with eyes open.
+
 ## What's next
 
 - **Build a client?** See the [DaemonClient TypeScript quickstart](../developers/examples/daemon-client-quickstart.md) and the [HTTP protocol reference](../developers/qwen-serve-protocol.md).
