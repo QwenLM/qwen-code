@@ -148,7 +148,7 @@ describe('OpenAILogger', () => {
       expect(fileExists).toBe(true);
     });
 
-    it('should include sanitized filename tag and metadata when provided', async () => {
+    it('should include sanitized internal prompt id suffix when provided', async () => {
       const logger = new OpenAILogger(testTempDir);
       await logger.initialize();
 
@@ -162,13 +162,7 @@ describe('OpenAILogger', () => {
         request,
         response,
         undefined,
-        {
-          filenameTag: 'side-query:session-title',
-          metadata: {
-            promptId: 'side-query:session-title',
-            internalPrompt: true,
-          },
-        },
+        'side-query:session-title',
       );
 
       expect(path.basename(logPath)).toMatch(
@@ -176,10 +170,29 @@ describe('OpenAILogger', () => {
       );
 
       const logContent = JSON.parse(await fs.readFile(logPath, 'utf-8'));
-      expect(logContent.metadata).toEqual({
-        promptId: 'side-query:session-title',
-        internalPrompt: true,
-      });
+      expect(logContent).not.toHaveProperty('metadata');
+    });
+
+    it('should not include a filename suffix for non-internal prompt ids', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+
+      const request = {
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: 'test' }],
+      };
+      const response = { id: 'test-id', choices: [] };
+
+      const logPath = await logger.logInteraction(
+        request,
+        response,
+        undefined,
+        'user_query',
+      );
+
+      expect(path.basename(logPath)).toMatch(
+        /openai-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9]{8}\.json/,
+      );
     });
 
     it('should write correct log data structure', async () => {

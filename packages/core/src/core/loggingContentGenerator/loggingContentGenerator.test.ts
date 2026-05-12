@@ -1498,13 +1498,7 @@ describe('LoggingContentGenerator', () => {
         expect.objectContaining({ id: 'openai-response' }),
       );
       expect(openaiError).toBeUndefined();
-      expect(options).toEqual({
-        filenameTag: promptId,
-        metadata: {
-          promptId,
-          internalPrompt: true,
-        },
-      });
+      expect(options).toBe(promptId);
     },
   );
 
@@ -1570,13 +1564,7 @@ describe('LoggingContentGenerator', () => {
         expect.objectContaining({ id: 'openai-response' }),
       );
       expect(openaiError).toBeUndefined();
-      expect(options).toEqual({
-        filenameTag: promptId,
-        metadata: {
-          promptId,
-          internalPrompt: true,
-        },
-      });
+      expect(options).toBe(promptId);
     },
   );
 });

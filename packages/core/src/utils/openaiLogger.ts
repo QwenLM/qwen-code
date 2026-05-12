@@ -9,17 +9,15 @@ import { promises as fs } from 'node:fs';
 import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
 import { createDebugLogger } from './debugLogger.js';
+import { isInternalPromptId } from './internalPromptIds.js';
 
 const debugLogger = createDebugLogger('OPENAI_LOGGER');
 
-export interface OpenAILogInteractionOptions {
-  filenameTag?: string;
-  metadata?: Record<string, unknown>;
-}
-
-function sanitizeFilenameTag(tag: string | undefined): string | undefined {
-  if (!tag) return undefined;
-  const sanitized = tag
+function sanitizePromptIdForFilename(
+  promptId: string | undefined,
+): string | undefined {
+  if (!promptId || !isInternalPromptId(promptId)) return undefined;
+  const sanitized = promptId
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '');
   return sanitized || undefined;
@@ -77,13 +75,15 @@ export class OpenAILogger {
    * @param request The request sent to OpenAI
    * @param response The response received from OpenAI
    * @param error Optional error if the request failed
+   * @param promptId Optional prompt id; internal prompt ids are appended to
+   *                 the filename after timestamp and id.
    * @returns The file path where the log was written
    */
   async logInteraction(
     request: unknown,
     response?: unknown,
     error?: Error,
-    options?: OpenAILogInteractionOptions,
+    promptId?: string,
   ): Promise<string> {
     if (!this.initialized) {
       await this.initialize();
@@ -91,15 +91,14 @@ export class OpenAILogger {
 
     const timestamp = new Date().toISOString().replace(/:/g, '-');
     const id = uuidv4().slice(0, 8);
-    const filenameTag = sanitizeFilenameTag(options?.filenameTag);
-    const filename = filenameTag
-      ? `openai-${timestamp}-${id}-${filenameTag}.json`
+    const promptIdSuffix = sanitizePromptIdForFilename(promptId);
+    const filename = promptIdSuffix
+      ? `openai-${timestamp}-${id}-${promptIdSuffix}.json`
       : `openai-${timestamp}-${id}.json`;
     const filePath = path.join(this.logDir, filename);
 
     const logData = {
       timestamp: new Date().toISOString(),
-      ...(options?.metadata ? { metadata: options.metadata } : {}),
       request,
       response: response || null,
       error: error

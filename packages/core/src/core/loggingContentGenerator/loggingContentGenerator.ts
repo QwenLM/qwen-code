@@ -48,10 +48,7 @@ import type {
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
 import type { RequestContext } from '../openaiContentGenerator/types.js';
-import {
-  OpenAILogger,
-  type OpenAILogInteractionOptions,
-} from '../../utils/openaiLogger.js';
+import { OpenAILogger } from '../../utils/openaiLogger.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   getErrorMessage,
@@ -577,7 +574,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         : error
           ? new Error(String(error))
           : undefined,
-      this.buildOpenAILogOptions(promptId),
+      promptId,
     );
   }
 
@@ -592,22 +589,6 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (loggingError) {
       debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
     }
-  }
-
-  private buildOpenAILogOptions(
-    promptId: string | undefined,
-  ): OpenAILogInteractionOptions | undefined {
-    if (!isInternalPromptId(promptId)) {
-      return undefined;
-    }
-
-    return {
-      filenameTag: promptId,
-      metadata: {
-        promptId,
-        internalPrompt: true,
-      },
-    };
   }
 
   private convertGeminiResponseToOpenAIForLogging(
