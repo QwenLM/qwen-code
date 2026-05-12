@@ -269,7 +269,11 @@ function VirtualizedList<T>(
     let totalHeight = 0;
     for (let i = 0; i < data.length; i++) {
       const key = keyExtractor(data[i], i);
-      const height = heights[key] ?? estimatedItemHeight(i);
+      const raw = heights[key] ?? estimatedItemHeight(i);
+      // Defensive coerce: a buggy estimator returning NaN / negative /
+      // Infinity would poison every downstream scroll-math read (binary
+      // search assumes monotonic offsets). Clamp at 0 and fall through.
+      const height = Number.isFinite(raw) && raw > 0 ? raw : 0;
       totalHeight += height;
       offsets.push(totalHeight);
     }
@@ -516,7 +520,23 @@ function VirtualizedList<T>(
           (renderStatic === true && isOutsideViewport) ||
           isStaticItem?.(item, i) === true;
 
-        const content = renderItem({ item, index: i });
+        // Isolate per-item render failures so one buggy history record
+        // can't take down the whole VP tree. Without this, a thrown
+        // renderItem propagates through React's commit phase and Ink
+        // tears down the entire UI. The fallback keeps the row in the
+        // viewport so the user can scroll past it instead of losing the
+        // session.
+        let content: React.ReactElement;
+        try {
+          content = renderItem({ item, index: i });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          content = (
+            <Box flexDirection="column" flexShrink={0}>
+              <Text color="red">[render error] {message}</Text>
+            </Box>
+          );
+        }
         const key = keyExtractor(item, i);
 
         items.push(
