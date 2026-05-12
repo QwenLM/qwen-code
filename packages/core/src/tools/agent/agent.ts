@@ -38,9 +38,12 @@ import {
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
   buildChildMessage,
+  buildWorktreeNotice,
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
+import { randomBytes } from 'node:crypto';
+import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import {
   getCurrentAgentId,
   runWithAgentContext,
@@ -145,6 +148,15 @@ export interface AgentParams {
   prompt: string;
   subagent_type?: string;
   run_in_background?: boolean;
+  /**
+   * When set to `'worktree'`, spins up a temporary git worktree under
+   * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
+   * confine all file operations to that path. After the agent completes:
+   * - if no changes were made, the worktree is auto-removed;
+   * - if changes were made, the worktree is preserved and its path/branch
+   *   are returned in the agent's result.
+   */
+  isolation?: 'worktree';
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -345,6 +357,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             'Set to true to run this agent in the background. You will be notified when it completes.',
         },
+        isolation: {
+          type: 'string',
+          enum: ['worktree'],
+          description:
+            "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
+        },
       },
       required: ['description', 'prompt'],
       additionalProperties: false,
@@ -434,6 +452,7 @@ Usage notes:
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 - You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
+- You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 
 Example usage:
 
@@ -526,6 +545,19 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
       if (!subagentExists) {
         const availableNames = this.availableSubagents.map((s) => s.name);
         return `Subagent "${params.subagent_type}" not found. Available subagents: ${availableNames.join(', ')}`;
+      }
+    }
+
+    if (params.isolation !== undefined) {
+      if (params.isolation !== 'worktree') {
+        return 'Parameter "isolation" must be "worktree" when set.';
+      }
+      // Forks (no subagent_type) reuse the parent's full conversation
+      // context — putting them in a separate worktree would split
+      // intent from working tree and confuse path resolution. Require
+      // an explicit subagent_type when requesting isolation.
+      if (!params.subagent_type) {
+        return 'Parameter "isolation" requires "subagent_type" to be set.';
       }
     }
 
@@ -1184,6 +1216,106 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         taskPrompt = this.params.prompt;
       }
 
+      // ── Optional worktree isolation ──────────────────────────────
+      // When `isolation: 'worktree'` is requested, provision a temporary
+      // worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> and
+      // prepend a notice to the task prompt telling the subagent to
+      // operate inside that path. After the subagent completes, the
+      // cleanup helper removes the worktree if no changes were made,
+      // or preserves it (and reports its path/branch) if there are.
+      let worktreeIsolation: {
+        slug: string;
+        path: string;
+        branch: string;
+      } | null = null;
+      const failWorktreeProvisioning = (reason: string): ToolResult => {
+        this.currentDisplay = {
+          ...this.currentDisplay!,
+          status: 'failed' as const,
+          terminateReason: reason,
+        };
+        return {
+          llmContent: reason,
+          returnDisplay: this.currentDisplay,
+        };
+      };
+
+      if (this.params.isolation === 'worktree') {
+        const projectRoot = this.config.getTargetDir();
+        const wtService = new GitWorktreeService(projectRoot);
+        const gitCheck = await wtService.checkGitAvailable();
+        if (!gitCheck.available) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: ${gitCheck.error ?? 'git is not available'}`,
+          );
+        }
+        if (!(await wtService.isGitRepository())) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: ${projectRoot} is not a git repository.`,
+          );
+        }
+        const slug = `agent-${randomBytes(4).toString('hex').slice(0, 7)}`;
+        const created = await wtService.createUserWorktree(slug);
+        if (!created.success || !created.worktree) {
+          return failWorktreeProvisioning(
+            `Failed to create isolation worktree: ${created.error ?? 'unknown error'}`,
+          );
+        }
+        worktreeIsolation = {
+          slug,
+          path: created.worktree.path,
+          branch: created.worktree.branch,
+        };
+        const notice = buildWorktreeNotice(projectRoot, created.worktree.path);
+        taskPrompt = `${notice}\n\n${taskPrompt}`;
+      }
+
+      // Cleanup helper invoked after the subagent terminates (success,
+      // failure, or cancel). Removes the worktree when no changes were
+      // made; preserves it (and returns its info) when there are changes.
+      const cleanupWorktreeIsolation = async (): Promise<{
+        preservedPath?: string;
+        preservedBranch?: string;
+      }> => {
+        if (!worktreeIsolation) return {};
+        const wtService = new GitWorktreeService(this.config.getTargetDir());
+        let hasChanges = true;
+        try {
+          hasChanges = await wtService.hasWorktreeChanges(
+            worktreeIsolation.path,
+          );
+        } catch {
+          // Fail-closed: assume changes exist.
+        }
+        if (hasChanges) {
+          return {
+            preservedPath: worktreeIsolation.path,
+            preservedBranch: worktreeIsolation.branch,
+          };
+        }
+        try {
+          await wtService.removeUserWorktree(worktreeIsolation.slug, {
+            deleteBranch: true,
+          });
+        } catch (error) {
+          debugLogger.warn(
+            `[Agent] Failed to remove ephemeral worktree ${worktreeIsolation.path}: ${error}`,
+          );
+        }
+        return {};
+      };
+
+      const formatWorktreeSuffix = (info: {
+        preservedPath?: string;
+        preservedBranch?: string;
+      }): string => {
+        if (!info.preservedPath) return '';
+        return (
+          `\n\n[worktree preserved: ${info.preservedPath} ` +
+          `(branch ${info.preservedBranch ?? 'unknown'})]`
+        );
+      };
+
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
 
@@ -1432,7 +1564,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // the parent model (and the UI) don't treat incomplete runs as
             // completed.
             const terminateMode = bgSubagent.getTerminateMode();
-            const finalText = bgSubagent.getFinalText();
+            const wtSuffix = formatWorktreeSuffix(
+              await cleanupWorktreeIsolation(),
+            );
+            const finalText = bgSubagent.getFinalText() + wtSuffix;
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
@@ -1469,6 +1604,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const errorMsg =
               error instanceof Error ? error.message : String(error);
             debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
+
+            // Best-effort: preserve or remove the isolation worktree before
+            // the registry record reflects the failure.
+            try {
+              await cleanupWorktreeIsolation();
+            } catch {
+              // Already logged inside the helper; do not mask the original
+              // failure mode.
+            }
 
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
@@ -1673,9 +1817,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
+        const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {
-            llmContent: finalText || 'Subagent execution failed.',
+            llmContent: (finalText || 'Subagent execution failed.') + wtSuffix,
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -1693,14 +1838,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           return {
             llmContent: [
               {
-                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}`,
+                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}${wtSuffix}`,
               },
             ],
             returnDisplay: this.currentDisplay!,
           };
         }
         return {
-          llmContent: [{ text: finalText }],
+          llmContent: [{ text: finalText + wtSuffix }],
           returnDisplay: this.currentDisplay!,
         };
       } finally {

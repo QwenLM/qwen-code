@@ -94,6 +94,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
+  // Worktree management belongs to the parent session — a subagent must
+  // never enter or exit the user's worktree state independently.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
 ]);
 
 /**

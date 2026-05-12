@@ -3072,6 +3072,14 @@ export class Config {
         return new ExitPlanModeTool(this);
       });
     }
+    await registerLazy(ToolNames.ENTER_WORKTREE, async () => {
+      const { EnterWorktreeTool } = await import('../tools/enter-worktree.js');
+      return new EnterWorktreeTool(this);
+    });
+    await registerLazy(ToolNames.EXIT_WORKTREE, async () => {
+      const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
+      return new ExitWorktreeTool(this);
+    });
     await registerLazy(ToolNames.WEB_FETCH, async () => {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);

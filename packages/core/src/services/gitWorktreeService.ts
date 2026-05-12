@@ -824,4 +824,242 @@ export class GitWorktreeService {
       return false;
     }
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // User-facing worktree APIs (used by EnterWorktree / ExitWorktree tools
+  // and AgentTool `isolation: 'worktree'`). These create worktrees under
+  // `<projectRoot>/.qwen/worktrees/<slug>` rather than under the
+  // session-scoped Arena baseDir.
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Returns the directory holding all general-purpose worktrees for this
+   * repo: `<projectRoot>/.qwen/worktrees`.
+   */
+  getUserWorktreesDir(): string {
+    return path.join(this.sourceRepoPath, '.qwen', WORKTREES_DIR);
+  }
+
+  /**
+   * Returns the absolute worktree path for a given slug.
+   */
+  getUserWorktreePath(slug: string): string {
+    return path.join(this.getUserWorktreesDir(), slug);
+  }
+
+  /**
+   * Generates an auto-slug `{adj}-{noun}-{4hex}` for an unnamed worktree.
+   */
+  static generateAutoSlug(): string {
+    const ADJECTIVES = [
+      'swift',
+      'bright',
+      'calm',
+      'keen',
+      'bold',
+      'eager',
+      'kind',
+      'quick',
+    ];
+    const NOUNS = ['fox', 'owl', 'elm', 'oak', 'ray', 'sky', 'leaf', 'pine'];
+    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+    const suffix = Math.random().toString(16).slice(2, 6).padEnd(4, '0');
+    return `${adj}-${noun}-${suffix}`;
+  }
+
+  /**
+   * Validates a worktree slug. Returns null on success, or an error message.
+   *
+   * Rules (mirrors claude-code's `validateWorktreeSlug`):
+   * - Non-empty, ≤ 64 chars
+   * - Only `[a-zA-Z0-9._-]` characters; no path separators
+   * - No `..` or leading/trailing dots (would resolve outside the worktrees dir)
+   */
+  static validateUserWorktreeSlug(slug: string): string | null {
+    if (typeof slug !== 'string' || slug.length === 0) {
+      return 'Worktree name must be a non-empty string.';
+    }
+    if (slug.length > 64) {
+      return 'Worktree name must be at most 64 characters.';
+    }
+    if (!/^[a-zA-Z0-9._-]+$/.test(slug)) {
+      return 'Worktree name may only contain letters, digits, dots, underscores, and hyphens.';
+    }
+    if (slug.includes('..') || slug.startsWith('.') || slug.startsWith('-')) {
+      return 'Worktree name must not start with "." or "-" or contain "..".';
+    }
+    return null;
+  }
+
+  /**
+   * Creates a general-purpose worktree at `<projectRoot>/.qwen/worktrees/<slug>`
+   * with branch `worktree-<slug>`. Used by `EnterWorktreeTool` and
+   * `AgentTool isolation:'worktree'`.
+   */
+  async createUserWorktree(
+    slug: string,
+    baseBranch?: string,
+  ): Promise<CreateWorktreeResult> {
+    const validationError = GitWorktreeService.validateUserWorktreeSlug(slug);
+    if (validationError) {
+      return { success: false, error: validationError };
+    }
+
+    try {
+      const worktreesDir = this.getUserWorktreesDir();
+      await fs.mkdir(worktreesDir, { recursive: true });
+      const worktreePath = path.join(worktreesDir, slug);
+
+      if (await this.pathExists(worktreePath)) {
+        return {
+          success: false,
+          error: `Worktree already exists at ${worktreePath}`,
+        };
+      }
+
+      const base = baseBranch || (await this.getCurrentBranch());
+      const branchName = `worktree-${slug}`;
+
+      // `-B` resets the branch if it already exists (e.g., from a previous
+      // worktree at the same slug that was removed without deleting the branch).
+      await this.git.raw([
+        'worktree',
+        'add',
+        '-B',
+        branchName,
+        worktreePath,
+        base,
+      ]);
+
+      const worktree: WorktreeInfo = {
+        id: slug,
+        name: slug,
+        path: worktreePath,
+        branch: branchName,
+        isActive: true,
+        createdAt: Date.now(),
+      };
+      return { success: true, worktree };
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+      };
+    }
+  }
+
+  /**
+   * Removes a user worktree, optionally deleting its branch.
+   */
+  async removeUserWorktree(
+    slug: string,
+    options: { deleteBranch?: boolean } = {},
+  ): Promise<{ success: boolean; error?: string }> {
+    const worktreePath = this.getUserWorktreePath(slug);
+    const branchName = `worktree-${slug}`;
+
+    const removed = await this.removeWorktree(worktreePath);
+    if (!removed.success) {
+      return removed;
+    }
+
+    if (options.deleteBranch) {
+      try {
+        await this.git.branch(['-D', branchName]);
+      } catch {
+        // Best-effort: branch may have been deleted already, or may not exist.
+      }
+    }
+    return { success: true };
+  }
+
+  /**
+   * Lists all user worktrees in this repo by reading the worktrees directory.
+   */
+  async listUserWorktrees(): Promise<WorktreeInfo[]> {
+    const worktreesDir = this.getUserWorktreesDir();
+    try {
+      const entries = await fs.readdir(worktreesDir, { withFileTypes: true });
+      const result: WorktreeInfo[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.')) continue;
+        const worktreePath = path.join(worktreesDir, entry.name);
+        let branch = '';
+        try {
+          branch = execSync('git rev-parse --abbrev-ref HEAD', {
+            cwd: worktreePath,
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+          }).trim();
+        } catch {
+          // Ignore: worktree may be in an inconsistent state
+        }
+        let createdAt = Date.now();
+        try {
+          const stats = await fs.stat(worktreePath);
+          createdAt = stats.birthtimeMs || stats.mtimeMs;
+        } catch {
+          // Ignore stat errors
+        }
+        result.push({
+          id: entry.name,
+          name: entry.name,
+          path: worktreePath,
+          branch,
+          isActive: true,
+          createdAt,
+        });
+      }
+      return result;
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Reports whether a worktree has uncommitted tracked changes (staged or
+   * unstaged) or untracked files. Used by `ExitWorktreeTool` to refuse
+   * `remove` when the user has work in progress.
+   *
+   * Fail-closed: returns `true` on any git error so the caller assumes the
+   * worktree is dirty rather than risking data loss.
+   */
+  async hasWorktreeChanges(worktreePath: string): Promise<boolean> {
+    try {
+      const wtGit = simpleGit(worktreePath);
+      const status = await wtGit.status();
+      // `not_added` covers untracked; `staged`/`modified`/etc. cover the rest.
+      return !status.isClean();
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * Counts uncommitted file changes in a worktree. Returns null if the
+   * worktree can't be inspected (which the caller should treat as "dirty").
+   */
+  async countWorktreeChanges(
+    worktreePath: string,
+  ): Promise<{ tracked: number; untracked: number } | null> {
+    try {
+      const wtGit = simpleGit(worktreePath);
+      const status = await wtGit.status();
+      const tracked =
+        status.staged.length +
+        status.modified.length +
+        status.deleted.length +
+        status.renamed.length +
+        status.created.length;
+      const untracked = status.not_added.length;
+      return { tracked, untracked };
+    } catch {
+      return null;
+    }
+  }
 }
