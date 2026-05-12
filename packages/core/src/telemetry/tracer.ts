@@ -214,18 +214,20 @@ export function startSpanWithContext(
 /**
  * Determine whether the synthetic session root should force the SAMPLED flag.
  *
- * With the default `parentbased_always_on` sampler, children of an unsampled
- * parent are not recorded, so the root must carry SAMPLED for traces to
- * appear. When a custom sampler is configured (e.g. `traceidratio:0.01`),
- * forcing SAMPLED would bypass that sampler, making it effectively a no-op.
- * In that case we use NONE so the sampler evaluates each span independently.
+ * parentbased_* samplers delegate to localParentNotSampled (default AlwaysOff)
+ * when the parent carries TraceFlags.NONE. Since our synthetic root is the
+ * parent of all session spans, it MUST carry SAMPLED for any parentbased_*
+ * sampler — otherwise zero traces are exported.
+ *
+ * For non-parentbased samplers (e.g. `traceidratio`, `always_off`), each span
+ * is evaluated independently regardless of parent flags, so we use NONE to
+ * let the sampler decide.
  */
 function shouldForceSampled(): boolean {
   const sampler =
     process.env['OTEL_TRACES_SAMPLER']?.trim().toLowerCase() ?? '';
-  return (
-    !sampler || sampler === 'parentbased_always_on' || sampler === 'always_on'
-  );
+  if (!sampler || sampler.startsWith('parentbased_')) return true;
+  return sampler === 'always_on';
 }
 
 /**

@@ -416,26 +416,31 @@ export class LoggingContentGenerator implements ContentGenerator {
     const runInSpan = <T>(fn: () => T): T =>
       spanContext ? context.with(spanContext, fn) : fn();
 
-    // Defensive timeout: if the consumer abandons the generator without
-    // calling .return() (e.g. drops the reference), the span would never
-    // end. Close it after a bounded duration so it doesn't leak forever.
-    const STREAM_SPAN_MAX_MS = 5 * 60_000; // 5 minutes
+    // Idle timeout: if no chunks arrive for this duration the consumer has
+    // likely abandoned the generator without calling .return(). Close the
+    // span so it doesn't leak forever.  The timer resets on every chunk,
+    // so legitimately long-running streams are never affected.
+    const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000; // 5 minutes
     let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
-    if (span) {
-      spanEndTimeout = setTimeout(() => {
-        try {
-          safeSetStatus(span, {
-            code: SpanStatusCode.ERROR,
-            message: 'Stream span timed out',
-          });
-          spanEnded = true;
-          span.end();
-        } catch {
-          // OTel errors must not interrupt the consumer.
+    const resetSpanTimeout = span
+      ? () => {
+          if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
+          spanEndTimeout = setTimeout(() => {
+            try {
+              safeSetStatus(span, {
+                code: SpanStatusCode.ERROR,
+                message: 'Stream span timed out (idle)',
+              });
+              spanEnded = true;
+              span.end();
+            } catch {
+              // OTel errors must not interrupt the consumer.
+            }
+          }, STREAM_IDLE_TIMEOUT_MS);
+          spanEndTimeout.unref();
         }
-      }, STREAM_SPAN_MAX_MS);
-      spanEndTimeout.unref();
-    }
+      : undefined;
+    resetSpanTimeout?.();
 
     try {
       for await (const response of stream) {
@@ -455,6 +460,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             lastUsageMetadata = response.usageMetadata;
           }
         });
+        resetSpanTimeout?.();
         yield response;
       }
       // Only log successful API response if no error occurred

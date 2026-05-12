@@ -439,6 +439,20 @@ describe('createSessionRootContext', () => {
     }
   });
 
+  it('uses TraceFlags.SAMPLED for parentbased_traceidratio (parent flag gates children)', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_traceidratio';
+    try {
+      const ctx = createSessionRootContext('session-pb-ratio') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
   it('generates a valid 16-char hex spanId', () => {
     const ctx = createSessionRootContext('session-123') as unknown as {
       spanId: string;
