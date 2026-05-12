@@ -48,12 +48,15 @@ from qwen_code_sdk import (
 
 
 def extract_text(message):
-    content = message["message"].get("content", [])
-    return "".join(
+    content = message.get("message", {}).get("content", [])
+    if not isinstance(content, list):
+        return repr(content)
+    texts = [
         block.get("text", "")
         for block in content
         if isinstance(block, dict) and block.get("type") == "text"
-    )
+    ]
+    return "".join(texts) if texts else "[no text content]"
 
 
 def print_result(message):
@@ -65,23 +68,26 @@ def print_result(message):
 
 
 async def main() -> None:
-    result = query(
+    async with query(
         "Explain the repository structure.",
         {
             "cwd": "/path/to/project",
             "path_to_qwen_executable": "qwen",
         },
-    )
-
-    async for message in result:
-        if is_sdk_assistant_message(message):
-            print(extract_text(message))
-        elif is_sdk_result_message(message):
-            print_result(message)
+    ) as result:
+        async for message in result:
+            if is_sdk_assistant_message(message):
+                print(extract_text(message))
+            elif is_sdk_result_message(message):
+                print_result(message)
 
 
 asyncio.run(main())
 ```
+
+`asyncio.run()` is appropriate for standalone scripts. If your application
+already runs an event loop, such as Jupyter, FastAPI, or pytest-asyncio, call
+`await main()` instead.
 
 ## Sync Usage
 
@@ -133,28 +139,28 @@ with query_sync(
 
 ### `QueryOptions`
 
-| Option                     | Type / values                                              | Description                                                |
-| -------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------- |
-| `cwd`                      | `str`                                                      | Working directory for the CLI process.                     |
-| `model`                    | `str`                                                      | Model override for this SDK session.                       |
-| `path_to_qwen_executable`  | `str`                                                      | `qwen`, an explicit binary path, or a `.js` CLI bundle.    |
-| `permission_mode`          | `default`, `plan`, `auto-edit`, `yolo`                     | Tool execution approval mode.                              |
-| `can_use_tool`             | async callback                                             | Custom permission callback for tool requests.              |
-| `env`                      | `dict[str, str]`                                           | Extra environment variables passed to the CLI process.     |
-| `system_prompt`            | `str`                                                      | Override the system prompt.                                |
-| `append_system_prompt`     | `str`                                                      | Append extra instructions to the system prompt.            |
-| `debug`                    | `bool`                                                     | Forward CLI stderr to stderr when no `stderr` hook exists. |
-| `max_session_turns`        | `int`                                                      | Maximum turns before the CLI ends the session.             |
-| `core_tools`               | `list[str]`                                                | Restrict the available tool set.                           |
-| `exclude_tools`            | `list[str]`                                                | Exclude matching tools.                                    |
-| `allowed_tools`            | `list[str]`                                                | Allow matching tools without callback approval.            |
-| `auth_type`                | `openai`, `anthropic`, `qwen-oauth`, `gemini`, `vertex-ai` | Authentication mode passed to the CLI.                     |
-| `include_partial_messages` | `bool`                                                     | Emit partial assistant stream events.                      |
-| `resume`                   | UUID string                                                | Resume a known session id.                                 |
-| `continue_session`         | `bool`                                                     | Continue the latest CLI session.                           |
-| `session_id`               | UUID string                                                | Start or correlate a session with a known id.              |
-| `timeout`                  | mapping                                                    | Timeouts in seconds.                                       |
-| `stderr`                   | callable                                                   | Receives CLI stderr lines.                                 |
+| Option                     | Type / values                                              | Description                                                                                                     |
+| -------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `cwd`                      | `str`                                                      | Working directory for the CLI process.                                                                          |
+| `model`                    | `str`                                                      | Model override for this SDK session.                                                                            |
+| `path_to_qwen_executable`  | `str`                                                      | `qwen`, an explicit binary path, or a `.js` CLI bundle.                                                         |
+| `permission_mode`          | `default`, `plan`, `auto-edit`, `yolo`                     | Tool execution approval mode. `yolo` auto-approves all tools; use it only in trusted or sandboxed environments. |
+| `can_use_tool`             | async callback                                             | Custom permission callback for tool requests.                                                                   |
+| `env`                      | `dict[str, str]`                                           | Extra environment variables passed to the CLI process.                                                          |
+| `system_prompt`            | `str`                                                      | Override the system prompt.                                                                                     |
+| `append_system_prompt`     | `str`                                                      | Append extra instructions to the system prompt.                                                                 |
+| `debug`                    | `bool`                                                     | Forward CLI stderr to stderr when no `stderr` hook exists.                                                      |
+| `max_session_turns`        | `int`                                                      | Maximum turns before the CLI ends the session.                                                                  |
+| `core_tools`               | `list[str]`                                                | Restrict the available tool set.                                                                                |
+| `exclude_tools`            | `list[str]`                                                | Exclude matching tools.                                                                                         |
+| `allowed_tools`            | `list[str]`                                                | Allow matching tools without callback approval.                                                                 |
+| `auth_type`                | `openai`, `anthropic`, `qwen-oauth`, `gemini`, `vertex-ai` | Authentication mode passed to the CLI.                                                                          |
+| `include_partial_messages` | `bool`                                                     | Emit partial assistant stream events.                                                                           |
+| `resume`                   | UUID string                                                | Resume a known session id.                                                                                      |
+| `continue_session`         | `bool`                                                     | Continue the latest CLI session.                                                                                |
+| `session_id`               | UUID string                                                | Start or correlate a session with a known id.                                                                   |
+| `timeout`                  | mapping                                                    | Timeouts in seconds.                                                                                            |
+| `stderr`                   | callable                                                   | Receives CLI stderr lines.                                                                                      |
 
 Use only one of `resume`, `continue_session`, or `session_id` in a request. The
 SDK raises `ValidationError` if these session options are combined.
@@ -166,31 +172,27 @@ Unsupported in v1:
 ### Common Configuration
 
 ```python
-result = query(
-    "Summarize the recent changes.",
-    {
-        "cwd": "/path/to/project",
-        "path_to_qwen_executable": "qwen",
-        "model": "qwen-plus",
-        "permission_mode": "plan",
-        "max_session_turns": 1,
-        "env": {
-            "OPENAI_API_KEY": "...",
-            "OPENAI_BASE_URL": "...",
-            "OPENAI_MODEL": "qwen-plus",
-        },
-        "timeout": {
-            "control_request": 60,
-            "can_use_tool": 60,
-            "stream_close": 60,
-        },
+options = {
+    "cwd": "/path/to/project",
+    "path_to_qwen_executable": "qwen",
+    "model": "qwen-plus",
+    "permission_mode": "plan",
+    "max_session_turns": 1,
+    "env": {
+        "OPENAI_MODEL": "qwen-plus",
     },
-)
+    "timeout": {
+        "control_request": 60,
+        "can_use_tool": 60,
+        "stream_close": 60,
+    },
+}
 ```
 
 Timeout values are seconds. `env` is merged on top of the parent process
 environment, so you only need to pass variables that should differ for this SDK
-session.
+session. Set secrets such as `OPENAI_API_KEY` in the parent environment or a
+secrets manager rather than hardcoding them in source.
 
 ## Permission Handling
 
@@ -209,15 +211,39 @@ Example:
 
 ```python
 import asyncio
+from pathlib import Path
 
 from qwen_code_sdk import is_sdk_result_message, query
 
+PROJECT_ROOT = Path("/path/to/project").resolve()
+
+
+def project_path(tool_name, tool_input):
+    key = "path" if tool_name == "list_directory" else "file_path"
+    raw_path = tool_input.get(key)
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+
+    resolved = (PROJECT_ROOT / raw_path).resolve()
+    try:
+        resolved.relative_to(PROJECT_ROOT)
+    except ValueError:
+        return None
+    return resolved
+
 
 async def can_use_tool(tool_name, tool_input, context):
-    if tool_name in {"read_file", "list_directory"}:
-        return {"behavior": "allow", "updatedInput": tool_input}
+    if tool_name in {"read_file", "list_directory", "write_file"}:
+        resolved = project_path(tool_name, tool_input)
+        if resolved is None:
+            return {
+                "behavior": "deny",
+                "message": "Only project-local paths are allowed",
+            }
 
-    if tool_name == "write_file" and tool_input.get("file_path", "").endswith(".md"):
+        if tool_name == "write_file" and resolved.suffix != ".md":
+            return {"behavior": "deny", "message": "Only .md files can be written"}
+
         return {"behavior": "allow", "updatedInput": tool_input}
 
     return {
@@ -227,22 +253,21 @@ async def can_use_tool(tool_name, tool_input, context):
 
 
 async def main():
-    result = query(
+    async with query(
         "Update README.md with a short summary.",
         {
-            "cwd": "/path/to/project",
+            "cwd": str(PROJECT_ROOT),
             "path_to_qwen_executable": "qwen",
             "can_use_tool": can_use_tool,
         },
-    )
-
-    async for message in result:
-        if is_sdk_result_message(message):
-            if message.get("is_error"):
-                error = message.get("error") or {}
-                print(f"Error: {error.get('message', 'Unknown error')}")
-            else:
-                print(message.get("result", ""))
+    ) as result:
+        async for message in result:
+            if is_sdk_result_message(message):
+                if message.get("is_error"):
+                    error = message.get("error") or {}
+                    print(f"Error: {error.get('message', 'Unknown error')}")
+                else:
+                    print(message.get("result", ""))
 
 
 asyncio.run(main())
@@ -288,22 +313,21 @@ async def prompts():
 
 
 async def main():
-    result = query(
+    async with query(
         prompts(),
         {
             "cwd": "/path/to/project",
             "path_to_qwen_executable": "qwen",
             "session_id": SESSION_ID,
         },
-    )
-
-    async for message in result:
-        if is_sdk_result_message(message):
-            if message.get("is_error"):
-                error = message.get("error") or {}
-                print(f"Error: {error.get('message', 'Unknown error')}")
-            else:
-                print(message.get("result", ""))
+    ) as result:
+        async for message in result:
+            if is_sdk_result_message(message):
+                if message.get("is_error"):
+                    error = message.get("error") or {}
+                    print(f"Error: {error.get('message', 'Unknown error')}")
+                else:
+                    print(message.get("result", ""))
 
 
 asyncio.run(main())
@@ -325,27 +349,26 @@ from qwen_code_sdk import is_sdk_result_message, query
 
 
 async def main():
-    result = query(
+    async with query(
         "Inspect this repository and explain the test layout.",
         {
             "cwd": "/path/to/project",
             "path_to_qwen_executable": "qwen",
         },
-    )
+    ) as result:
+        commands = await result.supported_commands()
+        print(commands)
 
-    commands = await result.supported_commands()
-    print(commands)
+        await result.set_permission_mode("plan")
+        await result.set_model("qwen-plus")
 
-    await result.set_permission_mode("plan")
-    await result.set_model("qwen-plus")
-
-    async for message in result:
-        if is_sdk_result_message(message):
-            if message.get("is_error"):
-                error = message.get("error") or {}
-                print(f"Error: {error.get('message', 'Unknown error')}")
-            else:
-                print(message.get("result", ""))
+        async for message in result:
+            if is_sdk_result_message(message):
+                if message.get("is_error"):
+                    error = message.get("error") or {}
+                    print(f"Error: {error.get('message', 'Unknown error')}")
+                else:
+                    print(message.get("result", ""))
 
 
 asyncio.run(main())
@@ -364,21 +387,20 @@ from qwen_code_sdk import is_sdk_result_message, query
 
 async def main():
     # Resume a known session by its id.
-    known = query(
+    async with query(
         "Continue from this session.",
         {
             "path_to_qwen_executable": "qwen",
             "resume": "123e4567-e89b-12d3-a456-426614174000",
         },
-    )
-
-    async for message in known:
-        if is_sdk_result_message(message):
-            if message.get("is_error"):
-                error = message.get("error") or {}
-                print(f"Error: {error.get('message', 'Unknown error')}")
-            else:
-                print(message.get("result", ""))
+    ) as known:
+        async for message in known:
+            if is_sdk_result_message(message):
+                if message.get("is_error"):
+                    error = message.get("error") or {}
+                    print(f"Error: {error.get('message', 'Unknown error')}")
+                else:
+                    print(message.get("result", ""))
 
 
 asyncio.run(main())
@@ -393,21 +415,20 @@ from qwen_code_sdk import is_sdk_result_message, query
 
 
 async def main():
-    latest = query(
+    async with query(
         "Continue the latest session.",
         {
             "path_to_qwen_executable": "qwen",
             "continue_session": True,
         },
-    )
-
-    async for message in latest:
-        if is_sdk_result_message(message):
-            if message.get("is_error"):
-                error = message.get("error") or {}
-                print(f"Error: {error.get('message', 'Unknown error')}")
-            else:
-                print(message.get("result", ""))
+    ) as latest:
+        async for message in latest:
+            if is_sdk_result_message(message):
+                if message.get("is_error"):
+                    error = message.get("error") or {}
+                    print(f"Error: {error.get('message', 'Unknown error')}")
+                else:
+                    print(message.get("result", ""))
 
 
 asyncio.run(main())
@@ -425,12 +446,22 @@ delegates the selection of the latest session to the CLI.
 - `AbortError`: control request or session was cancelled
 
 ```python
-from qwen_code_sdk import ProcessExitError, ValidationError, query_sync
+from qwen_code_sdk import (
+    ProcessExitError,
+    ValidationError,
+    is_sdk_result_message,
+    query_sync,
+)
 
 try:
     with query_sync("Say hello", {"path_to_qwen_executable": "qwen"}) as result:
         for message in result:
-            print(message)
+            if is_sdk_result_message(message):
+                if message.get("is_error"):
+                    error = message.get("error") or {}
+                    print(f"Error: {error.get('message', 'Unknown error')}")
+                else:
+                    print(message.get("result", ""))
 except ValidationError as exc:
     print(f"Invalid SDK options: {exc}")
 except ProcessExitError as exc:
