@@ -387,6 +387,25 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
+        // Also check by normalized path in case realpathSync failed above
+        // and the initial directory is stored under a different canonical
+        // form (e.g. symlinked cwd).
+        const normalizedExpanded = path.normalize(expandedDir);
+        const initialDirs = workspaceContext.getInitialDirectories();
+        if (initialDirs.some((d) => path.normalize(d) === normalizedExpanded)) {
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: t(
+                'Cannot remove initial workspace directory: {{directory}}',
+                { directory },
+              ),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
         // Persist removal to settings using a two-phase approach:
         // Phase 1 — compute new directory lists for each scope (async
         // parallel realpath resolution to avoid N+1 sync I/O).
@@ -422,7 +441,14 @@ export const directoryCommand: SlashCommand = {
             }),
           );
           const includeDirectories = resolutions
-            .filter((r) => r.resolved !== targetDir && r.original !== targetDir)
+            .filter((r) => {
+              const normalized = path.normalize(expandHomeDir(r.original));
+              return (
+                r.resolved !== targetDir &&
+                r.original !== targetDir &&
+                normalized !== targetDir
+              );
+            })
             .map((r) => r.original);
           if (includeDirectories.length < scopeDirs.length) {
             found = true;
@@ -456,6 +482,8 @@ export const directoryCommand: SlashCommand = {
         };
 
         // Phase 2: commit all scopes atomically.
+        // setValue() writes to disk immediately, so on partial failure we
+        // must also restore the disk files for already-committed scopes.
         const committed: SettingScope[] = [];
         try {
           for (const change of pendingChanges) {
@@ -467,15 +495,28 @@ export const directoryCommand: SlashCommand = {
             committed.push(change.scope);
           }
         } catch (error) {
-          // Roll back any scopes that were already committed.
+          // Roll back in-memory state for committed scopes.
           for (const scope of committed) {
             if (scope === SettingScope.Workspace) {
               settings.workspace.settings = workspaceBefore.settings;
               settings.workspace.originalSettings =
                 workspaceBefore.originalSettings;
+              // Re-write the disk file to match the restored in-memory state.
+              settings.setValueFullSave(
+                scope,
+                'context.includeDirectories',
+                workspaceBefore.originalSettings.context?.includeDirectories ??
+                  [],
+              );
             } else {
               settings.user.settings = userBefore.settings;
               settings.user.originalSettings = userBefore.originalSettings;
+              // Re-write the disk file to match the restored in-memory state.
+              settings.setValueFullSave(
+                scope,
+                'context.includeDirectories',
+                userBefore.originalSettings.context?.includeDirectories ?? [],
+              );
             }
           }
           settings.recomputeMerged();
@@ -492,7 +533,7 @@ export const directoryCommand: SlashCommand = {
         }
 
         // Now remove from memory — persisted settings are already updated.
-        const removed = workspaceContext.removeDirectory(expandedDir);
+        const removed = workspaceContext.removeDirectory(canonicalDirectory);
         if (!removed) {
           addItem(
             {
@@ -506,9 +547,22 @@ export const directoryCommand: SlashCommand = {
           return;
         }
 
+        // Report success — the directory has been removed from both
+        // persisted settings and in-memory workspace context.
+        addItem(
+          {
+            type: MessageType.INFO,
+            text: t('Removed directory: {{directory}}', { directory }),
+          },
+          Date.now(),
+        );
+
         // Refresh hierarchical memory to drop QWEN.md content and
         // conditional rules that were loaded from the removed directory,
         // mirroring what the add path already does.
+        // This is best-effort: a failure here does not roll back the
+        // directory removal, but the user is warned that stale content
+        // may remain for the rest of the session.
         if (config.shouldLoadMemoryFromIncludeDirectories()) {
           try {
             const { memoryContent, fileCount, conditionalRules, projectRoot } =
@@ -531,24 +585,16 @@ export const directoryCommand: SlashCommand = {
           } catch (error) {
             addItem(
               {
-                type: MessageType.ERROR,
-                text: t('Error refreshing memory: {{error}}', {
-                  error: (error as Error).message,
-                }),
+                type: MessageType.WARNING,
+                text: t(
+                  'Directory removed but memory refresh failed: {{error}}',
+                  { error: (error as Error).message },
+                ),
               },
               Date.now(),
             );
-            return;
           }
         }
-
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: t('Removed directory: {{directory}}', { directory }),
-          },
-          Date.now(),
-        );
       },
     },
     {

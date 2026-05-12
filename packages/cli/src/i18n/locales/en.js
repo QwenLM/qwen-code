@@ -1087,6 +1087,8 @@ export default {
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
     'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',
   'Error refreshing memory: {{error}}': 'Error refreshing memory: {{error}}',
+  'Directory removed but memory refresh failed: {{error}}':
+    'Directory removed but memory refresh failed: {{error}}',
   'Successfully added directories:\n- {{directories}}':
     'Successfully added directories:\n- {{directories}}',
   'Current workspace directories:\n{{directories}}':

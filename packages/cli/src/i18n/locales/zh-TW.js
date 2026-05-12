@@ -915,6 +915,8 @@ export default {
   'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}':
     '如果存在，已成功從以下目錄添加 QWEN.md 檔案：\n- {{directories}}',
   'Error refreshing memory: {{error}}': '刷新內存時出錯：{{error}}',
+  'Directory removed but memory refresh failed: {{error}}':
+    '目錄已移除，但內存刷新失敗：{{error}}',
   'Successfully added directories:\n- {{directories}}':
     '成功添加目錄：\n- {{directories}}',
   'Current workspace directories:\n{{directories}}':

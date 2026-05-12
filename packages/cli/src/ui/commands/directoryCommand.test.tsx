@@ -94,6 +94,7 @@ describe('directoryCommand', () => {
         originalSettings: {},
       },
       setValue: vi.fn(),
+      setValueFullSave: vi.fn(),
       recomputeMerged: vi.fn(),
       forScope: vi.fn((scope: string) => {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -473,6 +474,7 @@ describe('directoryCommand', () => {
         setValue: vi.fn().mockImplementation(() => {
           throw settingsError;
         }),
+        setValueFullSave: vi.fn(),
         recomputeMerged: vi.fn(),
       };
       newSettings.forScope = vi.fn((scope: string) => {
@@ -618,7 +620,7 @@ describe('directoryCommand', () => {
       );
     });
 
-    it('should roll back workspace settings when user scope fails', async () => {
+    it('should roll back committed scopes when later scope fails', async () => {
       const removableDir = path.normalize('/home/user/project2');
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
@@ -664,11 +666,14 @@ describe('directoryCommand', () => {
           throw new Error('user scope write failed');
         }
       });
+      // setValueFullSave is called during disk rollback to restore the
+      // committed scope's disk file to its pre-mutation state.
+      mockSettings.setValueFullSave = vi.fn();
 
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
-      // Should have rolled back workspace settings to original state.
+      // Should have rolled back and shown error.
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.ERROR,
@@ -678,6 +683,21 @@ describe('directoryCommand', () => {
       );
       // Directory should NOT have been removed from memory.
       expect(mockWorkspaceContext.removeDirectory).not.toHaveBeenCalled();
+
+      // Verify in-memory workspace settings were restored to original state.
+      expect(
+        mockSettings.workspace.settings.context.includeDirectories,
+      ).toEqual(originalWorkspaceDirs);
+      expect(
+        mockSettings.workspace.originalSettings.context.includeDirectories,
+      ).toEqual(originalWorkspaceDirs);
+
+      // Verify disk rollback was called for the committed workspace scope.
+      expect(mockSettings.setValueFullSave).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'context.includeDirectories',
+        originalWorkspaceDirs,
+      );
     });
 
     it('should report error when in-memory removal fails but settings were updated', async () => {
@@ -841,7 +861,7 @@ describe('directoryCommand', () => {
       );
     });
 
-    it('should show error and not success message when memory refresh fails', async () => {
+    it('should show warning when memory refresh fails but still report success', async () => {
       const removableDir = path.normalize('/home/user/project2');
       mockWorkspaceContext = {
         ...mockWorkspaceContext,
@@ -895,91 +915,33 @@ describe('directoryCommand', () => {
       if (!removeCommand?.action) throw new Error('No action');
       await removeCommand.action(mockContext, removableDir);
 
+      // Success message should still be shown
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.ERROR,
-          text: expect.stringContaining('Error refreshing memory'),
-        }),
-        expect.any(Number),
-      );
-      expect(mockContext.ui.addItem).not.toHaveBeenCalledWith(
         expect.objectContaining({
           type: MessageType.INFO,
           text: `Removed directory: ${removableDir}`,
         }),
         expect.any(Number),
       );
-    });
-
-    it('should roll back committed scopes when later scope fails', async () => {
-      const removableDir = path.normalize('/home/user/project2');
-      mockWorkspaceContext = {
-        ...mockWorkspaceContext,
-        removeDirectory: vi.fn().mockReturnValue(true),
-        isInitialDirectory: vi.fn().mockReturnValue(false),
-        getInitialDirectories: vi
-          .fn()
-          .mockReturnValue([path.normalize('/home/user/project1')]),
-      } as unknown as WorkspaceContext;
-
-      mockConfig = {
-        ...mockConfig,
-        getWorkspaceContext: () => mockWorkspaceContext,
-      } as unknown as Config;
-
-      const originalWorkspaceDirs = [
-        path.normalize('/home/user/project1'),
-        removableDir,
-      ];
-      const originalUserDirs = [removableDir];
-
-      mockSettings.workspace = {
-        settings: {
-          context: { includeDirectories: [...originalWorkspaceDirs] },
-        },
-        originalSettings: {
-          context: { includeDirectories: [...originalWorkspaceDirs] },
-        },
-      };
-      mockSettings.user = {
-        settings: {
-          context: { includeDirectories: [...originalUserDirs] },
-        },
-        originalSettings: {
-          context: { includeDirectories: [...originalUserDirs] },
-        },
-      };
-
-      let callCount = 0;
-      mockSettings.setValue = vi.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 2) {
-          throw new Error('user scope write failed');
-        }
-      });
-
-      if (!removeCommand?.action) throw new Error('No action');
-      await removeCommand.action(mockContext, removableDir);
-
-      // Should have rolled back and shown error.
+      // Memory refresh failure should be a warning, not an error
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.ERROR,
-          text: 'Error updating settings: user scope write failed',
+          type: MessageType.WARNING,
+          text: expect.stringContaining(
+            'Directory removed but memory refresh failed',
+          ),
         }),
         expect.any(Number),
       );
-      // Directory should NOT have been removed from memory.
-      expect(mockWorkspaceContext.removeDirectory).not.toHaveBeenCalled();
     });
-  });
 
-  it('should correctly expand a Windows-style home directory path', () => {
-    const windowsPath = '%userprofile%\\Documents';
-    const expectedPath = path.win32.join(os.homedir(), 'Documents');
-    const result = expandHomeDir(windowsPath);
-    expect(path.win32.normalize(result)).toBe(
-      path.win32.normalize(expectedPath),
-    );
+    it('should correctly expand a Windows-style home directory path', () => {
+      const windowsPath = '%userprofile%\\Documents';
+      const expectedPath = path.win32.join(os.homedir(), 'Documents');
+      const result = expandHomeDir(windowsPath);
+      expect(path.win32.normalize(result)).toBe(
+        path.win32.normalize(expectedPath),
+      );
+    });
   });
 });
