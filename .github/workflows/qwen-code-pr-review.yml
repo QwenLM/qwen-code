@@ -15,6 +15,18 @@ on:
         description: 'PR number to review'
         required: true
         type: 'number'
+      review_mode:
+        description: 'Run without posting comments, or publish review comments'
+        required: true
+        default: 'dry-run'
+        type: 'choice'
+        options:
+          - 'dry-run'
+          - 'comment'
+      additional_instructions:
+        description: 'Optional maintainer focus for this review'
+        required: false
+        type: 'string'
 
 jobs:
   review-pr:
@@ -69,20 +81,27 @@ jobs:
         env:
           EVENT_NAME: '${{ github.event_name }}'
           WORKFLOW_PR_NUMBER: '${{ github.event.inputs.pr_number }}'
+          WORKFLOW_REVIEW_MODE: '${{ github.event.inputs.review_mode }}'
+          WORKFLOW_ADDITIONAL_INSTRUCTIONS: '${{ github.event.inputs.additional_instructions }}'
         run: |-
           set -euo pipefail
 
+          additional_instructions=""
           case "$EVENT_NAME" in
             workflow_dispatch)
               pr_number="$WORKFLOW_PR_NUMBER"
+              review_mode="${WORKFLOW_REVIEW_MODE:-dry-run}"
+              additional_instructions="${WORKFLOW_ADDITIONAL_INSTRUCTIONS:-}"
               comment_body=""
               ;;
             pull_request_target|pull_request_review_comment|pull_request_review)
               pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
+              review_mode="comment"
               comment_body="$(jq -r '.comment.body // .review.body // ""' "$GITHUB_EVENT_PATH")"
               ;;
             issue_comment)
               pr_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
+              review_mode="comment"
               comment_body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
               ;;
             *)
@@ -96,19 +115,33 @@ jobs:
             exit 1
           fi
 
-          additional_instructions=""
-          if printf '%s' "$comment_body" | grep -q '@qwen /review'; then
+          case "$review_mode" in
+            dry-run|comment)
+              ;;
+            *)
+              echo "::error::Unsupported review mode: $review_mode"
+              exit 1
+              ;;
+          esac
+
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && printf '%s' "$comment_body" | grep -q '@qwen /review'; then
             additional_instructions="$(
               printf '%s' "$comment_body" |
                 sed 's/.*@qwen \/review//' |
                 sed 's/^[[:space:]]*//'
             )"
-            # Hard-cap to 2KB to keep prompt-injection surface bounded.
-            # Reviewers should keep instructions short.
-            additional_instructions="$(printf '%s' "$additional_instructions" | head -c 2048)"
           fi
+          # Hard-cap to 2KB to keep prompt-injection surface bounded.
+          # Reviewers should keep instructions short.
+          additional_instructions="$(printf '%s' "$additional_instructions" | head -c 2048)"
 
           echo "number=$pr_number" >> "$GITHUB_OUTPUT"
+          echo "review_mode=$review_mode" >> "$GITHUB_OUTPUT"
+          if [ "$review_mode" = "comment" ]; then
+            echo "should_comment=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_comment=false" >> "$GITHUB_OUTPUT"
+          fi
           output_delimiter="QWEN_REVIEW_INSTRUCTIONS_$(date +%s%N)"
           {
             echo "additional_instructions<<$output_delimiter"
@@ -143,6 +176,8 @@ jobs:
         id: 'size'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
         run: |-
           set -euo pipefail
 
@@ -166,9 +201,17 @@ jobs:
               printf '_Qwen Code PR review did not run a detailed code review for this oversized changeset. Model configured for review: `%s`._\n' \
                 "$OPENAI_MODEL"
             } > qwen-pr-review-size-comment.md
-            gh pr comment "$PR_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body-file qwen-pr-review-size-comment.md
+            if [ "$SHOULD_COMMENT" = "true" ]; then
+              gh pr comment "$PR_NUMBER" \
+                --repo "$GITHUB_REPOSITORY" \
+                --body-file qwen-pr-review-size-comment.md
+            else
+              {
+                printf '### Qwen PR review dry run\n\n'
+                cat qwen-pr-review-size-comment.md
+                printf '\n\nReview mode: `%s`; no PR comments were posted.\n' "$REVIEW_MODE"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           else
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
@@ -203,19 +246,37 @@ jobs:
           steps.size.outputs.should_review == 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
           QWEN_REVIEW_ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
         run: |-
           set -euo pipefail
 
           export PATH="$PWD/.qwen/bin:$PATH"
+          review_prompt="/review $PR_NUMBER --ci"
+          if [ "$SHOULD_COMMENT" = "true" ]; then
+            review_prompt="/review $PR_NUMBER --comment --ci"
+          fi
+
+          echo "Running Qwen PR review in $REVIEW_MODE mode."
           node dist/cli.js \
             --approval-mode yolo \
             --core-tools "task,run_shell_command,grep_search,read_file,write_file,glob" \
-            --prompt "/review $PR_NUMBER --comment --ci"
+            --prompt "$review_prompt"
+
+          if [ "$SHOULD_COMMENT" != "true" ]; then
+            {
+              printf '### Qwen PR review dry run\n\n'
+              printf 'Completed review for PR #%s without posting PR comments.\n' "$PR_NUMBER"
+              printf '\nReview logs are available in this workflow run.\n'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: 'Post fallback comment on review failure'
         if: |-
-          failure() && steps.review.conclusion == 'failure'
+          failure() &&
+          steps.review.conclusion == 'failure' &&
+          steps.pr.outputs.should_comment == 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
