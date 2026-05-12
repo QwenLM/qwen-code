@@ -175,24 +175,45 @@ export const MainContent = () => {
   // absorbed call IDs are dropped during merge so refreshStatic fires;
   // summaries for force-expanded (non-absorbed) groups pass through so
   // HistoryItemDisplay can render them as standalone `● <label>` lines.
-  const mergedHistory = useMemo(
-    () =>
-      compactMode
-        ? mergeCompactToolGroups(
-            uiState.history,
-            uiState.embeddedShellFocused,
-            uiState.activePtyId,
-            absorbedCallIds,
-          )
-        : uiState.history,
-    [
-      compactMode,
+  //
+  // Compact-mode content-stable: `mergeCompactToolGroups` always allocates a
+  // fresh array. With `activePtyId` / `embeddedShellFocused` in the deps,
+  // every streaming tick mid-shell-tool produced a new array even when
+  // membership was identical, defeating the Round-2 renderItem stability
+  // fix for compact-mode users. Pair-wise compare the new merged array to
+  // the previous one and return the previous reference when items align.
+  const prevMergedHistoryRef = useRef<HistoryItem[] | null>(null);
+  const mergedHistory = useMemo(() => {
+    if (!compactMode) {
+      prevMergedHistoryRef.current = uiState.history;
+      return uiState.history;
+    }
+    const next = mergeCompactToolGroups(
       uiState.history,
       uiState.embeddedShellFocused,
       uiState.activePtyId,
       absorbedCallIds,
-    ],
-  );
+    );
+    const prev = prevMergedHistoryRef.current;
+    if (prev && prev.length === next.length) {
+      let same = true;
+      for (let i = 0; i < next.length; i++) {
+        if (prev[i] !== next[i]) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return prev;
+    }
+    prevMergedHistoryRef.current = next;
+    return next;
+  }, [
+    compactMode,
+    uiState.history,
+    uiState.embeddedShellFocused,
+    uiState.activePtyId,
+    absorbedCallIds,
+  ]);
 
   // Build a callId → summary lookup from `tool_use_summary` history items so
   // compact-mode tool groups can render a semantic label instead of a generic
