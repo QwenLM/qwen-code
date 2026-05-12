@@ -408,6 +408,13 @@ export function shouldWrapMarkdownLink(
 const HOST_LIKE_RE =
   /\b[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)*\.[a-z]{2,}\b/gi;
 
+// Dotted-quad IPv4 in a label: `[1.1.1.1](https://attacker.com)` is the
+// same class of click-deception as a bare hostname but `HOST_LIKE_RE`'s
+// alphabetic-TLD anchor skips it. Each octet is loosely bounded to 1-3
+// digits; over-permissive (e.g. `999.999.999.999`) is fine — false
+// positives just keep an extra `(url)` suffix.
+const IPV4_LIKE_RE = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
+
 function targetHostname(url: string): string | undefined {
   try {
     const u = new URL(url);
@@ -431,8 +438,12 @@ export function labelMayDeceive(label: string, url: string): boolean {
   if (/:\/\//.test(label) || /^[a-z][a-z0-9+.-]*:/i.test(label.trim())) {
     return true;
   }
-  const labelHosts = label.toLowerCase().match(HOST_LIKE_RE);
-  if (!labelHosts || labelHosts.length === 0) return false;
+  const lower = label.toLowerCase();
+  const labelHosts = [
+    ...(lower.match(HOST_LIKE_RE) ?? []),
+    ...(lower.match(IPV4_LIKE_RE) ?? []),
+  ];
+  if (labelHosts.length === 0) return false;
   const target = targetHostname(url);
   if (!target) return true;
   return labelHosts.some((h) => h !== target);

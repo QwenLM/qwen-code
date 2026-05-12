@@ -210,6 +210,22 @@ describe('osc8 helpers', () => {
       ).toBe(false);
     });
 
+    it('flags IPv4 literal labels whose host differs from the target', () => {
+      // `[1.1.1.1](https://attacker.com)` — common shape (Cloudflare DNS,
+      // Google DNS) the model might emit. Same click-deception class as a
+      // bare hostname but the alphabetic-TLD regex skips it, so a separate
+      // dotted-quad rule has to catch it.
+      expect(labelMayDeceive('1.1.1.1', 'https://attacker.com')).toBe(true);
+      expect(labelMayDeceive('192.168.1.1', 'https://evil.com')).toBe(true);
+      expect(labelMayDeceive('Click 8.8.8.8 here', 'https://evil.com')).toBe(
+        true,
+      );
+    });
+
+    it('does NOT flag IPv4 literal labels that match the target', () => {
+      expect(labelMayDeceive('1.1.1.1', 'https://1.1.1.1/dns')).toBe(false);
+    });
+
     it('does NOT flag email-style labels matching the mailto target', () => {
       // `new URL('mailto:x@y').hostname` is empty; the implementation has to
       // pull the host from after the `@` or every mailto link with a
