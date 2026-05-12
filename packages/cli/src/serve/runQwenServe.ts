@@ -121,6 +121,27 @@ export async function runQwenServe(
     listenHostname = inner;
   }
 
+  // BUF9-: validate maxConnections BEFORE binding so a typo fails the
+  // promise instead of escaping as an uncaught exception inside the
+  // listen callback (which fires from the `listening` event after the
+  // outer promise has already resolved). Silent fail-OPEN on NaN /
+  // negative would weaken the DoS/FD-exhaustion guard the cap exists
+  // for.
+  if (opts.maxConnections !== undefined) {
+    if (Number.isNaN(opts.maxConnections)) {
+      throw new TypeError(
+        'Invalid maxConnections: NaN. Must be >= 0 ' +
+          '(0 / Infinity = unlimited).',
+      );
+    }
+    if (opts.maxConnections < 0) {
+      throw new TypeError(
+        `Invalid maxConnections: ${opts.maxConnections}. Must be >= 0 ` +
+          `(0 / Infinity = unlimited).`,
+      );
+    }
+  }
+
   return await new Promise<RunHandle>((resolve, reject) => {
     const server = app.listen(opts.port, listenHostname, () => {
       // Listener-level connection cap, set inside the listen callback
@@ -138,10 +159,11 @@ export async function runQwenServe(
       // "disable the cap" sentinels — but on Node 22 setting
       // `server.maxConnections = 0` causes the listener to refuse
       // EVERY connection (verified on v22.15.0: every fetch fails
-      // with `SocketError: other side closed`). Treat 0 / Infinity /
-      // non-finite as "leave the property unset" so the documented
-      // disable path actually disables instead of silently bricking
-      // the daemon.
+      // with `SocketError: other side closed`). Treat 0 / Infinity
+      // as "leave the property unset" so the documented disable
+      // path actually disables instead of silently bricking the
+      // daemon. NaN / negative are rejected upstream (BUF9-) so
+      // they never reach here.
       const cap = opts.maxConnections ?? 256;
       if (cap > 0 && Number.isFinite(cap)) {
         server.maxConnections = cap;
@@ -245,16 +267,44 @@ export async function runQwenServe(
               .finally(() => {
                 // Phase 2: arm the force timer NOW so it only races
                 // server.close, not the bridge tear-down above.
+                // BUb7h: `RunHandle.close()` contract says "fully
+                // closed and bridge drained" — the previous code
+                // resolved on a 100ms shortcut AFTER
+                // `closeAllConnections()` without waiting for
+                // `server.close`'s callback, so embedders/tests
+                // could observe a "closed" handle while the server
+                // was still finalizing. Now: force-close just
+                // accelerates `server.close` by killing the
+                // sockets, but we still wait for `server.close`'s
+                // callback to fire. A secondary deadline catches
+                // the pathological case where `server.close` never
+                // resolves at all (kernel-stuck socket etc.) so
+                // shutdown is still bounded.
+                const SECONDARY_DEADLINE_MS = 2_000;
+                let secondaryTimer: NodeJS.Timeout | undefined;
                 const forceTimer = setTimeout(() => {
                   writeStderrLine(
                     `qwen serve: ${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
                   );
                   server.closeAllConnections();
-                  setTimeout(() => finish(), 100).unref();
+                  // After force-close, server.close's callback
+                  // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
+                  // before we resolve anyway with a warning — much
+                  // longer than the previous 100ms shortcut, and
+                  // logged so the operator knows the contract was
+                  // bent.
+                  secondaryTimer = setTimeout(() => {
+                    writeStderrLine(
+                      `qwen serve: server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
+                    );
+                    finish();
+                  }, SECONDARY_DEADLINE_MS);
+                  secondaryTimer.unref();
                 }, SHUTDOWN_FORCE_CLOSE_MS);
                 forceTimer.unref();
                 server.close((err) => {
                   clearTimeout(forceTimer);
+                  if (secondaryTimer) clearTimeout(secondaryTimer);
                   finish(err);
                 });
               });

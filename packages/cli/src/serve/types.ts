@@ -41,10 +41,14 @@ export interface ServeOptions {
    * Defaults to 256 — bounds the raw socket count regardless of
    * session count, so a slow / phantom SSE client can't pin the
    * daemon's FD table even when it isn't holding a live ACP session.
-   * Set to `0` to disable (Node treats `0` as unlimited at this
-   * layer). Independent of `maxSessions` because one session can
-   * have many SSE subscribers (default cap 64) plus short-lived
-   * REST calls.
+   * `0` (or `Infinity`) disables the cap by leaving
+   * `server.maxConnections` unset, which falls back to Node's
+   * built-in unlimited default. We avoid actually setting
+   * `server.maxConnections = 0` because on Node 22 that causes the
+   * listener to refuse EVERY connection (tanzhenxin issue 1).
+   * NaN / negative values throw at boot. Independent of
+   * `maxSessions` because one session can have many SSE subscribers
+   * (default cap 64) plus short-lived REST calls.
    */
   maxConnections?: number;
 }

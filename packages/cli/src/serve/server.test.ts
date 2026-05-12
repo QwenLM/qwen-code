@@ -929,6 +929,27 @@ describe('runQwenServe', () => {
     expect(handle.server.maxConnections).toBe(100);
   });
 
+  it('--max-connections NaN/negative throws at boot (BUF9-)', async () => {
+    // Silent fail-OPEN on a CLI typo would weaken the DoS guard.
+    // Boot-loud is the right behavior for an unparseable cap.
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: NaN,
+      }),
+    ).rejects.toThrow(/maxConnections: NaN/);
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        maxConnections: -5,
+      }),
+    ).rejects.toThrow(/maxConnections: -5/);
+  });
+
   it('case-insensitive loopback: --hostname Localhost / LOCALHOST does NOT require a token (BQ92B)', async () => {
     // The previous Set lookup was case-sensitive, so `Localhost` was
     // treated as non-loopback and refused to boot without a token.
