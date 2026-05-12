@@ -79,7 +79,8 @@ export async function runQwenServe(
   if (!isLoopbackBind(opts.hostname) && !token) {
     throw new Error(
       `Refusing to bind ${opts.hostname}:${opts.port} without a bearer token. ` +
-        `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to 127.0.0.1.`,
+        `Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or rebind to loopback ` +
+        `(127.0.0.1, localhost, ::1, or [::1]).`,
     );
   }
 
@@ -150,7 +151,18 @@ export async function runQwenServe(
       // Forward declaration so handle.close can detach the listener after
       // drain completes. The handler is registered just before `resolve()`.
       const onSignal = async (signal: NodeJS.Signals) => {
-        if (shuttingDown) return;
+        if (shuttingDown) {
+          // BSA0K: second signal forces exit. During drain (up to
+          // ~15s for a stuck child + the 5s force-close timer) an
+          // operator's reflexive `^C^C` would otherwise be dropped.
+          // Match standard daemon behavior (nginx, redis, etc.):
+          // first signal = graceful drain; second = hard exit.
+          writeStderrLine(
+            `qwen serve: received ${signal} during drain — forcing exit`,
+          );
+          process.exit(1);
+          return;
+        }
         writeStderrLine(`qwen serve: received ${signal}, draining...`);
         try {
           await handle.close();

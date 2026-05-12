@@ -408,7 +408,25 @@ class BridgeClient implements Client {
     // Stage 1 (most agent-side tools call core directly, NOT through
     // these ACP fs methods) and Stage 2 in-process eliminates the
     // bridge fs proxy entirely. Tracked as a Stage 2 prerequisite.
-    await fs.writeFile(params.path, params.content, 'utf8');
+    //
+    // BSA0D: write-then-rename so a SIGKILL / OOM mid-write doesn't
+    // leave the target truncated. POSIX `rename` is atomic within the
+    // same filesystem; on Windows it's atomic when the target doesn't
+    // exist (we tolerate the race-on-overwrite case as a Stage 2
+    // gap). The tmp file lives in the same directory so the rename
+    // can't cross filesystem boundaries (which would degrade to a
+    // copy + race re-emerges).
+    const tmp = `${params.path}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await fs.writeFile(tmp, params.content, 'utf8');
+      await fs.rename(tmp, params.path);
+    } catch (err) {
+      // Best-effort cleanup if the write succeeded but rename failed
+      // (e.g. permission change between calls). Swallow cleanup
+      // errors — the original failure is the meaningful one.
+      await fs.unlink(tmp).catch(() => {});
+      throw err;
+    }
     return {};
   }
 
@@ -422,6 +440,21 @@ class BridgeClient implements Client {
     // bytes wanted".
     if (typeof params.limit === 'number' && params.limit <= 0) {
       return { content: '' };
+    }
+    // BSA0E: cap the file size we'll buffer into RSS at 100 MiB so a
+    // request like `{ line: 1, limit: 10 }` against a 500 MB log
+    // doesn't cost the daemon 500 MB of memory just to return 10
+    // lines. Stage 2's in-process refactor will replace this proxy
+    // with a streaming readline implementation that stops at the
+    // requested range; until then the cap is the cheapest defense.
+    const READ_FILE_SIZE_CAP = 100 * 1024 * 1024;
+    const stats = await fs.stat(params.path);
+    if (stats.size > READ_FILE_SIZE_CAP) {
+      throw new Error(
+        `readTextFile: ${params.path} is ${stats.size} bytes, ` +
+          `exceeds the ${READ_FILE_SIZE_CAP}-byte daemon cap. ` +
+          `Tail/grep externally and feed the relevant slice instead.`,
+      );
     }
     const content = await fs.readFile(params.path, 'utf8');
     if (typeof params.line === 'number' || typeof params.limit === 'number') {
@@ -1404,7 +1437,13 @@ function canonicalizeWorkspace(p: string): string {
  *      just slow, and would have been DOA anyway.
  * Stage 2 will add abort plumbing once ACP exposes a cancel hook
  * for `unstable_setSessionModel`. Tracked in the model-change
- * concurrency notes in `applyModelServiceId`.
+ * concurrency notes in `applyModelServiceId`. BSA0C suggested a
+ * `modelSwitchTimedOut` flag + `model_switch_late_success`
+ * synthetic frame for full observability of the divergent state;
+ * recorded as a Stage 2 follow-up so the timeout/late-success
+ * handshake is implemented once across both ACP-side cancel and
+ * the bridge-side state flag (rather than just papering over the
+ * symptom).
  */
 async function withTimeout<T>(
   p: Promise<T>,

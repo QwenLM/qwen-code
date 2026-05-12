@@ -783,6 +783,17 @@ function errorMessage(err: unknown): string {
  * Forward both fields so callers can triage from response body alone.
  * `error` stays as the human-readable string for backward compatibility
  * with clients that only consumed `error` in the original shape.
+ *
+ * BSA0G acknowledged: forwarding `data` verbatim leaks per-error
+ * detail (file paths in upstream tool failures, partial API response
+ * snippets, etc.) to every authenticated SSE subscriber that
+ * observes 5xx responses. In Stage 1's single-user / small-team
+ * trust model (every authenticated client is the same human or
+ * collaborators they trust) this is acceptable — and the triage
+ * value of the rich error is high. Stage 2 multi-tenant deployments
+ * will need an opt-in `--redact-errors` flag (or per-deployment
+ * policy hook) that strips `data` and replaces it with an
+ * error-class identifier; tracked under #3803 follow-ups.
  */
 function errorPayload(err: unknown): {
   error: string;

@@ -52,7 +52,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         default: '127.0.0.1',
         description:
-          'Interface to bind. Anything beyond 127.0.0.1/localhost requires a token.',
+          'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
       })
       .option('token', {
         type: 'string',

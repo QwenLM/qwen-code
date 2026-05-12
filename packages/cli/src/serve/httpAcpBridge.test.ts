@@ -1492,6 +1492,82 @@ describe('createHttpAcpBridge', () => {
       }
     });
 
+    it('writeTextFile leaves no .tmp turd in the target directory (BSA0D)', async () => {
+      // Verify the atomic write-then-rename pattern doesn't leak the
+      // intermediate temp file. After a successful write, only the
+      // target should exist in the directory.
+      const { bridge, conn } = await setupForFs();
+      const dir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-atomic-'),
+      );
+      const tmp = path.join(dir, 'target.txt');
+      try {
+        await (
+          conn as unknown as {
+            writeTextFile(p: {
+              path: string;
+              content: string;
+              sessionId: string;
+            }): Promise<unknown>;
+          }
+        ).writeTextFile({
+          sessionId: 'unused',
+          path: tmp,
+          content: 'atomic',
+        });
+        const entries = await fsp.readdir(dir);
+        // Only the target should remain — no `target.txt.<pid>.<ts>.tmp`.
+        expect(entries).toEqual(['target.txt']);
+        expect(await fsp.readFile(tmp, 'utf8')).toBe('atomic');
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('readTextFile rejects files past the size cap (BSA0E)', async () => {
+      // Cap is 100 MiB; create a 1 KiB sentinel and monkey-patch the
+      // path's stat-reported size to exceed the cap by re-pointing
+      // readTextFile at /dev/zero (which fs.stat reports as size 0
+      // on Linux), so we can't easily simulate a 100MB file in unit
+      // tests. Instead, confirm the cap path is reachable via
+      // direct invocation by stubbing fs.stat through a sparse file.
+      //
+      // Sparse file: `truncate -s 200M` creates a 200 MiB hole that
+      // costs zero blocks. fs.stat reports size=200MiB; fs.readFile
+      // would balloon RSS but we throw before that.
+      const { bridge, conn } = await setupForFs();
+      const sparse = path.join(
+        os.tmpdir(),
+        `qwen-bridge-sparse-${randomBytes(8).toString('hex')}.bin`,
+      );
+      const fh = await fsp.open(sparse, 'w');
+      try {
+        await fh.truncate(200 * 1024 * 1024); // 200 MiB hole
+        await fh.close();
+        // Error message is wrapped by the JSON-RPC layer; assert via
+        // the structured envelope's data.details rather than the
+        // outer "Internal error" string.
+        await expect(
+          (
+            conn as unknown as {
+              readTextFile(p: {
+                path: string;
+                sessionId: string;
+              }): Promise<unknown>;
+            }
+          ).readTextFile({ sessionId: 'unused', path: sparse }),
+        ).rejects.toMatchObject({
+          data: {
+            details: expect.stringMatching(/exceeds the.*byte daemon cap/),
+          },
+        });
+      } finally {
+        await fsp.rm(sparse, { force: true });
+        await bridge.shutdown();
+      }
+    });
+
     it('readTextFile returns full content by default', async () => {
       const { bridge, conn } = await setupForFs();
       const tmp = path.join(
