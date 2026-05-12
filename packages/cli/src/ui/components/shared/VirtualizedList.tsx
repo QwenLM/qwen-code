@@ -30,7 +30,6 @@ export type VirtualizedListProps<T> = {
   initialScrollOffsetInIndex?: number;
   targetScrollIndex?: number;
   renderStatic?: boolean;
-  isStatic?: boolean;
   isStaticItem?: (item: T, index: number) => boolean;
   width?: number | string;
   containerHeight?: number;
@@ -86,18 +85,14 @@ const VirtualizedListItem = memo(
     width,
     containerWidth,
     itemKey,
-    index,
     onHeightChange,
-    onSetRef,
   }: {
     content: React.ReactElement;
     shouldBeStatic: boolean;
     width: number | string | undefined;
     containerWidth: number;
     itemKey: string;
-    index: number;
     onHeightChange: (key: string, height: number) => void;
-    onSetRef: (index: number, el: DOMElement | null) => void;
   }) => {
     const itemRef = useRef<DOMElement>(null);
 
@@ -113,13 +108,6 @@ const VirtualizedListItem = memo(
         onHeightChangeRef.current(itemKey, height);
       }
     }, [itemKey, height, hasMeasured]);
-
-    useLayoutEffect(() => {
-      onSetRef(index, itemRef.current);
-      return () => {
-        onSetRef(index, null);
-      };
-    }, [index, onSetRef]);
 
     return (
       <Box width="100%" flexDirection="column" flexShrink={0} ref={itemRef}>
@@ -213,13 +201,8 @@ function VirtualizedList<T>(
   const containerHeight = props.containerHeight ?? measuredContainerHeight;
   const containerWidth = measuredContainerWidth;
 
-  const itemRefs = useRef<Array<DOMElement | null>>([]);
   const [heights, setHeights] = useState<Record<string, number>>({});
   const isInitialScrollSet = useRef(false);
-
-  const onSetRef = useCallback((index: number, el: DOMElement | null) => {
-    itemRefs.current[index] = el;
-  }, []);
 
   const onHeightChange = useCallback((key: string, height: number) => {
     setHeights((prev) => {
@@ -301,23 +284,30 @@ function VirtualizedList<T>(
   );
   const prevOffsetsLength = useRef(offsets.length);
 
-  if (
-    (props.targetScrollIndex !== undefined &&
-      props.targetScrollIndex !== prevTargetScrollIndex &&
-      offsets.length > 1) ||
-    (props.targetScrollIndex !== undefined &&
-      prevOffsetsLength.current <= 1 &&
-      offsets.length > 1)
-  ) {
-    if (props.targetScrollIndex !== prevTargetScrollIndex) {
-      setPrevTargetScrollIndex(props.targetScrollIndex);
+  // Render-phase state update — React-endorsed pattern for adjusting state
+  // based on previous-render information (see React docs: "Adjusting state
+  // while rendering"). This must run synchronously with the offsets memo so
+  // the very first paint after a targetScrollIndex change shows the anchored
+  // row instead of a one-frame flash at the previous position. Each setter
+  // is guarded by an equality check so React bails out of repeat renders
+  // when the value is unchanged.
+  const target = props.targetScrollIndex;
+  if (target !== undefined && offsets.length > 1) {
+    const targetChanged = target !== prevTargetScrollIndex;
+    const offsetsJustBecameUsable = prevOffsetsLength.current <= 1;
+    if (targetChanged || offsetsJustBecameUsable) {
+      if (targetChanged) {
+        setPrevTargetScrollIndex(target);
+      }
+      if (isStickingToBottom) {
+        setIsStickingToBottom(false);
+      }
+      if (scrollAnchor.index !== target || scrollAnchor.offset !== 0) {
+        setScrollAnchor({ index: target, offset: 0 });
+      }
     }
-    prevOffsetsLength.current = offsets.length;
-    setIsStickingToBottom(false);
-    setScrollAnchor({ index: props.targetScrollIndex, offset: 0 });
-  } else {
-    prevOffsetsLength.current = offsets.length;
   }
+  prevOffsetsLength.current = offsets.length;
 
   const actualScrollTop = useMemo(() => {
     const offset = offsets[scrollAnchor.index];
@@ -547,9 +537,7 @@ function VirtualizedList<T>(
             shouldBeStatic={shouldBeStatic}
             width={width}
             containerWidth={containerWidth}
-            index={i}
             onHeightChange={onHeightChange}
-            onSetRef={onSetRef}
           />,
         );
       }
@@ -569,7 +557,6 @@ function VirtualizedList<T>(
     width,
     containerWidth,
     onHeightChange,
-    onSetRef,
   ]);
 
   const { getScrollTop, setPendingScrollTop } = useBatchedScroll(scrollTop);
