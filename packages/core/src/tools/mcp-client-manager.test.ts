@@ -513,6 +513,183 @@ describe('McpClientManager', () => {
     neverResolve();
   });
 
+  it('discoverAllMcpToolsIncremental skips servers flagged as disabled', async () => {
+    // PR-A regression guard: the new incremental path used to iterate
+    // `Object.entries(servers)` without consulting `isMcpServerDisabled`,
+    // so a server the user had explicitly disabled (e.g. via
+    // `mcpServers.foo.disabled: true`) would still get connected and its
+    // tools registered. Mirrors the existing protection in
+    // `discoverAllMcpTools`.
+    const mockedMcpClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({
+        enabled: { command: 'node', args: [] },
+        disabled: { command: 'node', args: [] },
+      }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: (name: string) => name === 'disabled',
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    // Only the enabled server should have driven a discover; the disabled
+    // one is skipped before any connect attempt.
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(1);
+    expect(mockedMcpClient.discover).toHaveBeenCalledTimes(1);
+  });
+
+  it('discoveryTimeoutMs is clamped to a minimum and maximum', async () => {
+    // A 0 or negative override would cause the timeout to fire on the
+    // very next macrotask, racing the connect() handshake. Combined with
+    // the lack of disconnect-on-timeout this used to be a silent tool
+    // registration vector. The clamp puts the floor at 100ms.
+    const calls: number[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      cb: () => void,
+      ms?: number,
+    ) => {
+      if (typeof ms === 'number') calls.push(ms);
+      return realSetTimeout(cb, ms ?? 0);
+    }) as unknown as typeof setTimeout);
+
+    const mockedMcpClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({
+        zero: { command: 'node', args: [], discoveryTimeoutMs: 0 },
+        negative: { command: 'node', args: [], discoveryTimeoutMs: -5 },
+        huge: { command: 'node', args: [], discoveryTimeoutMs: 10_000_000 },
+      }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    spy.mockRestore();
+
+    // Among the values setTimeout was called with, look only at the ones
+    // our discoveryTimeoutFor would have produced: 100 (clamped floor)
+    // and 300_000 (clamped ceiling). Other timers (test infra, vitest)
+    // may be in `calls` but never both 100 AND 300000 by coincidence.
+    expect(calls).toContain(100);
+    expect(calls).toContain(300_000);
+    expect(calls).not.toContain(0);
+    expect(calls).not.toContain(-5);
+    expect(calls).not.toContain(10_000_000);
+  });
+
+  it('discoveryTimeoutFor treats websocket (tcp) transport as remote', async () => {
+    // The remote-vs-stdio classification gates the 5s vs 30s default
+    // timeout. `tcp` is the WebSocket transport field on MCPServerConfig
+    // — without it, hung WS handshakes would block `waitForMcpReady()`
+    // for 30s instead of 5s.
+    const mockedMcpClient = {
+      connect: vi.fn().mockReturnValue(new Promise<void>(() => {})),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const calls: number[] = [];
+    const realSetTimeout = globalThis.setTimeout;
+    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      cb: () => void,
+      ms?: number,
+    ) => {
+      if (typeof ms === 'number') calls.push(ms);
+      // Fire immediately to settle quickly without waiting 5s/30s.
+      return realSetTimeout(cb, 1);
+    }) as unknown as typeof setTimeout);
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ wsServer: { tcp: 'ws://example.test' } }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    spy.mockRestore();
+
+    expect(calls).toContain(5_000);
+    expect(calls).not.toContain(30_000);
+  });
+
+  it('runWithDiscoveryTimeout disconnects the client on timeout to abort silent tool registration', async () => {
+    // Before this fix, the inner `discoverMcpToolsForServer` kept running
+    // after the timeout rejected the outer promise. If `client.discover()`
+    // eventually succeeded it would register the late-arriving server's
+    // tools into the live toolRegistry (a remote-exploitable silent
+    // registration). Disconnecting the client on timeout aborts the
+    // handshake so no tools land.
+    let resolveConnect!: () => void;
+    const hungConnect = new Promise<void>((res) => {
+      resolveConnect = res;
+    });
+    const mockedMcpClient = {
+      connect: vi.fn().mockReturnValue(hungConnect),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({
+        slow: { command: 'node', args: [], discoveryTimeoutMs: 100 },
+      }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    // The timeout must have triggered the disconnect — that's what
+    // aborts the connect() handshake so no tools land.
+    expect(mockedMcpClient.disconnect).toHaveBeenCalled();
+
+    // Cleanup the hung promise to avoid leaking it across tests.
+    resolveConnect();
+  });
+
   it('discoverAllMcpToolsIncremental emits the trailing mcp-client-update after COMPLETED', async () => {
     // Without the trailing emit, the cli's deferred-finalize subscriber
     // (which polls discoveryState on each `mcp-client-update`) would never

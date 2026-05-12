@@ -470,6 +470,15 @@ export class McpClientManager {
 
     // Check for new servers or configuration changes
     for (const [name] of Object.entries(servers)) {
+      // Mirror `discoverAllMcpTools` (line ~102): users who explicitly
+      // disabled a server via `mcpServers.<name>.disabled: true` must not
+      // see it reconnected by the incremental path. Without this, the
+      // PR-A background path silently re-registers tools the user has
+      // told us to ignore.
+      if (cliConfig.isMcpServerDisabled(name)) {
+        debugLogger.debug(`Skipping disabled MCP server: ${name}`);
+        continue;
+      }
       const existingClient = this.clients.get(name);
       if (!existingClient) {
         // New server
@@ -509,6 +518,14 @@ export class McpClientManager {
         }
         recordStartupEvent(`mcp_server_ready:${name}`, { outcome: 'ready' });
       } catch (error) {
+        // Defensive cleanup: the dedup Map entry is normally removed by
+        // `discoverMcpToolsForServer`'s `finally`, but `runWithDiscoveryTimeout`
+        // can reject before that finally runs (the timeout also disconnects
+        // the client to abort the underlying handshake). Without this
+        // explicit delete, a brief window exists where a subsequent
+        // `discoverMcpToolsForServer(name)` call would short-circuit on
+        // a now-doomed promise.
+        this.serverDiscoveryPromises.delete(name);
         recordStartupEvent(`mcp_server_ready:${name}`, {
           outcome: 'failed',
           reason: getErrorMessage(error),
@@ -551,8 +568,30 @@ export class McpClientManager {
     fn: () => Promise<T>,
   ): Promise<T> {
     const timeoutMs = this.discoveryTimeoutFor(serverConfig);
+    let timedOut = false;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
+        timedOut = true;
+        // CRITICAL: rejecting `runWithDiscoveryTimeout` does NOT cancel
+        // the underlying `discoverMcpToolsForServer` — it keeps trying
+        // to `connect()` / `discover()`, and if the slow server
+        // eventually responds, `discover()` registers its tools into
+        // the live `toolRegistry` and re-emits `mcp-client-update`.
+        // From the user's perspective the server "failed" but its tools
+        // are silently active, including any that shadow built-ins.
+        // Disconnect the client to abort the handshake so the
+        // background promise rejects (the `connect()` call throws when
+        // its transport is closed mid-handshake), the underlying
+        // promise's `finally` clears the dedup Map entry, and no tools
+        // ever reach the registry.
+        const client = this.clients.get(serverName);
+        if (client) {
+          void client.disconnect().catch((err) => {
+            debugLogger.debug(
+              `Forced disconnect of timed-out server '${serverName}' threw: ${getErrorMessage(err)}`,
+            );
+          });
+        }
         reject(
           new Error(
             `MCP server '${serverName}' discovery timed out after ${timeoutMs}ms`,
@@ -562,23 +601,57 @@ export class McpClientManager {
       fn().then(
         (value) => {
           clearTimeout(timer);
-          resolve(value);
+          // Suppress success after timeout — the timeout already
+          // rejected the outer promise; resolving it again is a no-op
+          // but the success path would also re-emit
+          // `mcp_server_ready:ready` and `mcp_first_tool_registered`
+          // even though the rest of the system has moved on.
+          if (!timedOut) resolve(value);
         },
         (err) => {
           clearTimeout(timer);
-          reject(err instanceof Error ? err : new Error(String(err)));
+          if (!timedOut) {
+            reject(err instanceof Error ? err : new Error(String(err)));
+          }
         },
       );
     });
   }
 
+  /**
+   * Minimum / maximum discovery timeouts. `0` or a negative value as a
+   * per-server override would cause every discover to fire its timeout on
+   * the next tick — combined with the lack of disconnect on timeout this
+   * was a remote-exploitable silent-tool-registration vector (a
+   * MITM/attacker-controlled MCP server could land its tools after the
+   * timeout fired). `Infinity` / very large values would hang
+   * `waitForMcpReady()` forever for non-interactive paths. The 100ms
+   * floor is generous (real handshakes start in single-digit ms locally,
+   * tens of ms remote); the 5-minute ceiling matches the longest tool
+   * call timeouts we've documented.
+   */
+  private static readonly MIN_DISCOVERY_TIMEOUT_MS = 100;
+  private static readonly MAX_DISCOVERY_TIMEOUT_MS = 300_000;
+
   private discoveryTimeoutFor(serverConfig?: MCPServerConfig): number {
-    if (serverConfig?.discoveryTimeoutMs !== undefined) {
-      return serverConfig.discoveryTimeoutMs;
+    const override = serverConfig?.discoveryTimeoutMs;
+    if (override !== undefined && Number.isFinite(override)) {
+      return Math.max(
+        McpClientManager.MIN_DISCOVERY_TIMEOUT_MS,
+        Math.min(override, McpClientManager.MAX_DISCOVERY_TIMEOUT_MS),
+      );
     }
-    // Remote transports (HTTP/SSE) carry network risk and get a shorter
-    // default; stdio servers we trust the user already runs locally.
-    const isRemote = !!(serverConfig?.httpUrl || serverConfig?.url);
+    // Remote transports (HTTP/SSE/WebSocket) carry network risk and get
+    // a shorter default; stdio servers we trust the user already runs
+    // locally. `tcp` is the WebSocket transport field on
+    // `MCPServerConfig` — without it, websocket servers fall through to
+    // the stdio default and a hung WS handshake holds back the
+    // non-interactive `waitForMcpReady()` for 30s instead of 5s.
+    const isRemote = !!(
+      serverConfig?.httpUrl ||
+      serverConfig?.url ||
+      serverConfig?.tcp
+    );
     return isRemote ? 5_000 : 30_000;
   }
 
