@@ -306,6 +306,15 @@ export class Logger {
         if (writtenEntry.type === MessageSenderType.USER) {
           this.lastLoggedUserEntry = writtenEntry;
         }
+      } else if (type === MessageSenderType.USER) {
+        // Duplicate-skip path: another logger instance won the race and
+        // wrote an entry with the same (sessionId, messageId, timestamp,
+        // message). `_updateLogFile` mutated `newEntryObject.messageId`
+        // in-place to match disk, so the 5-tuple identifies the row that
+        // IS on disk — adopt it as the undo target. Leaving the tracker
+        // pointing at the previous USER would let cancel/auto-restore
+        // delete an older, unrelated row.
+        this.lastLoggedUserEntry = newEntryObject;
       }
     } catch (_error) {
       // Persist failed. Only invalidate the undo tracker when the FAILED

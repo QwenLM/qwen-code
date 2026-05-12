@@ -338,6 +338,43 @@ describe('Logger', () => {
       logger2.close();
     });
 
+    it('updates lastLoggedUserEntry to the new entry when _updateLogFile skips a USER write (duplicate-skip)', async () => {
+      // Regression for PR #4023: when `_updateLogFile` detects another
+      // instance already wrote an identical row and returns null, the
+      // skipped write must still shift `lastLoggedUserEntry` to the
+      // new entry. Otherwise the tracker would lie about the most
+      // recent USER row and a subsequent cancel/auto-restore would
+      // delete an older, unrelated prompt.
+      //
+      // The natural race (max+1 colliding with an existing messageId)
+      // can't be triggered with sequential awaits because
+      // `_updateLogFile`'s snapshot is always max+1-strict. Drive the
+      // contract directly by mocking the private method to return null
+      // — the post-condition we care about is on `lastLoggedUserEntry`,
+      // not on the _readLogFile/writeFile machinery.
+      await logger.logMessage(MessageSenderType.USER, 'first');
+      const trackerAfterFirst = logger['lastLoggedUserEntry'];
+      expect(trackerAfterFirst?.message).toBe('first');
+
+      // Force the duplicate-skip path: _updateLogFile resolves to null.
+      const updateSpy = vi
+        .spyOn(
+          logger as unknown as { _updateLogFile: (e: LogEntry) => unknown },
+          '_updateLogFile',
+        )
+        .mockResolvedValueOnce(null);
+      vi.advanceTimersByTime(1000);
+      await logger.logMessage(MessageSenderType.USER, 'second');
+      expect(updateSpy).toHaveBeenCalled();
+
+      // Tracker MUST have advanced — point at the entry "second" so a
+      // follow-up undo targets that row, not the older "first".
+      const trackerAfterSkip = logger['lastLoggedUserEntry'];
+      expect(trackerAfterSkip).not.toBe(trackerAfterFirst);
+      expect(trackerAfterSkip?.message).toBe('second');
+      expect(trackerAfterSkip?.type).toBe(MessageSenderType.USER);
+    });
+
     it('should not throw, not increment messageId, and log error if writing to file fails', async () => {
       vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
       const initialMessageId = logger['messageId'];
