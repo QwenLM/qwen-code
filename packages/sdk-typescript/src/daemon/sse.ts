@@ -227,6 +227,16 @@ function parseFrame(raw: string): DaemonEvent | undefined {
     ) {
       return undefined;
     }
+    // BSP1-: when `id` is present it must be a finite safe integer.
+    // `DaemonEvent.id` is `number | undefined`; a string `id` from a
+    // misbehaving proxy would survive the v+type guard above and
+    // break Last-Event-ID resume logic on the consumer side (which
+    // does numeric comparisons). Reject the frame entirely so the
+    // consumer's id-monotonicity invariant holds.
+    const rawId = (parsed as { id?: unknown }).id;
+    if (rawId !== undefined && !Number.isSafeInteger(rawId)) {
+      return undefined;
+    }
     return parsed as DaemonEvent;
   } catch {
     return undefined;

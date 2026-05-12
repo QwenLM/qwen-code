@@ -108,6 +108,26 @@ describe('parseSseStream', () => {
     expect(events[0]?.id).toBe(2);
   });
 
+  it('skips frames whose `id` is present but not a safe integer (BSP1-)', async () => {
+    // `DaemonEvent.id` is `number | undefined`. A string / float /
+    // unsafe-bigint id from a misbehaving proxy would break the
+    // consumer's Last-Event-ID resume math (which does numeric
+    // comparisons against the in-memory monotonic counter).
+    const stream = bodyFromString(
+      'data: {"id":"1","v":1,"type":"x","data":"ok"}\n\n' + // string id
+        'data: {"id":1.5,"v":1,"type":"x","data":"ok"}\n\n' + // float id
+        'data: {"id":9007199254740993,"v":1,"type":"x","data":"ok"}\n\n' + // > MAX_SAFE_INTEGER
+        'data: {"id":-1,"v":1,"type":"x","data":"ok"}\n\n' + // negative — passes
+        'data: {"v":1,"type":"x","data":"ok"}\n\n' + // no id — passes
+        'data: {"id":42,"v":1,"type":"x","data":"ok"}\n\n', // ok
+    );
+    const events = await collect(parseSseStream(stream));
+    // Only the negative-id, no-id, and 42-id frames pass. (Negative
+    // is technically a safe integer; the daemon never emits negative
+    // ids but the guard isn't responsible for that constraint.)
+    expect(events.map((e) => e.id)).toEqual([-1, undefined, 42]);
+  });
+
   it('skips non-DaemonEvent JSON (null/primitive/array/shape-mismatch) — BQ9ze+BREsR guards', async () => {
     // `JSON.parse('null')` / `JSON.parse('[...]')` / objects missing
     // `v === 1` / `type: string` parse cleanly but aren't
