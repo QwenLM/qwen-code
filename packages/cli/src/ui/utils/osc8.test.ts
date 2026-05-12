@@ -185,10 +185,47 @@ describe('osc8 helpers', () => {
       expect(labelMayDeceive(url, url)).toBe(false);
     });
 
-    it('does NOT flag plain-text labels', () => {
+    it('flags bare-host labels whose host differs from the target', () => {
+      // The single most common click-deception shape in markdown — and one
+      // a careful attacker would prefer over a full `https://…` label,
+      // since it looks more natural. Must NOT escape the heuristic.
+      expect(labelMayDeceive('google.com', 'https://attacker.com')).toBe(true);
+      expect(
+        labelMayDeceive('paypal.com', 'https://phish.example.org/login'),
+      ).toBe(true);
+      // Punycode IDN attack — label `google.com`, target is the lookalike
+      // punycode host. Label host does not equal target host → flag.
+      expect(labelMayDeceive('google.com', 'https://xn--googl-fsa.com')).toBe(
+        true,
+      );
+    });
+
+    it('does NOT flag bare-host labels that match the target', () => {
+      // Honest rendering: label is the same host the URL points to.
+      expect(labelMayDeceive('google.com', 'https://google.com/page')).toBe(
+        false,
+      );
+      expect(
+        labelMayDeceive('docs.example.com', 'https://docs.example.com/x'),
+      ).toBe(false);
+    });
+
+    it('flags same-host different-path labels', () => {
+      // `[https://google.com/safe](https://google.com/evil)` — same host but
+      // the label hides which path. The `://` pattern fires here and the
+      // user sees the real path in the `(url)` suffix.
+      expect(
+        labelMayDeceive('https://google.com/safe', 'https://google.com/evil'),
+      ).toBe(true);
+    });
+
+    it('does NOT flag plain-text or numeric labels', () => {
       expect(labelMayDeceive('click here', 'https://example.com')).toBe(false);
       expect(labelMayDeceive('docs', 'https://example.com')).toBe(false);
       expect(labelMayDeceive('', 'https://example.com')).toBe(false);
+      // Version strings like `v1.2.3` are not host-like (last segment is
+      // digits, not alphabetic) so they don't trip the heuristic.
+      expect(labelMayDeceive('v1.2.3', 'https://example.com')).toBe(false);
     });
   });
 

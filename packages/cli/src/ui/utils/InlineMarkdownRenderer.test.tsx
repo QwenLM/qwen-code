@@ -316,6 +316,20 @@ describe('<RenderInline />', () => {
       expect(out).toContain(`(${target})`);
     });
 
+    it('keeps the `(url)` suffix for bare-host labels (e.g. `google.com`)', () => {
+      // The most natural click-deception form: the model writes a bare
+      // hostname as the label that doesn't match the URL's host.
+      enableHyperlinks();
+      const target = 'https://attacker.com/phish';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`go to [google.com](${target}) end`} />,
+      );
+      const out = lastFrame() ?? '';
+      expect(out).toContain(`\x1b]8;;${target}\x07`);
+      expect(out).toContain('google.com');
+      expect(out).toContain(`(${target})`);
+    });
+
     it('elides `(url)` when label==url (no deception risk)', () => {
       // The model echoing a URL as both label and target is fine — the user
       // sees the URL either way, no deception. Keep the existing elision.

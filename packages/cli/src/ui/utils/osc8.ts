@@ -391,13 +391,45 @@ export function shouldWrapMarkdownLink(
  * even though OSC 8 wrapping is otherwise active. The label is still
  * clickable (envelope is still emitted), but the user sees the real target.
  *
- * Heuristic is intentionally permissive (`://` substring) — false positives
- * just mean an extra `(url)` suffix on niche labels like `mailto://x`, which
- * is harmless. False negatives let a real spoof through.
+ * Three patterns trip the heuristic:
+ *   1. Label contains `scheme://…` — covers `[https://google.com](https://evil.com)`.
+ *   2. Label *starts* with a `scheme:` — covers `[mailto:x](mailto:y)`.
+ *   3. Label contains a bare host token (`name.tld`) that doesn't equal the
+ *      URL's hostname — covers the most common spoof shape an attacker
+ *      would actually use: `[google.com](https://attacker.com)`.
+ *
+ * Heuristic is intentionally permissive: false positives just append a
+ * harmless `(url)` suffix to niche labels (e.g. Python attrs like
+ * `os.path` happen to look like a host); false negatives let a real spoof
+ * through. ASCII-only hostname matching means an IDN-homograph attack
+ * (Cyrillic `о` in `gооgle.com`) escapes the bare-host check, but the
+ * fully-qualified-URL form of that same attack is still caught by pattern 1.
  */
+const HOST_LIKE_RE =
+  /\b[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)*\.[a-z]{2,}\b/gi;
+
+function targetHostname(url: string): string | undefined {
+  try {
+    const h = new URL(url).hostname.toLowerCase();
+    return h || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function labelMayDeceive(label: string, url: string): boolean {
   if (label === url) return false;
-  return /:\/\//.test(label) || /^[a-z][a-z0-9+.-]*:/i.test(label.trim());
+  if (/:\/\//.test(label) || /^[a-z][a-z0-9+.-]*:/i.test(label.trim())) {
+    return true;
+  }
+  // Re-set lastIndex defensively — exported regex literals reuse state
+  // across calls when matched with `.exec` elsewhere.
+  HOST_LIKE_RE.lastIndex = 0;
+  const labelHosts = label.toLowerCase().match(HOST_LIKE_RE);
+  if (!labelHosts || labelHosts.length === 0) return false;
+  const target = targetHostname(url);
+  if (!target) return true;
+  return labelHosts.some((h) => h !== target);
 }
 
 // ── Test helpers ─────────────────────────────────────────────────────────
