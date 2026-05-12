@@ -183,6 +183,7 @@ For local development and debugging, you can capture telemetry data locally:
 ### File-based Output (Recommended)
 
 1. Enable telemetry in your `.qwen/settings.json`:
+
    ```json
    {
      "telemetry": {
@@ -191,6 +192,11 @@ For local development and debugging, you can capture telemetry data locally:
      }
    }
    ```
+
+   > **Note:** When `outfile` is set, OTLP export is automatically disabled.
+   > The `target` and `otlpEndpoint` settings are not needed for file-only
+   > output and can be safely omitted from your config.
+
 2. Run Qwen Code and send prompts.
 3. View logs and metrics in the specified file (e.g., `.qwen/telemetry.log`).
 
