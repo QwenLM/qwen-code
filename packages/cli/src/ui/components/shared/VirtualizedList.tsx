@@ -232,24 +232,32 @@ function VirtualizedList<T>(
   // reset) or when item keys change (pending → completed key transition).
   // Without this the heights record grows unbounded across long sessions —
   // every `p-N` from a turn that finalized is left behind, every cleared
-  // turn's `h-N` lingers. Run in useLayoutEffect so the prune commits in the
-  // same paint as the data shrink, avoiding one frame of stale offsets.
+  // turn's `h-N` lingers.
+  //
+  // Gated so we don't pay O(N) every streaming tick: only run when the
+  // heights record has clearly outpaced the live data (size > 2× data.length,
+  // a heuristic that fires after any `/clear` or after enough pending→
+  // completed transitions). Steady-state streaming sees no work here. Use
+  // useLayoutEffect so the prune commits in the same paint as the data
+  // change, avoiding one frame of stale offsets.
   useLayoutEffect(() => {
-    const currentKeys = new Set<string>();
-    for (let i = 0; i < data.length; i++) {
-      currentKeys.add(keyExtractor(data[i], i));
-    }
     setHeights((prev) => {
-      let changed = false;
-      for (const k of Object.keys(prev)) {
+      const prevKeys = Object.keys(prev);
+      if (prevKeys.length <= Math.max(8, 2 * data.length)) return prev;
+      const currentKeys = new Set<string>();
+      for (let i = 0; i < data.length; i++) {
+        currentKeys.add(keyExtractor(data[i], i));
+      }
+      let staleSeen = false;
+      for (const k of prevKeys) {
         if (!currentKeys.has(k)) {
-          changed = true;
+          staleSeen = true;
           break;
         }
       }
-      if (!changed) return prev;
+      if (!staleSeen) return prev;
       const next: Record<string, number> = {};
-      for (const k of Object.keys(prev)) {
+      for (const k of prevKeys) {
         if (currentKeys.has(k)) next[k] = prev[k];
       }
       return next;
