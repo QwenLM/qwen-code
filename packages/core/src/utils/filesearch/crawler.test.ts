@@ -687,6 +687,7 @@ describe('crawler', () => {
 
     it('should treat maxDepth as relative to the crawl directory', async () => {
       await initGitRepo(tmpDir);
+      tmpDir = await fs.realpath(tmpDir);
 
       const ignore = loadIgnoreRules({
         projectRoot: tmpDir,
@@ -852,6 +853,7 @@ describe('crawler', () => {
         src: ['file2.js'],
       });
       await initGitRepo(tmpDir);
+      tmpDir = await fs.realpath(tmpDir);
 
       const ignore = loadIgnoreRules({
         projectRoot: tmpDir,

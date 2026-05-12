@@ -313,7 +313,10 @@ function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
   if (!state) return true;
 
   if (currentMtime !== null && state.gitRootMtimeMs !== null) {
-    return currentMtime > state.gitRootMtimeMs || !isThrottled(stateKey);
+    // `currentMtime > state.gitRootMtimeMs` is handled in `crawl()` via
+    // `scanWorkingTreeForChange` so a mere index touch (e.g. `git status`)
+    // does not always force a full `ls-files --cached` re-listing.
+    return currentMtime < state.gitRootMtimeMs || !isThrottled(stateKey);
   }
 
   // For non-git paths, we can only rely on time-based throttling.
@@ -322,6 +325,21 @@ function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
   }
 
   return true;
+}
+
+function refreshChangeStateGitMtime(
+  stateKey: string,
+  crawlDirectory: string,
+): void {
+  const state = changeStateMap.get(stateKey);
+  if (!state) {
+    return;
+  }
+  const mtime = getGitRootMtime(crawlDirectory);
+  changeStateMap.set(stateKey, {
+    ...state,
+    gitRootMtimeMs: mtime,
+  });
 }
 
 function updateChangeState(
@@ -362,7 +380,6 @@ interface CommandResult {
 }
 
 interface RunCommandOptions {
-  maxLines?: number;
   collectLines?: boolean;
   onLine?: (line: string) => boolean;
   silentOnFailure?: boolean;
@@ -378,12 +395,7 @@ function runCommand(
   timeoutMs: number = 20_000,
   options?: RunCommandOptions,
 ): Promise<CommandResult> {
-  const maxLines = options?.maxLines;
   const collectLines = options?.collectLines !== false;
-
-  if (maxLines !== undefined && maxLines <= 0) {
-    return Promise.resolve({ success: true, lines: [] });
-  }
 
   return new Promise((resolve) => {
     const lines: string[] = [];
@@ -408,6 +420,16 @@ function runCommand(
         cwd,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
+        ...(command === 'git'
+          ? {
+              env: {
+                ...process.env,
+                GIT_DIR: undefined,
+                GIT_WORK_TREE: undefined,
+                GIT_INDEX_FILE: undefined,
+              },
+            }
+          : {}),
       });
     } catch (err) {
       if (!options?.silentOnFailure) {
@@ -456,12 +478,6 @@ function runCommand(
 
       if (collectLines) {
         lines.push(normalized);
-      }
-
-      if (maxLines !== undefined && lines.length >= maxLines) {
-        killedByLimit = true;
-        stopProcess();
-        return false;
       }
 
       streamedLineCount++;
@@ -557,6 +573,11 @@ function runCommand(
         clearTimeout(timeout);
       }
 
+      if (killedByLimit) {
+        finalize(true, lines);
+        return;
+      }
+
       if (timedOut) {
         if (!options?.silentOnFailure) {
           logCommandProblem('command timed out', command, args, {
@@ -565,11 +586,6 @@ function runCommand(
           });
         }
         finalize(false, []);
-        return;
-      }
-
-      if (killedByLimit) {
-        finalize(true, lines);
         return;
       }
 
@@ -605,8 +621,20 @@ function normalizePath(p: string): string {
 }
 
 function getPosixRelative(from: string, to: string): string {
-  const fromAbs = path.resolve(from);
-  const toAbs = path.resolve(to);
+  const fromResolved = path.resolve(from);
+  const toResolved = path.resolve(to);
+  let fromAbs = fromResolved;
+  let toAbs = toResolved;
+  try {
+    fromAbs = fs.realpathSync(fromResolved);
+  } catch {
+    // Path may not exist; keep resolved form for best-effort relativity.
+  }
+  try {
+    toAbs = fs.realpathSync(toResolved);
+  } catch {
+    // Path may not exist; keep resolved form for best-effort relativity.
+  }
   const relative = path.relative(fromAbs, toAbs);
   const posixRel = toPosixPath(relative);
   return posixRel === '' ? '.' : posixRel;
@@ -929,24 +957,24 @@ function posixPathUnderGitRoot(
   normalizedFile: string,
   relativeToGitRoot: string,
   relativeToCrawlDir: string,
+  normGitRoot: string,
+  normCrawlDir: string,
 ): string {
-  const rg = normalizeGitPath(relativeToGitRoot, true);
-  const rc = normalizeGitPath(relativeToCrawlDir, true);
   const nf = normalizeGitPath(normalizedFile, false);
 
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
-    const rest = sliceAfterGitPathspecPrefix(nf, rg);
+    const rest = sliceAfterGitPathspecPrefix(nf, normGitRoot);
     if (rest !== null) {
-      return path.posix.join(rc, rest);
+      return path.posix.join(normCrawlDir, rest);
     }
-    if (equalsRepoRelativeCaseAware(nf, rg)) {
+    if (equalsRepoRelativeCaseAware(nf, normGitRoot)) {
       const base = nf.replace(/\/+$/, '');
       return `${base}/`;
     }
     const nfFile = nf.replace(/\/+$/, '');
-    return path.posix.join(rc, nfFile);
+    return path.posix.join(normCrawlDir, nfFile);
   }
-  return path.posix.join(rc, nf.replace(/\/+$/, ''));
+  return path.posix.join(normCrawlDir, nf.replace(/\/+$/, ''));
 }
 
 async function crawlWithGitLsFiles(
@@ -992,8 +1020,17 @@ async function crawlWithGitLsFiles(
     return { success: false, files: [], gitRepoListingFailed: false };
   }
 
+  if (
+    !workingTreePrefetch &&
+    (untrackedFiles === null || deletedFiles === null)
+  ) {
+    return { success: false, files: [], gitRepoListingFailed: true };
+  }
+
   const relativeToCrawlDir = getPosixRelative(cwd, crawlDirectory);
   const relativeToGitRoot = getPosixRelative(gitRoot, crawlDirectory);
+  const normGitRoot = normalizeGitPath(relativeToGitRoot, true);
+  const normCrawlDir = normalizeGitPath(relativeToCrawlDir, true);
   const dirFilter = options.ignore.getDirectoryFilter();
   const fileFilter = options.ignore.getFileFilter();
 
@@ -1005,7 +1042,7 @@ async function crawlWithGitLsFiles(
     trackedArgs.push(relativeToGitRoot);
   }
 
-  const deletedSet = new Set(deletedFiles ?? []);
+  const deletedSet = new Set(deletedFiles);
 
   const fileSet = new Set<string>();
   let budgetedFileCount = 0;
@@ -1052,6 +1089,8 @@ async function crawlWithGitLsFiles(
       normalizedFile,
       relativeToGitRoot,
       relativeToCrawlDir,
+      normGitRoot,
+      normCrawlDir,
     );
 
     if (!shouldIncludeFile(fullPath, dirFilter, fileFilter)) {
@@ -1104,6 +1143,8 @@ async function crawlWithGitLsFiles(
         normalizedFile,
         relativeToGitRoot,
         relativeToCrawlDir,
+        normGitRoot,
+        normCrawlDir,
       );
 
       if (!shouldIncludeFile(fullPath, dirFilter, fileFilter)) {
@@ -1277,9 +1318,21 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
   // run `buildResultsFromFileSet` here — it would duplicate every directory
   // (it also synthesizes parents from file paths). Git/rg only list files and
   // need that helper; fdir does not.
-  return results
+  const mapped = results
     .filter((p) => p.length > 0 && p !== '.')
     .map((p) => path.posix.join(relativeToCrawlDir, p));
+
+  // Align with git/rg: include the crawl root as a directory row when it is not
+  // the project cwd (fdir walks inside `crawlDirectory` and never emits that row).
+  if (relativeToCrawlDir !== '.') {
+    const rootDir = relativeToCrawlDir.endsWith('/')
+      ? relativeToCrawlDir
+      : `${relativeToCrawlDir}/`;
+    if (!mapped.includes(rootDir)) {
+      return [rootDir, ...mapped];
+    }
+  }
+  return mapped;
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {
@@ -1304,12 +1357,31 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
 
   let workingTreePrefetch: GitWorkingTreePrefetch | undefined;
 
+  // Typical callers (see `fileSearch.ts`) pass `cache: true` and rely on the TTL
+  // crawlCache only. This branch is for tests and any caller that sets
+  // `cache: false`: it keeps an in-memory snapshot plus git index / untracked
+  // fingerprints to avoid redundant subprocess work within the throttle window.
   if (!options.cache) {
-    const needReCrawl = hasFileListChanged(stateKey, options.crawlDirectory);
+    const state = changeStateMap.get(stateKey);
+    if (state) {
+      const currentMtime = getGitRootMtime(options.crawlDirectory);
+      const indexNewerThanState =
+        currentMtime !== null &&
+        state.gitRootMtimeMs !== null &&
+        currentMtime > state.gitRootMtimeMs;
 
-    if (!needReCrawl) {
-      const state = changeStateMap.get(stateKey);
-      if (state) {
+      if (indexNewerThanState) {
+        const scan = await scanWorkingTreeForChange(
+          state,
+          options.crawlDirectory,
+          options.useGitignore !== false,
+        );
+        if (!scan.changed) {
+          refreshChangeStateGitMtime(stateKey, options.crawlDirectory);
+          return state.fileList;
+        }
+        workingTreePrefetch = scan.prefetch;
+      } else if (!hasFileListChanged(stateKey, options.crawlDirectory)) {
         const scan = await scanWorkingTreeForChange(
           state,
           options.crawlDirectory,
