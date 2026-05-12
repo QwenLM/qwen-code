@@ -134,6 +134,20 @@ export class EventBus {
     return this.subs.size;
   }
 
+  /**
+   * Publish an event to the bus. Returns the constructed `BridgeEvent`
+   * (with `id` + `v` assigned) on success, or `undefined` when the
+   * bus is closed.
+   *
+   * **Never throws** (BX9_p contract). Closing the bus mid-publish
+   * is the only abnormal path and is handled as a return-undefined
+   * no-op; subscriber-enqueue failures are caught internally and
+   * translated to per-subscriber eviction. Call sites can rely on
+   * this — the historical `try { publish(...) } catch {}` blocks in
+   * `httpAcpBridge.ts` are defense-in-depth, not load-bearing, and
+   * may be removed in a future cleanup pass without changing
+   * behavior. Don't add new try/catch wrappers around `publish()`.
+   */
   publish(input: Omit<BridgeEvent, 'id' | 'v'>): BridgeEvent | undefined {
     // Publishing against a closed bus is a no-op rather than a throw.
     // The shutdown path closes per-session buses *before* awaiting

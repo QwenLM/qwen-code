@@ -1583,18 +1583,28 @@ function sliceLineRange(
  * downstream `spawn({cwd})` will fail with a useful ENOENT if the
  * workspace truly doesn't exist.
  *
- * NOTE: This is an undocumented cross-module contract — `config.ts`,
+ * NOTE: This is a **cross-module contract** (BX9_q) — `config.ts`,
  * `settings.ts`, `sandbox.ts`, and this file all need to canonicalize
  * the same way for `sessionScope: 'single'` re-attach to work
- * correctly across paths. Stage 2 in-process (issue #3803 §10) will
- * collapse the bridge into core, removing the bridge-side path
- * resolution entirely; until then, *any* change to how those modules
- * resolve workspace paths needs a matching change here. A shared
- * `canonicalizeWorkspace` utility under `packages/cli/src/utils/`
- * (or `packages/core/src/utils/`) was considered but deferred:
- * the call sites use slightly different fallback policies, and a
- * lowest-common-denominator extraction would force changes in
- * unrelated subsystems mid-Stage-1.
+ * correctly across paths. The contract: use `realpathSync.native` on
+ * the resolved absolute path; fall back to `path.resolve` only when
+ * the path doesn't exist yet. If a future change breaks this
+ * alignment (e.g. one module starts lowercasing on Windows but this
+ * one doesn't), `byWorkspace.get()` lookup misses for the same
+ * physical directory → duplicate sessions silently spawn, and
+ * `sessionScope: 'single'` degrades to "one per spelling" with no
+ * error. There's no test that pins the alignment; the integration
+ * suite would catch a divergence only if it tested the specific
+ * casing / symlink path the affected module changed.
+ *
+ * Stage 2 in-process (#3803 §10) collapses the bridge into core,
+ * removing the bridge-side path resolution entirely. Stage 1.5
+ * `@qwen-code/acp-bridge` lift (chiga0 finding 1) is the natural
+ * place to extract a shared `canonicalizeWorkspace` primitive that
+ * all four modules consume — the lowest-common-denominator
+ * extraction is fine THERE because the package boundary forces the
+ * call sites to converge. Until then, *any* change to how those
+ * modules resolve workspace paths needs a matching change here.
  */
 function canonicalizeWorkspace(p: string): string {
   const resolved = path.resolve(p);

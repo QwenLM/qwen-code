@@ -158,27 +158,33 @@ export async function* parseSseStream(
 function consumeFrames(buf: string): { frames: string[]; tail: string } {
   const frames: string[] = [];
   let cursor = 0;
+  // BX9_a: in the common LF-only case the CRLF scan always returns
+  // -1, traversing the entire remaining buffer for nothing. Search
+  // `\n\n` first; only fall back to `\r\n\r\n` if the LF separator
+  // isn't found OR comes after a (potentially) earlier CRLF
+  // separator. The earlier-separator case is rare (mixed-encoding
+  // streams) so the extra CRLF scan only fires when needed.
   while (cursor < buf.length) {
     const lf = buf.indexOf('\n\n', cursor);
-    const crlf = buf.indexOf('\r\n\r\n', cursor);
-    let sepIdx: number;
-    let sepLen: number;
-    if (lf === -1 && crlf === -1) break;
     if (lf === -1) {
-      sepIdx = crlf;
-      sepLen = 4;
-    } else if (crlf === -1) {
-      sepIdx = lf;
-      sepLen = 2;
-    } else if (crlf < lf) {
-      sepIdx = crlf;
-      sepLen = 4;
-    } else {
-      sepIdx = lf;
-      sepLen = 2;
+      // No LF separator left — try the CRLF fallback.
+      const crlf = buf.indexOf('\r\n\r\n', cursor);
+      if (crlf === -1) break;
+      frames.push(buf.slice(cursor, crlf));
+      cursor = crlf + 4;
+      continue;
     }
-    frames.push(buf.slice(cursor, sepIdx));
-    cursor = sepIdx + sepLen;
+    // An LF exists. If a CRLF appears earlier (mixed-encoding edge
+    // case), use it instead. Restrict the CRLF scan to `[cursor, lf)`
+    // — anything past `lf` doesn't matter since LF already terminates.
+    const crlf = buf.indexOf('\r\n\r\n', cursor);
+    if (crlf !== -1 && crlf < lf) {
+      frames.push(buf.slice(cursor, crlf));
+      cursor = crlf + 4;
+    } else {
+      frames.push(buf.slice(cursor, lf));
+      cursor = lf + 2;
+    }
   }
   return { frames, tail: buf.slice(cursor) };
 }

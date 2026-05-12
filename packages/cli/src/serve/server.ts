@@ -301,7 +301,22 @@ export function createServeApp(
       // send a response anyway, and active clients (e.g. an IDE
       // plugin scrubbing a stuck prompt) would otherwise spam the
       // daemon log.
-      if (err instanceof DOMException && err.name === 'AbortError') return;
+      //
+      // BX9_k: narrow the swallow to ONLY the case where WE armed
+      // the abort. The earlier blanket `err.name === 'AbortError'`
+      // could also swallow an internal bridge abort (e.g. the child
+      // process aborting a prompt mid-flight) — leaving the client
+      // with no response and no log trace. If `abort.signal.aborted`
+      // is false, the AbortError came from somewhere we didn't
+      // expect → route it through `sendBridgeError` as a real
+      // failure.
+      if (
+        err instanceof DOMException &&
+        err.name === 'AbortError' &&
+        abort.signal.aborted
+      ) {
+        return;
+      }
       sendBridgeError(res, err, {
         route: 'POST /session/:id/prompt',
         sessionId,
