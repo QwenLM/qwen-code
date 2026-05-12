@@ -1477,6 +1477,15 @@ export const AppContainer = (props: AppContainerProps) => {
       );
       historyManager.truncateToItem(lastUserItem.id);
       buffer.setText(lastUserItem.text);
+      // Third cleanup leg: the in-memory chat history. `GeminiChat`
+      // appends the user content before the stream generator runs, and
+      // the abort path doesn't pop it. Without this strip, the NEXT
+      // request's wire payload would carry the cancelled prompt as an
+      // orphan user turn alongside the new one — model context would
+      // contradict what the UI told the user was rewound. Mirrors the
+      // existing strip in the Retry submit path
+      // (GeminiClient.sendMessageStream).
+      geminiClient?.stripOrphanedUserEntriesFromHistory?.();
       // Also undo the cross-session ↑-history disk entry written by
       // useGeminiStream's `logger.logMessage` — otherwise
       // getPreviousUserMessages would resurrect the cancelled prompt next
@@ -1494,6 +1503,7 @@ export const AppContainer = (props: AppContainerProps) => {
       popAllMessages,
       historyManager,
       logger,
+      geminiClient,
       pendingSlashCommandHistoryItems,
       pendingGeminiHistoryItems,
     ],

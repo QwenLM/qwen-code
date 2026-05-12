@@ -891,6 +891,7 @@ describe('AppContainer State Management', () => {
       const mockSetText = vi.fn();
       const mockTruncateToItem = vi.fn();
       const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      const mockStripOrphans = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
         text: '',
         setText: mockSetText,
@@ -910,6 +911,15 @@ describe('AppContainer State Management', () => {
         getPreviousUserMessages: vi.fn().mockResolvedValue([]),
         removeLastUserMessage: mockRemoveLastUserMessage,
       });
+      // Extend the default GeminiClient mock with the orphan-strip
+      // entry-point so the auto-restore branch's third cleanup leg can
+      // be observed.
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        stripOrphanedUserEntriesFromHistory: mockStripOrphans,
+      } as unknown as GeminiClient);
       installCancelCapture({
         streamingState: 'responding',
         submitQuery: vi.fn(),
@@ -949,6 +959,10 @@ describe('AppContainer State Management', () => {
       expect(mockSetText).toHaveBeenCalledWith('what time is it?');
       // Cross-session ↑-history (disk-backed) is also cleaned.
       expect(mockRemoveLastUserMessage).toHaveBeenCalled();
+      // Third cleanup leg: in-memory chat history is stripped so the
+      // cancelled prompt doesn't ride along on the next request as an
+      // orphan user turn.
+      expect(mockStripOrphans).toHaveBeenCalled();
     });
 
     it('does not auto-restore when the cancelled turn did not add a user item (e.g. Cron / slash submit_prompt)', async () => {

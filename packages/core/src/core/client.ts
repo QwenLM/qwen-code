@@ -306,7 +306,20 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
-  private stripOrphanedUserEntriesFromHistory() {
+  /**
+   * Pop orphaned trailing user entries from the in-memory chat history.
+   * Used by:
+   *   - The Retry submit path (sendMessageStream below), which drops a
+   *     prior failed attempt before re-sending.
+   *   - The auto-restore-on-cancel flow in AppContainer, which rewinds
+   *     a user prompt out of the UI transcript and the disk-backed
+   *     ↑-history; this is the third place the cancelled prompt lives.
+   *     Without calling this from auto-restore, the next request's wire
+   *     payload would carry two consecutive user turns — the cancelled
+   *     one and the new one — and the model would see context the user
+   *     thought had been undone.
+   */
+  stripOrphanedUserEntriesFromHistory() {
     this.getChat().stripOrphanedUserEntriesFromHistory();
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
