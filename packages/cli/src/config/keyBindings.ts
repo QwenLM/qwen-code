@@ -31,6 +31,10 @@ export enum Command {
   NAVIGATION_UP = 'navigationUp',
   NAVIGATION_DOWN = 'navigationDown',
 
+  // Selection list navigation (dialogs, menus)
+  SELECTION_UP = 'selectionUp',
+  SELECTION_DOWN = 'selectionDown',
+
   // Auto-completion
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
@@ -131,10 +135,22 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.NAVIGATION_UP]: [{ key: 'up' }],
   [Command.NAVIGATION_DOWN]: [{ key: 'down' }],
 
+  // Selection list navigation — up/k/Ctrl+P move selection up; down/j/Ctrl+N move selection down
+  // ctrl: false on k/j ensures Ctrl+K (kill-line) and Ctrl+N (history-down) are not captured here
+  [Command.SELECTION_UP]: [
+    { key: 'up' },
+    { key: 'k', ctrl: false },
+    { key: 'p', ctrl: true },
+  ],
+  [Command.SELECTION_DOWN]: [
+    { key: 'down' },
+    { key: 'j', ctrl: false },
+    { key: 'n', ctrl: true },
+  ],
+
   // Auto-completion
   [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
   // Completion navigation uses only arrow keys
-  // Ctrl+P/N are reserved for history navigation (HISTORY_UP/DOWN)
   [Command.COMPLETION_UP]: [{ key: 'up' }],
   [Command.COMPLETION_DOWN]: [{ key: 'down' }],
 

@@ -19,6 +19,7 @@ import {
   useBackgroundTaskViewActions,
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
@@ -1053,12 +1054,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (!dialogOpen) return;
 
       if (dialogMode === 'list') {
-        if (key.name === 'up') {
+        if (keyMatchers[Command.SELECTION_UP](key)) {
           moveSelectionUp();
           setPendingCancelEntryId(null);
           return;
         }
-        if (key.name === 'down') {
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
           moveSelectionDown();
           setPendingCancelEntryId(null);
           return;

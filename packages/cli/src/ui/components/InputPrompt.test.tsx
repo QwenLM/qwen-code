@@ -144,6 +144,8 @@ describe('InputPrompt', () => {
         mockBuffer.viewportVisualLines = [newText];
         mockBuffer.allVisualLines = [newText];
         mockBuffer.visualToLogicalMap = [[0, 0]];
+        // Mirror real buffer: setText positions cursor at end of last visual line
+        mockBuffer.visualCursor = [0, newText.length];
       }),
       replaceRangeByOffset: vi.fn(),
       viewportVisualLines: [''],
@@ -375,8 +377,12 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
+    // Two-step edge: pre-position cursor at col 0 so Up directly triggers history
+    mockBuffer.visualCursor = [0, 0];
     stdin.write('\u001B[A'); // Up arrow
     await wait();
+    // Pre-position cursor at end so Down directly triggers history
+    mockBuffer.visualCursor = [0, 'some text'.length];
     stdin.write('\u001B[B'); // Down arrow
     await wait();
     stdin.write('\r'); // Enter
@@ -414,6 +420,8 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateDown).not.toHaveBeenCalled();
 
     // Ctrl+P should navigate history, not completion
+    // Two-step edge: pre-position cursor at col 0 so Ctrl+P directly triggers history
+    mockBuffer.visualCursor = [0, 0];
     stdin.write('\u0010'); // Ctrl+P
     await wait();
     expect(mockCommandCompletion.navigateUp).toHaveBeenCalledTimes(1);
@@ -1270,6 +1278,8 @@ describe('InputPrompt', () => {
     const TestHarness = () => {
       const buffer = useTextBuffer({
         initialText: '/export md',
+        // Two-step edge: position cursor at end so Down directly triggers history
+        initialCursorOffset: '/export md'.length,
         viewport: { width: 80, height: 20 },
         isValidPath: () => false,
         onChange: () => {},
@@ -3660,6 +3670,96 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+  });
+
+  // Two-step edge transition: Ctrl+P / Ctrl+N (and arrow ↑/↓) in a non-empty
+  // buffer first snap the cursor to col 0 (Up) or end-of-line (Down) when the
+  // cursor isn't already at that edge, and only on a *second* press do they
+  // walk the input history. This mirrors readline / Claude Code parity called
+  // out in issue #3821. Multi-line transition between visual rows is covered
+  // end-to-end via manual testing (see contributions/3821-readline-shortcuts/
+  // demo.md cases 2 & 3); the unit tests below exercise the single-visual-row
+  // edges where the mock buffer's view of the world is self-consistent.
+  describe('two-step edge transition for history navigation', () => {
+    it('Ctrl+P with cursor mid-line snaps to col 0 without touching history', async () => {
+      // setText('hello') puts the mock's visualCursor at the end of 'hello'.
+      // From that position pressing Ctrl+P should first move cursor to col 0;
+      // it must NOT navigate history on this press.
+      mockBuffer.setText('hello');
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u0010'); // Ctrl+P
+      await wait();
+
+      expect(mockBuffer.move).toHaveBeenCalledWith('home');
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Ctrl+N with cursor not at end-of-line snaps to end without touching history', async () => {
+      // Manually park the cursor at col 0 (as if a prior Ctrl+P just loaded a
+      // history entry, which lands cursor at offset 0). Pressing Ctrl+N now
+      // should first jump cursor to end-of-line, not navigate history.
+      mockBuffer.setText('hello');
+      mockBuffer.visualCursor = [0, 0]; // simulate "just loaded older history"
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u000E'); // Ctrl+N
+      await wait();
+
+      expect(mockBuffer.move).toHaveBeenCalledWith('end');
+      expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Ctrl+P at col 0 walks history and parks the cursor at offset 0', async () => {
+      // navigateUp returns boolean true on a real history move. We model that
+      // here so the post-navigation moveToOffset(0) side-effect (the "cursor
+      // at start of the restored older entry" rule) is observable.
+      mockInputHistory.navigateUp.mockReturnValue(true);
+      mockBuffer.setText('current draft');
+      mockBuffer.visualCursor = [0, 0];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u0010'); // Ctrl+P
+      await wait();
+
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      // Readline "previous-history" lands the cursor at the start of the
+      // restored entry.
+      expect(mockBuffer.moveToOffset).toHaveBeenCalledWith(0);
+      unmount();
+    });
+
+    it('arrow Up applies the same two-step rule as Ctrl+P (snap before navigate)', async () => {
+      // The arrow-key history path lives alongside Ctrl+P in InputPrompt.tsx
+      // and the two must stay in lock-step. This test pins the parity so a
+      // future refactor that diverges them will fail.
+      mockBuffer.setText('hello'); // cursor at end via patched setText mock
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockBuffer.move).toHaveBeenCalledWith('home');
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       unmount();
     });
   });

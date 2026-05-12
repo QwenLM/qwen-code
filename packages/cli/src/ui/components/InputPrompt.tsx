@@ -968,10 +968,41 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {
-          inputHistory.navigateUp();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on first visual row → move cursor up one row
+          // 2. Else if cursor not at col 0 → snap to col 0 (no history change)
+          // 3. Else → navigate to older history; cursor lands at offset 0
+          const onFirstRow =
+            buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0;
+          if (!onFirstRow) {
+            buffer.move('up');
+            return true;
+          }
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (keyMatchers[Command.HISTORY_DOWN](key)) {
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on last visual row → move cursor down one row
+          // 2. Else if cursor not at end of line → snap to end (no history change)
+          // 3. Else → navigate to newer history; cursor lands at end (setText default)
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const onLastRow = buffer.visualCursor[0] === lastRowIdx;
+          if (!onLastRow) {
+            buffer.move('down');
+            return true;
+          }
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
           inputHistory.navigateDown();
           return true;
         }
@@ -981,7 +1012,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          inputHistory.navigateUp();
+          // Two-step edge transition: snap cursor to col 0 before triggering history
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (
@@ -989,6 +1027,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
+          // Two-step edge transition: snap cursor to end of line before triggering history
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
           if (inputHistory.navigateDown()) {
             return true;
           }

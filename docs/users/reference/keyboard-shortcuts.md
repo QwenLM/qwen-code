@@ -19,35 +19,35 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## Input Prompt
 
-| Shortcut                                           | Description                                                                                                                         |
-| -------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| `!`                                                | Toggle shell mode when the input is empty.                                                                                          |
-| `?`                                                | Toggle keyboard shortcuts display when the input is empty.                                                                          |
-| `\` (at end of line) + `Enter`                     | Insert a newline.                                                                                                                   |
-| `Down Arrow`                                       | Navigate down through the input history.                                                                                            |
-| `Enter`                                            | Submit the current prompt.                                                                                                          |
-| `Meta+Delete` / `Ctrl+Delete`                      | Delete the word to the right of the cursor.                                                                                         |
-| `Tab`                                              | Autocomplete the current suggestion if one exists.                                                                                  |
-| `Up Arrow`                                         | Navigate up through the input history.                                                                                              |
-| `Ctrl+A` / `Home`                                  | Move the cursor to the beginning of the line.                                                                                       |
-| `Ctrl+B` / `Left Arrow`                            | Move the cursor one character to the left.                                                                                          |
-| `Ctrl+C`                                           | Clear the input prompt                                                                                                              |
-| `Esc` (double press)                               | Clear the input prompt.                                                                                                             |
-| `Ctrl+D` / `Delete`                                | Delete the character to the right of the cursor.                                                                                    |
-| `Ctrl+E` / `End`                                   | Move the cursor to the end of the line.                                                                                             |
-| `Ctrl+F` / `Right Arrow`                           | Move the cursor one character to the right.                                                                                         |
-| `Ctrl+H` / `Backspace`                             | Delete the character to the left of the cursor.                                                                                     |
-| `Ctrl+K`                                           | Delete from the cursor to the end of the line.                                                                                      |
-| `Ctrl+Left Arrow` / `Meta+Left Arrow` / `Meta+B`   | Move the cursor one word to the left.                                                                                               |
-| `Ctrl+N`                                           | Navigate down through the input history.                                                                                            |
-| `Ctrl+P`                                           | Navigate up through the input history.                                                                                              |
-| `Ctrl+R`                                           | Reverse search through input/shell history.                                                                                         |
-| `Ctrl+Y`                                           | Retry the last failed request.                                                                                                      |
-| `Ctrl+Right Arrow` / `Meta+Right Arrow` / `Meta+F` | Move the cursor one word to the right.                                                                                              |
-| `Ctrl+U`                                           | Delete from the cursor to the beginning of the line.                                                                                |
-| `Ctrl+V` (Windows: `Alt+V`)                        | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt. |
-| `Ctrl+W` / `Meta+Backspace` / `Ctrl+Backspace`     | Delete the word to the left of the cursor.                                                                                          |
-| `Ctrl+X` / `Meta+Enter`                            | Open the current input in an external editor.                                                                                       |
+| Shortcut                                           | Description                                                                                                                                                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `!`                                                | Toggle shell mode when the input is empty.                                                                                                                                        |
+| `?`                                                | Toggle keyboard shortcuts display when the input is empty.                                                                                                                        |
+| `\` (at end of line) + `Enter`                     | Insert a newline.                                                                                                                                                                 |
+| `Down Arrow`                                       | Navigate down through the input history.                                                                                                                                          |
+| `Enter`                                            | Submit the current prompt.                                                                                                                                                        |
+| `Meta+Delete` / `Ctrl+Delete`                      | Delete the word to the right of the cursor.                                                                                                                                       |
+| `Tab`                                              | Autocomplete the current suggestion if one exists.                                                                                                                                |
+| `Up Arrow`                                         | Navigate up through the input history.                                                                                                                                            |
+| `Ctrl+A` / `Home`                                  | Move the cursor to the beginning of the line.                                                                                                                                     |
+| `Ctrl+B` / `Left Arrow`                            | Move the cursor one character to the left.                                                                                                                                        |
+| `Ctrl+C`                                           | Clear the input prompt                                                                                                                                                            |
+| `Esc` (double press)                               | Clear the input prompt.                                                                                                                                                           |
+| `Ctrl+D` / `Delete`                                | Delete the character to the right of the cursor.                                                                                                                                  |
+| `Ctrl+E` / `End`                                   | Move the cursor to the end of the line.                                                                                                                                           |
+| `Ctrl+F` / `Right Arrow`                           | Move the cursor one character to the right.                                                                                                                                       |
+| `Ctrl+H` / `Backspace`                             | Delete the character to the left of the cursor.                                                                                                                                   |
+| `Ctrl+K`                                           | Delete from the cursor to the end of the line.                                                                                                                                    |
+| `Ctrl+Left Arrow` / `Meta+Left Arrow` / `Meta+B`   | Move the cursor one word to the left.                                                                                                                                             |
+| `Ctrl+N`                                           | In single-line input: navigate down through the input history. In multi-line input: move the cursor down one line; fall back to history navigation when already on the last line. |
+| `Ctrl+P`                                           | In single-line input: navigate up through the input history. In multi-line input: move the cursor up one line; fall back to history navigation when already on the first line.    |
+| `Ctrl+R`                                           | Reverse search through input/shell history.                                                                                                                                       |
+| `Ctrl+Y`                                           | Retry the last failed request.                                                                                                                                                    |
+| `Ctrl+Right Arrow` / `Meta+Right Arrow` / `Meta+F` | Move the cursor one word to the right.                                                                                                                                            |
+| `Ctrl+U`                                           | Delete from the cursor to the beginning of the line.                                                                                                                              |
+| `Ctrl+V` (Windows: `Alt+V`)                        | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt.                                               |
+| `Ctrl+W` / `Meta+Backspace` / `Ctrl+Backspace`     | Delete the word to the left of the cursor.                                                                                                                                        |
+| `Ctrl+X` / `Meta+Enter`                            | Open the current input in an external editor.                                                                                                                                     |
 
 ## Suggestions
 
@@ -59,13 +59,13 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## Radio Button Select
 
-| Shortcut           | Description                                                                                                   |
-| ------------------ | ------------------------------------------------------------------------------------------------------------- |
-| `Down Arrow` / `j` | Move selection down.                                                                                          |
-| `Enter`            | Confirm selection.                                                                                            |
-| `Up Arrow` / `k`   | Move selection up.                                                                                            |
-| `1-9`              | Select an item by its number.                                                                                 |
-| (multi-digit)      | For items with numbers greater than 9, press the digits in quick succession to select the corresponding item. |
+| Shortcut                      | Description                                                                                                   |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `Down Arrow` / `j` / `Ctrl+N` | Move selection down.                                                                                          |
+| `Enter`                       | Confirm selection.                                                                                            |
+| `Up Arrow` / `k` / `Ctrl+P`   | Move selection up.                                                                                            |
+| `1-9`                         | Select an item by its number.                                                                                 |
+| (multi-digit)                 | For items with numbers greater than 9, press the digits in quick succession to select the corresponding item. |
 
 ## IDE Integration
 
