@@ -19,6 +19,8 @@ import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js'
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 
+const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
+
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -53,7 +55,6 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
     );
 
-    const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
     if (normalizedProxyUrl && !isDashscopeOrigin && !isProxyMatch) {
       debugLogger.debug(
         `DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match. DashScope headers/cache control will be skipped.`,

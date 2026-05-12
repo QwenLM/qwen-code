@@ -69,6 +69,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.unstubAllEnvs();
     const mockedBuildRuntimeFetchOptions =
       buildRuntimeFetchOptions as unknown as MockedFunction<
         (sdkType: 'openai', proxyUrl?: string) => OpenAIRuntimeFetchOptions
@@ -236,7 +237,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(false);
       expect(mockDebugLogger.debug).toHaveBeenCalledWith(
         expect.stringContaining(
-          "DASHSCOPE_PROXY_BASE_URL is configured as 'https://your-proxy.com/dashscope'",
+          'DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match',
         ),
       );
     });
