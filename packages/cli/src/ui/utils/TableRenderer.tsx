@@ -381,7 +381,30 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     }
   }
 
-  // ── Step 4: Check max row lines to decide vertical fallback ──
+  // ── Step 4: Width-gate the horizontal path before any wrap work ──
+  // Column-aware horizontal-vs-vertical decision: a horizontal table needs
+  // at least `MIN_COLUMN_WIDTH` per column plus the border overhead computed
+  // above, with a safety margin. This avoids the prior fixed 60-col floor
+  // that forced vertical mode for a 2-col table on a 50-col terminal even
+  // when content fit comfortably. The downstream `maxLineWidth` safety
+  // check still catches content that would actually overflow.
+  //
+  // Evaluating this before `calculateMaxRowLines()` short-circuits the
+  // per-cell `wrapText` pass when the terminal is already too narrow for
+  // any horizontal layout — that work would be discarded anyway.
+  const minHorizontalTableWidth = Math.max(
+    ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
+    colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
+  );
+  if (contentWidth < minHorizontalTableWidth) {
+    return (
+      <Box marginY={1}>
+        <Text>{renderVerticalFormat()}</Text>
+      </Box>
+    );
+  }
+
+  // ── Step 5: Check max row lines to decide vertical fallback ──
   function calculateMaxRowLines(): number {
     let maxLines = 1;
     for (let i = 0; i < colCount; i++) {
@@ -402,18 +425,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   const maxRowLines = calculateMaxRowLines();
-  // Column-aware horizontal-vs-vertical decision: a horizontal table needs
-  // at least `MIN_COLUMN_WIDTH` per column plus the border overhead computed
-  // above, with a safety margin. This avoids the prior fixed 60-col floor
-  // that forced vertical mode for a 2-col table on a 50-col terminal even
-  // when content fit comfortably. The downstream `maxLineWidth` safety
-  // check still catches content that would actually overflow.
-  const minHorizontalTableWidth = Math.max(
-    ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
-    colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
-  );
-  const useVerticalFormat =
-    contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES;
+  const useVerticalFormat = maxRowLines > MAX_ROW_LINES;
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>

@@ -20,6 +20,21 @@ import { StreamingState, type HistoryItemToolGroup } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
 
+/**
+ * Terminal width (in columns) at or below which the full bottom
+ * LoadingIndicator is suppressed during active token streaming, leaving only
+ * the minimal `(Esc to cancel)` fallback (see narrow-terminal block below).
+ *
+ * Chosen empirically as the width below which LoadingIndicator's current
+ * timer/spinner/phrase layout starts wrapping and breaking the bottom UI.
+ * If LoadingIndicator is later restyled to require more horizontal space,
+ * raise this constant; if it becomes more compact, lower it. Keep in sync
+ * with LoadingIndicator's own internal `isNarrowWidth()` threshold (80) —
+ * the two are independent (this gates full suppression, that gates internal
+ * layout compaction) and intentionally so.
+ */
+const SUPPRESS_LOADING_INDICATOR_MAX_WIDTH = 30;
+
 export const Composer = () => {
   const config = useConfig();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
@@ -45,7 +60,7 @@ export const Composer = () => {
   // guard so future expansions of `isStreaming` don't silently widen suppression.
   const suppressBottomLoadingIndicator =
     uiState.streamingState === StreamingState.Responding &&
-    uiState.terminalWidth <= 30;
+    uiState.terminalWidth <= SUPPRESS_LOADING_INDICATOR_MAX_WIDTH;
 
   // Aggregate agent tool tokens from executing tool calls. Only changes when
   // a subagent reports progress, so it doesn't drive the animation loop.
