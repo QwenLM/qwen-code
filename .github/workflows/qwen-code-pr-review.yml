@@ -16,11 +16,12 @@ on:
         required: true
         type: 'number'
       review_mode:
-        description: 'Run without posting comments, or publish review comments'
+        description: 'Run a smoke review, run without posting comments, or publish review comments'
         required: true
         default: 'dry-run'
         type: 'choice'
         options:
+          - 'smoke'
           - 'dry-run'
           - 'comment'
       additional_instructions:
@@ -118,7 +119,7 @@ jobs:
           fi
 
           case "$review_mode" in
-            dry-run|comment)
+            smoke|dry-run|comment)
               ;;
             *)
               echo "::error::Unsupported review mode: $review_mode"
@@ -189,10 +190,17 @@ jobs:
           additions="$(jq -r '.additions' <<< "$pr_json")"
           deletions="$(jq -r '.deletions' <<< "$pr_json")"
           changed_files="$(jq -r '.changedFiles' <<< "$pr_json")"
+          title="$(jq -r '.title' <<< "$pr_json")"
+          base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
+          head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
           changed_lines=$((additions + deletions))
 
           echo "changed_lines=$changed_lines" >> "$GITHUB_OUTPUT"
           echo "changed_files=$changed_files" >> "$GITHUB_OUTPUT"
+          echo "Review target: PR #$PR_NUMBER"
+          echo "Review title: $title"
+          echo "Review branch: $base_ref <- $head_ref"
+          echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
             echo "should_review=false" >> "$GITHUB_OUTPUT"
@@ -267,13 +275,78 @@ jobs:
             timeout 180s node dist/cli.js \
               --auth-type openai \
               --model "$OPENAI_MODEL" \
+              --output-format json \
               --max-session-turns 1 \
               --prompt "Reply with OK only."
+
+      - name: 'Smoke review PR diff'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.review_mode == 'smoke'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+        run: |-
+          set -euo pipefail
+
+          export PATH="$PWD/.qwen/bin:$PATH"
+          mkdir -p .qwen/tmp
+          diff_file=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-smoke.diff"
+          prompt_file=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-smoke-prompt.md"
+          output_file=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-smoke-output.json"
+
+          gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch > "$diff_file"
+          diff_lines="$(wc -l < "$diff_file" | tr -d ' ')"
+          diff_bytes="$(wc -c < "$diff_file" | tr -d ' ')"
+
+          echo "Smoke review target: PR #$PR_NUMBER"
+          echo "Smoke review scope: $diff_lines patch lines, $diff_bytes bytes"
+
+          {
+            printf 'You are smoke-testing the Qwen PR review GitHub Action.\n'
+            printf 'Review only the pull request patch below. Do not infer unrelated repository-wide changes.\n\n'
+            printf 'Return concise Markdown with exactly these headings:\n'
+            printf '1. Target\n'
+            printf '2. Changed files\n'
+            printf '3. Scope check\n'
+            printf '4. Obvious review findings\n\n'
+            printf 'Target PR: #%s\n\n' "$PR_NUMBER"
+            printf 'Patch follows. It may be truncated after 20000 bytes for smoke testing.\n\n'
+            head -c 20000 "$diff_file"
+          } > "$prompt_file"
+
+          OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
+            OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
+            timeout 180s node dist/cli.js \
+              --auth-type openai \
+              --model "$OPENAI_MODEL" \
+              --output-format json \
+              --max-session-turns 1 \
+              --prompt "$(cat "$prompt_file")" | tee "$output_file"
+
+          smoke_result="$(
+            jq -r '
+              if type == "array" then
+                ([.[] | select(.type == "result")] | last | .result // "")
+              else
+                .result // ""
+              end
+            ' "$output_file"
+          )"
+
+          {
+            printf '### Qwen PR review smoke test\n\n'
+            printf '- Target PR: #%s\n' "$PR_NUMBER"
+            printf '- Patch size: %s lines, %s bytes\n\n' "$diff_lines" "$diff_bytes"
+            printf '%s\n' "$smoke_result"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Run bundled Qwen PR review'
         id: 'review'
         if: |-
-          steps.size.outputs.should_review == 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.review_mode != 'smoke'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
