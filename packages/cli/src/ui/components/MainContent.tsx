@@ -156,6 +156,14 @@ export const MainContent = () => {
     ],
   );
 
+  // Filter out items whose display is suppressed (e.g. --quiet-restore).
+  // Canonical consumers (/rewind, turn mapping) use the full historyManager.history;
+  // rendering consumers use this visible subset.
+  const visibleMergedHistory = useMemo(
+    () => mergedHistory.filter((item) => !item.display?.suppressOnRestore),
+    [mergedHistory],
+  );
+
   // Build a callId → summary lookup from `tool_use_summary` history items so
   // compact-mode tool groups can render a semantic label instead of a generic
   // "Tool × N" line. A summary is indexed under every callId it covers; when
@@ -235,7 +243,7 @@ export const MainContent = () => {
     useMemo(() => {
       let runningOffsets = createEmptySourceCopyOffsets();
 
-      const items = mergedHistory.map((item) => {
+      const items = visibleMergedHistory.map((item) => {
         if (item.type === 'gemini') {
           runningOffsets = createEmptySourceCopyOffsets();
           const offsets = cloneSourceCopyOffsets(runningOffsets);
@@ -260,7 +268,7 @@ export const MainContent = () => {
         historyItemsWithSourceCopyOffsets: items,
         pendingStartSourceCopyOffsets: cloneSourceCopyOffsets(runningOffsets),
       };
-    }, [mergedHistory]);
+    }, [visibleMergedHistory]);
 
   const pendingHistoryItemsWithSourceCopyOffsets = useMemo(() => {
     let runningOffsets = cloneSourceCopyOffsets(pendingStartSourceCopyOffsets);
@@ -289,18 +297,18 @@ export const MainContent = () => {
 
   // Progressive Static replay (issue #3899). `replayCount` is the number of
   // history items currently passed to <Static>. It catches up to
-  // mergedHistory.length either in one shot (small lag) or chunk-by-chunk
+  // visibleMergedHistory.length either in one shot (small lag) or chunk-by-chunk
   // through setImmediate (large lag, e.g., post-Ctrl+O remount of a 500-item
   // session).
   //
-  // Note: source-copy offsets are computed across the FULL mergedHistory
+  // Note: source-copy offsets are computed across the visible merged history
   // above so each code block keeps its stable copy index even when only a
   // prefix is visible; we slice the post-offset array here.
   const [replayCount, setReplayCount] = useState(() =>
-    initialReplayCount(mergedHistory.length),
+    initialReplayCount(visibleMergedHistory.length),
   );
-  const mergedLengthRef = useRef(mergedHistory.length);
-  mergedLengthRef.current = mergedHistory.length;
+  const visibleLengthRef = useRef(visibleMergedHistory.length);
+  visibleLengthRef.current = visibleMergedHistory.length;
 
   // The reset MUST happen during render (not in an effect): historyRemountKey
   // also drives the <Static> key below, and Ink remounts Static synchronously
@@ -314,23 +322,23 @@ export const MainContent = () => {
   const [lastRemountKey, setLastRemountKey] = useState(historyRemountKey);
   if (lastRemountKey !== historyRemountKey) {
     setLastRemountKey(historyRemountKey);
-    setReplayCount(initialReplayCount(mergedLengthRef.current));
+    setReplayCount(initialReplayCount(visibleLengthRef.current));
   }
 
   useEffect(() => {
-    if (replayCount >= mergedHistory.length) return;
-    const remaining = mergedHistory.length - replayCount;
+    if (replayCount >= visibleMergedHistory.length) return;
+    const remaining = visibleMergedHistory.length - replayCount;
     if (remaining <= PROGRESSIVE_REPLAY_CHUNK_SIZE) {
-      setReplayCount(mergedHistory.length);
+      setReplayCount(visibleMergedHistory.length);
       return;
     }
     const handle = setImmediate(() => {
       setReplayCount((c) =>
-        Math.min(c + PROGRESSIVE_REPLAY_CHUNK_SIZE, mergedLengthRef.current),
+        Math.min(c + PROGRESSIVE_REPLAY_CHUNK_SIZE, visibleLengthRef.current),
       );
     });
     return () => clearImmediate(handle);
-  }, [replayCount, mergedHistory.length]);
+  }, [replayCount, visibleMergedHistory.length]);
 
   // Render the full list when the tail gap is small (≤ CHUNK_SIZE). This
   // covers the normal append path: a pending item finalizes, replayCount is
@@ -339,16 +347,11 @@ export const MainContent = () => {
   // because it is gone from pendingHistoryItems but not yet in the Static
   // slice. Chunked replay is still used for large remount gaps (Ctrl+O on a
   // long session) where the gap is >> CHUNK_SIZE.
-  // Filter out hidden items (e.g. from --quiet-restore) so they are not
-  // rendered but remain in historyManager.history for /rewind turn mapping.
-  const visibleHistoryItemsWithSourceCopyOffsets = useMemo(() => {
-    const filtered = historyItemsWithSourceCopyOffsets.filter(
-      ({ item }) => !item.hidden,
-    );
-    return filtered.length - replayCount <= PROGRESSIVE_REPLAY_CHUNK_SIZE
-      ? filtered
-      : filtered.slice(0, replayCount);
-  }, [historyItemsWithSourceCopyOffsets, replayCount]);
+  const visibleHistoryItemsWithSourceCopyOffsets =
+    historyItemsWithSourceCopyOffsets.length - replayCount <=
+    PROGRESSIVE_REPLAY_CHUNK_SIZE
+      ? historyItemsWithSourceCopyOffsets
+      : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
   return (
     <>

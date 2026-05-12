@@ -90,8 +90,14 @@ export interface SummaryProps {
 
 export interface HistoryItemBase {
   text?: string; // Text content for user/gemini/info/error messages
-  /** If true, the item is kept in history for turn mapping but not rendered. */
-  hidden?: boolean;
+  /** Display-only flags that do not affect canonical history semantics. */
+  display?: {
+    /**
+     * If true, the item is kept in history for turn mapping but not
+     * rendered in the restored transcript. Set by --quiet-restore.
+     */
+    suppressOnRestore?: boolean;
+  };
 }
 
 export type HistoryItemUser = HistoryItemBase & {

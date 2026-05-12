@@ -10,8 +10,11 @@ import {
   type Config,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
+import {
+  buildResumedHistoryItems,
+  applyResumeDisplayPolicy,
+  createQuietRestoreSummaryItem,
+} from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItem } from '../types.js';
 import {
@@ -111,26 +114,18 @@ export function useResumeCommand(
       setSessionName?.(customTitle ?? null);
 
       // Reset UI history.
-      const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
-
-      if (config.isQuietRestore()) {
-        // Mark restored items as hidden so they are not rendered but
-        // remain in historyManager.history for /rewind turn mapping.
-        for (const item of uiHistoryItems) {
-          item.hidden = true;
-        }
-      }
-
+      const rawItems = buildResumedHistoryItems(sessionData, config);
+      const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
+        quietRestore: config.isQuietRestore(),
+      });
       clearItems?.();
       loadHistory?.(uiHistoryItems);
 
       if (config.isQuietRestore()) {
-        const messageCount = sessionData.conversation.messages.length;
         addItem?.(
-          {
-            type: MessageType.INFO,
-            text: `Resumed session with ${messageCount} message${messageCount !== 1 ? 's' : ''}. History display suppressed (--quiet-restore).`,
-          } as Omit<HistoryItem, 'id'>,
+          createQuietRestoreSummaryItem(
+            sessionData.conversation.messages.length,
+          ),
           Date.now(),
         );
       }

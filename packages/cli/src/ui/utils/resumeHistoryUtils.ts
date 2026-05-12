@@ -20,7 +20,7 @@ import type {
   HistoryItemWithoutId,
   IndividualToolCallDisplay,
 } from '../types.js';
-import { ToolCallStatus } from '../types.js';
+import { ToolCallStatus, MessageType } from '../types.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -483,4 +483,34 @@ export function buildResumedHistoryItems(
   }
 
   return items;
+}
+
+/**
+ * Applies the quiet-restore display policy to resumed history items.
+ * When `quietRestore` is true, marks each item with
+ * `display.suppressOnRestore` so the rendering layer skips them while
+ * the canonical history (used by /rewind turn mapping) is preserved.
+ */
+export function applyResumeDisplayPolicy(
+  items: HistoryItem[],
+  options: { quietRestore?: boolean },
+): HistoryItem[] {
+  if (!options.quietRestore) return items;
+  return items.map((item) => ({
+    ...item,
+    display: { ...item.display, suppressOnRestore: true },
+  }));
+}
+
+/**
+ * Creates the summary INFO item shown when --quiet-restore suppresses
+ * the restored transcript.
+ */
+export function createQuietRestoreSummaryItem(
+  messageCount: number,
+): Omit<HistoryItem, 'id'> {
+  return {
+    type: MessageType.INFO,
+    text: `Resumed session with ${messageCount} message${messageCount !== 1 ? 's' : ''}. History display suppressed (--quiet-restore).`,
+  };
 }

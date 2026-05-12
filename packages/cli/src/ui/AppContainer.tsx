@@ -61,9 +61,11 @@ import {
   type WaitingToolCall,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
-import { loadLowlight } from './utils/lowlightLoader.js';
-import { restoreGoalFromHistory } from './utils/restoreGoal.js';
+import {
+  buildResumedHistoryItems,
+  applyResumeDisplayPolicy,
+  createQuietRestoreSummaryItem,
+} from './utils/resumeHistoryUtils.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -488,28 +490,17 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
-        const historyItems = buildResumedHistoryItems(
-          resumedSessionData,
-          config,
-        );
-
-        if (config.isQuietRestore()) {
-          // Mark restored items as hidden so they are not rendered but
-          // remain in historyManager.history for /rewind turn mapping.
-          for (const item of historyItems) {
-            item.hidden = true;
-          }
-        }
-
+        const rawItems = buildResumedHistoryItems(resumedSessionData, config);
+        const historyItems = applyResumeDisplayPolicy(rawItems, {
+          quietRestore: config.isQuietRestore(),
+        });
         historyManager.loadHistory(historyItems);
 
         if (config.isQuietRestore()) {
-          const messageCount = resumedSessionData.conversation.messages.length;
           historyManager.addItem(
-            {
-              type: MessageType.INFO,
-              text: `Resumed session with ${messageCount} message${messageCount !== 1 ? 's' : ''}. History display suppressed (--quiet-restore).`,
-            },
+            createQuietRestoreSummaryItem(
+              resumedSessionData.conversation.messages.length,
+            ),
             Date.now(),
           );
         }
