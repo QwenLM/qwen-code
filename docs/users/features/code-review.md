@@ -177,12 +177,12 @@ For non-interactive automation (e.g. the bundled PR-review GitHub Action), invok
 
 `--ci` changes the skill's behavior to be safe for `pull_request_target`-style workflows where the runner has access to repository secrets:
 
-- **Static-only.** Skips dependency install, linters, build, and tests against the PR worktree. The `--ci` safety contract in `SKILL.md` Step 3.0 enumerates disallowed binaries (`npm`/`npx`/`pnpm`/`yarn`/`node`/`python`/`cargo`/`make`/`mvn`/`gradle`/`bash -c`/`sh -c`/`eval`), forbidden git/gh write paths, blocked filesystem regions, banned secret echoing, and disallowed `gh api` repository-mutating endpoints.
+- **Static-only.** Skips dependency install, linters, build, and tests against the PR worktree. The `--ci` safety contract in `SKILL.md` Step 3.0 is the source of truth for disallowed interpreters and build tools, forbidden git/gh write paths, blocked filesystem regions, banned secret echoing, and disallowed `gh api` repository-mutating endpoints.
 - **Non-interactive.** Skips Step 8 (Autofix), skips follow-up prompts, and answers presubmit overlap questions automatically (drops same-line overlap with prior Qwen comments instead of asking).
 - **Treats PR content as data.** Diffs, descriptions, trigger comments, and `QWEN_REVIEW_ADDITIONAL_INSTRUCTIONS` are never executed as instructions. Any prompt-injection attempt is surfaced under a dedicated heading in the final review body.
 - **Comment-only.** Pair with `--comment` to publish findings via a single PR review. Without `--comment`, the review still runs but only logs to the workflow step summary (a "dry run").
 
-See `.github/workflows/qwen-code-pr-review.yml` for the reference workflow that wires `--ci` to a `pull_request_target` trigger restricted to `OWNER`/`MEMBER`/`COLLABORATOR`. External-contributor PRs will not be auto-reviewed on `opened`; a maintainer must comment `@qwen /review` to start the review for those PRs (intentional safety boundary).
+See `.github/workflows/qwen-code-pr-review.yml` for the reference workflow that wires `--ci` to a `pull_request_target` trigger restricted to `OWNER`/`MEMBER`/`COLLABORATOR`. The workflow expects `QWEN_PR_REVIEW_MODEL` as a repository variable and `REVIEW_OPENAI_API_KEY` / `REVIEW_OPENAI_BASE_URL` as review-specific repository secrets; these secrets are mapped to Qwen Code's `OPENAI_*` environment only for the preflight and review processes. External-contributor PRs will not be auto-reviewed on `opened`; a maintainer must comment `@qwen /review` to start the review for those PRs (intentional safety boundary).
 
 ## Follow-up Actions
 
@@ -223,11 +223,11 @@ Example `.qwen/review-rules.md`:
 
 When the skill is run with `--ci`, three readiness checks run before detailed code review:
 
-| Gate                | Default behavior | How to opt into blocking                                                                  |
-| ------------------- | ---------------- | ----------------------------------------------------------------------------------------- |
-| Scope               | **blocking**     | Always on. Threshold = `QWEN_PR_REVIEW_MAX_CHANGED_LINES` (default 1500).                 |
-| Product direction   | advisory         | Add the line `product-direction-gate: blocking` to `.qwen/review-rules.md`.               |
-| Validation evidence | advisory         | No opt-in today; surface in review body only.                                             |
+| Gate                | Default behavior | How to opt into blocking                                                    |
+| ------------------- | ---------------- | --------------------------------------------------------------------------- |
+| Scope               | **blocking**     | Always on. Threshold = `QWEN_PR_REVIEW_MAX_CHANGED_LINES` (default 1500).   |
+| Product direction   | advisory         | Add the line `product-direction-gate: blocking` to `.qwen/review-rules.md`. |
+| Validation evidence | advisory         | No opt-in today; surface in review body only.                               |
 
 Advisory gates surface their concern inside the Step 9 review body so a maintainer can react, but they do **not** stop the review. Blocking gates skip Steps 3–9 and post a single, contributor-friendly process comment with a model footer and a "reply if false-positive" line.
 

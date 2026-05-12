@@ -63,10 +63,10 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     env:
-      # Job-level env is intentionally minimal. OPENAI_API_KEY and OPENAI_BASE_URL are
-      # scoped to the `Run bundled Qwen PR review` step only, so dependency-install
-      # postinstall scripts and the bundle build cannot read them. GITHUB_TOKEN stays
-      # job-level because gh-based size/comment steps need it.
+      # Job-level env is intentionally minimal. Review provider secrets are
+      # scoped to the preflight/review steps only, so dependency-install
+      # postinstall scripts and the bundle build cannot read them. GITHUB_TOKEN
+      # stays job-level because gh-based size/comment steps need it.
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
@@ -242,6 +242,34 @@ jobs:
           ln -sf "$PWD/dist/cli.js" .qwen/bin/qwen
           echo "$PWD/.qwen/bin" >> "$GITHUB_PATH"
 
+      - name: 'Preflight review model'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        env:
+          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+        run: |-
+          set -euo pipefail
+
+          if [ -z "${REVIEW_OPENAI_API_KEY:-}" ]; then
+            echo "::error::Repository secret REVIEW_OPENAI_API_KEY is required for Qwen PR review."
+            exit 1
+          fi
+          if [ -z "${REVIEW_OPENAI_BASE_URL:-}" ]; then
+            echo "::error::Repository secret REVIEW_OPENAI_BASE_URL is required for Qwen PR review."
+            exit 1
+          fi
+
+          export PATH="$PWD/.qwen/bin:$PATH"
+          echo "Running Qwen review model preflight with model: $OPENAI_MODEL"
+          OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
+            OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
+            timeout 180s node dist/cli.js \
+              --auth-type openai \
+              --model "$OPENAI_MODEL" \
+              --max-session-turns 1 \
+              --prompt "Reply with OK only."
+
       - name: 'Run bundled Qwen PR review'
         id: 'review'
         if: |-
@@ -251,10 +279,10 @@ jobs:
           REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
           SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
           QWEN_REVIEW_ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
-          # OpenAI credentials are step-scoped so the npm install / bundle step above
-          # cannot read them via dependency postinstall scripts.
-          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          # Review credentials are step-scoped and mapped to OPENAI_* only for
+          # the Qwen process below.
+          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
         run: |-
           set -euo pipefail
 
@@ -265,10 +293,14 @@ jobs:
           fi
 
           echo "Running Qwen PR review in $REVIEW_MODE mode."
-          node dist/cli.js \
-            --approval-mode yolo \
-            --core-tools "task,run_shell_command,grep_search,read_file,write_file,glob" \
-            --prompt "$review_prompt"
+          OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
+            OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
+            node dist/cli.js \
+              --auth-type openai \
+              --model "$OPENAI_MODEL" \
+              --approval-mode yolo \
+              --core-tools "task,run_shell_command,grep_search,read_file,write_file,glob" \
+              --prompt "$review_prompt"
 
           if [ "$SHOULD_COMMENT" != "true" ]; then
             {
