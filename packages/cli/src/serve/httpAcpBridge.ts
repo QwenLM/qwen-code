@@ -304,6 +304,40 @@ export interface BridgeOptions {
   maxSessions?: number;
 }
 
+/**
+ * One `qwen --acp` child + the ACP connection on top of it, shared by
+ * all SessionEntries whose workspace maps to this channel. Stage 1.5
+ * multi-session work (per LaZzyMan / tanzhenxin reviews) leverages
+ * the agent's native `sessions: Map<string, Session>` (see
+ * `acp-integration/acpAgent.ts:194`) so multiple `newSession()` calls
+ * on one channel get separate session ids while sharing the child's
+ * process / OAuth / file-cache / hierarchy-memory parse.
+ *
+ * Lifetime: created on first `spawnOrAttach` for a workspace, kept
+ * alive while `sessionIds.size > 0`, and killed by `killSession` when
+ * the last entry leaves OR by `channel.exited` when the child dies.
+ * Cross-workspace channel sharing is intentionally NOT done in this
+ * bridge — `acpAgent.ts:601 (this.settings = loadSettings(cwd))`
+ * replaces the cached settings on each newSession call, so different
+ * workspaces in one child would step on each other's settings. One
+ * channel per workspace is the safe scope for Stage 1.5.
+ */
+interface ChannelInfo {
+  channel: AcpChannel;
+  connection: ClientSideConnection;
+  /** Shared BridgeClient — its methods route ACP params by sessionId. */
+  client: BridgeClient;
+  workspaceCwd: string;
+  /**
+   * Live session ids multiplexed on this channel. Updated when
+   * `doSpawn` registers a new session and when `killSession` /
+   * `channel.exited` removes one. When the set drops to empty AND no
+   * session is mid-attach, the channel is killed and removed from
+   * `byWorkspaceChannel`.
+   */
+  sessionIds: Set<string>;
+}
+
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
@@ -387,7 +421,20 @@ interface PendingPermission {
  */
 class BridgeClient implements Client {
   constructor(
-    private readonly resolveEntry: () => SessionEntry | undefined,
+    /**
+     * Look up the `SessionEntry` for an ACP call. Stage 1.5 multi-
+     * session on one channel means `BridgeClient` is shared across
+     * many sessions, so we can't bind the entry in a closure — we
+     * dispatch by the `sessionId` ACP includes in every per-session
+     * notification / request. `undefined` sessionId is the fallback
+     * for ACP calls that don't carry one (none expected on the
+     * client surface as of this writing) and resolves to whatever
+     * the channel's most-recent entry is — kept defensive to avoid
+     * silent drops if ACP grows a no-sessionId call.
+     */
+    private readonly resolveEntry: (
+      sessionId?: string,
+    ) => SessionEntry | undefined,
     private readonly registerPending: (pending: PendingPermission) => void,
     /**
      * Roll back a `registerPending` call when the subsequent publish
@@ -412,7 +459,7 @@ class BridgeClient implements Client {
   async requestPermission(
     params: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    const entry = this.resolveEntry();
+    const entry = this.resolveEntry(params.sessionId);
     if (!entry) return { outcome: { outcome: 'cancelled' } };
 
     const requestId = randomUUID();
@@ -454,7 +501,7 @@ class BridgeClient implements Client {
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
-    const entry = this.resolveEntry();
+    const entry = this.resolveEntry(params.sessionId);
     if (!entry) return;
     entry.events.publish({ type: 'session_update', data: params });
   }
@@ -627,15 +674,27 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     );
   }
 
-  // Single-scope reuse keyed by canonical workspace path.
-  // Cleanup-on-crash: `channel.exited` (registered at line ~469) removes
-  // the entry from both maps + cancels pending permissions + publishes
-  // `session_died` + closes the EventBus when the child process dies
-  // between requests. Stage 2's in-process bridge eliminates the
-  // spawned-child failure mode entirely — but for Stage 1, the next
-  // prompt against a crashed session sees `SessionNotFoundError`
-  // (cleanup raced ahead of the request), not a hung channel write.
+  // Single-scope reuse keyed by canonical workspace path. Tracks the
+  // SessionEntry that a same-workspace attach should re-use. With
+  // Stage 1.5 multi-session per channel, this points at the FIRST
+  // session created for the workspace under `single` scope; under
+  // `thread` scope additional sessions on the same workspace don't
+  // overwrite this entry.
   const byWorkspace = new Map<string, SessionEntry>();
+  // Stage 1.5 multi-session: one channel per workspace, N sessions
+  // multiplex on it via `connection.newSession({cwd, mcpServers})`.
+  // `byWorkspaceChannel.get(workspaceKey)` returns the shared channel
+  // for spawn-vs-reuse decisions in `doSpawn`. Channel is kept alive
+  // while `sessionIds.size > 0`; the last `killSession` (or the
+  // `channel.exited` cleanup) drops the entry from this map.
+  const byWorkspaceChannel = new Map<string, ChannelInfo>();
+  // Coalesces concurrent channel-spawn requests for the same workspace
+  // (regardless of sessionScope). Without this, two parallel callers
+  // would both `channelFactory(workspaceKey)` and one of the
+  // spawned children would never make it into `byWorkspaceChannel`,
+  // becoming a permanent orphan. Cleared in the `finally` of the
+  // creator regardless of outcome.
+  const inFlightChannelSpawns = new Map<string, Promise<ChannelInfo>>();
   const byId = new Map<string, SessionEntry>();
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
   // across sessions are infeasible in practice.
@@ -700,175 +759,194 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     return true;
   };
 
-  async function doSpawn(
+  /**
+   * Get-or-create the shared `qwen --acp` channel for a workspace.
+   * Stage 1.5 multi-session: one channel hosts N sessions via
+   * `connection.newSession()`. Concurrent callers coalesce through
+   * `inFlightChannelSpawns` so we never spawn two children for one
+   * workspace. The returned `ChannelInfo` is shared — caller adds
+   * their session id to `sessionIds` and uses `info.connection.newSession()`.
+   *
+   * Wires up the one-and-only `channel.exited` cleanup on first
+   * creation so the late-arriving event tears down ALL sessions on
+   * the channel (vs. the previous 1-session-per-channel design where
+   * each entry registered its own listener).
+   */
+  async function getOrCreateChannel(
     workspaceKey: string,
-    modelServiceId?: string,
-  ): Promise<BridgeSession> {
-    // FIXME(stage-1.5): the bridge spawns one `qwen --acp` child per
-    // session today. But the ACP agent in `acp-integration/acpAgent.ts`
-    // (line ~194: `private sessions: Map<string, Session>`) natively
-    // supports multiple concurrent sessions inside one child process
-    // — yiliang114's VSCode plugin already uses this pattern. Stage
-    // 1.5 should refactor here to keep one child per workspace (or
-    // daemon-wide) and call `connection.newSession({ cwd, mcpServers })`
-    // multiple times on the same channel. Sessions then share the
-    // child's OAuth state / FileReadCache / CLAUDE.md parse / process
-    // overhead. This is a bridge-side change; it does NOT require the
-    // #3803 §21 Path A/B/C intra-daemon multi-session workstream
-    // (qwen-code already does that at the agent layer; the bridge
-    // just doesn't plug into it). Pairs naturally with the
-    // `@qwen-code/acp-bridge` package lift (chiga0 finding 1) —
-    // expose a `newSession()` method on the `AcpChannel` interface
-    // distinct from channel creation.
-    const channel = await channelFactory(workspaceKey);
-    let entry: SessionEntry | undefined;
-    const client = new BridgeClient(
-      () => entry,
-      registerPending,
-      (rid) =>
-        // Roll back a register-then-publish-failed pending so the agent
-        // doesn't hang waiting on a vote nobody can see.
-        resolvePending(rid, { outcome: { outcome: 'cancelled' } }),
-    );
-    const connection = new ClientSideConnection(() => client, channel.stream);
+  ): Promise<ChannelInfo> {
+    const existing = byWorkspaceChannel.get(workspaceKey);
+    if (existing) return existing;
+    const inFlight = inFlightChannelSpawns.get(workspaceKey);
+    if (inFlight) return await inFlight;
 
-    try {
-      await withTimeout(
-        connection.initialize({
-          protocolVersion: PROTOCOL_VERSION,
-          clientCapabilities: {
-            fs: { readTextFile: true, writeTextFile: true },
-          },
-          clientInfo: { name: 'qwen-serve-bridge', version: '0' },
-        }),
-        initTimeoutMs,
-        'initialize',
+    const promise = (async () => {
+      const channel = await channelFactory(workspaceKey);
+      const client = new BridgeClient(
+        (sessionId) => (sessionId ? byId.get(sessionId) : undefined),
+        registerPending,
+        (rid) =>
+          // Roll back a register-then-publish-failed pending so the agent
+          // doesn't hang waiting on a vote nobody can see.
+          resolvePending(rid, { outcome: { outcome: 'cancelled' } }),
       );
-      const newSessionResp = await withTimeout(
-        connection.newSession({
-          cwd: workspaceKey,
-          mcpServers: [],
-        }),
-        initTimeoutMs,
-        'newSession',
-      );
+      const connection = new ClientSideConnection(() => client, channel.stream);
 
-      // Late-shutdown re-check (BUy4U): shutdown() may have flipped
-      // while we were in `connection.initialize` or
-      // `connection.newSession` (the ACP handshake takes ~1s on cold
-      // start). If we commit to the maps now, the snapshot in
-      // shutdown() already missed this entry — child would leak past
-      // `process.exit(0)`. Tear down what we have and surface to the
-      // caller.
-      //
-      // This re-check is the LOAD-BEARING correctness contract, not
-      // a band-aid: `shutdown()` deliberately starts tearing down
-      // already-registered sessions in parallel with awaiting
-      // `inFlightSpawns` (faster fan-out), and relies on this
-      // re-check to catch any spawn whose `newSession` returns AFTER
-      // shutdown flipped the flag. The alternative — await all
-      // in-flight spawns to settle BEFORE snapshotting byId — is
-      // cleaner to reason about but serializes shutdown by
-      // up-to-`initTimeoutMs` (10s default) before any already-live
-      // session starts tearing down. We chose parallel + re-check.
-      // Both A and B coalesced callers see the same rejection
-      // because `doSpawn`'s promise (cached in `inFlightSpawns`) is
-      // what rejects.
+      try {
+        await withTimeout(
+          connection.initialize({
+            protocolVersion: PROTOCOL_VERSION,
+            clientCapabilities: {
+              fs: { readTextFile: true, writeTextFile: true },
+            },
+            clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+          }),
+          initTimeoutMs,
+          'initialize',
+        );
+      } catch (err) {
+        await channel.kill().catch(() => {});
+        throw err;
+      }
+
+      // Late-shutdown re-check: if shutdown flipped during `initialize`,
+      // tear this channel down rather than leak past `process.exit(0)`.
       if (shuttingDown) {
         await channel.kill().catch(() => {});
         throw new Error('HttpAcpBridge is shutting down');
       }
-      entry = {
-        sessionId: newSessionResp.sessionId,
-        workspaceCwd: workspaceKey,
+
+      const info: ChannelInfo = {
         channel,
         connection,
-        events: new EventBus(),
-        promptQueue: Promise.resolve(),
-        modelChangeQueue: Promise.resolve(),
-        pendingPermissionIds: new Set(),
-        attachCount: 0,
+        client,
+        workspaceCwd: workspaceKey,
+        sessionIds: new Set(),
       };
-      byWorkspace.set(workspaceKey, entry);
-      byId.set(entry.sessionId, entry);
+      byWorkspaceChannel.set(workspaceKey, info);
 
-      // Cleanup if the child terminates between requests. `channel.exited`
-      // resolves both for planned shutdown (we already removed the entry
-      // before calling kill, so the `byId.get(...) === entry` check is
-      // false and this is a no-op) AND for unplanned crashes (entry is
-      // still in the maps → cancel pending permissions, publish a
-      // `session_died` event so live SSE subscribers learn the session is
-      // gone, close the bus, drop from maps).
-      const liveEntry = entry;
-      void channel.exited.then((info) => {
-        if (byId.get(liveEntry.sessionId) !== liveEntry) return;
-        cancelPendingForSession(liveEntry.sessionId);
-        try {
-          liveEntry.events.publish({
-            type: 'session_died',
-            data: {
-              sessionId: liveEntry.sessionId,
-              reason: 'channel_closed',
-              // BX9_P: thread `exitCode` / `signalCode` from the
-              // spawn factory through so operators triaging a crash
-              // can read the cause from the SSE frame instead of
-              // grepping stderr for the pid.
-              exitCode: info?.exitCode ?? null,
-              signalCode: info?.signalCode ?? null,
-            },
-          });
-        } catch {
-          /* bus already closed */
+      // One-time channel.exited cleanup. The child dying takes ALL
+      // multiplexed sessions with it — iterate `sessionIds` (snapshot
+      // first to be safe against concurrent killSession during
+      // iteration), publish `session_died` on each session's bus,
+      // remove from byId / byWorkspace / pending tables.
+      void channel.exited.then((exitInfo) => {
+        const stillOurs = byWorkspaceChannel.get(workspaceKey) === info;
+        if (stillOurs) byWorkspaceChannel.delete(workspaceKey);
+        const sessions = Array.from(info.sessionIds);
+        info.sessionIds.clear();
+        for (const sid of sessions) {
+          const sessEntry = byId.get(sid);
+          if (!sessEntry) continue;
+          cancelPendingForSession(sid);
+          try {
+            sessEntry.events.publish({
+              type: 'session_died',
+              data: {
+                sessionId: sid,
+                reason: 'channel_closed',
+                // BX9_P: thread exitCode/signalCode through.
+                exitCode: exitInfo?.exitCode ?? null,
+                signalCode: exitInfo?.signalCode ?? null,
+              },
+            });
+          } catch {
+            /* bus already closed */
+          }
+          byId.delete(sid);
+          if (byWorkspace.get(sessEntry.workspaceCwd) === sessEntry) {
+            byWorkspace.delete(sessEntry.workspaceCwd);
+          }
+          sessEntry.events.close();
         }
-        byWorkspace.delete(liveEntry.workspaceCwd);
-        byId.delete(liveEntry.sessionId);
-        liveEntry.events.close();
       });
 
-      // ACP `newSession` doesn't take a model id; honor the caller's
-      // `modelServiceId` by issuing the unstable `setSessionModel` call
-      // immediately after the session is established. Use the shared
-      // `applyModelServiceId` helper so the call:
-      //   - races against `transportClosedReject` (a wedged child
-      //     during model switch fails fast instead of consuming the
-      //     full init timeout — A09HD)
-      //   - publishes `model_switched` / `model_switch_failed` to the
-      //     bus so attached clients see the result
-      //   - serializes through `entry.modelChangeQueue` for ordering
-      //     against later attach-with-different-model calls
-      //
-      // On failure we DO NOT tear the session down. An earlier rev
-      // tore it down so the caller "didn't inherit silent drift",
-      // but that killed an already-functional session and left the
-      // caller with a 500 and no sessionId to retry against. The
-      // session is operational on the agent's default model — the
-      // `model_switch_failed` event tells subscribers exactly what
-      // happened, and the caller can retry the switch via
-      // `POST /session/:id/model` once they know the sessionId.
-      //
-      // Swallow the rejection inline so the outer try/catch (which
-      // would `channel.kill()`) doesn't fire. The publish inside
-      // `applyModelServiceId` is the visible signal; the caller
-      // gets a 200 and a sessionId regardless, and learns of the
-      // model issue via the SSE stream.
-      if (modelServiceId) {
-        await applyModelServiceId(entry, modelServiceId, initTimeoutMs).catch(
-          () => {
-            // Already published `model_switch_failed`; don't take
-            // down the session.
-          },
-        );
-      }
+      return info;
+    })();
 
-      return {
-        sessionId: entry.sessionId,
-        workspaceCwd: entry.workspaceCwd,
-        attached: false,
-      };
-    } catch (err) {
-      await channel.kill().catch(() => {});
-      throw err;
+    inFlightChannelSpawns.set(workspaceKey, promise);
+    try {
+      return await promise;
+    } finally {
+      inFlightChannelSpawns.delete(workspaceKey);
     }
+  }
+
+  async function doSpawn(
+    workspaceKey: string,
+    modelServiceId?: string,
+  ): Promise<BridgeSession> {
+    // Stage 1.5 multi-session: get-or-create the channel for this
+    // workspace, then call `connection.newSession()` on it. Sessions
+    // share the child's process / OAuth / file-cache / hierarchy-
+    // memory parse via the agent's `sessions: Map<string, Session>`
+    // (see `acp-integration/acpAgent.ts:194`).
+    // newSession on an established channel can fail (auth, config,
+    // etc.) without the channel dying. We DON'T kill the channel on
+    // newSession failure: other sessions on it may still be live —
+    // they'd lose their work for a problem orthogonal to them. The
+    // edge case of "newSession fails on a freshly-created channel
+    // with no live sessions" leaks an empty channel until something
+    // else (channel.exited / shutdown) cleans it up; that's much
+    // better than killing other live sessions, and the
+    // empty-sessionIds set lets the NEXT caller retry through that
+    // same channel if it's still healthy.
+    const channelInfo = await getOrCreateChannel(workspaceKey);
+    const newSessionResp = await withTimeout(
+      channelInfo.connection.newSession({
+        cwd: workspaceKey,
+        mcpServers: [],
+      }),
+      initTimeoutMs,
+      'newSession',
+    );
+
+    // Late-shutdown re-check (BUy4U): shutdown() may have flipped
+    // while we were in `connection.newSession` (~1s on cold start).
+    if (shuttingDown) {
+      // Don't kill the channel — see comment above. Just throw.
+      throw new Error('HttpAcpBridge is shutting down');
+    }
+
+    const entry: SessionEntry = {
+      sessionId: newSessionResp.sessionId,
+      workspaceCwd: workspaceKey,
+      channel: channelInfo.channel,
+      connection: channelInfo.connection,
+      events: new EventBus(),
+      promptQueue: Promise.resolve(),
+      modelChangeQueue: Promise.resolve(),
+      pendingPermissionIds: new Set(),
+      attachCount: 0,
+    };
+    channelInfo.sessionIds.add(entry.sessionId);
+    byId.set(entry.sessionId, entry);
+    // `byWorkspace` is the single-scope attach lookup — only the
+    // FIRST session for a workspace wins this slot. Subsequent
+    // thread-scope sessions don't overwrite it.
+    if (!byWorkspace.has(workspaceKey)) {
+      byWorkspace.set(workspaceKey, entry);
+    }
+
+    // ACP `newSession` doesn't take a model id; honor the caller's
+    // `modelServiceId` via `unstable_setSessionModel`. See
+    // `applyModelServiceId` for rationale (race against
+    // transportClosedReject, publish model_switched on success,
+    // model_switch_failed on failure, don't tear down the session).
+    if (modelServiceId) {
+      await applyModelServiceId(entry, modelServiceId, initTimeoutMs).catch(
+        () => {
+          // Already published `model_switch_failed`; session stays
+          // operational on the agent's default model.
+        },
+      );
+    }
+
+    return {
+      sessionId: entry.sessionId,
+      workspaceCwd: entry.workspaceCwd,
+      attached: false,
+    };
   }
 
   /**
@@ -1413,11 +1491,18 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // through.
       if (opts?.requireZeroAttaches && entry.attachCount > 0) return;
       // Remove from the maps eagerly so concurrent `spawnOrAttach`
-      // can't reattach to a session we're tearing down. The
-      // `channel.exited` cleanup at line 461-484 also removes from
-      // these maps, but eager removal narrows the race window.
-      byWorkspace.delete(entry.workspaceCwd);
+      // can't reattach to a session we're tearing down.
+      if (byWorkspace.get(entry.workspaceCwd) === entry) {
+        byWorkspace.delete(entry.workspaceCwd);
+      }
       byId.delete(sessionId);
+      // Stage 1.5 multi-session: detach from the channel. The channel
+      // dies only when its LAST session leaves — other sessions on
+      // the same channel keep running.
+      const channelInfo = byWorkspaceChannel.get(entry.workspaceCwd);
+      if (channelInfo && channelInfo.channel === entry.channel) {
+        channelInfo.sessionIds.delete(sessionId);
+      }
       // Resolve any still-pending permission as cancelled (matches the
       // shutdown path) so callers awaiting requestPermission unwind.
       for (const id of Array.from(entry.pendingPermissionIds)) {
@@ -1425,9 +1510,9 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       }
       // Publish `session_died` BEFORE closing the bus. After the eager
       // `byId.delete` above, the channel.exited handler's
-      // `byId.get(...) !== entry` guard short-circuits, so the
-      // automatic publish at crash time wouldn't fire. SSE subscribers
-      // need this terminal frame to know the session is gone.
+      // `byId.get(...)` returns undefined so the automatic publish
+      // at crash time wouldn't fire. SSE subscribers need this
+      // terminal frame to know the session is gone.
       try {
         entry.events.publish({
           type: 'session_died',
@@ -1437,9 +1522,20 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         /* bus already closed */
       }
       entry.events.close();
-      await entry.channel.kill().catch(() => {
-        // Best-effort kill — channel may already be dead.
-      });
+      // Only kill the channel when no other sessions remain. ACP
+      // doesn't expose a per-session "close" call on the agent side,
+      // so the agent's `sessions: Map<string, Session>` grows by one
+      // until the channel dies — bounded by `maxSessions` (default
+      // 20) so memory is capped. FIXME(stage-1.5): if ACP grows a
+      // `closeSession` notification, send it here so the agent can
+      // drop the entry from its map immediately rather than at
+      // channel exit.
+      if (channelInfo && channelInfo.sessionIds.size === 0) {
+        byWorkspaceChannel.delete(entry.workspaceCwd);
+        await channelInfo.channel.kill().catch(() => {
+          // Best-effort kill — channel may already be dead.
+        });
+      }
     },
 
     async detachClient(sessionId) {
@@ -1479,6 +1575,11 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // spawning a child this teardown won't see.
       shuttingDown = true;
       const entries = Array.from(byId.values());
+      // Snapshot channels too — Stage 1.5 multi-session means N
+      // sessions may share one channel; we tear down channels
+      // (which transitively takes all their sessions), not entries
+      // one-by-one.
+      const channelInfos = Array.from(byWorkspaceChannel.values());
       // Resolve every still-pending permission as cancelled before clearing
       // the maps so callers awaiting `requestPermission` unwind cleanly.
       for (const e of entries) {
@@ -1489,14 +1590,15 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       }
       byWorkspace.clear();
       byId.clear();
+      byWorkspaceChannel.clear();
       pendingPermissions.clear();
       // Publish a terminal `session_died` BEFORE closing each bus so SSE
       // subscribers can distinguish "daemon shut down" from a transient
       // network error and don't sit indefinitely retrying. The
       // channel.exited handler also publishes this on a child crash,
       // but at shutdown time the entry has already been removed from
-      // `byId` (above), so the handler's `byId.get(...) !== entry`
-      // guard would short-circuit and the event would never fire.
+      // `byId` (above), so the handler's `byId.get(...)` is undefined
+      // and the automatic publish wouldn't fire.
       for (const e of entries) {
         try {
           e.events.publish({
@@ -1508,16 +1610,26 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         }
         e.events.close();
       }
-      // Wait for in-flight spawns too. The snapshot above only sees
-      // sessions already in `byId`; a `doSpawn` past `channelFactory()`
-      // but still inside `connection.newSession` (~1s on cold start) is
-      // not yet registered. Without the await, `bridge.shutdown()`
-      // resolves before the late re-check at doSpawn:472 tears down its
-      // half-built channel — the orphan's stderr error fires AFTER the
-      // daemon claimed graceful shutdown (log-confusing). Settle on
-      // each, ignoring rejections so a single failure doesn't poison
-      // the others.
-      const inFlightAwaits = Array.from(inFlightSpawns.values()).map(
+      // Wait for in-flight channel spawns + session spawns. The
+      // snapshots above only see what's already registered; a doSpawn
+      // past `newSession()` but pre-`byId.set` is missed, as is a
+      // `getOrCreateChannel` past `channelFactory()` but pre-
+      // `byWorkspaceChannel.set`. The late-shutdown re-checks at
+      // doSpawn/getOrCreateChannel catch both — but without these
+      // awaits, `bridge.shutdown()` would resolve before they
+      // finish, and the orphan stderr error from a half-built
+      // child would fire AFTER the daemon claimed graceful
+      // shutdown (log-confusing).
+      const inFlightSessionAwaits = Array.from(inFlightSpawns.values()).map(
+        (p): Promise<void> =>
+          p.then(
+            () => undefined,
+            () => undefined,
+          ),
+      );
+      const inFlightChannelAwaits = Array.from(
+        inFlightChannelSpawns.values(),
+      ).map(
         (p): Promise<void> =>
           p.then(
             () => undefined,
@@ -1525,8 +1637,12 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           ),
       );
       await Promise.all([
-        ...entries.map((e) => e.channel.kill().catch(() => {})),
-        ...inFlightAwaits,
+        // Kill each unique channel once. With multi-session per
+        // channel, the same channel object can be referenced by
+        // multiple entries; `channelInfos` is the deduplicated set.
+        ...channelInfos.map((ci) => ci.channel.kill().catch(() => {})),
+        ...inFlightSessionAwaits,
+        ...inFlightChannelAwaits,
       ]);
     },
   };

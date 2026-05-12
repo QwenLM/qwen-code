@@ -38,6 +38,7 @@ import {
   type AcpChannel,
   type ChannelFactory,
 } from './httpAcpBridge.js';
+import type { BridgeEvent } from './eventBus.js';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
 // expected values match what the bridge canonicalizes internally on
@@ -88,7 +89,13 @@ class FakeAgent implements Agent {
   async newSession(p: NewSessionRequest): Promise<NewSessionResponse> {
     this.newSessionCalls.push(p);
     const prefix = this.opts.sessionIdPrefix ?? 'sess';
-    return { sessionId: `${prefix}:${p.cwd}` };
+    // Stage 1.5 multi-session: one FakeAgent can host multiple
+    // sessions (same as the real ACP agent), so each newSession call
+    // returns a fresh id. Suffix by call-count so tests that issue
+    // multiple newSession on the same channel get distinct ids.
+    const count = this.newSessionCalls.length;
+    const suffix = count === 1 ? '' : `#${count}`;
+    return { sessionId: `${prefix}:${p.cwd}${suffix}` };
   }
 
   async loadSession(_p: LoadSessionRequest): Promise<LoadSessionResponse> {
@@ -252,7 +259,7 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  it('spawns fresh per call under sessionScope:thread', async () => {
+  it('creates fresh session per call under sessionScope:thread (Stage 1.5 multi-session: shares channel)', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
@@ -267,10 +274,14 @@ describe('createHttpAcpBridge', () => {
     const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
+    // Distinct sessions, both freshly created (neither is an attach).
     expect(first.sessionId).not.toBe(second.sessionId);
     expect(first.attached).toBe(false);
     expect(second.attached).toBe(false);
-    expect(handles).toHaveLength(2);
+    // Stage 1.5 multi-session: the two thread-scope calls SHARE the
+    // workspace's `qwen --acp` child. Only one `channelFactory` call.
+    // Each `newSession()` call to the agent produces a distinct id.
+    expect(handles).toHaveLength(1);
     expect(bridge.sessionCount).toBe(2);
 
     await bridge.shutdown();
@@ -2227,6 +2238,120 @@ describe('createHttpAcpBridge', () => {
         await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       }
       expect(bridge.sessionCount).toBe(5);
+      await bridge.shutdown();
+    });
+
+    it('Stage 1.5 multi-session: N sessions on same workspace share ONE channel', async () => {
+      // The headline of the Stage 1.5 refactor — multiple thread-scope
+      // sessions on one workspace pay for one `qwen --acp` child, not
+      // N children. LaZzyMan + tanzhenxin pushed for this; the agent
+      // already supports it via `acpAgent.ts:194 sessions:
+      // Map<string, Session>`.
+      let factoryCalls = 0;
+      const factory: ChannelFactory = async () => {
+        factoryCalls++;
+        return makeChannel({ sessionIdPrefix: `s${factoryCalls}` }).channel;
+      };
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        maxSessions: 0,
+        sessionScope: 'thread',
+      });
+      // Spin up 5 sessions on the same workspace.
+      const sessions = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+        ),
+      );
+      // 5 distinct sessions...
+      expect(new Set(sessions.map((s) => s.sessionId)).size).toBe(5);
+      expect(bridge.sessionCount).toBe(5);
+      // ...but only ONE channelFactory call (= one child process).
+      expect(factoryCalls).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('Stage 1.5: killSession on one of N sessions does NOT kill the shared channel', async () => {
+      // Counterpart guarantee: tearing down one session must not take
+      // its siblings with it. The channel stays alive while
+      // `channelInfo.sessionIds.size > 0`.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(handles).toHaveLength(1);
+      // Kill one — the other two stay.
+      await bridge.killSession(b.sessionId);
+      expect(bridge.sessionCount).toBe(2);
+      expect(handles[0]?.killed).toBe(false);
+      // Kill the second — last one alive.
+      await bridge.killSession(a.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handles[0]?.killed).toBe(false);
+      // Kill the last — NOW the channel is killed.
+      await bridge.killSession(c.sessionId);
+      expect(bridge.sessionCount).toBe(0);
+      expect(handles[0]?.killed).toBe(true);
+      await bridge.shutdown();
+    });
+
+    it('Stage 1.5: channel.exited tears down ALL multiplexed sessions', async () => {
+      // When the shared child dies (crash, kill, network gone), all
+      // sessions on it die together — they're truly co-fated. Each
+      // session's bus gets its own `session_died` event so each SSE
+      // subscriber learns the bad news on their own stream.
+      const handles: ChannelHandle[] = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(bridge.sessionCount).toBe(3);
+
+      // Subscribe so we can observe each session_died.
+      const eventsByA: BridgeEvent[] = [];
+      const eventsByB: BridgeEvent[] = [];
+      const eventsByC: BridgeEvent[] = [];
+      const drainA = (async () => {
+        for await (const ev of bridge.subscribeEvents(a.sessionId))
+          eventsByA.push(ev);
+      })();
+      const drainB = (async () => {
+        for await (const ev of bridge.subscribeEvents(b.sessionId))
+          eventsByB.push(ev);
+      })();
+      const drainC = (async () => {
+        for await (const ev of bridge.subscribeEvents(c.sessionId))
+          eventsByC.push(ev);
+      })();
+      // Let the subscriptions register before crashing.
+      await new Promise((r) => setImmediate(r));
+
+      // Simulate channel-level crash (child exited).
+      handles[0]?.crash();
+      await Promise.all([drainA, drainB, drainC]);
+
+      expect(eventsByA[eventsByA.length - 1]?.type).toBe('session_died');
+      expect(eventsByB[eventsByB.length - 1]?.type).toBe('session_died');
+      expect(eventsByC[eventsByC.length - 1]?.type).toBe('session_died');
+      expect(bridge.sessionCount).toBe(0);
+
       await bridge.shutdown();
     });
   });

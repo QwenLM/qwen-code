@@ -4,7 +4,7 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 
 > **Status:** Stage 1 (experimental). The protocol surface is locked at the §04 routes table from issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803). Stage 1.5 (`qwen --serve` flag — TUI co-hosts the same HTTP server) and Stage 2 (in-process refactor + `mDNS`/OpenAPI/WebSocket/Prometheus polish) are immediately downstream.
 >
-> **Scope honesty:** Stage 1 is sized for **developers prototyping clients against the protocol surface** and for **local single-user / small-team collaboration**. Production-grade multi-client / long-running / network-flaky workloads (mobile companions, IM bots reaching 1000+ chats) need Stage 1.5+ guarantees that aren't in this release. Stage 1's bridge also spawns one `qwen --acp` child per session, so opening many parallel sessions on the same workspace pays N× memory until the Stage 1.5 bridge refactor lands (see [§ N parallel sessions](#n-parallel-sessions-stage-1-cost-vs-stage-15-fix) below — qwen-code's ACP agent already supports multi-session in one process; the bridge just doesn't leverage it yet). See [Stage 1.5+ runtime guarantees](#stage-15-runtime-guarantees) for the full gap list and #3803 for the convergence roadmap.
+> **Scope honesty:** Stage 1 is sized for **developers prototyping clients against the protocol surface** and for **local single-user / small-team collaboration**. Production-grade multi-client / long-running / network-flaky workloads (mobile companions, IM bots reaching 1000+ chats) need Stage 1.5+ guarantees that aren't in this release. See [Stage 1.5+ runtime guarantees](#stage-15-runtime-guarantees) for the full gap list and #3803 for the convergence roadmap.
 
 ## What it gives you
 
@@ -183,7 +183,7 @@ Stage 1's contract is sized for prototyping. Per [#3889 chiga0 downstream-consum
 **Blockers for serious downstream use:**
 
 1. **Per-request `sessionScope` override** on `POST /session` — today the daemon-wide default is the only setting; a VSCode extension can't say "I want a private session for this window" against a daemon configured for shared sessions.
-2. **`loadSession` / `unstable_resumeSession` over HTTP** — without this, no integration can survive a child crash or daemon restart, and the "1 daemon = 1 session, just spawn another" model is internally inconsistent (orchestrators can't recover state either).
+2. **`loadSession` / `unstable_resumeSession` over HTTP** — without this, no integration can survive a child crash or daemon restart, and any orchestrator coordinating the daemon can't recover state either.
 3. **Persistent client identity (pair tokens + per-client revocation)** — Stage 1 uses one shared bearer; a leaked token revokes everyone, and `originatorClientId` is client-self-declared rather than daemon-stamped from authenticated identity.
 
 **Reliability baseline:**
@@ -238,36 +238,28 @@ In this mode, TUI is a **"super-client"** — it observes the same agent convers
 
 (B) is the more ambitious answer but locks Stage 1.5 into a substantially larger wire surface that must also pass cleanly through the planned in-process refactor. We'd rather walk the smaller scope honestly. The session-state-event taxonomy work — enumerating which TUI flows are local-only by design vs. could plausibly graduate to wire under a future opt-in (B)-flavor extension — moves to [#3803](https://github.com/QwenLM/qwen-code/issues/3803), not Stage 1.5 code.
 
-### N parallel sessions: Stage 1 cost vs. Stage 1.5 fix
+### N parallel sessions share one `qwen --acp` child
 
-**Correction to earlier framing** (per [LaZzyMan's comment](https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4428498510) and verified against `packages/cli/src/acp-integration/acpAgent.ts:194`): `qwen --acp` natively supports multi-session in a single child process (`private sessions: Map<string, Session>` keyed by `sessionId`). The yiliang114 VSCode plugin already uses this — one `qwen --acp` process, many sessions over its stdio. **Multi-session resource sharing is an ACP / qwen-code capability today, not a future roadmap item.**
+Multiple sessions on the same workspace **share one `qwen --acp` child process** via the agent's native multi-session support (`packages/cli/src/acp-integration/acpAgent.ts:194: private sessions: Map<string, Session>`). The bridge calls `connection.newSession({cwd, mcpServers})` for each session — the agent stores them in its sessions map and demultiplexes per-call sessionId.
 
-The Stage 1 bridge in this PR doesn't yet leverage it — see `httpAcpBridge.ts:707`:
+Concrete cost at N=5 sessions on the same workspace:
 
-```ts
-const channel = await channelFactory(workspaceKey);   // spawns a new qwen --acp child
-...
-const newSessionResp = await connection.newSession({…}); // single newSession per child
-```
+| Resource                             | Per session | At N=5                       |
+| ------------------------------------ | ----------- | ---------------------------- |
+| Daemon Node process                  | one         | **30–50 MB** (one daemon)    |
+| `qwen --acp` child                   | shared      | **60–100 MB** (one child)    |
+| MCP server children                  | per-session | 3×N if configs differ        |
+| `FileReadCache` (in-child heap)      | shared      | parsed once                  |
+| `CLAUDE.md` / hierarchy memory parse | shared      | parsed once                  |
+| OAuth refresh-token state            | shared      | **one refresh path**         |
+| Auto-memory learned facts            | shared      | one knowledge base per child |
+| Cold start                           | first only  | <200 ms after first session  |
 
-Every fresh session spawns its own child for simplicity (one channel state per child = easier debugging, no cross-session interference during Stage 1 stabilization). The cost-per-session table below describes what THIS bridge pays today, not what's architecturally possible.
+The bridge keeps **one channel per workspace** (cross-workspace sharing is intentionally not done — different workspaces have different settings/auth scope, and `acpAgent.ts:601` reloads settings per newSession `cwd`, which would interfere). The channel stays alive while at least one session is live; the last `killSession` (or a channel-level crash) kills the child.
 
-| Resource                             | Per session (Stage 1 bridge) | At N=5 (Stage 1) | At N=5 (Stage 1.5 bridge)     |
-| ------------------------------------ | ---------------------------- | ---------------- | ----------------------------- |
-| Daemon Node process                  | ~30–50 MB RSS                | **150–250 MB**   | **30–50 MB** (one daemon)     |
-| `qwen --acp` child + sandbox         | ~60–100 MB RSS               | **300–500 MB**   | **60–100 MB** (one child)     |
-| MCP server children                  | 3 per session                | **15 processes** | 3 if config shared, else 3×N  |
-| `FileReadCache` (in-child heap)      | independent                  | same files 5×    | shared (one child)            |
-| `CLAUDE.md` / hierarchy memory parse | independent                  | 5× parse         | parsed once per workspace cwd |
-| OAuth refresh-token state            | independent                  | 5 parallel       | **shared (one process)**      |
-| Auto-memory learned facts            | independent                  | fragments        | shared                        |
-| Cold start                           | 1–3 s per new session        | each window pays | <200 ms after first session   |
+**MCP server children** are still per-session today — each session's config can specify different servers, so they're independently spawned. Stage 1.5 follow-up: refcount MCP server children by `(workspace, config-hash)` so identical configs share. Not in scope for this PR.
 
-**Stage 1 (this PR) — accept the N× cost as a temporary design choice.** If your workflow needs many parallel sessions on the same workspace today, prefer in-session topic switching, separate workspaces, or accept the cost.
-
-**Stage 1.5 — bridge refactor to leverage ACP multi-session.** The natural fix: keep one `qwen --acp` child per workspace (or daemon-wide), and call `connection.newSession({ cwd, mcpServers })` multiple times on it. Sessions share the child's process / OAuth / file cache / hierarchy-memory parse; MCP children remain per-session unless the config is identical (configurable). This is a **bridge-side change**, NOT the `#3803 §21 Path A/B/C` intra-daemon multi-session workstream — qwen-code already does intra-process multi-session at the agent layer; the bridge just needs to plug into it. Marked inline in `httpAcpBridge.ts` (`FIXME(stage-1.5)` on `channelFactory`).
-
-**Peer-agent comparison context.** Cursor / Continue / Claude Code / OpenCode / Gemini CLI all do single-process multi-session at their agent layer. **qwen-code does too** — the Stage 1 bridge is the artifact that currently spawns a child per session, and Stage 1.5 closes that gap.
+**Peer agents (Cursor / Continue / Claude Code / OpenCode / Gemini CLI) all do single-process multi-session.** qwen-code matches them at the agent layer; the Stage 1 bridge in this PR makes the same architecture visible over HTTP.
 
 ## What's next
 
