@@ -110,15 +110,8 @@ function normalizeStreamingTextDelta(
   }
 
   if (
-    !state.cumulativeMode &&
-    state.emittedText.length >= CUMULATIVE_DETECTION_WINDOW_BYTES
-  ) {
-    return rawDelta;
-  }
-
-  if (
-    rawDelta.startsWith(state.emittedText) &&
-    rawDelta.length > state.emittedText.length
+    rawDelta.length > state.emittedText.length &&
+    rawDelta.startsWith(state.emittedText)
   ) {
     const prevLen = state.emittedText.length;
     const suffix = rawDelta.slice(prevLen);

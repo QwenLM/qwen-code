@@ -2498,6 +2498,47 @@ describe('OpenAIContentConverter', () => {
       expect(allEmitted).toEqual(incrementalChunks);
     });
 
+    it('should detect cumulative mode even when the first chunk exceeds the detection window cap', () => {
+      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review:
+      // Some cumulative providers ship a large initial chunk (>1024 chars)
+      // and then accumulate more text on subsequent chunks. The detection
+      // window cap must not short-circuit prefix-overlap detection before the
+      // second chunk gets a chance to be classified, otherwise the entire
+      // first chunk gets duplicated.
+      const ctx = withStreamParser();
+      const firstChunk = 'A'.repeat(1500); // well past CUMULATIVE_DETECTION_WINDOW_BYTES (1024)
+      const secondChunk = firstChunk + 'B'.repeat(200); // cumulative extension
+      const thirdChunk = secondChunk + 'C'.repeat(50); // further cumulative extension
+
+      const emitted = [firstChunk, secondChunk, thirdChunk].map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-large-first-${index}`,
+              created: 789 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // Chunk 1: initial passthrough.
+      expect(emitted[0]).toBe(firstChunk);
+      // Chunk 2: prefix-extends → cumulative mode, emits the 200-char suffix only.
+      expect(emitted[1]).toBe('B'.repeat(200));
+      // Chunk 3: continues in cumulative mode, emits only the new 50-char suffix.
+      expect(emitted[2]).toBe('C'.repeat(50));
+    });
+
     it('should suppress cumulative rewind (provider re-sends shorter accumulated string)', () => {
       const ctx = withStreamParser();
       // Scenario: provider sends Hello → Hello World (extension) → Hello (rewind) → Hello World! (extension again)
