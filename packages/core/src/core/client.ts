@@ -60,6 +60,8 @@ import { ToolNames } from '../tools/tool-names.js';
 import {
   NextSpeakerCheckEvent,
   logNextSpeakerCheck,
+  startInteractionSpan,
+  endInteractionSpan,
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
@@ -918,13 +920,18 @@ export class GeminiClient {
     // Notifications start a fresh Turn with a new prompt_id, so the loop
     // detector must reset — otherwise a prior turn's count can trip
     // LoopDetected early on the notification turn.
-    if (
+    const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
-      messageType === SendMessageType.Notification
-    ) {
+      messageType === SendMessageType.Notification;
+    if (isTopLevelInteraction) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+      startInteractionSpan(this.config, {
+        promptId: prompt_id,
+        model: options?.modelOverride ?? this.config.getModel(),
+        messageType,
+      });
     }
 
     if (
@@ -1035,6 +1042,10 @@ export class GeminiClient {
         this.pendingRecallAbortController?.abort();
         this.pendingRecallAbortController = undefined;
         yield { type: GeminiEventType.MaxSessionTurns };
+        if (isTopLevelInteraction)
+          endInteractionSpan('error', {
+            errorMessage: 'max session turns exceeded',
+          });
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -1044,6 +1055,8 @@ export class GeminiClient {
     if (!boundedTurns) {
       this.pendingRecallAbortController?.abort();
       this.pendingRecallAbortController = undefined;
+      if (isTopLevelInteraction)
+        endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
       return new Turn(this.getChat(), prompt_id);
     }
 
@@ -1067,6 +1080,10 @@ export class GeminiClient {
               'Please start a new session or increase the sessionTokenLimit in your settings.json.',
           },
         };
+        if (isTopLevelInteraction)
+          endInteractionSpan('error', {
+            errorMessage: 'session token limit exceeded',
+          });
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -1109,6 +1126,7 @@ export class GeminiClient {
         await arenaAgentClient.reportCancelled();
         this.pendingRecallAbortController?.abort();
         this.pendingRecallAbortController = undefined;
+        if (isTopLevelInteraction) endInteractionSpan('cancelled');
         return new Turn(this.getChat(), prompt_id);
       }
     }
@@ -1187,6 +1205,8 @@ export class GeminiClient {
             await arenaAgentClient.reportError('Loop detected');
           }
           this.lastApiCompletionTimestamp = Date.now();
+          if (isTopLevelInteraction)
+            endInteractionSpan('error', { errorMessage: 'loop detected' });
           return turn;
         }
       }
@@ -1213,6 +1233,13 @@ export class GeminiClient {
           await arenaAgentClient.reportError(errorMsg);
         }
         this.lastApiCompletionTimestamp = Date.now();
+        if (isTopLevelInteraction) {
+          const errMsg =
+            event.value instanceof Error
+              ? event.value.message
+              : 'unknown error';
+          endInteractionSpan('error', { errorMessage: errMsg });
+        }
         return turn;
       }
     }
@@ -1259,6 +1286,7 @@ export class GeminiClient {
 
       // Check if aborted after hook execution
       if (signal.aborted) {
+        if (isTopLevelInteraction) endInteractionSpan('cancelled');
         return turn;
       }
 
@@ -1283,6 +1311,7 @@ export class GeminiClient {
       ) {
         // Check if aborted before continuing
         if (signal.aborted) {
+          if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return turn;
         }
 
@@ -1312,7 +1341,7 @@ export class GeminiClient {
         }
 
         const continueRequest = [{ text: continueReason }];
-        return yield* this.sendMessageStream(
+        const hookTurn = yield* this.sendMessageStream(
           continueRequest,
           signal,
           prompt_id,
@@ -1326,6 +1355,9 @@ export class GeminiClient {
           },
           boundedTurns - 1,
         );
+        if (isTopLevelInteraction)
+          endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+        return hookTurn;
       }
     }
 
@@ -1352,10 +1384,10 @@ export class GeminiClient {
 
       if (this.config.getSkipNextSpeakerCheck()) {
         this.runManagedAutoMemoryBackgroundTasks(messageType);
-        // Report completed before returning — agent has no more work to do
         if (arenaAgentClient) {
           await arenaAgentClient.reportCompleted();
         }
+        if (isTopLevelInteraction) endInteractionSpan('ok');
         return turn;
       }
 
@@ -1375,15 +1407,16 @@ export class GeminiClient {
       );
       if (nextSpeakerCheck?.next_speaker === 'model') {
         const nextRequest = [{ text: 'Please continue.' }];
-        // This recursive call's events will be yielded out, and the final
-        // turn object from the recursive call will be returned.
-        return yield* this.sendMessageStream(
+        const continueTurn = yield* this.sendMessageStream(
           nextRequest,
           signal,
           prompt_id,
           options,
           boundedTurns - 1,
         );
+        if (isTopLevelInteraction)
+          endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+        return continueTurn;
       }
 
       this.runManagedAutoMemoryBackgroundTasks(messageType);
@@ -1399,6 +1432,9 @@ export class GeminiClient {
       await arenaAgentClient.reportCancelled();
     }
 
+    if (isTopLevelInteraction) {
+      endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
+    }
     return turn;
   }
 
