@@ -48,23 +48,19 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ? DASHSCOPE_PROXY_BASE_URL.slice(0, -1)
       : DASHSCOPE_PROXY_BASE_URL;
 
-const isProxyMatch = Boolean(
-  normalizedProxyUrl &&
-    normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
-);
-// ...
-return isDashscopeOrigin || isProxyMatch;
+    const isProxyMatch = Boolean(
       normalizedProxyUrl &&
         normalizedBaseUrl.toLowerCase() === normalizedProxyUrl.toLowerCase(),
     );
 
-    if (normalizedProxyUrl && !isDashscopeOrigin && !isProxyConfigured) {
-      createDebugLogger('DashScopeOpenAICompatibleProvider').debug(
-        `DASHSCOPE_PROXY_BASE_URL is configured as '${normalizedProxyUrl}', but the request baseUrl '${normalizedBaseUrl}' does not match. DashScope headers/cache control will be skipped.`,
+    const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
+    if (normalizedProxyUrl && !isDashscopeOrigin && !isProxyMatch) {
+      debugLogger.debug(
+        `DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match. DashScope headers/cache control will be skipped.`,
       );
     }
 
-    return isDashscopeOrigin || isProxyConfigured;
+    return isDashscopeOrigin || isProxyMatch;
   }
 
   override buildHeaders(): Record<string, string | undefined> {
