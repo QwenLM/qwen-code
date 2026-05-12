@@ -1472,6 +1472,23 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
+  // Disable ToolSearch when explicitly configured or for models that benefit
+  // from prefix-based KV caching (e.g. DeepSeek V4). When tool_search is in
+  // the deny list, client.ts eagerly reveals all deferred tools so every MCP
+  // tool schema is in the initial declaration list, keeping the prompt prefix
+  // stable and maximizing cache hit rates.
+  const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
+  const shouldDisableToolSearch =
+    toolSearchExplicitlyEnabled === false ||
+    (toolSearchExplicitlyEnabled === undefined &&
+      resolvedModel !== undefined &&
+      /^deepseek-v4/i.test(resolvedModel));
+  if (shouldDisableToolSearch) {
+    if (!mergedDeny.includes('tool_search')) {
+      mergedDeny.push('tool_search');
+    }
+  }
+
   const sandboxConfig = await loadSandboxConfig(
     bareMode ? ({} as Settings) : settings,
     argv,
