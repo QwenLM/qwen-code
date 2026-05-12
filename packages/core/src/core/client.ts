@@ -9,7 +9,6 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponse,
-  PartUnion,
   PartListUnion,
   Tool,
 } from '@google/genai';
@@ -82,7 +81,10 @@ import {
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
-import { flatMapTextParts } from '../utils/partUtils.js';
+import {
+  flatMapTextParts,
+  prependToFirstTextPart,
+} from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { escapeClosingSystemReminderTags } from '../utils/xml.js';
@@ -142,43 +144,6 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
 function wrapIdeContext(contextText: string): string {
   const safeContextText = escapeClosingSystemReminderTags(contextText);
   return `<system-reminder>\n${safeContextText}\n</system-reminder>`;
-}
-
-function prependToFirstTextPart(
-  parts: PartUnion[],
-  textToPrepend: string,
-): PartUnion[] {
-  if (!textToPrepend) {
-    return parts;
-  }
-
-  if (parts.length === 0) {
-    return [{ text: textToPrepend }];
-  }
-
-  const textPartIndex = parts.findIndex(
-    (part) =>
-      typeof part === 'string' ||
-      (typeof part === 'object' && part !== null && 'text' in part),
-  );
-
-  if (textPartIndex === -1) {
-    return [{ text: textToPrepend }, ...parts];
-  }
-
-  const updatedParts = [...parts];
-  const textPart = updatedParts[textPartIndex];
-
-  if (typeof textPart === 'string') {
-    updatedParts[textPartIndex] = `${textToPrepend}\n\n${textPart}`;
-  } else {
-    updatedParts[textPartIndex] = {
-      ...textPart,
-      text: `${textToPrepend}\n\n${textPart.text ?? ''}`,
-    };
-  }
-
-  return updatedParts;
 }
 
 /**
