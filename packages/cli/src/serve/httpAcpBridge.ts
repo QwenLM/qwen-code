@@ -167,6 +167,23 @@ export interface HttpAcpBridge {
     opts?: { requireZeroAttaches?: boolean },
   ): Promise<void>;
 
+  /**
+   * Roll back a prior attach: decrement `attachCount` and, if the
+   * session now has neither attaching clients (`attachCount === 0`)
+   * nor live SSE subscribers, reap it.
+   *
+   * Called from the server's `POST /session` route handler when the
+   * attaching client disconnected before the response could be
+   * written (`!res.writable && session.attached === true`). Without
+   * this, the BQ9tV `attachCount`-based race guard would persist
+   * monotonically: once any attach bumped the counter, the
+   * spawn-owner's disconnect-reaper would never run again — even if
+   * the attacher themselves disconnected (tanzhenxin issue 2). This
+   * is the symmetric "I bumped, but my socket died so the bump is
+   * fictitious" cleanup.
+   */
+  detachClient(sessionId: string): Promise<void>;
+
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
 
@@ -1312,6 +1329,36 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       await entry.channel.kill().catch(() => {
         // Best-effort kill — channel may already be dead.
       });
+    },
+
+    async detachClient(sessionId) {
+      // tanzhenxin issue 2: the BQ9tV `attachCount` race guard is
+      // monotonic — once any attach bumps it, the spawn-owner's
+      // disconnect-reaper becomes a permanent no-op even if the
+      // attaching client itself disconnected. This is the symmetric
+      // rollback the server's `!res.writable && session.attached`
+      // path calls into.
+      const entry = byId.get(sessionId);
+      if (!entry) return;
+      if (entry.attachCount > 0) entry.attachCount--;
+      // If nobody is left (no other attaches pending, no live SSE
+      // subscribers), reap the session so an orphan agent child
+      // doesn't leak. A still-active C client either:
+      //   - holds attachCount > 0 via their own attach, or
+      //   - holds entry.events.subscriberCount > 0 via SSE.
+      // Either way we don't reap. A C client between attach response
+      // and SSE open isn't covered here, but the spawn-owner's
+      // disconnect-reaper path (`requireZeroAttaches`) is what
+      // protects them — the moment THIS client (B) finishes detach,
+      // any subsequent A-owner reaper attempt can correctly fire.
+      if (entry.attachCount === 0 && entry.events.subscriberCount === 0) {
+        // Re-use killSession's reap logic. No `requireZeroAttaches`
+        // — the check we already did is stronger (we ALSO require
+        // zero subscribers).
+        await this.killSession(sessionId).catch(() => {
+          /* best-effort; channel.exited will eventually reap anyway */
+        });
+      }
     },
 
     async shutdown() {

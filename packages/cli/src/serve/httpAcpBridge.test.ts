@@ -1998,6 +1998,66 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('detachClient rolls back a fictitious attach + reaps when alone (tanzhenxin issue 2)', async () => {
+      // Pre-fix bug: `attachCount` is monotonic. Once B's
+      // `spawnOrAttach` bumps it (synchronously, before the route
+      // handler can see `!res.writable`), the spawn-owner A's
+      // disconnect-reaper would see attachCount > 0 and skip the
+      // reap — permanently. If B then ALSO disconnects, both
+      // route handlers return without doing anything, and the agent
+      // child is orphaned with no client knowing the sessionId.
+      //
+      // Fix: B's route handler calls `detachClient` when
+      // `!res.writable`, decrementing the counter. The bridge then
+      // checks both attachCount AND subscriberCount and reaps if
+      // both are zero.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(a.attached).toBe(false);
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      expect(bridge.sessionCount).toBe(1);
+      // B disconnects — calls detach.
+      await bridge.detachClient(b.sessionId);
+      // After detach: attachCount returns to 0, no SSE subscribers,
+      // → session is reaped.
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('detachClient does NOT reap when an SSE subscriber is live (tanzhenxin issue 2)', async () => {
+      // Counterpart: when client C is actively subscribed, detach
+      // from a transient B must NOT reap C's session.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = createHttpAcpBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(a.attached).toBe(false);
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      // C opens an SSE subscription (counts as "live consumer").
+      const sub = bridge.subscribeEvents(a.sessionId);
+      const sublooper = (async () => {
+        for await (const _ev of sub) {
+          /* drain */
+        }
+      })();
+      // Yield so the iterator's start-up runs and the subscriber
+      // registers on the EventBus.
+      await new Promise((r) => setImmediate(r));
+      // B disconnects → detach. Session must survive.
+      await bridge.detachClient(b.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+      await sublooper.catch(() => {});
+    });
+
     it('killSession({requireZeroAttaches:true}) DOES reap when no other client attached (BQ9tV)', async () => {
       // Counterpart to the above: when the spawn-owner truly was
       // alone, the reaper must still reap. This pins the guard's

@@ -72,6 +72,7 @@ interface FakeBridge extends HttpAcpBridge {
     sessionId: string;
     opts?: { requireZeroAttaches?: boolean };
   }>;
+  detachCalls: string[];
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
@@ -89,6 +90,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionId: string;
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
+  const detachCalls: string[] = [];
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const listCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
@@ -111,6 +113,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     promptCalls,
     cancelCalls,
     killCalls,
+    detachCalls,
     permissionVotes,
     listCalls,
     setModelCalls,
@@ -158,6 +161,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
+    },
+    async detachClient(sessionId) {
+      detachCalls.push(sessionId);
     },
     async shutdown() {
       shutdownCalls += 1;
@@ -873,6 +879,54 @@ describe('runQwenServe', () => {
     const res = await fetch(`http://127.0.0.1:${port}/health`);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ status: 'ok' });
+  });
+
+  it('--max-connections 0 still accepts connections (tanzhenxin issue 1)', async () => {
+    // Pre-fix bug: docs say "Set to 0 to disable" and code did
+    // `server.maxConnections = opts.maxConnections ?? 256`, but on
+    // Node 22 `server.maxConnections = 0` causes the listener to
+    // refuse EVERY connection. An operator following the documented
+    // disable path got a daemon that booted cleanly but silently
+    // bricked every request. Fix treats 0 / Infinity / non-finite as
+    // "leave the property unset" so Node's default (no cap) actually
+    // applies.
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      maxConnections: 0,
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: 'ok' });
+    // And `server.maxConnections` should be the Node default
+    // (undefined / unset), NOT 0.
+    expect(handle.server.maxConnections).not.toBe(0);
+  });
+
+  it('--max-connections Infinity treated as unlimited (tanzhenxin issue 1)', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      maxConnections: Infinity,
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(res.status).toBe(200);
+    expect(handle.server.maxConnections).not.toBe(0);
+    expect(handle.server.maxConnections).not.toBe(Infinity);
+  });
+
+  it('--max-connections 100 sets the cap as supplied', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      maxConnections: 100,
+    });
+    expect(handle.server.maxConnections).toBe(100);
   });
 
   it('case-insensitive loopback: --hostname Localhost / LOCALHOST does NOT require a token (BQ92B)', async () => {

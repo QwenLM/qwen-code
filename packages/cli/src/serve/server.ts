@@ -201,6 +201,19 @@ export function createServeApp(
             .catch(() => {
               // Best-effort cleanup; channel.exited will eventually reap.
             });
+        } else {
+          // tanzhenxin issue 2: when an attaching client disconnects
+          // before its 200 response can be written, the
+          // `attachCount` bump we did inside `spawnOrAttach` is
+          // fictitious — there's no live attaching client. Roll the
+          // counter back and let the bridge decide whether to reap
+          // (it does if attachCount returns to 0 AND no live SSE
+          // subscribers). Without this, both-coalesced-callers-
+          // disconnect leaves an orphan agent child no client knows
+          // the id of.
+          bridge.detachClient(session.sessionId).catch(() => {
+            // Best-effort cleanup; channel.exited will eventually reap.
+          });
         }
         return;
       }

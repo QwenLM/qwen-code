@@ -132,9 +132,21 @@ export async function runQwenServe(
       // socket descriptors. The default of 256 leaves room for many
       // sessions × many legitimate clients while keeping the FD count
       // bounded; operators with high-concurrency deployments raise it
-      // via `--max-connections` (BRQQb). `0` means unlimited (Node's
-      // own semantic — `server.maxConnections = 0` disables the cap).
-      server.maxConnections = opts.maxConnections ?? 256;
+      // via `--max-connections` (BRQQb).
+      //
+      // tanzhenxin issue 1: `0` and `Infinity` are operator-visible
+      // "disable the cap" sentinels — but on Node 22 setting
+      // `server.maxConnections = 0` causes the listener to refuse
+      // EVERY connection (verified on v22.15.0: every fetch fails
+      // with `SocketError: other side closed`). Treat 0 / Infinity /
+      // non-finite as "leave the property unset" so the documented
+      // disable path actually disables instead of silently bricking
+      // the daemon.
+      const cap = opts.maxConnections ?? 256;
+      if (cap > 0 && Number.isFinite(cap)) {
+        server.maxConnections = cap;
+      }
+      // else: leave unset (Node's default = unlimited at this layer).
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
