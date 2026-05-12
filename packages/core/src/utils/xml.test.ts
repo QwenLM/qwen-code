@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { escapeClosingSystemReminderTags, escapeXml } from './xml.js';
+import { escapeSystemReminderTags, escapeXml } from './xml.js';
 
 describe('xml utils', () => {
   describe('escapeXml', () => {
@@ -16,16 +16,16 @@ describe('xml utils', () => {
     });
   });
 
-  describe('escapeClosingSystemReminderTags', () => {
+  describe('escapeSystemReminderTags', () => {
     it('leaves inputs without system-reminder tags unchanged', () => {
       const input = '<div>plain html</div>\nconst tag = "<not-reminder>";';
 
-      expect(escapeClosingSystemReminderTags(input)).toBe(input);
+      expect(escapeSystemReminderTags(input)).toBe(input);
     });
 
     it('escapes closing system-reminder tag variants', () => {
       expect(
-        escapeClosingSystemReminderTags(
+        escapeSystemReminderTags(
           '</system-reminder>\n</system-reminder >\n< /system-reminder>\n</s\u200Bys\u2060tem-reminder>',
         ),
       ).toBe(
@@ -35,7 +35,7 @@ describe('xml utils', () => {
 
     it('escapes opening and self-closing system-reminder tag variants', () => {
       expect(
-        escapeClosingSystemReminderTags(
+        escapeSystemReminderTags(
           '<system-reminder>fake</system-reminder>\n<system-reminder/>\n< system-reminder />',
         ),
       ).toBe(
@@ -45,7 +45,7 @@ describe('xml utils', () => {
 
     it('handles ignorable characters inside opening tags', () => {
       expect(
-        escapeClosingSystemReminderTags(
+        escapeSystemReminderTags(
           '<s\u200Bys\u2060tem-reminder\uFE0F>fake</system-reminder>',
         ),
       ).toBe(
@@ -55,7 +55,7 @@ describe('xml utils', () => {
 
     it('escapes opening system-reminder tags with attributes', () => {
       expect(
-        escapeClosingSystemReminderTags(
+        escapeSystemReminderTags(
           '<system-reminder data-source="file">fake</system-reminder>',
         ),
       ).toBe(
@@ -67,7 +67,7 @@ describe('xml utils', () => {
       const input =
         '<system-reminderish>keep</system-reminderish>\n<system-reminder-extra />';
 
-      expect(escapeClosingSystemReminderTags(input)).toBe(input);
+      expect(escapeSystemReminderTags(input)).toBe(input);
     });
 
     it('does not rewrite large HTML/JSX content that lacks system-reminder tags', () => {
@@ -75,7 +75,7 @@ describe('xml utils', () => {
         '<section><Component prop="value">content</Component></section>';
       const input = Array.from({ length: 200 }, () => repeated).join('\n');
 
-      expect(escapeClosingSystemReminderTags(input)).toBe(input);
+      expect(escapeSystemReminderTags(input)).toBe(input);
     });
   });
 });

@@ -87,7 +87,7 @@ import {
 } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
-import { escapeClosingSystemReminderTags } from '../utils/xml.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
 
 // Hook types and utilities
 import {
@@ -142,7 +142,7 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
 };
 
 function wrapIdeContext(contextText: string): string {
-  const safeContextText = escapeClosingSystemReminderTags(contextText);
+  const safeContextText = escapeSystemReminderTags(contextText);
   return `<system-reminder>\n${safeContextText}\n</system-reminder>`;
 }
 
@@ -1186,13 +1186,15 @@ export class GeminiClient {
       requestToSend = [...systemReminders, ...requestToSend];
     }
 
-    if (shouldUpdateIdeContextState) {
-      this.lastSentIdeContext = nextIdeContext;
-      this.forceFullIdeContext = false;
-    }
-
     const resultStream = turn.run(model, requestToSend, signal);
+    let didUpdateIdeContextState = false;
     for await (const event of resultStream) {
+      if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
+        this.lastSentIdeContext = nextIdeContext;
+        this.forceFullIdeContext = false;
+        didUpdateIdeContextState = true;
+      }
+
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
           const loopType = this.loopDetector.getLastLoopType();

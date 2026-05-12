@@ -30,6 +30,7 @@ import { type GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { ModelsConfig } from '../models/modelsConfig.js';
+import { UnauthorizedError } from '../utils/errors.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { CompressionStatus, GeminiEventType, Turn } from './turn.js';
 
@@ -2789,6 +2790,84 @@ Other open files:
         );
         expect(requestText).toContain('/path/to/file.ts');
         expect(requestText).not.toContain('summary of changes');
+      });
+
+      it('keeps the IDE context baseline unchanged if the turn stream throws before the first event', async () => {
+        const normalHistory: Content[] = [
+          { role: 'user', parts: [{ text: 'A normal message.' }] },
+          { role: 'model', parts: [{ text: 'A normal response.' }] },
+        ];
+        vi.mocked(mockChat.getHistory!).mockReturnValue(normalHistory);
+
+        const previousIdeContext = {
+          workspaceState: {
+            openFiles: [
+              {
+                path: '/path/to/old-file.ts',
+                timestamp: Date.now() - 1000,
+                isActive: true,
+              },
+            ],
+          },
+        };
+        const nextIdeContext = {
+          workspaceState: {
+            openFiles: [
+              {
+                path: '/path/to/new-file.ts',
+                timestamp: Date.now(),
+                isActive: true,
+              },
+            ],
+          },
+        };
+
+        client['lastSentIdeContext'] = previousIdeContext;
+        client['forceFullIdeContext'] = false;
+        vi.mocked(ideContextStore.get).mockReturnValue(nextIdeContext);
+        mockTurnRunFn.mockImplementationOnce(async function* (
+          _model: string,
+          _request: unknown,
+          signal: AbortSignal,
+        ) {
+          if (signal.aborted) {
+            yield { type: GeminiEventType.UserCancelled };
+          }
+          throw new UnauthorizedError('unauthorized');
+        });
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'Message that throws before streaming' }],
+              new AbortController().signal,
+              'prompt-id-ide-unauthorized',
+            ),
+          ),
+        ).rejects.toThrow(UnauthorizedError);
+
+        expect(client['lastSentIdeContext']).toBe(previousIdeContext);
+
+        mockTurnRunFn.mockReturnValueOnce(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'ok' };
+          })(),
+        );
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'After unauthorized' }],
+            new AbortController().signal,
+            'prompt-id-after-ide-unauthorized',
+          ),
+        );
+
+        const requestText = getLastTurnRequestText();
+        expect(requestText).toContain(
+          "Here is a summary of changes in the user's current editor context",
+        );
+        expect(requestText).toContain('Active file changed:');
+        expect(requestText).toContain('/path/to/new-file.ts');
       });
 
       it('should send the latest IDE context on the next message after a skipped context', async () => {

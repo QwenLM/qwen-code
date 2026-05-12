@@ -85,6 +85,6 @@ function escapeSystemReminderTag(tag: string): string {
  * while preventing untrusted content, including visually hidden format/control
  * characters inside the tag, from ending or spoofing the reminder envelope.
  */
-export function escapeClosingSystemReminderTags(text: string): string {
+export function escapeSystemReminderTags(text: string): string {
   return text.replace(XML_TAG_CANDIDATE_RE, escapeSystemReminderTag);
 }
