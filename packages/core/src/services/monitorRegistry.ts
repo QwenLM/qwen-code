@@ -294,7 +294,26 @@ export class MonitorRegistry {
     this.emitTerminalNotification(entry, error);
   }
 
-  // No-op if not 'running' — guards against race with concurrent cancellation.
+  /**
+   * Cancel a running monitor. No-op if not 'running' — guards against a race
+   * with concurrent cancellation.
+   *
+   * The two branches order `settle()` and `abort()` differently on purpose:
+   *
+   * - `notify: false` (silent cancel, e.g. owner-agent teardown): settle to
+   *   `'cancelled'` *first*, then abort. The status transition is locked in
+   *   before any abort-listener can run, so an abort-triggered `fail()` or
+   *   `complete()` can't race in and overwrite the terminal status. The
+   *   owner is woken via `dispatchOwnerLifecycleWake()` instead of the
+   *   notification channel.
+   *
+   * - Default (user-visible cancel): abort *first*, then re-check `status`.
+   *   This lets a naturally-completing operation settle itself through its
+   *   own terminal path (so the user sees `completed`/`failed` rather than
+   *   a forced `cancelled` when the abort arrives at the finish line). Only
+   *   if `status` is still `'running'` after abort do we force `'cancelled'`
+   *   and emit the terminal notification.
+   */
   cancel(monitorId: string, options: MonitorCancelOptions = {}): void {
     const entry = this.monitors.get(monitorId);
     if (!entry || entry.status !== 'running') return;
@@ -441,7 +460,7 @@ export class MonitorRegistry {
     }
   }
 
-  private dispatchOwnerLifecycleWake(entry: MonitorEntry): void {
+  private dispatchOwnerLifecycleWake(entry: MonitorTask): void {
     if (!entry.ownerAgentId) return;
     const callback = this.agentLifecycleCallbacks.get(entry.ownerAgentId);
     if (!callback) return;
@@ -580,7 +599,7 @@ export class MonitorRegistry {
   }
 
   private dispatchNotification(
-    entry: MonitorEntry,
+    entry: MonitorTask,
     displayLine: string,
     modelText: string,
     meta: MonitorNotificationMeta,
