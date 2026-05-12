@@ -197,16 +197,27 @@ function parseFrame(raw: string): DaemonEvent | undefined {
   const dataText = dataLines.join('\n');
   try {
     const parsed = JSON.parse(dataText);
-    // `JSON.parse('null')` / `JSON.parse('42')` etc. parse cleanly
-    // but aren't `DaemonEvent`-shaped. Casting them through would
-    // hand consumers a value that violates the generator's
-    // `AsyncGenerator<DaemonEvent>` contract (e.g. `null` where
-    // `ev.type` is supposed to be readable). The daemon itself
-    // never emits non-object frames — `formatSseFrame` always
-    // serializes a populated object — so this guard exists for
-    // defense-in-depth against misbehaving proxies / alternate
-    // implementations.
+    // `JSON.parse('null')` / `JSON.parse('42')` / `JSON.parse('[1,2]')`
+    // etc. parse cleanly but aren't `DaemonEvent`-shaped. Casting
+    // them through would hand consumers a value that violates the
+    // generator's `AsyncGenerator<DaemonEvent>` contract (e.g.
+    // `null` where `ev.type` is supposed to be readable, or an
+    // array where `ev.v` would be undefined). The daemon itself
+    // never emits these — `formatSseFrame` always serializes a
+    // populated object with `v === 1` and `type: string` — so the
+    // guard is defense-in-depth against misbehaving proxies /
+    // alternate daemon implementations. Per BREsR: also reject
+    // arrays and require minimal shape (`v === 1`, `type` is a
+    // string) before yielding so the generator's static type is a
+    // genuine runtime guarantee.
     if (typeof parsed !== 'object' || parsed === null) return undefined;
+    if (Array.isArray(parsed)) return undefined;
+    if (
+      (parsed as { v?: unknown }).v !== 1 ||
+      typeof (parsed as { type?: unknown }).type !== 'string'
+    ) {
+      return undefined;
+    }
     return parsed as DaemonEvent;
   } catch {
     return undefined;

@@ -96,30 +96,26 @@ describe('parseSseStream', () => {
     expect(events[0]?.id).toBe(2);
   });
 
-  it('skips non-object JSON (null/number/string/array) — BQ9ze guard', async () => {
-    // `JSON.parse('null')` returns null but the generator's
-    // contract is `AsyncGenerator<DaemonEvent>` (always an object).
-    // The daemon never emits these; this is defense-in-depth
-    // against a misbehaving proxy / alternate implementation.
+  it('skips non-DaemonEvent JSON (null/primitive/array/shape-mismatch) — BQ9ze+BREsR guards', async () => {
+    // `JSON.parse('null')` / `JSON.parse('[...]')` / objects missing
+    // `v === 1` / `type: string` parse cleanly but aren't
+    // `DaemonEvent`-shaped. The generator's static type is
+    // `AsyncGenerator<DaemonEvent>` — yielding non-event values
+    // would violate the runtime contract. The daemon never emits
+    // any of these; defense-in-depth against misbehaving proxies.
     const stream = bodyFromString(
       'id: 1\ndata: null\n\n' +
         'id: 2\ndata: 42\n\n' +
         'id: 3\ndata: "string"\n\n' +
         'id: 4\ndata: [1,2,3]\n\n' +
-        'id: 5\nevent: x\ndata: {"id":5,"v":1,"type":"x","data":"ok"}\n\n',
+        'id: 5\ndata: {"v":1}\n\n' + // missing `type`
+        'id: 6\ndata: {"v":2,"type":"x","data":"ok"}\n\n' + // wrong `v`
+        'id: 7\ndata: {"v":1,"type":42,"data":"ok"}\n\n' + // type not string
+        'id: 8\nevent: x\ndata: {"id":8,"v":1,"type":"x","data":"ok"}\n\n',
     );
     const events = await collect(parseSseStream(stream));
-    // Only the well-formed object frame should yield. Note: `[1,2,3]`
-    // is technically `typeof "object"`, but it isn't `DaemonEvent`-
-    // shaped; the runtime guard is intentionally narrow (rejecting
-    // null + primitives is enough to prevent the type-cast bug).
-    // Arrays still pass typeof-object, so id:4 may also yield as a
-    // best-effort; the goal is purely to cover the null/primitive
-    // hole.
-    expect(events.map((e) => e.id)).toContain(5);
-    expect(events.map((e) => e.id)).not.toContain(1);
-    expect(events.map((e) => e.id)).not.toContain(2);
-    expect(events.map((e) => e.id)).not.toContain(3);
+    // Only the well-formed frame should yield.
+    expect(events.map((e) => e.id)).toEqual([8]);
   });
 
   it('flushes a trailing frame with no terminating blank line on stream close', async () => {
