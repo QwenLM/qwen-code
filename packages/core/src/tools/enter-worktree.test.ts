@@ -109,6 +109,14 @@ describe('EnterWorktreeTool metadata', () => {
     const tool = new EnterWorktreeTool(makeMockConfig());
     expect(tool.validateToolParams({})).toBeNull();
   });
+
+  it('accepts an empty-string name (treated as auto-generate)', () => {
+    // Some models pass `{ name: '' }` when the schema marks `name` as
+    // optional. Validation should not reject this — `execute` falls back
+    // to an auto-generated slug.
+    const tool = new EnterWorktreeTool(makeMockConfig());
+    expect(tool.validateToolParams({ name: '' })).toBeNull();
+  });
 });
 
 describe('ExitWorktreeTool metadata and validation', () => {

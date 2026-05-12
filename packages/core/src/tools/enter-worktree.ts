@@ -79,7 +79,15 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
       );
     }
 
-    const slug = this.params.name ?? GitWorktreeService.generateAutoSlug();
+    // Treat an empty `name` ('') the same as undefined — some models pass
+    // `{ name: '' }` when the schema marks `name` as optional, expecting
+    // the auto-generated slug. Without this, validation would reject the
+    // empty string before reaching the auto-slug path.
+    const requested =
+      this.params.name && this.params.name.length > 0
+        ? this.params.name
+        : undefined;
+    const slug = requested ?? GitWorktreeService.generateAutoSlug();
     const validation = GitWorktreeService.validateUserWorktreeSlug(slug);
     if (validation) {
       return errorResult(validation);
@@ -152,6 +160,12 @@ export class EnterWorktreeTool extends BaseDeclarativeTool<
     if (params.name !== undefined) {
       if (typeof params.name !== 'string') {
         return 'Parameter "name" must be a string.';
+      }
+      // Empty string is treated as "not provided" — `execute` falls back
+      // to an auto-generated slug. Skip slug-format validation here so
+      // the auto-slug path is reachable.
+      if (params.name.length === 0) {
+        return null;
       }
       const error = GitWorktreeService.validateUserWorktreeSlug(params.name);
       if (error) return error;
