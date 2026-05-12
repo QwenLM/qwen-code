@@ -1641,6 +1641,15 @@ describe('createHttpAcpBridge', () => {
       // Char devices / FIFOs / procfs entries report size=0 but
       // produce unbounded data on read. Use a FIFO as the portable
       // probe (chrdev / procfs not always available).
+      //
+      // Hard-skip on Windows: the platform doesn't have FIFOs at the
+      // OS level. Git-Bash and similar shells ship a `mkfifo` binary
+      // that succeeds-with-degeneration (creates a regular file or
+      // silently does nothing), which then makes the test assert
+      // against the wrong error shape and look like a regression.
+      // The bridge's `!stats.isFile()` check itself is platform-
+      // agnostic; Linux + macOS coverage is sufficient.
+      if (process.platform === 'win32') return;
       const { bridge, conn } = await setupForFs();
       const fifoPath = path.join(
         os.tmpdir(),
@@ -1650,9 +1659,7 @@ describe('createHttpAcpBridge', () => {
       try {
         execFileSync('mkfifo', [fifoPath]);
       } catch {
-        // Skip on platforms without mkfifo (Windows). Test is
-        // pinning POSIX behavior; Stage 2 in-process refactor will
-        // make this moot anyway.
+        // Skip if mkfifo not on PATH for some reason.
         await bridge.shutdown();
         return;
       }
@@ -1712,6 +1719,47 @@ describe('createHttpAcpBridge', () => {
         expect(await fsp.readFile(link, 'utf8')).toBe(
           'updated through symlink',
         );
+      } finally {
+        await fsp.rm(dir, { recursive: true, force: true });
+        await bridge.shutdown();
+      }
+    });
+
+    it('writeTextFile preserves dangling symlinks (BfFvO)', async () => {
+      // Symlink whose target doesn't exist yet — `fs.realpath` throws
+      // ENOENT. Pre-fix: the catch silently fell back to writing to
+      // params.path (the symlink), and rename replaced the symlink
+      // with a regular file (the original BX8Yw bug, masked for
+      // dangling targets). Fix uses `fs.readlink` to disambiguate.
+      if (process.platform === 'win32') return; // symlinks need admin on Windows
+      const { bridge, conn } = await setupForFs();
+      const dir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-bridge-dangling-'),
+      );
+      const target = path.join(dir, 'target.txt'); // not created yet
+      const link = path.join(dir, 'link.txt');
+      await fsp.symlink(target, link);
+      try {
+        await (
+          conn as unknown as {
+            writeTextFile(p: {
+              path: string;
+              content: string;
+              sessionId: string;
+            }): Promise<unknown>;
+          }
+        ).writeTextFile({
+          sessionId: 'unused',
+          path: link,
+          content: 'created through dangling symlink',
+        });
+        // Target now exists with the content.
+        expect(await fsp.readFile(target, 'utf8')).toBe(
+          'created through dangling symlink',
+        );
+        // Link is STILL a symlink (not replaced by a regular file).
+        const linkStat = await fsp.lstat(link);
+        expect(linkStat.isSymbolicLink()).toBe(true);
       } finally {
         await fsp.rm(dir, { recursive: true, force: true });
         await bridge.shutdown();

@@ -626,13 +626,38 @@ class BridgeClient implements Client {
     // regular file, leaving the original symlink target unchanged
     // while the write appears successful. Resolve symlinks via
     // `realpath` first so the atomic write lands at the actual file.
-    // Non-existent paths bypass realpath (nothing to resolve); falls
-    // through to the original target.
+    //
+    // BfFvO: dangling-symlink case — `realpath` throws ENOENT when
+    // the symlink's target doesn't exist. A blanket catch then
+    // silently falls back to `params.path` (the symlink itself), and
+    // `rename(tmp, params.path)` would replace the symlink with a
+    // regular file — exactly the bug BX8Yw was supposed to fix.
+    // Distinguish "path doesn't exist at all" (truly new file →
+    // write through) from "dangling symlink" (symlink exists, target
+    // doesn't → write through to the symlink's intended target so
+    // the symlink stays a symlink and points at a fresh file).
     let realTarget = params.path;
     try {
       realTarget = await fs.realpath(params.path);
-    } catch {
-      /* path doesn't exist yet — write through directly */
+    } catch (err) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? (err as { code?: unknown }).code
+          : undefined;
+      if (code !== 'ENOENT') throw err;
+      // realpath ENOENT can mean (a) path doesn't exist at all, or
+      // (b) the path is a symlink whose target doesn't exist. Use
+      // `readlink` to disambiguate. If it succeeds we've got a
+      // dangling symlink → resolve its target manually so the
+      // subsequent rename creates the target instead of replacing
+      // the symlink.
+      try {
+        const linkTarget = await fs.readlink(params.path);
+        realTarget = path.resolve(path.dirname(params.path), linkTarget);
+      } catch {
+        // readlink also failed → truly non-existent path → write
+        // through to the original (it'll be created).
+      }
     }
     // BX8Yp + BX9_h: temp filename must include random bytes —
     // PID+ms alone collides under `sessionScope: 'thread'` (two
@@ -905,7 +930,24 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     const promise = (async () => {
       const channel = await channelFactory(workspaceKey);
       const client = new BridgeClient(
-        (sessionId) => (sessionId ? byId.get(sessionId) : undefined),
+        // BfFut: ACP today carries a sessionId on every per-session
+        // notification / request, so the no-sessionId branch is
+        // technically unreachable. But the channel is multi-session
+        // (Stage 1.5 multiplex), so if ACP ever grows a no-sessionId
+        // call we'd silently drop it on a multi-session channel
+        // instead of throwing. Surface that ambiguity loudly.
+        (sessionId) => {
+          if (sessionId) return byId.get(sessionId);
+          const info = byWorkspaceChannel.get(workspaceKey);
+          if (info && info.sessionIds.size > 1) {
+            throw new Error(
+              'BridgeClient: ACP call without sessionId on a ' +
+                'multi-session channel cannot be routed — workspace=' +
+                workspaceKey,
+            );
+          }
+          return undefined;
+        },
         registerPending,
         (rid) =>
           // Roll back a register-then-publish-failed pending so the agent
