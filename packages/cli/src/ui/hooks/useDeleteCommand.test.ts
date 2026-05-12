@@ -462,8 +462,11 @@ describe('useDeleteCommand', () => {
       expect(sessionService.removeSessions).toHaveBeenCalledWith(['x']);
     });
 
-    it('reports an error when the call throws', async () => {
-      const removeSessions = vi.fn().mockRejectedValue(new Error('nope'));
+    it('reports an error when the call throws and releases the in-flight guard', async () => {
+      const removeSessions = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('nope'))
+        .mockResolvedValueOnce({ removed: ['b'], notFound: [], errors: [] });
       const { config } = createConfig({
         currentSessionId: 'current',
         removeSessions,
@@ -486,6 +489,14 @@ describe('useDeleteCommand', () => {
       // The original error message must surface for diagnostics — bare
       // "Failed to delete sessions." would hide the root cause.
       expect(item.text).toContain('nope');
+
+      await act(async () => {
+        result.current.handleDeleteMany(['b']);
+        await flushAsync();
+      });
+
+      expect(removeSessions).toHaveBeenCalledTimes(2);
+      expect(removeSessions).toHaveBeenLastCalledWith(['b']);
     });
   });
 });
