@@ -66,6 +66,13 @@ describe('osc8 helpers', () => {
       expect(sanitizeForOsc('a\x00b\x07c\x1bd\x7fe')).toBe('abcde');
     });
 
+    it('strips C1 control bytes (\\x80-\\x9f)', () => {
+      // \x9c is 8-bit ST and \x9d is 8-bit OSC — terminals that honor C1
+      // controls treat these as sequence boundaries, so they must not
+      // survive inside an OSC 8 target.
+      expect(sanitizeForOsc('a\x80b\x9cc\x9dd\x9fe')).toBe('abcde');
+    });
+
     it('keeps printable ASCII and unicode intact', () => {
       expect(sanitizeForOsc('https://example.com/路径?q=v')).toBe(
         'https://example.com/路径?q=v',

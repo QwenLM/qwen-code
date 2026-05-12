@@ -20,14 +20,16 @@ import { wrapForMultiplexer } from '../../utils/osc.js';
 export { wrapForMultiplexer };
 
 /**
- * Strip C0 control characters and DEL so an untrusted string can be safely
+ * Strip C0 + DEL + C1 control characters so an untrusted string can be safely
  * embedded inside an OSC escape. Without this a `\x07` (BEL) or `\x1b` (ESC)
  * in the input would prematurely terminate the OSC sequence and leak the
- * tail bytes to the terminal as interpretable escape codes.
+ * tail bytes to the terminal as interpretable escape codes. C1 bytes
+ * (`\x80-\x9f`) include the 8-bit ST and OSC introducers, which terminals
+ * that honor C1 controls treat the same as their two-byte ESC counterparts.
  */
 export function sanitizeForOsc(s: string): string {
   // eslint-disable-next-line no-control-regex
-  return s.replace(/[\x00-\x1f\x7f]/g, '');
+  return s.replace(/[\x00-\x1f\x7f\x80-\x9f]/g, '');
 }
 
 /**
