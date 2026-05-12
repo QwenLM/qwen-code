@@ -551,6 +551,114 @@ describe('McpClientManager', () => {
     expect(mockedMcpClient.discover).toHaveBeenCalledTimes(1);
   });
 
+  it('discoverAllMcpToolsIncremental tears down enabled→disabled transitions', async () => {
+    // Mid-session, the user disables a previously-connected server (e.g.
+    // via `/mcp disable foo` or by editing settings). The incremental
+    // path must tear down the existing client, drop its registered tools,
+    // stop its health check, and remove its global status — otherwise
+    // the Footer pill keeps counting it, its tools stay live in the
+    // ToolRegistry, and the health-check loop keeps probing a server
+    // the user has told us to ignore.
+    const mockedMcpClient = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const removeMcpToolsByServer = vi.fn();
+    const toolRegistryStub = {
+      removeMcpToolsByServer,
+    } as unknown as ToolRegistry;
+
+    let disabled = false;
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ foo: { command: 'node', args: [] } }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: (name: string) => name === 'foo' && disabled,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, toolRegistryStub);
+
+    // First pass: server enabled, gets connected.
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(1);
+    expect(mockedMcpClient.disconnect).not.toHaveBeenCalled();
+
+    // Now disable mid-session and re-run incremental discovery.
+    disabled = true;
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    // The previously-connected client must be disconnected and its tools
+    // dropped from the registry.
+    expect(mockedMcpClient.disconnect).toHaveBeenCalledTimes(1);
+    expect(removeMcpToolsByServer).toHaveBeenCalledWith('foo');
+    // And no fresh connect was attempted (the disabled branch fires
+    // before serversToUpdate is populated).
+    expect(mockedMcpClient.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('discoverAllMcpToolsIncremental records `failed` outcome for swallowed connect errors', async () => {
+    // `discoverMcpToolsForServerInternal` catches connect/discover errors
+    // without re-throwing (best-effort semantics — one broken server
+    // shouldn't bring down the others). Before this fix, the try block in
+    // `discoverAllMcpToolsIncremental` therefore resolved even for failed
+    // servers, and we'd record `mcp_server_ready:<name>` with
+    // `outcome: 'ready'`. Now we consult the actual server status (set
+    // to DISCONNECTED by McpClient.connect's catch) and emit `failed`
+    // instead — otherwise the startup profile claims success for every
+    // auth error / crashed server.
+    const events: Array<{ name: string; attrs?: Record<string, unknown> }> = [];
+    const startupEventSink = await import('../utils/startupEventSink.js');
+    startupEventSink.setStartupEventSink((name, attrs) => {
+      events.push({ name, attrs });
+    });
+
+    const mockedMcpClient = {
+      connect: vi.fn().mockRejectedValue(new Error('auth failed')),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ 'broken-auth': { command: 'node', args: [] } }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    // Cleanup the global sink so it doesn't leak into other tests.
+    startupEventSink.setStartupEventSink(null);
+
+    const readyEvents = events.filter(
+      (e) => e.name === 'mcp_server_ready:broken-auth',
+    );
+    expect(readyEvents).toHaveLength(1);
+    expect(readyEvents[0].attrs?.['outcome']).toBe('failed');
+    // And no `mcp_first_tool_registered` was emitted — that metric is
+    // user-facing ("first MCP server became usable") so a failed server
+    // must not pollute it.
+    const firstToolEvents = events.filter(
+      (e) => e.name === 'mcp_first_tool_registered',
+    );
+    expect(firstToolEvents).toHaveLength(0);
+  });
+
   it('discoveryTimeoutMs is clamped to a minimum and maximum', async () => {
     // A 0 or negative override would cause the timeout to fire on the
     // very next macrotask, racing the connect() handshake. Combined with

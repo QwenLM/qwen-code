@@ -11,6 +11,7 @@ import {
   McpClient,
   MCPDiscoveryState,
   MCPServerStatus,
+  getMCPServerStatus,
   populateMcpServerCommand,
   removeMCPServerStatus,
 } from './mcp-client.js';
@@ -477,6 +478,16 @@ export class McpClientManager {
       // told us to ignore.
       if (cliConfig.isMcpServerDisabled(name)) {
         debugLogger.debug(`Skipping disabled MCP server: ${name}`);
+        // If the server was previously enabled and got connected, we now
+        // need to tear it down — otherwise its client, registered tools
+        // and health checks linger after an enabled→disabled mid-session
+        // transition (e.g. via `/mcp disable <name>`). `removeServer`
+        // disconnects, drops the client entry, removes tools from the
+        // registry, stops the health check, and removes the global
+        // status so the Footer pill stops counting it.
+        if (this.clients.has(name)) {
+          await this.removeServer(name);
+        }
         continue;
       }
       const existingClient = this.clients.get(name);
@@ -510,13 +521,30 @@ export class McpClientManager {
         await this.runWithDiscoveryTimeout(name, serverConfig, () =>
           this.discoverMcpToolsForServer(name, cliConfig),
         );
-        if (!firstToolEventFired) {
-          firstToolEventFired = true;
-          recordStartupEvent('mcp_first_tool_registered', {
-            serverName: name,
+        // `discoverMcpToolsForServerInternal` swallows connect/discover
+        // errors (best-effort discovery semantics — see its catch block),
+        // so the try here resolves even for failed servers. Only the
+        // timeout path reaches the catch below. Consult the actual
+        // server status to decide which outcome to record, otherwise
+        // every auth failure / crash / "no tools found" looks like
+        // `ready` in the startup profile.
+        const client = this.clients.get(name);
+        const actuallyReady =
+          !!client && getMCPServerStatus(name) === MCPServerStatus.CONNECTED;
+        if (actuallyReady) {
+          if (!firstToolEventFired) {
+            firstToolEventFired = true;
+            recordStartupEvent('mcp_first_tool_registered', {
+              serverName: name,
+            });
+          }
+          recordStartupEvent(`mcp_server_ready:${name}`, { outcome: 'ready' });
+        } else {
+          recordStartupEvent(`mcp_server_ready:${name}`, {
+            outcome: 'failed',
+            reason: 'connect or discover error',
           });
         }
-        recordStartupEvent(`mcp_server_ready:${name}`, { outcome: 'ready' });
       } catch (error) {
         // Defensive cleanup: the dedup Map entry is normally removed by
         // `discoverMcpToolsForServer`'s `finally`, but `runWithDiscoveryTimeout`

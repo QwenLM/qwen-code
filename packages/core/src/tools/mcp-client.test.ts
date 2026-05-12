@@ -185,6 +185,57 @@ describe('mcp-client', () => {
         'No prompts or tools found on the server.',
       );
     });
+
+    it('flips status to DISCONNECTED when discover() throws', async () => {
+      // `Config.getFailedMcpServerNames()` filters by
+      // `status !== CONNECTED`, so a server that connects successfully
+      // but whose `discover()` then crashes (e.g. tools/list rejects, or
+      // the "no prompts or tools found" guard fires) must be marked
+      // DISCONNECTED before the error propagates. Without this, the
+      // server stays CONNECTED in the global registry, the non-interactive
+      // failure banner silently omits it, and the Footer's MCP health
+      // pill keeps counting it as healthy.
+      const mockedClient = {
+        connect: vi.fn(),
+        discover: vi.fn(),
+        disconnect: vi.fn(),
+        getStatus: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(new Error('tools/list crashed')),
+        close: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const serverName = `discover-error-${Date.now()}`;
+      const client = new McpClient(
+        serverName,
+        {
+          command: 'test-command',
+        },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      // Sanity: connect succeeded so the status is CONNECTED before the
+      // discover failure we're about to assert against.
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+
+      await expect(client.discover({} as Config)).rejects.toThrow();
+
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
+    });
   });
   describe('appendMcpServerCommand', () => {
     it('should do nothing if no MCP servers or command are configured', () => {
