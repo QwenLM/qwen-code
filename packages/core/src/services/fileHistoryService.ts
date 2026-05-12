@@ -247,7 +247,6 @@ export class FileHistoryService {
     trackedFiles: new Set(),
   };
 
-  private currentPromptId = '';
   private readonly sessionId: string;
   private readonly enabled: boolean;
   private readonly cwd: string;
@@ -260,14 +259,6 @@ export class FileHistoryService {
 
   isEnabled(): boolean {
     return this.enabled;
-  }
-
-  setCurrentPromptId(id: string): void {
-    this.currentPromptId = id;
-  }
-
-  getCurrentPromptId(): string {
-    return this.currentPromptId;
   }
 
   getSnapshots(): FileHistorySnapshot[] {
@@ -328,8 +319,6 @@ export class FileHistoryService {
 
   async makeSnapshot(promptId: string): Promise<void> {
     if (!this.enabled) return;
-
-    this.currentPromptId = promptId;
 
     const trackedFileBackups: Record<string, FileHistoryBackup> = {};
     const mostRecent = this.state.snapshots.at(-1);
@@ -422,6 +411,9 @@ export class FileHistoryService {
     const targetIdx = this.state.snapshots.indexOf(targetSnapshot);
     if (targetIdx >= 0) {
       this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
+      this.state.trackedFiles = new Set(
+        this.state.snapshots.flatMap((s) => Object.keys(s.trackedFileBackups)),
+      );
     }
 
     debugLogger.debug(`FileHistory: Finished rewinding to ${promptId}`);

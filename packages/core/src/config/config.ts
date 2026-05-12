@@ -1470,6 +1470,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
