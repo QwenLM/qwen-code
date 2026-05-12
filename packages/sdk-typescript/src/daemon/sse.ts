@@ -173,12 +173,13 @@ export async function* parseSseStream(
 function consumeFrames(buf: string): { frames: string[]; tail: string } {
   const frames: string[] = [];
   let cursor = 0;
-  // BX9_a: in the common LF-only case the CRLF scan always returns
-  // -1, traversing the entire remaining buffer for nothing. Search
-  // `\n\n` first; only fall back to `\r\n\r\n` if the LF separator
-  // isn't found OR comes after a (potentially) earlier CRLF
-  // separator. The earlier-separator case is rare (mixed-encoding
-  // streams) so the extra CRLF scan only fires when needed.
+  // BX9_a + BeFHR + BeFId: scan for `\n\n` first; on hit, look for
+  // an earlier `\r\n\r\n` within the window `[cursor, lf)` ONLY by
+  // slicing before scanning (Node's `String.indexOf` has no upper-
+  // bound argument). On the LF-not-found path, fall back to a full
+  // CRLF scan over the remainder. Net cost in the common LF-only
+  // case is one full scan + one bounded scan over the matched
+  // frame's bytes (small).
   while (cursor < buf.length) {
     const lf = buf.indexOf('\n\n', cursor);
     if (lf === -1) {
@@ -189,16 +190,14 @@ function consumeFrames(buf: string): { frames: string[]; tail: string } {
       cursor = crlf + 4;
       continue;
     }
-    // An LF exists. If a CRLF appears earlier (mixed-encoding edge
-    // case), use it instead. The CRLF scan runs over `[cursor, end)`
-    // (Node's `indexOf` doesn't accept an upper bound), but we only
-    // use the result if it falls before `lf` — anything past `lf`
-    // is ignored since LF already terminates the frame. BcRh_:
-    // comment fixed to match actual scan range. The cost is a
-    // single extra scan only when both LF and CRLF appear in the
-    // buffer (rare on a typical SSE stream).
-    const crlf = buf.indexOf('\r\n\r\n', cursor);
-    if (crlf !== -1 && crlf < lf) {
+    // An LF exists. Look for a CRLF that appears earlier
+    // (mixed-encoding edge case) by searching ONLY the
+    // pre-LF window so we don't pay for a full-remainder scan
+    // every iteration.
+    const window = buf.slice(cursor, lf);
+    const crlfInWindow = window.indexOf('\r\n\r\n');
+    if (crlfInWindow !== -1) {
+      const crlf = cursor + crlfInWindow;
       frames.push(buf.slice(cursor, crlf));
       cursor = crlf + 4;
     } else {
