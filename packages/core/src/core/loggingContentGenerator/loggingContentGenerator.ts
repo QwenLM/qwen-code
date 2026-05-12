@@ -424,6 +424,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
     const resetSpanTimeout = span
       ? () => {
+          if (spanEnded) return;
           if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
           spanEndTimeout = setTimeout(() => {
             try {
