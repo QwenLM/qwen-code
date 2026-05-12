@@ -25,7 +25,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
 import type { AgentExternalInput } from './runtime/agent-types.js';
-import type { TaskBase, TaskRegistration } from './tasks/types.js';
+import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
@@ -77,12 +77,12 @@ export function buildBackgroundEntryLabel(
 // envelope early and forge sibling tags (e.g. a faked <status>) that the
 // parent model would treat as trusted metadata. Use the shared helper.
 
-export type BackgroundTaskStatus =
-  | 'running'
-  | 'paused'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+/**
+ * @deprecated Use `TaskStatus` from `./tasks/types.js`. Kept as a one-release
+ * alias so existing consumers (notably `nonInteractiveCli.ts`) compile
+ * unchanged; the underlying union is identical.
+ */
+export type BackgroundTaskStatus = TaskStatus;
 
 export interface AgentCompletionStats {
   totalTokens: number;
