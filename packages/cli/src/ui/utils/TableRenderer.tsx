@@ -18,6 +18,13 @@ const MIN_COLUMN_WIDTH = 3;
 /** Maximum number of lines per row before switching to vertical format */
 const MAX_ROW_LINES = 4;
 
+/**
+ * Below this width the column-aware budget (see `minHorizontalTableWidth`
+ * below) is bypassed and we always switch to vertical: even a 1-column
+ * table is barely readable horizontally under ~24 cols of content.
+ */
+const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
+
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
@@ -66,6 +73,7 @@ const INK_COLOR_TO_ANSI: Record<string, number> = {
 };
 
 const HEX_COLOR_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+const ESC = '\x1b';
 
 /** Get raw ANSI foreground color escape (without reset) for re-application */
 function getColorCode(color: string): string {
@@ -105,6 +113,98 @@ function recolorAfterResets(text: string, colorCode: string): string {
     .join(fgReset + colorCode)
     .split(fullReset)
     .join(fullReset + colorCode);
+}
+
+function updateActiveForeground(
+  activeForeground: string,
+  paramsText: string,
+): string {
+  const params =
+    paramsText.length > 0
+      ? paramsText.split(';').map((param) => Number(param))
+      : [0];
+  let foreground = activeForeground;
+
+  for (let index = 0; index < params.length; index++) {
+    const code = params[index];
+    if (!Number.isFinite(code)) {
+      continue;
+    }
+
+    if (code === 0 || code === 39) {
+      foreground = '';
+    } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+      foreground = `\x1b[${code}m`;
+    } else if (code === 38) {
+      const mode = params[index + 1];
+      if (mode === 5 && Number.isFinite(params[index + 2])) {
+        foreground = `\x1b[38;5;${params[index + 2]}m`;
+        index += 2;
+      } else if (
+        mode === 2 &&
+        Number.isFinite(params[index + 2]) &&
+        Number.isFinite(params[index + 3]) &&
+        Number.isFinite(params[index + 4])
+      ) {
+        foreground = `\x1b[38;2;${params[index + 2]};${params[index + 3]};${params[index + 4]}m`;
+        index += 4;
+      }
+    }
+  }
+
+  return foreground;
+}
+
+function readSgrSequence(
+  text: string,
+  index: number,
+): { sequence: string; paramsText: string; endIndex: number } | null {
+  if (text[index] !== ESC || text[index + 1] !== '[') {
+    return null;
+  }
+  const endIndex = text.indexOf('m', index + 2);
+  if (endIndex === -1) {
+    return null;
+  }
+  const paramsText = text.slice(index + 2, endIndex);
+  if (!/^[0-9;]*$/.test(paramsText)) {
+    return null;
+  }
+  return {
+    sequence: text.slice(index, endIndex + 1),
+    paramsText,
+    endIndex,
+  };
+}
+
+function preserveForegroundAcrossLineBreaks(text: string): string {
+  let activeForeground = '';
+  let result = '';
+  let lastIndex = 0;
+  let index = 0;
+
+  while (index < text.length) {
+    const sgr = readSgrSequence(text, index);
+    if (!sgr) {
+      index += 1;
+      continue;
+    }
+
+    const segment = text.slice(lastIndex, index);
+    result += activeForeground
+      ? segment.replace(/\n/g, `\x1b[39m\n${activeForeground}`)
+      : segment;
+    result += sgr.sequence;
+    activeForeground = updateActiveForeground(activeForeground, sgr.paramsText);
+    index = sgr.endIndex + 1;
+    lastIndex = index;
+  }
+
+  const segment = text.slice(lastIndex);
+  result += activeForeground
+    ? segment.replace(/\n/g, `\x1b[39m\n${activeForeground}`)
+    : segment;
+  return result;
 }
 
 /** ANSI text formatting helpers (always produce escape codes, unlike chalk) */
@@ -245,7 +345,7 @@ function wrapText(
     trim: false,
     wordWrap: true,
   });
-  const lines = wrapped.split('\n');
+  const lines = preserveForegroundAcrossLineBreaks(wrapped).split('\n');
   // Trim trailing empty lines (wrap-ansi artifacts) but preserve internal ones
   while (lines.length > 1 && lines[lines.length - 1]!.length === 0) {
     lines.pop();
@@ -324,7 +424,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   });
 
   // ── Step 2: Calculate available space ──
-  // Border overhead: │ content │ content │ = 1 + (width + 3) per column
+  // Border overhead: │ content │ content │ = 1 + (width + 3) per column.
+  // NOTE: this value is reused below in the horizontal-vs-vertical threshold
+  // (`minHorizontalTableWidth`). Any change to this formula will silently
+  // shift the layout threshold — adjust both call sites together.
   const borderOverhead = 1 + colCount * 3;
   const availableWidth = Math.max(
     contentWidth - borderOverhead - SAFETY_MARGIN,
@@ -392,7 +495,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   const maxRowLines = calculateMaxRowLines();
-  const useVerticalFormat = maxRowLines > MAX_ROW_LINES;
+  // Column-aware horizontal-vs-vertical decision: a horizontal table needs
+  // at least `MIN_COLUMN_WIDTH` per column plus the border overhead computed
+  // above, with a safety margin. This avoids the prior fixed 60-col floor
+  // that forced vertical mode for a 2-col table on a 50-col terminal even
+  // when content fit comfortably. The downstream `maxLineWidth` safety
+  // check still catches content that would actually overflow.
+  const minHorizontalTableWidth = Math.max(
+    ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
+    colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
+  );
+  const useVerticalFormat =
+    contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES;
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>

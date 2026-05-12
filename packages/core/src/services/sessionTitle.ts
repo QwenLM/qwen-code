@@ -7,6 +7,7 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
 import { SESSION_TITLE_MAX_LENGTH } from './sessionService.js';
 
@@ -127,10 +128,8 @@ export async function tryGenerateSessionTitle(
     );
     if (!conversationText.trim()) return { ok: false, reason: 'empty_history' };
 
-    const baseLlmClient = config.getBaseLlmClient();
-    if (!baseLlmClient) return { ok: false, reason: 'no_client' };
-
-    const result = await baseLlmClient.generateJson({
+    const result = await runSideQuery<{ title?: string }>(config, {
+      purpose: 'session-title',
       model,
       systemInstruction: TITLE_SYSTEM_PROMPT,
       schema: TITLE_SCHEMA as unknown as Record<string, unknown>,
@@ -149,7 +148,6 @@ export async function tryGenerateSessionTitle(
         maxOutputTokens: 100,
       },
       abortSignal,
-      promptId: 'session_title',
       // Titles are best-effort cosmetic metadata — one shot only, no long retry loop.
       maxAttempts: 1,
     });

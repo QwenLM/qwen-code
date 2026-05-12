@@ -70,10 +70,9 @@ These settings can be overridden by environment variables or CLI flags.
 | `outfile`                        | `QWEN_TELEMETRY_OUTFILE`                           | `--telemetry-outfile <path>`                             | Save telemetry to file (overrides `otlpEndpoint`)        | file path         | -                       |
 | `logPrompts`                     | `QWEN_TELEMETRY_LOG_PROMPTS`                       | `--telemetry-log-prompts` / `--no-telemetry-log-prompts` | Include prompts in telemetry logs                        | `true`/`false`    | `true`                  |
 | `includeSensitiveSpanAttributes` | `QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES` | -                                                        | Include sensitive attributes in log-to-span bridge spans | `true`/`false`    | `false`                 |
-| `useCollector`                   | `QWEN_TELEMETRY_USE_COLLECTOR`                     | -                                                        | Use external OTLP collector (advanced)                   | `true`/`false`    | `false`                 |
 
 **Note on boolean environment variables:** For the boolean settings (`enabled`,
-`logPrompts`, `includeSensitiveSpanAttributes`, `useCollector`), setting the
+`logPrompts`, `includeSensitiveSpanAttributes`), setting the
 corresponding environment variable to `true` or `1` will enable the feature. Any
 other value will disable it.
 

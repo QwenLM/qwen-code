@@ -962,30 +962,34 @@ describe('useGeminiStream', () => {
     });
 
     it('skips summary generation when no fast model is configured', async () => {
-      const generateContent = vi.fn();
+      const generateText = vi.fn();
       const config = {
         ...mockConfig,
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => undefined),
-        getGeminiClient: vi.fn(() => ({ generateContent })),
+        getGeminiClient: vi.fn(() => ({})),
+        getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
       await runCompletion(config, [
         makeCompletedToolCall('c1', 'Read', { file: 'a.ts' }),
       ]);
 
-      expect(generateContent).not.toHaveBeenCalled();
+      expect(generateText).not.toHaveBeenCalled();
     });
 
     it('fires generation with tool input/output when enabled', async () => {
-      const generateContent = vi.fn().mockResolvedValue({
-        candidates: [{ content: { parts: [{ text: 'Searched auth/' }] } }],
+      const generateText = vi.fn().mockResolvedValue({
+        text: 'Searched auth/',
+        usage: undefined,
       });
       const config = {
         ...mockConfig,
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => 'qwen-fast'),
-        getGeminiClient: vi.fn(() => ({ generateContent })),
+        getModel: vi.fn(() => 'qwen-main'),
+        getGeminiClient: vi.fn(() => ({})),
+        getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
       await runCompletion(config, [
@@ -1007,10 +1011,10 @@ describe('useGeminiStream', () => {
       });
 
       // Model was called with the fast model and includes tool names in the prompt.
-      expect(generateContent).toHaveBeenCalledTimes(1);
-      const callArgs = generateContent.mock.calls[0];
-      expect(callArgs[3]).toBe('qwen-fast');
-      const userText = callArgs[0][0].parts[0].text as string;
+      expect(generateText).toHaveBeenCalledTimes(1);
+      const options = generateText.mock.calls[0][0];
+      expect(options.model).toBe('qwen-fast');
+      const userText = options.contents[0].parts[0].text as string;
       expect(userText).toContain('Tool: Grep');
       expect(userText).toContain('Tool: Read');
       expect(userText).toContain('"pattern":"login"');
@@ -1021,8 +1025,8 @@ describe('useGeminiStream', () => {
       // tool_group AFTER ours — simulates a slow summary landing during
       // the next turn. The summary must not be appended; otherwise the
       // ● label line would land in the wrong transcript position.
-      let resolveSummary: (val: { candidates: unknown[] }) => void;
-      const generateContent = vi.fn().mockImplementation(
+      let resolveSummary: (val: { text: string; usage?: undefined }) => void;
+      const generateText = vi.fn().mockImplementation(
         () =>
           new Promise((resolve) => {
             resolveSummary = resolve;
@@ -1032,7 +1036,9 @@ describe('useGeminiStream', () => {
         ...mockConfig,
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => 'qwen-fast'),
-        getGeminiClient: vi.fn(() => ({ generateContent })),
+        getModel: vi.fn(() => 'qwen-main'),
+        getGeminiClient: vi.fn(() => ({})),
+        getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
       let capturedOnComplete:
@@ -1115,9 +1121,7 @@ describe('useGeminiStream', () => {
       // Resolve the summary — it should be dropped because tool_group id=2
       // is newer than our anchor tool_group id=1.
       await act(async () => {
-        resolveSummary!({
-          candidates: [{ content: { parts: [{ text: 'Read file' }] } }],
-        });
+        resolveSummary!({ text: 'Read file', usage: undefined });
       });
 
       const summaryItems = (mockAddItem.mock.calls as any[][]).filter(
@@ -1127,14 +1131,17 @@ describe('useGeminiStream', () => {
     });
 
     it('does not add a history item when the model returns empty', async () => {
-      const generateContent = vi.fn().mockResolvedValue({
-        candidates: [{ content: { parts: [{ text: '' }] } }],
+      const generateText = vi.fn().mockResolvedValue({
+        text: '',
+        usage: undefined,
       });
       const config = {
         ...mockConfig,
         getEmitToolUseSummaries: vi.fn(() => true),
         getFastModel: vi.fn(() => 'qwen-fast'),
-        getGeminiClient: vi.fn(() => ({ generateContent })),
+        getModel: vi.fn(() => 'qwen-main'),
+        getGeminiClient: vi.fn(() => ({})),
+        getBaseLlmClient: vi.fn(() => ({ generateText })),
       } as unknown as Config;
 
       await runCompletion(config, [
@@ -1143,7 +1150,7 @@ describe('useGeminiStream', () => {
 
       // The fast-model call happened but produced no label, so no history item.
       await waitFor(() => {
-        expect(generateContent).toHaveBeenCalled();
+        expect(generateText).toHaveBeenCalled();
       });
       const summaryItems = (mockAddItem.mock.calls as any[][]).filter(
         (call) => call[0]?.type === 'tool_use_summary',

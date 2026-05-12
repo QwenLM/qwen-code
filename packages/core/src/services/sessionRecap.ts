@@ -7,6 +7,7 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 
 const debugLogger = createDebugLogger('SESSION_RECAP');
 
@@ -62,32 +63,28 @@ export async function generateSessionRecap(
 
     const model = config.getFastModel() ?? config.getModel();
 
-    const response = await geminiClient.generateContent(
-      [
+    const result = await runSideQuery(config, {
+      purpose: 'session-recap',
+      contents: [
         ...recentHistory,
         { role: 'user', parts: [{ text: RECAP_USER_PROMPT }] },
       ],
-      {
-        systemInstruction: RECAP_SYSTEM_PROMPT,
-        tools: [],
+      systemInstruction: RECAP_SYSTEM_PROMPT,
+      config: {
         maxOutputTokens: 300,
         temperature: 0.3,
       },
       abortSignal,
       model,
-    );
+      // Recap is best-effort cosmetic — don't burn the default 7 retries.
+      maxAttempts: 1,
+    });
 
     if (abortSignal.aborted) return null;
 
-    const raw = (response.candidates?.[0]?.content?.parts ?? [])
-      .map((part) => part.text)
-      .filter((t): t is string => typeof t === 'string')
-      .join('')
-      .trim();
+    if (!result.text) return null;
 
-    if (!raw) return null;
-
-    const text = extractRecap(raw);
+    const text = extractRecap(result.text);
     if (!text) return null;
 
     return { text, modelUsed: model };
