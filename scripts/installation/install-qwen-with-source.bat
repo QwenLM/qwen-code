@@ -384,11 +384,14 @@ exit /b 0
 
 :GithubBaseUrlForVersion
 rem args: %~1=version_path  → sets QWEN_GH_BASE_URL
+set "QWEN_GH_REPO=QwenLM/qwen-code"
+if defined QWEN_INSTALL_GITHUB_REPO set "QWEN_GH_REPO=!QWEN_INSTALL_GITHUB_REPO!"
 if /i "%~1"=="latest" (
-    set "QWEN_GH_BASE_URL=https://github.com/QwenLM/qwen-code/releases/latest/download"
+    set "QWEN_GH_BASE_URL=https://github.com/!QWEN_GH_REPO!/releases/latest/download"
 ) else (
-    set "QWEN_GH_BASE_URL=https://github.com/QwenLM/qwen-code/releases/download/%~1"
+    set "QWEN_GH_BASE_URL=https://github.com/!QWEN_GH_REPO!/releases/download/%~1"
 )
+set "QWEN_GH_REPO="
 exit /b 0
 
 :AliyunBaseUrlForVersion

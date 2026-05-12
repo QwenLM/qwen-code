@@ -544,10 +544,11 @@ maybe_update_shell_path() {
 
 github_base_url_for_version() {
     local version_path="$1"
+    local github_repo="${QWEN_INSTALL_GITHUB_REPO:-QwenLM/qwen-code}"
     if [[ "${version_path}" == "latest" ]]; then
-        echo "https://github.com/QwenLM/qwen-code/releases/latest/download"
+        echo "https://github.com/${github_repo}/releases/latest/download"
     else
-        echo "https://github.com/QwenLM/qwen-code/releases/download/${version_path}"
+        echo "https://github.com/${github_repo}/releases/download/${version_path}"
     fi
 }
 
