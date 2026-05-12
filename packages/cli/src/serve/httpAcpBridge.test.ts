@@ -1885,6 +1885,43 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('in-flight coalescing race: B attaches via inFlight before A reaps (BRSCi)', async () => {
+      // The harder coalescing path: A and B BOTH await the same
+      // doSpawn. When the spawn resolves, B's continuation must bump
+      // attachCount BEFORE A's route-handler-equivalent calls
+      // killSession. Slow-spawn factory → kick off both calls in
+      // parallel → confirm B's session survives A's reap.
+      let resolveSpawn: (() => void) | undefined;
+      const slowFactory: ChannelFactory = async () => {
+        await new Promise<void>((r) => {
+          resolveSpawn = r;
+        });
+        return makeChannel().channel;
+      };
+      const bridge = createHttpAcpBridge({
+        channelFactory: slowFactory,
+        sessionScope: 'single',
+      });
+      const aPromise = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Wait a tick so A's spawnOrAttach reaches `await doSpawn`.
+      await new Promise((r) => setTimeout(r, 5));
+      // Now B comes in and finds A's promise in inFlightSpawns.
+      const bPromise = bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await new Promise((r) => setTimeout(r, 5));
+      // Release the spawn — both A and B's awaits now resolve.
+      resolveSpawn!();
+      const [a, b] = await Promise.all([aPromise, bPromise]);
+      expect(a.attached).toBe(false);
+      expect(b.attached).toBe(true);
+      expect(b.sessionId).toBe(a.sessionId);
+      // Client A's disconnect-reaper fires AFTER B has bumped
+      // attachCount (which the in-flight branch now does pre-await).
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      // Session must survive — B was the late attacher.
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
     it('killSession({requireZeroAttaches:true}) DOES reap when no other client attached (BQ9tV)', async () => {
       // Counterpart to the above: when the spawn-owner truly was
       // alone, the reaper must still reap. This pins the guard's

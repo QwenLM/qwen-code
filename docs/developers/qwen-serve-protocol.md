@@ -97,6 +97,8 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 
 Stable contract: when `v` increments the frame layout has changed in a backwards-incompatible way.
 
+> **`modelServices` is always `[]` in Stage 1.** The agent uses its single default model service and doesn't enumerate it over the wire. Stage 2 will populate this from registered model adapters so SDK clients can build service-pickers; until then, do NOT rely on this field being non-empty.
+
 ### `POST /session`
 
 Spawn a new agent or attach to an existing one (under `sessionScope: 'single'`, the default).

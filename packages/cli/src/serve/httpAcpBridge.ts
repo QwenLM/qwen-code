@@ -854,6 +854,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       if (sessionScope === 'single') {
         const existing = byWorkspace.get(workspaceKey);
         if (existing) {
+          // BRSCi: bump attach counter BEFORE any await so the
+          // spawn-owner's disconnect reaper (server.ts:
+          // `requireZeroAttaches: true`) sees this attach even when
+          // we yield on the model-switch below. Increment is
+          // synchronous → atomic against the killSession
+          // sync-prefix check. Out-of-order increments don't matter
+          // (the counter is monotonic; we never decrement).
+          existing.attachCount++;
           // If the caller passed a modelServiceId on attach, the session
           // may currently be running a DIFFERENT model. Honor the request
           // by issuing setSessionModel — same call we'd use on
@@ -875,12 +883,6 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
               initTimeoutMs,
             ).catch(() => {});
           }
-          // Bump attach counter so the spawn-owner's disconnect
-          // reaper (server.ts: `requireZeroAttaches: true`) can see
-          // that another client picked up this session and skip the
-          // tear-down. Increment is synchronous → atomic against the
-          // killSession sync-prefix check.
-          existing.attachCount++;
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
@@ -895,26 +897,28 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         const inFlight = inFlightSpawns.get(workspaceKey);
         if (inFlight) {
           const session = await inFlight;
-          if (req.modelServiceId) {
-            const liveEntry = byId.get(session.sessionId);
-            if (liveEntry) {
-              // Same swallow as above — we picked up an in-flight
-              // spawn, the session is real, model-switch failure
-              // shouldn't deny us the sessionId.
-              await applyModelServiceId(
-                liveEntry,
-                req.modelServiceId,
-                initTimeoutMs,
-              ).catch(() => {});
-            }
-          }
-          // Same attach-counter bump as the direct-attach branch
-          // above so the spawn-owner's disconnect reaper sees this
-          // late-arriving attach. The in-flight branch is the more
-          // common race target (the second caller actively waited
-          // on the first caller's spawn).
+          // BRSCi: bump attach counter SYNCHRONOUSLY in the same
+          // microtask the in-flight spawn resolves to us, BEFORE
+          // any further await. The spawn-owner's route handler
+          // microtask (which calls `killSession({requireZeroAttaches})`)
+          // runs after our spawnOrAttach() resolves; the ordering
+          // guarantee is "every attach-bump runs before the
+          // matching killSession sync prefix" only if the bump is
+          // the first sync step after `await inFlight`. Doing the
+          // model-switch await first re-opens the race deepseek-v4-pro
+          // flagged in BRSCi.
           const attachedEntry = byId.get(session.sessionId);
           if (attachedEntry) attachedEntry.attachCount++;
+          if (req.modelServiceId && attachedEntry) {
+            // Same swallow as above — we picked up an in-flight
+            // spawn, the session is real, model-switch failure
+            // shouldn't deny us the sessionId.
+            await applyModelServiceId(
+              attachedEntry,
+              req.modelServiceId,
+              initTimeoutMs,
+            ).catch(() => {});
+          }
           return { ...session, attached: true };
         }
       }

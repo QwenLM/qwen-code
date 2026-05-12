@@ -20,11 +20,20 @@ export {
   type PermissionOutcomeSelected,
   type PermissionResponse,
   type PromptContentBlock,
-  type PromptRequest as DaemonPromptRequest,
+  // BRSCv: drop the historical `Daemon`-prefixed aliases for
+  // consistency with the rest of the daemon-type exports
+  // (CreateSessionRequest / DaemonSession / PromptResult / etc. are
+  // all exported un-prefixed). The prefix on these two was a
+  // transitional artifact from when the daemon types lived alongside
+  // older non-daemon types of the same name; they don't anymore.
+  // The SDK is Stage-1-experimental with no shipping consumers, so
+  // breaking the alias is cheaper than carrying inconsistent naming
+  // forward into Stage 2.
+  type PromptRequest,
   type PromptResult,
   type PromptTextContent,
   type SetModelResult,
-  type SubscribeOptions as DaemonSubscribeOptions,
+  type SubscribeOptions,
 } from './daemon/index.js';
 
 // SDK MCP Server exports

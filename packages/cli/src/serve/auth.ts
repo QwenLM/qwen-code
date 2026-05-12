@@ -130,10 +130,14 @@ export function bearerAuth(token: string | undefined): RequestHandler {
       res.status(401).json({ error: 'Unauthorized' });
       return;
     }
-    // Skip any extra whitespace between scheme and credentials. RFC
-    // 7230 §3.2.6 BWS allows both SP (0x20) and HTAB (0x09); accept
-    // both so a client emitting `Authorization: Bearer\t<token>`
-    // doesn't 401 on a spec-legal header.
+    // After the initial SP separator (the scheme→credentials boundary
+    // matches RFC 9110 §11.6.2's `1*SP`), skip any extra BWS before
+    // the credentials. RFC 7230 §3.2.6 BWS allows both SP (0x20)
+    // and HTAB (0x09); accept both so a client emitting
+    // `Authorization: Bearer \t<token>` (SP then HTAB) doesn't 401.
+    // Pure-HTAB-as-separator (`Bearer\t<token>`) is still rejected
+    // because the scheme parse uses `indexOf(' ')` — that's
+    // intentional per RFC 9110, not an oversight.
     let credStart = schemeEnd + 1;
     while (
       credStart < header.length &&

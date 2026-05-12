@@ -12,11 +12,24 @@ import type { Argv, CommandModule } from 'yargs';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
+/**
+ * Pause the current async function indefinitely. Used after the daemon
+ * listener is up so yargs `parse()` never resolves — if it did, the
+ * top-level CLI would fall through to the interactive (TUI) entry point
+ * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
+ * route. Named so a future maintainer doesn't read the bare
+ * `new Promise<never>(() => {})` as a bug (BRQQZ).
+ */
+function blockForever(): Promise<never> {
+  return new Promise<never>(() => {});
+}
+
 interface ServeArgs {
   port: number;
   hostname: string;
   token?: string;
   'max-sessions': number;
+  'max-connections': number;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -53,6 +66,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
       })
+      .option('max-connections', {
+        type: 'number',
+        default: 256,
+        description:
+          'Listener-level TCP connection cap (server.maxConnections). Bounds raw ' +
+          'sockets — slow/phantom SSE clients get rejected at accept time once full. ' +
+          'Set to 0 to disable.',
+      })
       .option('http-bridge', {
         type: 'boolean',
         default: true,
@@ -88,6 +109,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         token: argv.token,
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
+        maxConnections: argv['max-connections'],
       });
     } catch (err) {
       writeStderrLine(
@@ -95,9 +117,6 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       );
       process.exit(1);
     }
-    // Block here so yargs `parse()` never resolves and we never fall through
-    // to the interactive-mode path in gemini.tsx. The listener's SIGINT/SIGTERM
-    // handlers in runQwenServe are the sole exit route.
-    await new Promise<never>(() => {});
+    await blockForever();
   },
 };

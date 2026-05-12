@@ -36,6 +36,17 @@ export interface ServeOptions {
    * `0` or `Infinity` to disable.
    */
   maxSessions?: number;
+  /**
+   * Listener-level TCP connection cap (`server.maxConnections`).
+   * Defaults to 256 — bounds the raw socket count regardless of
+   * session count, so a slow / phantom SSE client can't pin the
+   * daemon's FD table even when it isn't holding a live ACP session.
+   * Set to `0` to disable (Node treats `0` as unlimited at this
+   * layer). Independent of `maxSessions` because one session can
+   * have many SSE subscribers (default cap 64) plus short-lived
+   * REST calls.
+   */
+  maxConnections?: number;
 }
 
 /**
@@ -48,6 +59,14 @@ export interface CapabilitiesEnvelope {
   v: 1;
   mode: ServeMode;
   features: string[];
+  /**
+   * Configured model services advertised over HTTP. **Stage 1 always
+   * returns `[]`** — the agent uses its single default service and
+   * doesn't enumerate it over the wire. Stage 2 will populate this
+   * from the registered model adapters so SDK clients can build
+   * service-pickers. Until then, SDK consumers should NOT rely on
+   * this field being non-empty.
+   */
   modelServices: string[];
 }
 
