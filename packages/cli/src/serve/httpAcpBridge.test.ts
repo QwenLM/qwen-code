@@ -34,6 +34,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   createHttpAcpBridge,
+  InvalidPermissionOptionError,
   SessionNotFoundError,
   type AcpChannel,
   type ChannelFactory,
@@ -662,6 +663,59 @@ describe('createHttpAcpBridge', () => {
       expect(response.outcome.outcome).toBe('selected');
       expect(response.outcome.optionId).toBe('allow');
       expect(bridge.pendingPermissionCount).toBe(0);
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('rejects votes whose optionId was not in the agent-offered set (BkwQI)', async () => {
+      // BkwQI: bridge.respondToPermission validates the voter's
+      // `optionId` against the original `options` the agent sent.
+      // A client with the bearer can't forge a hidden outcome (e.g.
+      // `ProceedAlways*` when the prompt's `hideAlwaysAllow` policy
+      // suppressed it). Throws `InvalidPermissionOptionError`.
+      const { bridge, session, conn } = await setupForPermission();
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      const payload = next.value!.data as { requestId: string };
+
+      // Forged optionId — NOT in the agent-offered set.
+      expect(() =>
+        bridge.respondToPermission(payload.requestId, {
+          outcome: { outcome: 'selected', optionId: 'ProceedAlwaysProject' },
+        }),
+      ).toThrow(InvalidPermissionOptionError);
+
+      // The pending permission is still alive — a valid vote can
+      // still resolve it. (Throw didn't consume the pending entry.)
+      expect(bridge.pendingPermissionCount).toBe(1);
+      bridge.respondToPermission(payload.requestId, {
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+      const response = (await respPromise) as {
+        outcome: { outcome: string; optionId?: string };
+      };
+      expect(response.outcome.optionId).toBe('allow');
+
+      // Cancelled outcomes don't need an optionId, and aren't checked.
+      // (Already covered by `cancelSession resolves outstanding
+      // permissions as cancelled` below — call out the contract here.)
 
       subAbort.abort();
       await bridge.shutdown();

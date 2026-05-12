@@ -17,6 +17,7 @@ import type {
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  InvalidPermissionOptionError,
   SessionLimitExceededError,
   SessionNotFoundError,
   type BridgeSession,
@@ -669,6 +670,35 @@ describe('createServeApp', () => {
         .send({ outcome: { outcome: 'selected', optionId: '' } });
       expect(res.status).toBe(400);
       expect(bridge.permissionVotes).toHaveLength(0);
+    });
+
+    it('400 with invalid_option_id when bridge throws InvalidPermissionOptionError (Blehl)', async () => {
+      // The bridge's optionId-validation path (BkwQI) surfaces
+      // forged outcomes (e.g. `ProceedAlways*` when the prompt's
+      // `hideAlwaysAllow` policy hid them). Route maps that
+      // distinct error to 400 with code `invalid_option_id`
+      // (vs 404 for "unknown requestId").
+      const bridge = fakeBridge({
+        respondImpl: () => {
+          throw new InvalidPermissionOptionError(
+            'req-1',
+            'ProceedAlwaysProject',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          outcome: { outcome: 'selected', optionId: 'ProceedAlwaysProject' },
+        });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_option_id',
+        requestId: 'req-1',
+        optionId: 'ProceedAlwaysProject',
+      });
     });
   });
 

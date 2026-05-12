@@ -754,11 +754,26 @@ class BridgeClient implements Client {
       // New file — accept umask defaults.
     }
     try {
-      await fs.writeFile(tmp, params.content, { encoding: 'utf8', flag: 'wx' });
+      // Blehd: pass `mode` to `writeFile` so the temp file is
+      // CREATED with the preserved mode (atomically, via the
+      // syscall's open(O_CREAT, mode)). The previous "create with
+      // umask defaults → chmod after" had a window where a `0600`
+      // secret-edit existed at `0644` on disk before chmod ran,
+      // briefly readable by anyone with directory access. Passing
+      // `mode` shrinks that window to "doesn't exist". On Windows
+      // the mode bits are mostly ignored by the OS; that's fine
+      // since the platform has no equivalent threat model here.
+      await fs.writeFile(tmp, params.content, {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: preserveMode?.mode ?? 0o600,
+      });
       if (preserveMode) {
-        // chmod first so the rename atomically swaps in a file
-        // with the right permissions. Skip on Windows where mode
-        // semantics differ (Node's chmod is a no-op for most bits).
+        // `writeFile`'s `mode` option is `mode & ~umask` on POSIX,
+        // so a tight umask (e.g. operator's shell `umask 077` for
+        // 0o600 default) could still drop bits we wanted preserved.
+        // Belt-and-suspenders chmod brings the file to EXACTLY the
+        // target's preserved mode regardless of umask interference.
         await fs.chmod(tmp, preserveMode.mode).catch(() => {
           /* chmod failed (Windows / fs without permission bits) */
         });

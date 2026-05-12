@@ -78,8 +78,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'Stage 1 mode: per-session `qwen --acp` child process behind the HTTP routes. ' +
-          'Stage 2 native in-process mode is not yet implemented; this flag will become opt-in then.',
+          'Stage 1 mode: one `qwen --acp` child per workspace behind the HTTP routes, ' +
+          "with multiple sessions multiplexed onto each child via the agent's native " +
+          '`newSession()`. Stage 2 native in-process mode is not yet implemented; ' +
+          'this flag will become opt-in then.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
