@@ -174,14 +174,16 @@ jobs:
           fi
 
       - name: 'Setup Node.js'
-        if: ${{ steps.size.outputs.should_review == 'true' }}
+        if: |-
+          steps.size.outputs.should_review == 'true'
         uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
 
       - name: 'Build local Qwen Code CLI'
-        if: ${{ steps.size.outputs.should_review == 'true' }}
+        if: |-
+          steps.size.outputs.should_review == 'true'
         run: |-
           set -euo pipefail
           npm ci
@@ -197,7 +199,8 @@ jobs:
 
       - name: 'Run bundled Qwen PR review'
         id: 'review'
-        if: ${{ steps.size.outputs.should_review == 'true' }}
+        if: |-
+          steps.size.outputs.should_review == 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           QWEN_REVIEW_ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
@@ -211,7 +214,8 @@ jobs:
             --prompt "/review $PR_NUMBER --comment --ci"
 
       - name: 'Post fallback comment on review failure'
-        if: ${{ failure() && steps.review.conclusion == 'failure' }}
+        if: |-
+          failure() && steps.review.conclusion == 'failure'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
