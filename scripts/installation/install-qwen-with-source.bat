@@ -409,7 +409,7 @@ set "QWEN_RACE_TIMEOUT=%~1"
 set "QWEN_RACE_GH_URL=%~2"
 set "QWEN_RACE_OSS_URL=%~3"
 set "QWEN_RACE_RESULT=github"
-for /f "delims=" %%r in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $t=[int]$env:QWEN_RACE_TIMEOUT; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; function Probe($url) { try { $r = [Net.WebRequest]::Create($url); $r.Method = 'HEAD'; $r.Timeout = $t * 1000; $resp = $r.GetResponse(); $resp.Close(); return $true } catch { return $false } }; if (Probe $env:QWEN_RACE_OSS_URL) { Write-Output 'aliyun'; exit 0 } elseif (Probe $env:QWEN_RACE_GH_URL) { Write-Output 'github'; exit 0 } else { Write-Output 'github'; exit 0 }"') do set "QWEN_RACE_RESULT=%%r"
+for /f "delims=" %%r in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $t=[int]$env:QWEN_RACE_TIMEOUT; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; function Probe($url) { try { $r = [Net.WebRequest]::Create($url); $r.Method = 'HEAD'; $r.Timeout = $t * 1000; if ($r -is [Net.HttpWebRequest]) { $r.AllowAutoRedirect = $true }; $resp = $r.GetResponse(); $resp.Close(); return $true } catch { return $false } }; if (Probe $env:QWEN_RACE_OSS_URL) { Write-Output 'aliyun'; exit 0 } elseif (Probe $env:QWEN_RACE_GH_URL) { Write-Output 'github'; exit 0 } else { Write-Output 'github'; exit 0 }"') do set "QWEN_RACE_RESULT=%%r"
 set "QWEN_RACE_TIMEOUT="
 set "QWEN_RACE_GH_URL="
 set "QWEN_RACE_OSS_URL="
@@ -462,7 +462,8 @@ exit /b %PS_STATUS%
 :UrlExists
 set "QWEN_CHECK_URL=%~1"
 rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+rem AllowAutoRedirect=true is required for GitHub release asset URLs which return HTTP 302.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; if ($request -is [Net.HttpWebRequest]) { $request.AllowAutoRedirect = $true }; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_CHECK_URL="
 exit /b %PS_STATUS%
