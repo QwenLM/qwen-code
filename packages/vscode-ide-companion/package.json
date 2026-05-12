@@ -291,7 +291,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/markdown-it": "^14.1.2",
-    "@types/node": "20.x",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.3",
     "@types/semver": "^7.7.1",
