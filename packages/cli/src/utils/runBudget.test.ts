@@ -116,6 +116,29 @@ describe('RunBudgetEnforcer', () => {
     expect(enforcer.getExceeded()?.kind).toBe('tool-calls');
   });
 
+  it('aborts when the reported cumulative token count exceeds maxTokens', () => {
+    const ac = new AbortController();
+    const enforcer = new RunBudgetEnforcer({ maxTokens: 1000 }, ac);
+    enforcer.tickTokens(500);
+    expect(ac.signal.aborted).toBe(false);
+    enforcer.tickTokens(1000);
+    expect(ac.signal.aborted).toBe(false);
+    enforcer.tickTokens(1001);
+    expect(ac.signal.aborted).toBe(true);
+    const exceeded = enforcer.getExceeded();
+    expect(exceeded?.kind).toBe('tokens');
+    expect(exceeded?.limit).toBe(1000);
+    expect(exceeded?.observed).toBe(1001);
+  });
+
+  it('does not enforce token budget when maxTokens is -1 (unlimited)', () => {
+    const ac = new AbortController();
+    const enforcer = new RunBudgetEnforcer({ maxTokens: -1 }, ac);
+    enforcer.tickTokens(Number.MAX_SAFE_INTEGER);
+    expect(ac.signal.aborted).toBe(false);
+    expect(enforcer.getExceeded()).toBeNull();
+  });
+
   it('does not record an "exceeded" reason when the controller was already aborted by a third party (SIGINT race)', () => {
     const ac = new AbortController();
     const enforcer = new RunBudgetEnforcer({ maxApiCalls: 0 }, ac);

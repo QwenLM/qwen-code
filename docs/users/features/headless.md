@@ -242,6 +242,7 @@ Key command-line options for headless usage:
 | `--max-wall-time`            | Wall-clock budget; accepts `90` (s), `30s`, `5m`, `1h`                   | `qwen -p "..." --max-wall-time 10m`                                      |
 | `--max-tool-calls`           | Cumulative tool-call budget for the run                                  | `qwen -p "..." --max-tool-calls 50`                                      |
 | `--max-api-calls`            | Cumulative model-stream-request budget                                   | `qwen -p "..." --max-api-calls 20`                                       |
+| `--max-tokens`               | Cumulative total-token budget (input + output) for the run               | `qwen -p "..." --max-tokens 200000`                                      |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
 
@@ -249,16 +250,27 @@ For complete details on all available configuration options, settings files, and
 
 Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call, including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at the host process's privilege level. When Qwen Code detects this combination with no sandbox configured, it prints a one-line warning to stderr at startup. Suppress the warning with `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` once you've reviewed the trade-off.
 
+### YOLO exit-time audit
+
+When a non-interactive YOLO run finishes (success _or_ failure), Qwen Code writes a single stderr line summarising how many `shell` / `write` / `edit` calls were auto-approved during the run:
+
+```
+YOLO audit: executed 4 shell, 2 write, 1 edit tool call(s) during this run.
+```
+
+This is meant to be grep-able from CI logs without parsing the full stream-json event log. The audit is suppressed by the same `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` env var as the startup warning. Read-only tools (grep, glob, read_file) are intentionally excluded — widening the list dilutes the signal.
+
 ### Run-level budgets
 
 Qwen Code can abort an unattended run when it crosses any of the following thresholds. Each is `-1` (unlimited) by default; setting any one of them is enough to bound runaway behavior. They are enforced cooperatively against the same `AbortController` that already carries SIGINT, so a budget abort emits a structured `FatalBudgetExceededError` (exit code **55**) — distinct from the turn-cap exit code 53 and the SIGINT exit code 130, so CI scripts can branch on the reason.
 
-| Flag                  | Settings key               | What it bounds                                                                                                |
-| --------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `--max-wall-time`     | `model.maxWallTimeSeconds` | Wall-clock duration of the whole run. Flag accepts `90` (s), `30s`, `5m`, `1h`, `500ms`. Settings is seconds. |
-| `--max-tool-calls`    | `model.maxToolCalls`       | Cumulative tool calls executed (counts successes _and_ failures — the model still consumes tokens on errors). |
-| `--max-api-calls`     | `model.maxApiCalls`        | Cumulative model-stream-request calls. Unlike `--max-session-turns`, every retry / drain-turn request counts. |
-| `--max-session-turns` | `model.maxSessionTurns`    | Number of user/model/tool turns; pre-existing.                                                                |
+| Flag                  | Settings key               | What it bounds                                                                                                                                                     |
+| --------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--max-wall-time`     | `model.maxWallTimeSeconds` | Wall-clock duration of the whole run. Flag accepts `90` (s), `30s`, `5m`, `1h`, `500ms`. Settings is seconds.                                                      |
+| `--max-tool-calls`    | `model.maxToolCalls`       | Cumulative tool calls executed (counts successes _and_ failures — the model still consumes tokens on errors).                                                      |
+| `--max-api-calls`     | `model.maxApiCalls`        | Cumulative model-stream-request calls. Unlike `--max-session-turns`, every retry / drain-turn request counts.                                                      |
+| `--max-tokens`        | `model.maxTokens`          | Cumulative total tokens (input + output). Enforced after each response, so the run may overshoot by at most one final response. Distinct from `sessionTokenLimit`. |
+| `--max-session-turns` | `model.maxSessionTurns`    | Number of user/model/tool turns; pre-existing.                                                                                                                     |
 
 ### Recommended combinations
 
@@ -267,7 +279,7 @@ Qwen Code can abort an unattended run when it crosses any of the following thres
 - **Long-running CI with retry-on-rate-limit:** combine `QWEN_CODE_UNATTENDED_RETRY=1` with `--max-wall-time` and `--max-api-calls`. The retry env keeps the run alive past transient 429 / 529 responses; the budgets ensure a persistently-failing provider can't extend the job indefinitely.
 - **Bounded auditing / exploration:** for read-only tasks, `--max-tool-calls 25` caps how aggressively the model can grep / read. Combine with `--exclude-tools shell,write,edit` to make the bound meaningful.
 
-> Cumulative token and dollar-cost budgets (`--max-tokens`, `--max-budget-usd`) are tracked separately and require provider-specific price tables; see [QwenLM/qwen-code#4103](https://github.com/QwenLM/qwen-code/issues/4103) for the follow-up.
+> A `--max-budget-usd` dollar-cost budget is not yet implemented — it requires per-provider price tables that don't exist in-tree yet. Tracked under [QwenLM/qwen-code#4103](https://github.com/QwenLM/qwen-code/issues/4103).
 
 ## Examples
 

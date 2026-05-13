@@ -164,6 +164,7 @@ export interface CliArgs {
   maxWallTime: string | undefined;
   maxToolCalls: number | undefined;
   maxApiCalls: number | undefined;
+  maxTokens: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -825,6 +826,11 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'number',
           description:
             'Maximum cumulative model-stream-request calls during the run. Aborts when exceeded. -1 / unset means no limit.',
+        })
+        .option('max-tokens', {
+          type: 'number',
+          description:
+            'Cumulative total-token budget for the run (input + output across every model call). Checked after each response — the run may overshoot by at most one final response. -1 / unset means no limit. Distinct from sessionTokenLimit, which caps next-prompt size.',
         })
         .option('core-tools', {
           type: 'array',
@@ -1681,6 +1687,7 @@ export async function loadCliConfig(
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: argv.maxToolCalls ?? settings.model?.maxToolCalls ?? -1,
     maxApiCalls: argv.maxApiCalls ?? settings.model?.maxApiCalls ?? -1,
+    maxTokens: argv.maxTokens ?? settings.model?.maxTokens ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? false,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,

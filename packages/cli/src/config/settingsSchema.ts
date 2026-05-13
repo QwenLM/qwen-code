@@ -1047,6 +1047,16 @@ const SETTINGS_SCHEMA = {
           'Cumulative model-stream-request budget for a run. -1 means unlimited. Overridable via --max-api-calls. Use alongside QWEN_CODE_UNATTENDED_RETRY to bound retry storms.',
         showInDialog: false,
       },
+      maxTokens: {
+        type: 'number',
+        label: 'Max Tokens',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Cumulative total-token budget for the run (input + output across every model call). -1 means unlimited. Overridable via --max-tokens. Distinct from sessionTokenLimit, which caps next-prompt context size.',
+        showInDialog: false,
+      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',

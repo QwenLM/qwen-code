@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  ToolNames,
+  type Config,
+  type SessionMetrics,
+} from '@qwen-code/qwen-code-core';
 
 export const HEADLESS_YOLO_NO_SANDBOX_WARNING =
   'Warning: running headless with --yolo / approval-mode=yolo and no sandbox. ' +
@@ -38,4 +43,49 @@ export function getHeadlessYoloSafetyWarning(
 
 function isTruthyEnv(val: string | undefined): boolean {
   return val === '1' || val === 'true';
+}
+
+/**
+ * Tool names that have material side effects on the host filesystem or
+ * subprocess space. In YOLO / headless runs these auto-execute with no
+ * user prompt, so the exit-time audit highlights them by name so CI logs
+ * and post-run reviews don't have to grep through structured events.
+ *
+ * Kept narrow on purpose — see issue #4103. Read-only tools (grep, glob,
+ * read_file) and meta tools (todo_write, save_memory) are intentionally
+ * out of scope; widening the list dilutes the signal.
+ */
+const DANGEROUS_TOOLS = {
+  shell: ToolNames.SHELL,
+  write: ToolNames.WRITE_FILE,
+  edit: ToolNames.EDIT,
+} as const;
+
+/**
+ * Returns a one-line stderr summary of dangerous tool calls (shell /
+ * write / edit) for an exiting YOLO run, or `null` when no audit line
+ * is warranted (not YOLO, no dangerous calls observed, or the user
+ * explicitly suppressed the YOLO notice).
+ *
+ * Distinct from the *startup* warning emitted by
+ * `getHeadlessYoloSafetyWarning`: that one warns about the privilege
+ * boundary before the run begins; this one summarises what actually
+ * happened so the operator can spot-check unattended runs in a single
+ * log line.
+ */
+export function getDangerousToolAuditLine(
+  config: Pick<Config, 'getApprovalMode'>,
+  metrics: SessionMetrics,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  if (config.getApprovalMode() !== ApprovalMode.YOLO) return null;
+  if (isTruthyEnv(env['QWEN_CODE_SUPPRESS_YOLO_WARNING'])) return null;
+  const byName = metrics.tools?.byName ?? {};
+  const counts = {
+    shell: byName[DANGEROUS_TOOLS.shell]?.count ?? 0,
+    write: byName[DANGEROUS_TOOLS.write]?.count ?? 0,
+    edit: byName[DANGEROUS_TOOLS.edit]?.count ?? 0,
+  };
+  if (counts.shell + counts.write + counts.edit === 0) return null;
+  return `YOLO audit: executed ${counts.shell} shell, ${counts.write} write, ${counts.edit} edit tool call(s) during this run.`;
 }

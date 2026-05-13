@@ -191,6 +191,7 @@ describe('runNonInteractive', () => {
       getMaxWallTimeSeconds: vi.fn().mockReturnValue(-1),
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
       getMaxApiCalls: vi.fn().mockReturnValue(-1),
+      getMaxTokens: vi.fn().mockReturnValue(-1),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getTargetDir: vi.fn().mockReturnValue('/test/project'),
       getMcpServers: vi.fn().mockReturnValue(undefined),

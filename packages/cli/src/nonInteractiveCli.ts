@@ -45,6 +45,7 @@ import {
   handleBudgetExceededError,
 } from './utils/errors.js';
 import { RunBudgetEnforcer } from './utils/runBudget.js';
+import { getDangerousToolAuditLine } from './utils/headlessSafetyWarnings.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -231,10 +232,30 @@ export async function runNonInteractive(
         maxWallTimeSeconds: config.getMaxWallTimeSeconds(),
         maxToolCalls: config.getMaxToolCalls(),
         maxApiCalls: config.getMaxApiCalls(),
+        maxTokens: config.getMaxTokens(),
       },
       abortController,
     );
     budgetEnforcer.start();
+
+    // YOLO exit-time audit. Idempotent — multiple call sites are intentional
+    // because `process.exit()` (called from handleError /
+    // handleCancellationError / handleBudgetExceededError /
+    // handleMaxTurnsExceededError) bypasses surrounding `finally` blocks, so
+    // we have to emit before each handler invocation as well as on natural
+    // completion. The flag prevents double-emission when several paths
+    // converge on the same shutdown.
+    let auditEmitted = false;
+    const emitYoloAudit = (): void => {
+      if (auditEmitted) return;
+      auditEmitted = true;
+      const line = getDangerousToolAuditLine(
+        config,
+        uiTelemetryService.getMetrics(),
+      );
+      if (line) process.stderr.write(`${line}\n`);
+    };
+
     /**
      * Called at every abort-detection site instead of `handleCancellationError`
      * directly. If a budget tripped, we surface the structured budget error;
@@ -242,6 +263,7 @@ export async function runNonInteractive(
      * behavior is preserved.
      */
     const routeAbort = async (): Promise<never> => {
+      emitYoloAudit();
       const exceeded = budgetEnforcer.getExceeded();
       if (exceeded) {
         await handleBudgetExceededError(config, exceeded);
@@ -728,6 +750,7 @@ export async function runNonInteractive(
           config.getMaxSessionTurns() >= 0 &&
           turnCount > config.getMaxSessionTurns()
         ) {
+          emitYoloAudit();
           await handleMaxTurnsExceededError(config);
         }
 
@@ -796,6 +819,17 @@ export async function runNonInteractive(
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
 
+        // Token budget is enforced retrospectively: poll cumulative usage
+        // after each model response and abort before issuing the next
+        // sendMessageStream / running any further tool calls. Overshoot
+        // by at most one final response is unavoidable since the model
+        // has to emit the tokens before they're counted.
+        budgetEnforcer.tickTokens(
+          computeUsageFromMetrics(uiTelemetryService.getMetrics())
+            .total_tokens ?? 0,
+        );
+        if (abortController.signal.aborted) await routeAbort();
+
         if (toolCallRequests.length > 0) {
           // Dispatch the per-turn tool-call batch through the shared
           // helper (see processToolCallBatch above). The helper handles
@@ -839,6 +873,7 @@ export async function runNonInteractive(
               config.getMaxSessionTurns() >= 0 &&
               turnCount > config.getMaxSessionTurns()
             ) {
+              emitYoloAudit();
               await handleMaxTurnsExceededError(config);
             }
 
@@ -903,6 +938,13 @@ export async function runNonInteractive(
 
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
+
+              // See main-loop tickTokens comment.
+              budgetEnforcer.tickTokens(
+                computeUsageFromMetrics(uiTelemetryService.getMetrics())
+                  .total_tokens ?? 0,
+              );
+              if (abortController.signal.aborted) await routeAbort();
 
               if (itemToolCallRequests.length > 0) {
                 // Same shared dispatch as the main-turn loop. The only
@@ -1147,6 +1189,7 @@ export async function runNonInteractive(
       // "AbortError" line.
       const budgetExceeded = budgetEnforcer.getExceeded();
       if (budgetExceeded) {
+        emitYoloAudit();
         await handleBudgetExceededError(config, budgetExceeded);
       }
 
@@ -1182,12 +1225,18 @@ export async function runNonInteractive(
           stats,
         });
       }
+      emitYoloAudit();
       await handleError(error, config);
     } finally {
       // Cancel the wall-clock timer so it doesn't fire after a successful
       // run completes — especially important when the caller (e.g. the
       // qwen-serve daemon) reuses a single process across many runs.
       budgetEnforcer.stop();
+
+      // Catches the natural success-return path; abort / max-turns / catch
+      // paths already emitted before invoking the relevant exit handler.
+      emitYoloAudit();
+
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);

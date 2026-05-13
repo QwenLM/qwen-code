@@ -490,6 +490,15 @@ export interface ConfigParameters {
    * multiple turns conceptually.
    */
   maxApiCalls?: number;
+  /**
+   * Cumulative token budget for the entire run (input + output across
+   * every model call). `-1` means no limit. Enforced retrospectively
+   * after each model response — token counts are only knowable after
+   * the model emits them, so the run can overshoot the budget by at
+   * most one final response. Distinct from `sessionTokenLimit` (which
+   * caps the size of the next prompt, i.e. context-window budget).
+   */
+  maxTokens?: number;
   clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
@@ -756,6 +765,7 @@ export class Config {
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
   private readonly maxApiCalls: number;
+  private readonly maxTokens: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
@@ -909,6 +919,7 @@ export class Config {
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
     this.maxApiCalls = params.maxApiCalls ?? -1;
+    this.maxTokens = params.maxTokens ?? -1;
     this.clearContextOnIdle = {
       toolResultsThresholdMinutes:
         params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
@@ -1780,6 +1791,10 @@ export class Config {
 
   getMaxApiCalls(): number {
     return this.maxApiCalls;
+  }
+
+  getMaxTokens(): number {
+    return this.maxTokens;
   }
 
   getClearContextOnIdle(): ClearContextOnIdleSettings {

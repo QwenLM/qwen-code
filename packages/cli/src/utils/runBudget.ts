@@ -22,7 +22,7 @@
  * users can reason about budgets uniformly.
  */
 
-export type BudgetKind = 'wall-time' | 'tool-calls' | 'api-calls';
+export type BudgetKind = 'wall-time' | 'tool-calls' | 'api-calls' | 'tokens';
 
 export interface BudgetExceeded {
   kind: BudgetKind;
@@ -47,6 +47,14 @@ export interface RunBudgetOptions {
    * aborts before any stream is opened).
    */
   maxApiCalls?: number;
+  /**
+   * Max cumulative total tokens (input + output) across the run. `-1` /
+   * `undefined` disables. Enforced **retrospectively** (poll after each
+   * stream completes) because token counts are only knowable after the
+   * model emits them — so the run may overshoot by at most one final
+   * response.
+   */
+  maxTokens?: number;
 }
 
 const SECOND = 1000;
@@ -117,6 +125,7 @@ export class RunBudgetEnforcer {
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
   private readonly maxApiCalls: number;
+  private readonly maxTokens: number;
   private readonly abortController: AbortController;
   private wallTimer: ReturnType<typeof setTimeout> | null = null;
   private toolCallCount = 0;
@@ -127,6 +136,7 @@ export class RunBudgetEnforcer {
     this.maxWallTimeSeconds = opts.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = opts.maxToolCalls ?? -1;
     this.maxApiCalls = opts.maxApiCalls ?? -1;
+    this.maxTokens = opts.maxTokens ?? -1;
     this.abortController = abortController;
   }
 
@@ -162,6 +172,24 @@ export class RunBudgetEnforcer {
         limit: this.maxApiCalls,
         observed: this.apiCallCount,
         message: `Run aborted: API-call budget of ${this.maxApiCalls} exceeded (--max-api-calls); observed ${this.apiCallCount}.`,
+      });
+    }
+  }
+
+  /**
+   * Reports the cumulative total-token count observed so far and enforces
+   * `maxTokens`. The caller passes the total from telemetry after each
+   * model response. Unlike `tickApiCall` / `tickToolCall`, the enforcer
+   * does NOT maintain its own counter here — the source of truth lives in
+   * `uiTelemetryService`, and threading a separate count would risk drift.
+   */
+  tickTokens(cumulativeTokens: number): void {
+    if (this.maxTokens >= 0 && cumulativeTokens > this.maxTokens) {
+      this.markExceeded({
+        kind: 'tokens',
+        limit: this.maxTokens,
+        observed: cumulativeTokens,
+        message: `Run aborted: token budget of ${this.maxTokens} exceeded (--max-tokens); observed ${cumulativeTokens} cumulative tokens.`,
       });
     }
   }
