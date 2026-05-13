@@ -7,6 +7,7 @@
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -1257,6 +1258,27 @@ export class Config {
     if (!this.getBareMode()) {
       void (async () => {
         try {
+          // Cheap fast-bail BEFORE the git probe: 99% of users never
+          // touch worktrees, and a single `fs.access` saves spawning a
+          // git subprocess on every CLI start. The fallback location
+          // (in the unusual case where `targetDir` is not the repo
+          // root) is caught when `cleanupStaleAgentWorktrees` does its
+          // own `fs.access` against the resolved `worktreesDir`.
+          const localWorktreesDir = path.join(
+            this.targetDir,
+            '.qwen',
+            'worktrees',
+          );
+          try {
+            await fsPromises.access(localWorktreesDir);
+          } catch {
+            // No `.qwen/worktrees` under the current cwd. The repo
+            // root may differ (monorepo subdir launch), but
+            // `cleanupStaleAgentWorktrees` will fast-bail there too,
+            // so resolving the root for the no-worktrees case is
+            // wasted work.
+            return;
+          }
           const probe = new GitWorktreeService(this.targetDir);
           const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
           const removed = await cleanupStaleAgentWorktrees(root);

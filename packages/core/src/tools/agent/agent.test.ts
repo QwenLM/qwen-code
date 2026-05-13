@@ -315,6 +315,36 @@ describe('AgentTool', () => {
         'Subagent "non-existent" not found. Available subagents: file-search, code-review',
       );
     });
+
+    it('accepts isolation="worktree" when subagent_type is set', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects isolation values other than "worktree"', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          // @ts-expect-error: deliberately wrong enum value
+          isolation: 'remote',
+        }),
+      ).toMatch(/isolation/i);
+    });
+
+    it('rejects isolation without subagent_type (fork is not isolatable)', () => {
+      const { subagent_type: _ignored, ...forkParams } = validParams;
+      void _ignored;
+      expect(
+        agentTool.validateToolParams({
+          ...forkParams,
+          isolation: 'worktree',
+        }),
+      ).toMatch(/subagent_type/i);
+    });
   });
 
   describe('refreshSubagents', () => {

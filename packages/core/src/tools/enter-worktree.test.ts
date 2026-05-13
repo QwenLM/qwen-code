@@ -91,6 +91,81 @@ describe('generateAgentWorktreeSlug', () => {
   });
 });
 
+describe('worktreeBranchForSlug', () => {
+  it('prefixes the slug with WORKTREE_BRANCH_PREFIX', async () => {
+    const { worktreeBranchForSlug, WORKTREE_BRANCH_PREFIX } = await import(
+      '../services/gitWorktreeService.js'
+    );
+    expect(worktreeBranchForSlug('feat-x')).toBe(
+      `${WORKTREE_BRANCH_PREFIX}feat-x`,
+    );
+    expect(worktreeBranchForSlug('agent-aabbccd')).toBe(
+      `${WORKTREE_BRANCH_PREFIX}agent-aabbccd`,
+    );
+  });
+});
+
+describe('session marker round-trip', () => {
+  it('write then read returns the same session id', async () => {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const os = await import('node:os');
+    const {
+      writeWorktreeSessionMarker,
+      readWorktreeSessionMarker,
+      WORKTREE_SESSION_FILE,
+    } = await import('../services/gitWorktreeService.js');
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-session-'));
+    try {
+      await writeWorktreeSessionMarker(tmp, 'session-abc-123');
+      const got = await readWorktreeSessionMarker(tmp);
+      expect(got).toBe('session-abc-123');
+      const onDisk = await fs.readFile(
+        path.join(tmp, WORKTREE_SESSION_FILE),
+        'utf8',
+      );
+      expect(onDisk.trim()).toBe('session-abc-123');
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when the marker file is missing', async () => {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    const os = await import('node:os');
+    const { readWorktreeSessionMarker } = await import(
+      '../services/gitWorktreeService.js'
+    );
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-session-'));
+    try {
+      expect(await readWorktreeSessionMarker(tmp)).toBeNull();
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('returns null when the marker file is empty / whitespace', async () => {
+    const fs = await import('node:fs/promises');
+    const pathMod = await import('node:path');
+    const os = await import('node:os');
+    const { readWorktreeSessionMarker, WORKTREE_SESSION_FILE } = await import(
+      '../services/gitWorktreeService.js'
+    );
+    const tmp = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'qwen-wt-session-'));
+    try {
+      await fs.writeFile(
+        pathMod.join(tmp, WORKTREE_SESSION_FILE),
+        '   \n  \n',
+        'utf8',
+      );
+      expect(await readWorktreeSessionMarker(tmp)).toBeNull();
+    } finally {
+      await fs.rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('GitWorktreeService.generateAutoSlug', () => {
   it('produces a slug matching the {adj}-{noun}-{6hex} pattern', () => {
     for (let i = 0; i < 50; i++) {

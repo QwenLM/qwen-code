@@ -28,6 +28,48 @@ export function worktreeBranchForSlug(slug: string): string {
 }
 
 /**
+ * Filename of the in-worktree session marker. Created at worktree
+ * provisioning time and consulted by `exit_worktree` to decide
+ * whether the current session is allowed to drop the worktree. The
+ * file lives outside the working tree (it is .gitignored as part of
+ * `.qwen/worktrees/.gitignore`) so it cannot leak into commits.
+ */
+export const WORKTREE_SESSION_FILE = '.qwen-session';
+
+/** Writes the owning session id into the worktree's session marker. */
+export async function writeWorktreeSessionMarker(
+  worktreePath: string,
+  sessionId: string,
+): Promise<void> {
+  await fs.writeFile(
+    path.join(worktreePath, WORKTREE_SESSION_FILE),
+    sessionId,
+    'utf8',
+  );
+}
+
+/**
+ * Reads the owning session id stored at worktree provisioning time.
+ * Returns `null` when the marker is missing or unreadable — callers
+ * decide whether to treat that as "owner unknown, refuse" or "owner
+ * unknown, allow with explicit override".
+ */
+export async function readWorktreeSessionMarker(
+  worktreePath: string,
+): Promise<string | null> {
+  try {
+    const raw = await fs.readFile(
+      path.join(worktreePath, WORKTREE_SESSION_FILE),
+      'utf8',
+    );
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Commit message used for the baseline snapshot in worktrees.
  * After overlaying the user's dirty state (tracked changes + untracked files),
  * a commit with this message is created so that later diffs only capture the
@@ -1279,12 +1321,18 @@ export class GitWorktreeService {
     try {
       const wtGit = simpleGit(worktreePath);
       const status = await wtGit.status();
+      // `conflicted` is mutually exclusive with the other arrays in
+      // simple-git's status — a worktree mid-merge with no other
+      // edits would otherwise read as `{tracked: 0, untracked: 0}`
+      // and slip past the dirty-state guard in `exit_worktree`,
+      // discarding the merge resolution. Treat as tracked changes.
       const tracked =
         status.staged.length +
         status.modified.length +
         status.deleted.length +
         status.renamed.length +
-        status.created.length;
+        status.created.length +
+        status.conflicted.length;
       const untracked = status.not_added.length;
       return { tracked, untracked };
     } catch {

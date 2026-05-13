@@ -45,6 +45,7 @@ import {
 import {
   generateAgentWorktreeSlug,
   GitWorktreeService,
+  writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
@@ -1348,7 +1349,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const wtService =
           projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
         const slug = generateAgentWorktreeSlug();
-        const created = await wtService.createUserWorktree(slug);
+        // Anchor the isolation worktree to the parent's currently
+        // checked-out branch. Without an explicit base,
+        // `createUserWorktree` falls back to whichever branch the main
+        // working tree happens to be on — which silently becomes `main`
+        // when the user invoked the agent from a feature branch, from
+        // inside another user worktree, or from a detached HEAD set up
+        // by the test harness. The subagent would then see the wrong
+        // code and produce diffs against an unrelated baseline.
+        let parentBranch: string | undefined;
+        try {
+          parentBranch = await wtService.getCurrentBranch();
+        } catch (error) {
+          // Best-effort: leave undefined so createUserWorktree's own
+          // fallback runs. A debug log lets operators see when we hit
+          // the fallback path.
+          debugLogger.warn(
+            `[Agent] getCurrentBranch failed at ${projectRoot}: ${error}`,
+          );
+        }
+        const created = await wtService.createUserWorktree(slug, parentBranch);
         if (!created.success || !created.worktree) {
           return failWorktreeProvisioning(
             `Failed to create isolation worktree: ${created.error ?? 'unknown error'}`,
@@ -1360,6 +1380,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           branch: created.worktree.branch,
           repoRoot: projectRoot,
         };
+
+        // Tag the isolation worktree with the parent session id for
+        // consistency with `enter_worktree` (ownership-aware
+        // `exit_worktree` refuses to drop worktrees from other
+        // sessions). Best-effort.
+        try {
+          await writeWorktreeSessionMarker(
+            created.worktree.path,
+            this.config.getSessionId(),
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `[Agent] failed to write session marker at ${created.worktree.path}: ${error}`,
+          );
+        }
       }
 
       // Resolve the subagent's permission mode before creating it
@@ -1445,14 +1480,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // above guarantees correctness; the notice reduces user-visible
       // surprises when the model summarises file paths.
       //
-      // The notice's "parent cwd" must be the repo top-level (where the
-      // user's main work lives), not whatever subdirectory the user
-      // happened to launch `qwen` from — otherwise the path-translation
-      // guidance would tell the agent to map worktree paths back to a
-      // monorepo subdir that may not contain the parent file at all.
+      // "parent cwd" is the parent agent's actual `getTargetDir()` —
+      // the directory the inherited conversation context speaks from.
+      // Using the repo top-level here would mistranslate paths the
+      // parent referenced as `./packages/core/foo` when the parent
+      // was running from `packages/core/`. Round-5 review caught this:
+      // the model's mental map is the parent's cwd, not the repo root.
       if (worktreeIsolation) {
         const notice = buildWorktreeNotice(
-          worktreeIsolation.repoRoot,
+          this.config.getTargetDir(),
           worktreeIsolation.path,
         );
         taskPrompt = `${notice}\n\n${taskPrompt}`;

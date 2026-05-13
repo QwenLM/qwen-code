@@ -146,25 +146,27 @@ export async function cleanupStaleAgentWorktrees(
 async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
   try {
     const wtGit = simpleGit(worktreePath);
-    const status = await wtGit.status();
-    // Skip the untracked-files scan: untracked files in a long-dead agent
-    // worktree are typically build artifacts, not user work — and listing
-    // them is the slowest part of `git status` on large repos. Tracked
-    // changes (staged, modified, deleted, renamed, created) are the signal
-    // that work is in progress.
-    return (
-      status.staged.length > 0 ||
-      status.modified.length > 0 ||
-      status.deleted.length > 0 ||
-      status.renamed.length > 0 ||
-      status.created.length > 0
-    );
+    // `git status --porcelain --untracked-files=no` lists every tracked
+    // change (staged, unstaged, conflicted — `UU` lines) and skips the
+    // untracked-file scan that simple-git's `status()` runs
+    // unconditionally. Untracked files in a long-dead agent worktree
+    // are typically build artifacts, not user work — and the
+    // untracked walk is the slowest part of `git status` on large
+    // repos. The previous implementation manually enumerated
+    // `status.staged/modified/...` which silently missed
+    // `conflicted[]` (mutually exclusive with the others in
+    // simple-git), so a worktree mid-merge looked "clean" and would
+    // be swept.
+    const out = await wtGit.raw([
+      'status',
+      '--porcelain',
+      '--untracked-files=no',
+    ]);
+    return out.trim().length > 0;
   } catch (error) {
-    // Fail-closed (assume dirty so the worktree is preserved) but log
-    // so the operator can distinguish "has real changes — leave alone"
-    // from "git index is unreadable — repo may be corrupt". Without
-    // this, a permission error or unmounted filesystem would silently
-    // keep the worktree forever with no breadcrumb.
+    // Fail-closed (preserve worktree) and log so a permission error or
+    // unmounted filesystem leaves a breadcrumb instead of being
+    // indistinguishable from "has real changes".
     debugLogger.warn(
       `hasTrackedChanges: cannot inspect ${worktreePath} — assuming dirty: ${error}`,
     );

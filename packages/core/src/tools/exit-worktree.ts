@@ -11,6 +11,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   GitWorktreeService,
+  readWorktreeSessionMarker,
   worktreeBranchForSlug,
 } from '../services/gitWorktreeService.js';
 import * as fs from 'node:fs/promises';
@@ -129,8 +130,34 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       };
     }
 
-    // action === 'remove' — two independent guards:
+    // action === 'remove' — three independent guards:
     //
+    // 0. Session ownership: refuse to drop a worktree that was created
+    //    by a different session. Without this, a prompt injection (or
+    //    just a confused model) in session A could enumerate
+    //    `.qwen/worktrees/` and call `exit_worktree` with a name
+    //    belonging to session B, destroying its work. Worktrees
+    //    created before this guard existed lack the marker; we treat
+    //    those as "owner unknown" and allow removal (matches prior
+    //    behaviour) but log so operators can see when the guard is
+    //    bypassed.
+    const owner = await readWorktreeSessionMarker(worktreePath);
+    const currentSessionId = this.config.getSessionId();
+    if (owner !== null && owner !== currentSessionId) {
+      return errorResult(
+        `Refusing to remove worktree "${this.params.name}" — it was ` +
+          `created by a different session (owner=${owner}). Resume the ` +
+          `owning session to drop it, or remove it manually with ` +
+          `\`git worktree remove ${worktreePath}\`.`,
+      );
+    }
+    if (owner === null) {
+      debugLogger.warn(
+        `exit_worktree: worktree ${worktreePath} has no session marker; ` +
+          `allowing removal from session ${currentSessionId}`,
+      );
+    }
+
     // 1. Uncommitted edits (working tree dirty). Bypassed by
     //    `discard_changes: true`.
     // 2. Commits on the worktree branch that no other local branch or

@@ -8,7 +8,10 @@ import type { ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import {
+  GitWorktreeService,
+  writeWorktreeSessionMarker,
+} from '../services/gitWorktreeService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('ENTER_WORKTREE');
@@ -66,6 +69,26 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
   async execute(_signal: AbortSignal): Promise<ToolResult> {
     const cwd = this.config.getTargetDir();
 
+    // Refuse nested worktree creation. If the caller's cwd is itself
+    // already inside `.qwen/worktrees/<slug>/`, a fresh worktree would
+    // be provisioned at `<repo>/.qwen/worktrees/<new>/` — but the
+    // model's mental model and inherited file paths would still
+    // reference the outer worktree. The resulting handle confusion
+    // typically leaves the inner worktree orphaned on exit.
+    //
+    // The check is conservative: any path component named
+    // `.qwen/worktrees` somewhere in cwd qualifies. We also forbid
+    // sentinel "inside a worktree" markers that an `enter_worktree`
+    // session leaves behind (writeSessionMarker, below).
+    if (/\.qwen[\\/]worktrees[\\/]/.test(cwd)) {
+      const reason =
+        'Already inside a git worktree. Call exit_worktree first, ' +
+        'or return to the main repository checkout before creating a ' +
+        'new worktree.';
+      debugLogger.warn(`enter_worktree: ${reason} (cwd=${cwd})`);
+      return errorResult(reason);
+    }
+
     // First-pass service rooted at cwd, only to find the repo top-level.
     // We can't use cwd as the worktree anchor because launching from a
     // monorepo subdirectory would scatter `.qwen/worktrees/` under each
@@ -109,11 +132,41 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
       return errorResult(validation);
     }
 
-    const result = await service.createUserWorktree(slug);
+    // Anchor at the parent session's currently checked-out branch.
+    // Without an explicit base, `createUserWorktree` falls back to
+    // whichever branch the main working tree has checked out, which is
+    // not necessarily where the user is working (e.g. they invoked
+    // qwen from a feature branch but the main working tree still has
+    // `main` checked out).
+    let baseBranch: string | undefined;
+    try {
+      baseBranch = await service.getCurrentBranch();
+    } catch (error) {
+      debugLogger.warn(
+        `enter_worktree: getCurrentBranch failed at ${projectRoot}: ${error}`,
+      );
+    }
+    const result = await service.createUserWorktree(slug, baseBranch);
     if (!result.success || !result.worktree) {
       const reason = result.error ?? 'Failed to create worktree.';
       debugLogger.warn(`enter_worktree: createUserWorktree failed: ${reason}`);
       return errorResult(reason);
+    }
+
+    // Tag the worktree with the current session id so a future
+    // `exit_worktree action='remove'` from a different session refuses
+    // to drop someone else's work. Best-effort: a write failure does
+    // not abort the creation (the worktree is still usable; ownership
+    // checks will treat unmarked worktrees as "owner unknown").
+    try {
+      await writeWorktreeSessionMarker(
+        result.worktree.path,
+        this.config.getSessionId(),
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `enter_worktree: failed to write session marker at ${result.worktree.path}: ${error}`,
+      );
     }
 
     const output: EnterWorktreeOutput = {
