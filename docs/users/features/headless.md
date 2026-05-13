@@ -241,6 +241,16 @@ Key command-line options for headless usage:
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
 
+## Safety in unattended runs
+
+Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call, including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at the host process's privilege level. When Qwen Code detects this combination with no sandbox configured, it prints a one-line warning to stderr at startup. Suppress the warning with `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` once you've reviewed the trade-off.
+
+Recommended combinations for unattended use:
+
+- **Trusted, isolated environment (ephemeral CI runner, container):** `qwen -p "..." --yolo --max-session-turns N --output-format json`. Pin a turn budget so a stuck agent can't burn through your CI minutes, and capture `output-format json` for post-run usage / tool-call auditing.
+- **Local machine or shared infra:** also pass `--sandbox` (or set `QWEN_SANDBOX=1`) so shell / write / edit tools run inside the sandbox image.
+- **Long-running CI with retry-on-rate-limit:** combine `QWEN_CODE_UNATTENDED_RETRY=1` with `--max-session-turns` so 429 / 529 retries can't extend a run past its turn budget. Wall-clock and token budgets are tracked separately in [#4103](https://github.com/QwenLM/qwen-code/issues/4103).
+
 ## Examples
 
 ### Code review

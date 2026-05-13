@@ -59,6 +59,7 @@ import {
   registerCleanup,
   runExitCleanup,
 } from './utils/cleanup.js';
+import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { AppEvent, appEvents } from './utils/events.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
@@ -757,6 +758,15 @@ export async function main() {
           'Warning: Debug logging is degraded (write failures occurred)',
         );
       }
+    }
+
+    // Headless + YOLO without a sandbox lets the model auto-approve and
+    // execute shell / write / edit tools at the current process's
+    // privilege level. Surface a one-line stderr warning so unattended
+    // CI / SDK runs have at least an observable signal. See issue #4103.
+    const yoloWarning = getHeadlessYoloSafetyWarning(config);
+    if (yoloWarning) {
+      writeStderrLine(yoloWarning);
     }
 
     // For non-stream-json mode, initialize config here
