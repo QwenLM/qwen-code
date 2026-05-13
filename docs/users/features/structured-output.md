@@ -33,11 +33,13 @@ Output on stdout (default `--output-format text`):
 The line is exactly the JSON-stringified payload + newline — no
 envelope, no event log. Pipe it straight into `jq` or another consumer.
 
-All error messages, log lines, and the model's incidental prose go
-to **stderr**. Stdout in text mode is reserved for the JSON payload on
-success and is empty on failure, so `$(qwen --json-schema …)` capture
-patterns are safe — failures land in stderr, not mixed into the
-captured variable.
+All error messages and log lines go to **stderr**. Stdout in text
+mode is reserved for the JSON payload on success and is empty on
+failure. The model's incidental prose during planning is **not**
+mirrored to stderr — text mode discards it; reach for `--output-format
+json` or `stream-json` if you need to see it. `$(qwen --json-schema
+…)` capture patterns are safe — failures land in stderr, not mixed
+into the captured variable.
 
 > **Empty schema:** Passing `{}` produces `{}` (an empty JSON object)
 > on stdout. The model calls `structured_output` with no arguments;
@@ -115,12 +117,15 @@ decidable cases). When in doubt it defers to Ajv at runtime.
 | `--output-format` | What goes to stdout |
 | --- | --- |
 | `text` (default) | `JSON.stringify(payload) + "\n"` — one line, the validated object. |
-| `json` | A single JSON document containing the full event log plus a `result` (`JSON.stringify(payload)`) AND a top-level `structured_result` field carrying the raw object. |
+| `json` | A single JSON **array** of message objects (the full event log). The final element is the `type: "result"` message, which carries both `result` (`JSON.stringify(payload)`) and `structured_result` (the raw object). |
 | `stream-json` | Each event on its own line as JSONL. The terminating `result` line carries `result` (stringified) and `structured_result` (raw object). |
 
 In both JSON formats, prefer reading `structured_result` over `result`
 when you want the object; `result` is the stringified form provided for
-consumers that always expect a string in that field.
+consumers that always expect a string in that field. For `--output-format
+json`, read the last element of the array and pull `structured_result`
+from there (e.g. `jq '.[-1].structured_result'`); for `stream-json`,
+read the final `type: "result"` line on the stream.
 
 ## Restrictions
 

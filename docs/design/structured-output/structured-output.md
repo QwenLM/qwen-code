@@ -216,9 +216,13 @@ called `structured_output` with no args under an empty schema):
   `{}` on stdout, not `null`. The `?? null` step is defence-in-depth
   for the strictly-undefined case.
 
-TEXT mode writes just the `result` field + newline to stdout. JSON
-mode batches the full event log. Stream-json mode emits each event on
-its own line.
+TEXT mode writes just the `result` field + newline to stdout (any
+incidental assistant prose accumulated during the run is discarded —
+not mirrored to stderr). JSON mode emits the full event log as a
+JSON array; `structured_result` lives on the final `type: "result"`
+element of that array, not at the document root. Stream-json mode
+emits each message on its own line as JSONL; the terminating `result`
+line carries `structured_result`.
 
 ## Privacy: cross-surface redaction
 
