@@ -28,9 +28,12 @@ const debugLogger = createDebugLogger('CODE_COLORIZER');
 // Lowlight is heavy (~1.5 MB bundled, ~36–60 ms V8 parse). It's loaded lazily
 // from `./lowlightLoader.js` via dynamic import so it lives in a separate
 // esbuild chunk that's only parsed once a code block actually needs
-// highlighting. Callers see plain text for the very first render and the
-// highlighted version once React next re-renders the surrounding subtree
-// (typically on the next user keystroke or message).
+// highlighting. To avoid leaving code blocks committed to ink's append-only
+// <Static> region as plain text for the rest of the session, AppContainer
+// fires `loadLowlight()` from a mount effect — in steady state the import
+// is already resolved by the time any colorize call lands. The fallback
+// below still handles the brief window before resolution and any
+// permanent-failure path (latched inside lowlightLoader).
 
 function renderHastNode(
   node: Root | Element | HastText | RootContent,

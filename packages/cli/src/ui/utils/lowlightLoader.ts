@@ -24,6 +24,15 @@ export type Lowlight = {
 
 let lowlightInstance: Lowlight | null = null;
 let lowlightLoad: Promise<Lowlight> | null = null;
+// Latches once the dynamic import has failed permanently. Without this,
+// every React render of a code block would re-call `loadLowlight()` and
+// re-attempt `import('lowlight')` — wasting CPU and spamming debug logs on
+// every keystroke if the chunk file is permanently missing (corrupted
+// install). A single permanent latch is acceptable because the colorizer
+// already falls back to plain text on miss; recovery requires a fresh
+// process anyway.
+let lowlightFailed = false;
+let lowlightError: Error | null = null;
 
 export function getLowlightInstance(): Lowlight | null {
   return lowlightInstance;
@@ -36,9 +45,17 @@ export function getLowlightInstance(): Lowlight | null {
  *      next React commit picks up the highlighted output.
  *   2. `test-setup.ts` — awaits this once to keep snapshot tests
  *      deterministic without dragging more modules into the test graph.
+ *
+ * Once an import attempt fails the failure is latched (see `lowlightFailed`)
+ * and subsequent calls return the same rejection without retrying.
  */
 export function loadLowlight(): Promise<Lowlight> {
   if (lowlightInstance) return Promise.resolve(lowlightInstance);
+  if (lowlightFailed) {
+    return Promise.reject(
+      lowlightError ?? new Error('lowlight import previously failed'),
+    );
+  }
   if (lowlightLoad) return lowlightLoad;
   lowlightLoad = import('lowlight')
     .then((mod) => {
@@ -46,6 +63,8 @@ export function loadLowlight(): Promise<Lowlight> {
       return lowlightInstance;
     })
     .catch((err) => {
+      lowlightFailed = true;
+      lowlightError = err instanceof Error ? err : new Error(String(err));
       lowlightLoad = null;
       throw err;
     });

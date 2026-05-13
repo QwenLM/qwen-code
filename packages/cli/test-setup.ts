@@ -25,4 +25,14 @@ import './src/test-utils/customMatchers.js';
 // module (no transitive imports of themeManager / settings / core) so this
 // prime does not perturb any other test's module graph.
 import { loadLowlight } from './src/ui/utils/lowlightLoader.js';
-await loadLowlight();
+try {
+  await loadLowlight();
+} catch (err) {
+  // Don't crash the entire test run if lowlight fails to import; snapshot
+  // tests that hit a code block will then render the plain-text fallback.
+  console.warn(
+    '[test-setup] Failed to prime lowlight cache, snapshot tests may ' +
+      'show plain-text fallback:',
+    String(err),
+  );
+}
