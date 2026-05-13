@@ -161,6 +161,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     // getCurrentSessionId() when the log record has no session.id attribute
     // (e.g. after a session change via /clear or /resume).
     const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
+    // || (not ??) so empty-string session.id also falls through to the fallback
     const sessionId =
       logRecord.attributes?.['session.id'] || getCurrentSessionId();
     let traceId: string;

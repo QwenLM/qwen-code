@@ -428,13 +428,13 @@ export class LoggingContentGenerator implements ContentGenerator {
           if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
           spanEndTimeout = setTimeout(() => {
             try {
-              span.setAttribute('stream.timed_out', true);
               safeSetStatus(span, {
                 code: SpanStatusCode.ERROR,
                 message: 'Stream span timed out (idle)',
               });
-              span.end();
               spanEnded = true;
+              span.setAttribute('stream.timed_out', true);
+              span.end();
             } catch {
               // OTel errors must not interrupt the consumer.
             }
