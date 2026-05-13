@@ -82,8 +82,17 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
-    const projectRoot = this.config.getTargetDir();
-    const service = new GitWorktreeService(projectRoot);
+    // Mirror `enter_worktree`: anchor at the repo top-level so we look
+    // for the worktree under the same directory it was created in.
+    // Otherwise launching `qwen` from a subdirectory of a monorepo would
+    // make exit_worktree look at `<subdir>/.qwen/worktrees/<slug>`,
+    // which never exists, and every call would return "Worktree not
+    // found" even when the worktree is alive.
+    const cwd = this.config.getTargetDir();
+    const probe = new GitWorktreeService(cwd);
+    const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+    const service =
+      projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
 
     const worktreePath = service.getUserWorktreePath(this.params.name);
     const branch = `worktree-${this.params.name}`;

@@ -1030,7 +1030,13 @@ export class GitWorktreeService {
         `refs/heads/${branchName}`,
       ]);
       return out.trim().length > 0;
-    } catch {
+    } catch (error) {
+      // Defensive default: if we cannot tell, assume the branch is
+      // absent so the create attempt fires. Worst case `git worktree
+      // add -b` itself errors out on the duplicate. But log so the
+      // root cause (disk full, permission, ref-store corruption) shows
+      // up in debug output instead of being invisible.
+      debugLogger.warn(`localBranchExists failed for ${branchName}: ${error}`);
       return false;
     }
   }
@@ -1169,53 +1175,6 @@ export class GitWorktreeService {
         `hasUnmergedWorktreeCommits failed for slug ${slug}: ${error}`,
       );
       return true;
-    }
-  }
-
-  /**
-   * Lists all user worktrees in this repo by reading the worktrees directory.
-   */
-  async listUserWorktrees(): Promise<WorktreeInfo[]> {
-    const worktreesDir = this.getUserWorktreesDir();
-    try {
-      const entries = await fs.readdir(worktreesDir, { withFileTypes: true });
-      const result: WorktreeInfo[] = [];
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name.startsWith('.')) continue;
-        const worktreePath = path.join(worktreesDir, entry.name);
-        let branch = '';
-        try {
-          branch = execSync('git rev-parse --abbrev-ref HEAD', {
-            cwd: worktreePath,
-            encoding: 'utf8',
-            stdio: ['pipe', 'pipe', 'pipe'],
-          }).trim();
-        } catch {
-          // Ignore: worktree may be in an inconsistent state
-        }
-        let createdAt = Date.now();
-        try {
-          const stats = await fs.stat(worktreePath);
-          createdAt = stats.birthtimeMs || stats.mtimeMs;
-        } catch {
-          // Ignore stat errors
-        }
-        result.push({
-          id: entry.name,
-          name: entry.name,
-          path: worktreePath,
-          branch,
-          isActive: true,
-          createdAt,
-        });
-      }
-      return result;
-    } catch (error) {
-      if (isNodeError(error) && error.code === 'ENOENT') {
-        return [];
-      }
-      throw error;
     }
   }
 

@@ -1245,16 +1245,31 @@ export class Config {
     // running it on every startup cannot destroy user work. We do not
     // await this: it is a hygiene task that must never delay the
     // first model turn.
+    //
+    // Anchor the sweep at the repo top-level so it scans the same
+    // directory the worktree creators (`enter_worktree` and
+    // `agent isolation:'worktree'`) write to. Using `this.targetDir`
+    // directly would cause launches from a monorepo subdirectory to
+    // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
+    // sweep would silently be a no-op forever.
     if (!this.getBareMode()) {
-      void import('../services/worktreeCleanup.js')
-        .then(({ cleanupStaleAgentWorktrees }) =>
-          cleanupStaleAgentWorktrees(this.targetDir),
-        )
-        .catch((error: unknown) => {
+      void (async () => {
+        try {
+          const { GitWorktreeService } = await import(
+            '../services/gitWorktreeService.js'
+          );
+          const probe = new GitWorktreeService(this.targetDir);
+          const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
+          const { cleanupStaleAgentWorktrees } = await import(
+            '../services/worktreeCleanup.js'
+          );
+          await cleanupStaleAgentWorktrees(root);
+        } catch (error: unknown) {
           this.debugLogger.debug(
             `Stale worktree sweep failed (non-fatal): ${error}`,
           );
-        });
+        }
+      })();
     }
   }
 

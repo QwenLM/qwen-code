@@ -1133,6 +1133,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     }> => {
       if (!worktreeIsolation) return {};
       const isolation = worktreeIsolation;
+      // Null the closure var BEFORE doing any work so any concurrent
+      // re-entry (e.g. the foreground-finally fallback firing in
+      // parallel with the outer catch on a thrown rejection) sees no
+      // isolation and bails. Without this, the second caller would
+      // operate on a worktree directory the first caller has already
+      // removed and `hasWorktreeChanges()` would fail-closed and
+      // produce a bogus `[worktree preserved: <missing path>]` suffix.
+      worktreeIsolation = null;
       const wtService = new GitWorktreeService(isolation.repoRoot);
       let hasChanges = true;
       try {
@@ -1435,9 +1443,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // operating in an isolated worktree. The mechanical isolation
       // above guarantees correctness; the notice reduces user-visible
       // surprises when the model summarises file paths.
+      //
+      // The notice's "parent cwd" must be the repo top-level (where the
+      // user's main work lives), not whatever subdirectory the user
+      // happened to launch `qwen` from — otherwise the path-translation
+      // guidance would tell the agent to map worktree paths back to a
+      // monorepo subdir that may not contain the parent file at all.
       if (worktreeIsolation) {
         const notice = buildWorktreeNotice(
-          this.config.getTargetDir(),
+          worktreeIsolation.repoRoot,
           worktreeIsolation.path,
         );
         taskPrompt = `${notice}\n\n${taskPrompt}`;
