@@ -165,6 +165,16 @@ validate_version() {
     exit 1
 }
 
+validate_github_repo() {
+    local github_repo="${QWEN_INSTALL_GITHUB_REPO:-QwenLM/qwen-code}"
+    if [[ "${github_repo}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+        return 0
+    fi
+
+    log_error "QWEN_INSTALL_GITHUB_REPO must be in owner/repo format."
+    exit 1
+}
+
 validate_install_path() {
     local value="$1"
     local option_name="$2"
@@ -211,6 +221,7 @@ validate_options() {
     validate_https_url "${BASE_URL}" "--base-url"
     validate_https_url "${NPM_REGISTRY}" "--registry"
     validate_version
+    validate_github_repo
     validate_install_path "${INSTALL_ROOT}" "QWEN_INSTALL_ROOT"
     validate_install_path "${INSTALL_LIB_PARENT}" "QWEN_INSTALL_LIB_PARENT"
     validate_install_path "${INSTALL_LIB_DIR}" "QWEN_INSTALL_LIB_DIR"
@@ -567,9 +578,9 @@ race_mirror_head() {
     tmpdir=$(mktemp -d -t qwen-mirror.XXXXXX 2>/dev/null) || tmpdir="/tmp/qwen-mirror.$$"
     mkdir -p "${tmpdir}" 2>/dev/null || true
 
-    (curl -fsI -m "${timeout}" -o /dev/null "${oss_url}" >/dev/null 2>&1 && : > "${tmpdir}/aliyun") &
+    (curl -fsIL -m "${timeout}" -o /dev/null "${oss_url}" >/dev/null 2>&1 && : > "${tmpdir}/aliyun") &
     local oss_pid=$!
-    (curl -fsI -m "${timeout}" -o /dev/null "${gh_url}"  >/dev/null 2>&1 && : > "${tmpdir}/github") &
+    (curl -fsIL -m "${timeout}" -o /dev/null "${gh_url}"  >/dev/null 2>&1 && : > "${tmpdir}/github") &
     local gh_pid=$!
 
     local winner=""

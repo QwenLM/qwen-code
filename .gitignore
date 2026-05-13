@@ -47,9 +47,6 @@ Thumbs.db
 # Ignore built ts files
 dist
 
-# Backup of dist/ created by script tests (see ensureMinimalDist)
-.qwen-dist-backup-*
-
 # Docker folder to help skip auth refreshes
 .docker
 

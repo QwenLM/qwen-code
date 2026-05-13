@@ -24,14 +24,14 @@ const EXPECTED_STANDALONE_ARCHIVE_NAMES = [
   'qwen-code-win-x64.zip',
 ];
 // Release artifacts that the installer chain expects in a GitHub Release.
-// Hosted installer scripts (install-qwen.sh / install-qwen.bat) are served
-// from a separate hosted endpoint and are
+// Hosted installer scripts are served from a separate endpoint and are
 // intentionally not part of this set; they have their own staging path in
 // `package:hosted-installation`.
 const EXPECTED_RELEASE_ASSET_NAMES = [
   ...EXPECTED_STANDALONE_ARCHIVE_NAMES,
   'SHA256SUMS',
 ];
+const REMOTE_FETCH_TIMEOUT_MS = 30_000;
 
 if (isMainModule(import.meta.url)) {
   try {
@@ -215,7 +215,7 @@ async function assertRemoteAssetsAvailable(normalizedBaseUrl, fetchImpl) {
 }
 
 async function assertRemoteAssetAvailable(url, fetchImpl) {
-  let response = await fetchImpl(url, { method: 'HEAD' });
+  let response = await fetchWithTimeout(fetchImpl, url, { method: 'HEAD' });
   if (response.ok) {
     await response.body?.cancel?.();
     return;
@@ -225,7 +225,7 @@ async function assertRemoteAssetAvailable(url, fetchImpl) {
   // Some object-storage hosts disable HEAD; fall back to a 1-byte ranged GET
   // so the verifier can still confirm reachability without downloading the
   // full archive.
-  response = await fetchImpl(url, {
+  response = await fetchWithTimeout(fetchImpl, url, {
     headers: {
       Range: 'bytes=0-0',
     },
@@ -244,13 +244,20 @@ function formatErrorReason(reason) {
 }
 
 async function fetchText(url, fetchImpl) {
-  const response = await fetchImpl(url);
+  const response = await fetchWithTimeout(fetchImpl, url);
   if (!response.ok) {
     fail(
       `Failed to download ${url}: ${response.status} ${response.statusText}`,
     );
   }
   return response.text();
+}
+
+function fetchWithTimeout(fetchImpl, url, options = {}) {
+  return fetchImpl(url, {
+    ...options,
+    signal: AbortSignal.timeout(REMOTE_FETCH_TIMEOUT_MS),
+  });
 }
 
 function normalizeHttpsBaseUrl(baseUrl) {

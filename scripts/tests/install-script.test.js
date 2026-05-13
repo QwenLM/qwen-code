@@ -117,6 +117,11 @@ describe('installation scripts', () => {
     );
     expect(script).toContain('wget -q --tries=3 "${url}" -O "${destination}"');
     expect(script).toContain('TEMP_DIRS+=');
+    expect(script).toContain('validate_github_repo()');
+    expect(script).toContain(
+      'QWEN_INSTALL_GITHUB_REPO must be in owner/repo format',
+    );
+    expect(script).toContain('curl -fsIL -m "${timeout}"');
     expect(script).not.toContain('-print -quit');
   });
 
@@ -196,11 +201,20 @@ describe('installation scripts', () => {
     expect(script).toContain('Falling back to npm installation');
     expect(script).toContain('set "STANDALONE_STATUS=!ERRORLEVEL!"');
     expect(script).toContain('if !STANDALONE_STATUS! EQU 2');
+    expect(script).toContain('set "ARG_KEY=%~1"');
+    expect(script).toContain('if /i "!ARG_KEY!"=="--version"');
+    expect(script).toContain('$value -match');
+    expect(script).toContain('QWEN_INSTALL_GITHUB_REPO');
+    expect(script).toContain(
+      'QWEN_INSTALL_GITHUB_REPO must be in owner/repo format',
+    );
     expect(script).toContain(
       'Standalone install failed. Retry with --method npm',
     );
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
+    expect(script).toContain('unsafe path with control character');
+    expect(script).toContain('Failed to update user PATH');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
   });
@@ -422,7 +436,7 @@ describe('standalone release packaging', () => {
     expect(installBatchSource).toContain(
       'if defined QWEN_INSTALL_VERSION set "VERSION=!QWEN_INSTALL_VERSION!"',
     );
-    expect(installBatchSource).toContain('"%~1"=="--version"');
+    expect(installBatchSource).toContain('!ARG_KEY!"=="--version"');
     expect(installBatchSource).toContain('--version requires a value');
 
     const installPowerShellSource = readScript(
@@ -539,6 +553,40 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('rejects hosted installer sources without real version parsing', async () => {
+    const { buildHostedInstallationAssets } = await import(
+      hostedInstallationScriptUrl
+    );
+    const tmpRoot = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-root-'));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-hosted-install-'));
+    const sourceDir = path.join(tmpRoot, 'scripts', 'installation');
+
+    try {
+      mkdirSync(sourceDir, { recursive: true });
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.sh'),
+        '#!/usr/bin/env bash\n' +
+          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
+          'echo "Usage: --version VERSION"\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.bat'),
+        '@echo off\r\nset "VERSION=latest"\r\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen-standalone.ps1'),
+        '& $qwenInstallerPath @args\n# QWEN_INSTALL_VERSION\n',
+      );
+
+      await expect(
+        buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
+      ).rejects.toThrow(/install-qwen-standalone\.sh.*--version parser/);
+    } finally {
+      rmSync(tmpRoot, { recursive: true, force: true });
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('rejects stale hosted installation assets in the output directory', async () => {
     const { buildHostedInstallationAssets } = await import(
       hostedInstallationScriptUrl
@@ -617,7 +665,7 @@ describe('standalone release packaging', () => {
       await expect(
         verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
           fetchImpl: async (url, options = {}) => {
-            fetchedUrls.push([url, options.method || 'GET']);
+            fetchedUrls.push([url, options.method || 'GET', !!options.signal]);
             if (url.endsWith('/SHA256SUMS')) {
               return new Response(checksumContent);
             }
@@ -632,11 +680,13 @@ describe('standalone release packaging', () => {
     expect(fetchedUrls).toContainEqual([
       'https://example.com/qwen-code/v0.0.0/SHA256SUMS',
       'GET',
+      true,
     ]);
     for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
       expect(fetchedUrls).toContainEqual([
         `https://example.com/qwen-code/v0.0.0/${assetName}`,
         'HEAD',
+        true,
       ]);
     }
     for (const [url] of fetchedUrls) {
@@ -1335,6 +1385,90 @@ describe('Windows installer end-to-end', () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  itOnWindows(
+    'falls back to npm in detect mode when archive is unavailable',
+    () => {
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const fakeBin = path.join(tmpDir, 'bin');
+        const npmLog = path.join(tmpDir, 'npm-install.log');
+        createFakeWindowsNpmTools(fakeBin);
+
+        const output = runWindowsCommand(
+          [
+            `call "${path.resolve('scripts/installation/install-qwen-standalone.bat')}"`,
+            '--method',
+            'detect',
+            '--source',
+            'smoke',
+          ].join(' '),
+          {
+            USERPROFILE: path.join(tmpDir, 'home'),
+            QWEN_INSTALL_ROOT: path.join(tmpDir, 'install'),
+            QWEN_FAKE_NPM_LOG: npmLog,
+            QWEN_FAKE_NPM_PREFIX: path.join(tmpDir, 'npm-prefix'),
+            PATH: `${fakeBin};${process.env.PATH}`,
+            PROCESSOR_ARCHITECTURE: 'ARM64',
+            PROCESSOR_ARCHITEW6432: '',
+          },
+        ).toString();
+
+        expect(output).toContain('Falling back to npm installation');
+        expect(readScript(npmLog)).toContain(
+          'install -g @qwen-code/qwen-code@latest --registry',
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnWindows('preserves context when npm fallback also fails', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const fakeBin = path.join(tmpDir, 'bin');
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(
+        path.join(fakeBin, 'node.cmd'),
+        ['@echo off', 'exit /b 1', ''].join('\r\n'),
+      );
+
+      let failureMessage = '';
+      try {
+        runWindowsCommand(
+          [
+            `call "${path.resolve('scripts/installation/install-qwen-standalone.bat')}"`,
+            '--method',
+            'detect',
+            '--source',
+            'smoke',
+          ].join(' '),
+          {
+            USERPROFILE: path.join(tmpDir, 'home'),
+            QWEN_INSTALL_ROOT: path.join(tmpDir, 'install'),
+            PATH: `${fakeBin};${process.env.PATH}`,
+            PROCESSOR_ARCHITECTURE: 'ARM64',
+            PROCESSOR_ARCHITEW6432: '',
+          },
+        );
+      } catch (error) {
+        failureMessage = [
+          error.message,
+          error.stdout?.toString() || '',
+          error.stderr?.toString() || '',
+        ].join('\n');
+      }
+
+      expect(failureMessage).toContain('Falling back to npm installation');
+      expect(failureMessage).toContain('Unable to determine Node.js version');
+      expect(failureMessage).toContain('npm fallback also failed');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 function ensureMinimalDist() {
@@ -1443,6 +1577,29 @@ function createFakeWindowsStandaloneArchive(tmpDir) {
   createZipForTest(archive, tmpDir, path.basename(packageRoot));
   writeChecksumFile(outDir, path.basename(archive));
   return archive;
+}
+
+function createFakeWindowsNpmTools(fakeBin) {
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(
+    path.join(fakeBin, 'node.cmd'),
+    ['@echo off', 'if "%~1"=="-p" echo 22.0.0', 'exit /b 0', ''].join('\r\n'),
+  );
+  writeFileSync(
+    path.join(fakeBin, 'npm.cmd'),
+    [
+      '@echo off',
+      'if "%~1"=="-v" echo 10.0.0 & exit /b 0',
+      'if "%~1"=="prefix" echo %QWEN_FAKE_NPM_PREFIX% & exit /b 0',
+      'if "%~1"=="install" echo %* > "%QWEN_FAKE_NPM_LOG%" & exit /b 0',
+      'exit /b 0',
+      '',
+    ].join('\r\n'),
+  );
+  writeFileSync(
+    path.join(fakeBin, 'qwen.cmd'),
+    ['@echo off', 'echo 0.0.0-npm', ''].join('\r\n'),
+  );
 }
 
 function createZipForTest(archive, cwd, entry) {

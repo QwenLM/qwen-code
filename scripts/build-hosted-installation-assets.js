@@ -35,10 +35,38 @@ const HOSTED_INSTALLATION_ASSETS = [
 const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
   ({ output }) => output,
 );
-const HOSTED_INSTALLER_REQUIRED_FRAGMENTS = [
-  '--version',
-  'QWEN_INSTALL_VERSION',
-];
+const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
+  'install-qwen-standalone.sh': [
+    {
+      name: 'QWEN_INSTALL_VERSION',
+      pattern: /QWEN_INSTALL_VERSION/,
+    },
+    {
+      name: '--version parser',
+      pattern: /--version\)|--version=\*\)/,
+    },
+  ],
+  'install-qwen-standalone.bat': [
+    {
+      name: 'QWEN_INSTALL_VERSION',
+      pattern: /QWEN_INSTALL_VERSION/,
+    },
+    {
+      name: '--version parser',
+      pattern: /ARG_KEY!"=="--version"|"%~1"=="--version"/,
+    },
+  ],
+  'install-qwen-standalone.ps1': [
+    {
+      name: 'argument forwarding',
+      pattern: /& \$qwenInstallerPath @args/,
+    },
+    {
+      name: 'QWEN_INSTALL_VERSION documentation',
+      pattern: /QWEN_INSTALL_VERSION/,
+    },
+  ],
+};
 // Narrow regexes that pin the default-version assignment to `latest`.
 // Substring matching alone would let the word "latest" leak in via comments
 // or help text even when the actual default has been changed. The patterns
@@ -159,9 +187,9 @@ function copyHostedInstallationAsset(source, destination, asset) {
 
 function assertHostedInstallerSource(source, output) {
   const contents = fs.readFileSync(source, 'utf8');
-  const missing = HOSTED_INSTALLER_REQUIRED_FRAGMENTS.filter(
-    (fragment) => !contents.includes(fragment),
-  );
+  const missing = (HOSTED_INSTALLER_BEHAVIOR_PATTERNS[output] || [])
+    .filter(({ pattern }) => !pattern.test(contents))
+    .map(({ name }) => name);
   if (missing.length > 0) {
     fail(
       `${output} is missing hosted installer behavior: ${missing.join(', ')}`,

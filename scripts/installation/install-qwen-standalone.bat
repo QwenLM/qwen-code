@@ -34,7 +34,18 @@ if defined QWEN_INSTALL_BIN_DIR set "INSTALL_BIN_DIR=!QWEN_INSTALL_BIN_DIR!"
 REM Parse flags before any network or filesystem work.
 :parse_args
 if "%~1"=="" goto end_parse
-if /i "%~1"=="--source" (
+set "ARG_KEY=%~1"
+set "ARG_VALUE="
+for /f "tokens=1,* delims==" %%A in ("%~1") do (
+    set "ARG_KEY=%%~A"
+    set "ARG_VALUE=%%~B"
+)
+if /i "!ARG_KEY!"=="--source" (
+    if not "!ARG_VALUE!"=="" (
+        set "SOURCE=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
     if "%~2"=="" (
         echo ERROR: --source requires a value
         exit /b 1
@@ -54,7 +65,12 @@ if /i "%~1"=="-s" (
     shift
     goto parse_args
 )
-if /i "%~1"=="--method" (
+if /i "!ARG_KEY!"=="--method" (
+    if not "!ARG_VALUE!"=="" (
+        set "METHOD=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
     if "%~2"=="" (
         echo ERROR: --method requires a value
         exit /b 1
@@ -64,7 +80,12 @@ if /i "%~1"=="--method" (
     shift
     goto parse_args
 )
-if /i "%~1"=="--mirror" (
+if /i "!ARG_KEY!"=="--mirror" (
+    if not "!ARG_VALUE!"=="" (
+        set "MIRROR=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
     if "%~2"=="" (
         echo ERROR: --mirror requires a value
         exit /b 1
@@ -74,7 +95,12 @@ if /i "%~1"=="--mirror" (
     shift
     goto parse_args
 )
-if /i "%~1"=="--base-url" (
+if /i "!ARG_KEY!"=="--base-url" (
+    if not "!ARG_VALUE!"=="" (
+        set "BASE_URL=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
     if "%~2"=="" (
         echo ERROR: --base-url requires a value
         exit /b 1
@@ -84,7 +110,12 @@ if /i "%~1"=="--base-url" (
     shift
     goto parse_args
 )
-if /i "%~1"=="--archive" (
+if /i "!ARG_KEY!"=="--archive" (
+    if not "!ARG_VALUE!"=="" (
+        set "ARCHIVE_PATH=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
     if "%~2"=="" (
         echo ERROR: --archive requires a value
         exit /b 1
@@ -94,7 +125,12 @@ if /i "%~1"=="--archive" (
     shift
     goto parse_args
 )
-if /i "%~1"=="--version" (
+if /i "!ARG_KEY!"=="--version" (
+    if not "!ARG_VALUE!"=="" (
+        set "VERSION=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
     if "%~2"=="" (
         echo ERROR: --version requires a value
         exit /b 1
@@ -104,7 +140,12 @@ if /i "%~1"=="--version" (
     shift
     goto parse_args
 )
-if /i "%~1"=="--registry" (
+if /i "!ARG_KEY!"=="--registry" (
+    if not "!ARG_VALUE!"=="" (
+        set "NPM_REGISTRY=!ARG_VALUE!"
+        shift
+        goto parse_args
+    )
     if "%~2"=="" (
         echo ERROR: --registry requires a value
         exit /b 1
@@ -154,16 +195,16 @@ REM reliably simulate the user's PATH ordering, so enumerate well-known
 REM per-tool bin directories plus everything `where qwen` returns.
 set "PRE_INSTALL_QWENS_FILE=%TEMP%\qwen-pre-install-%RANDOM%-%RANDOM%.txt"
 del /f /q "!PRE_INSTALL_QWENS_FILE!" >nul 2>&1
-for /f "delims=" %%i in ('where qwen 2^>nul') do echo %%i>>"!PRE_INSTALL_QWENS_FILE!"
+for /f "delims=" %%i in ('where qwen 2^>nul') do call echo %%i>>"!PRE_INSTALL_QWENS_FILE!"
 for %%c in (
     "!USERPROFILE!\.opencode\bin\qwen.cmd"
     "!APPDATA!\npm\qwen.cmd"
     "!USERPROFILE!\.bun\bin\qwen.cmd"
     "!LOCALAPPDATA!\bun\bin\qwen.cmd"
     "!LOCALAPPDATA!\qwen-code\bin\qwen.cmd"
-) do if exist %%c echo %%~c>>"!PRE_INSTALL_QWENS_FILE!"
+) do if exist %%c call echo %%~c>>"!PRE_INSTALL_QWENS_FILE!"
 for /f "delims=" %%i in ('npm prefix -g 2^>nul') do (
-    if exist "%%i\qwen.cmd" echo %%i\qwen.cmd>>"!PRE_INSTALL_QWENS_FILE!"
+    if exist "%%i\qwen.cmd" call echo %%i\qwen.cmd>>"!PRE_INSTALL_QWENS_FILE!"
 )
 set "PRE_INSTALL_QWENS_LIST="
 if exist "!PRE_INSTALL_QWENS_FILE!" (
@@ -333,6 +374,9 @@ if %ERRORLEVEL% NEQ 0 exit /b 1
 call :ValidateVersion
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
+call :ValidateGithubRepo
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
 call :ValidateSource
 exit /b %ERRORLEVEL%
 
@@ -347,11 +391,20 @@ exit /b 1
 
 :ValidateVersion
 if /i "!VERSION!"=="latest" exit /b 0
-echo(!VERSION!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
-if !ERRORLEVEL! EQU 0 exit /b 0
-echo(!VERSION!| findstr /R /C:"^v[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*[A-Za-z0-9.-]*$" >nul
-if !ERRORLEVEL! EQU 0 exit /b 0
+set "QWEN_VERSION_VALUE=!VERSION!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VERSION_VALUE; if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { exit 0 }; exit 1"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_VERSION_VALUE="
+if %PS_STATUS% EQU 0 exit /b 0
 echo ERROR: --version must be 'latest' or a semver string.
+exit /b 1
+
+:ValidateGithubRepo
+if not defined QWEN_INSTALL_GITHUB_REPO exit /b 0
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_INSTALL_GITHUB_REPO; if ($value -match '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$') { exit 0 }; exit 1"
+if %ERRORLEVEL% EQU 0 exit /b 0
+
+echo ERROR: QWEN_INSTALL_GITHUB_REPO must be in owner/repo format.
 exit /b 1
 
 :ValidateSource
@@ -800,7 +853,7 @@ REM with backslash separators even though the ZIP spec requires '/'. We
 REM accept either separator and reject only entries that, after
 REM normalization, are empty, absolute, drive-rooted, or contain a '..'
 REM segment.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); foreach ($entry in $archive.Entries) { $name = $entry.FullName -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $archive = $null; try { Add-Type -AssemblyName System.IO.Compression.FileSystem; $archive = [IO.Compression.ZipFile]::OpenRead($env:QWEN_ARCHIVE_FILE); foreach ($entry in $archive.Entries) { $raw = $entry.FullName; if ($raw.IndexOfAny([char[]](10,13)) -ge 0) { [Console]::Error.WriteLine('Archive contains unsafe path with control character: ' + $raw); exit 1 }; $name = $raw -replace '\\', '/'; while ($name.StartsWith('./')) { $name = $name.Substring(2) }; if ($name -eq '' -or $name.StartsWith('/') -or $name -match '^[A-Za-z]:' -or $name -match '(^|/)\.\.(/|$)') { [Console]::Error.WriteLine('Archive contains unsafe path: ' + $entry.FullName); exit 1 } } } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 } finally { if ($null -ne $archive) { $archive.Dispose() } }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_ARCHIVE_FILE="
 if %PS_STATUS% EQU 0 exit /b 0
@@ -997,6 +1050,10 @@ if defined OTHER_QWENS (
         echo   !EXTRA_BIN!
     ) else (
         call :MaybeUpdateUserPath "!EXTRA_BIN!"
+        if !ERRORLEVEL! NEQ 0 (
+            echo WARNING: Failed to update user PATH. Add the directory manually:
+            echo   !EXTRA_BIN!
+        )
         echo.
         echo If you prefer not to modify user PATH, rerun with --no-modify-path
         echo and pick one of:
