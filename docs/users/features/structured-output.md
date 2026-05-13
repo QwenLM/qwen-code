@@ -39,9 +39,11 @@ success and is empty on failure, so `$(qwen --json-schema …)` capture
 patterns are safe — failures land in stderr, not mixed into the
 captured variable.
 
-> **Empty schema:** Passing `{}` always produces `null` on stdout. The
-> model calls `structured_output` with no arguments, and `undefined`
-> payloads normalize to literal JSON `null`.
+> **Empty schema:** Passing `{}` produces `{}` (an empty JSON object)
+> on stdout. The model calls `structured_output` with no arguments;
+> the upstream argument-normalisation path turns the empty function
+> call into an empty-object payload, which passes validation against
+> the empty schema and is emitted verbatim.
 
 ## Supplying the schema
 
@@ -58,11 +60,12 @@ qwen -p "…" --json-schema @./schemas/summary.json
 The `@path` form expands `~`, normalizes the path, and reads the file
 with `utf8` encoding.
 
-> **Latency note:** Successful runs incur a fixed ~500 ms shutdown
-> holdback while in-flight background agents flush their final
-> notifications before the result is emitted. Single runs barely
-> notice it; batch pipelines that fan out hundreds of `--json-schema`
-> invocations should account for this floor.
+> **Latency note:** Successful runs incur a shutdown holdback **capped
+> at ~500 ms** while in-flight background agents flush their final
+> notifications before the result is emitted. The holdback exits early
+> if no background tasks are pending, so simple runs barely notice it;
+> batch pipelines that fan out hundreds of `--json-schema` invocations
+> against busy agents should account for this upper bound.
 
 > **Security note:** Schemas may contain user-supplied regular
 > expressions in `pattern` keywords. Ajv compiles these with the
@@ -132,19 +135,25 @@ consumers that always expect a string in that field.
 
 ## Retry and failure modes
 
+> **Cost note.** Two things multiply token spend in a `--json-schema`
+> run, both worth designing for:
+>
+> - **Schema embedded in every turn.** The schema ships as the
+>   `structured_output` function declaration's `parameters` block on
+>   every model request, not just the first. Large schemas (up to the
+>   4 MiB parse cap) proportionally increase per-turn input tokens
+>   for the entire run.
+> - **Each validation retry is a full model turn.** A schema the
+>   model misses repeatedly is multiplied per failure (request +
+>   inference + response). Keep schemas constrained enough to guide
+>   the model and simple enough to nail on the first try; raise
+>   `--max-session-turns` when retries are expected.
+
 The session ends on the first valid call. Until then:
 
 - **Args fail validation.** `structured_output` returns a tool-result
   error with Ajv's message, the model sees it on the next turn, and
   may correct the arguments and call again.
-
-  > **Cost note:** every retry is a full model turn (request +
-  > inference + response). A schema that the model misses repeatedly
-  > will multiply your token spend and latency for that run. Constrain
-  > schemas enough to guide the model, simple enough to nail on the
-  > first try; consider raising `--max-session-turns` when retries are
-  > expected.
-
 - **Model calls a side-effecting tool in the same turn as
   `structured_output`.** The pre-scan suppresses the sibling — it
   never runs, regardless of whether the structured call ultimately
@@ -165,9 +174,12 @@ The session ends on the first valid call. Until then:
   hint that points at the three common stuck-run causes: model never
   called the tool, `structured_output` is denied by permission rules,
   or the schema is unsatisfiable.
-- **Run is interrupted (SIGINT / Ctrl-C).** Exit code `130`. No
-  structured result is emitted, even if one had been captured during
-  the shutdown holdback.
+- **Run is interrupted (SIGINT / Ctrl-C).** Exit code `130`. The
+  structured result is normally not emitted, but the shutdown
+  holdback loop does not poll the abort signal, so a SIGINT that
+  arrives after a successful call has been captured but before the
+  result reaches stdout may still land on stdout. Treat the exit
+  code as the source of truth.
 
 ## Privacy
 

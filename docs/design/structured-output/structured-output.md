@@ -170,11 +170,17 @@ the shared "we got a valid call, shut down" path:
 2. Bounded holdback (`STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500` ms) so
    the natural cancel handlers of just-aborted agents have a chance
    to emit their terminal `task_notification` and land it in
-   `localQueue`. This is best-effort — orphaned `task_started` events
-   remain possible under load if a particular agent's abort handler
-   exceeds the budget. Without the holdback, stream-json consumers
-   would routinely see `task_started` events without matching
-   `task_notification`.
+   `localQueue`. The loop guard is
+   `Date.now() < deadline && registry.hasUnfinalizedTasks()`, so the
+   wait exits immediately when nothing is in flight (typical path)
+   and never blocks longer than the cap. The 500 ms ceiling is
+   best-effort — orphaned `task_started` events remain possible under
+   load if a particular agent's abort handler exceeds the budget.
+   The loop does **not** poll the abort signal: a SIGINT received
+   during holdback or during the emit path that follows will not
+   short-circuit the result that was already captured. Without the
+   holdback, stream-json consumers would routinely see `task_started`
+   events without matching `task_notification`.
 3. `flushQueuedNotificationsToSdk(localQueue)` drains everything still
    queued.
 4. `finalizeOneShotMonitors()` (idempotent — safe to call twice; the
@@ -188,7 +194,7 @@ the shared "we got a valid call, shut down" path:
 | Model emits plain text only | 1 | Error with turn count + truncated `Output preview`. |
 | Model never calls `structured_output` for `maxSessionTurns` turns | 53 | `Reached max session turns` + `--json-schema` hint pointing at the three common causes. |
 | Validation fails repeatedly | (eventually 53 via max-turns) | Each failure surfaces to the model on the next turn with the Ajv message. |
-| Abort / SIGINT | 130 | Cancellation path; no structured result emitted even if one was captured during the holdback. |
+| Abort / SIGINT | 130 | Cancellation path. A structured result is normally not emitted, but `emitStructuredSuccess()`'s holdback loop does not poll the abort signal — a SIGINT that arrives after capture but before/during the stdout emit may still flush the result. Exit code is the reliable signal. |
 
 ## Output envelope
 
@@ -204,6 +210,11 @@ called `structured_output` with no args under an empty schema):
   consumers that don't want to re-parse the stringified form.
 - `undefined` payloads normalize to `null` (rendered as the literal
   JSON `null` in both fields) so the field can't silently disappear.
+  In practice this fallback is rarely reached: upstream, `turn.ts`
+  applies `(fnCall.args || {})` before storing the submission, so a
+  zero-arg call against an empty schema lands as `{}` and renders as
+  `{}` on stdout, not `null`. The `?? null` step is defence-in-depth
+  for the strictly-undefined case.
 
 TEXT mode writes just the `result` field + newline to stdout. JSON
 mode batches the full event log. Stream-json mode emits each event on
