@@ -1050,7 +1050,8 @@ const SETTINGS_SCHEMA = {
         category: 'Model',
         requiresRestart: false,
         default: true,
-        description: 'Disable all loop detection checks (streaming and LLM).',
+        description:
+          'Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.',
         showInDialog: false,
       },
       skipStartupContext: {

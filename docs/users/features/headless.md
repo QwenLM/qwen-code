@@ -249,7 +249,7 @@ Recommended combinations for unattended use:
 
 - **Trusted, isolated environment (ephemeral CI runner, container):** `qwen -p "..." --yolo --max-session-turns N --output-format json`. Pin a turn budget so a stuck agent can't burn through your CI minutes, and capture `output-format json` for post-run usage / tool-call auditing.
 - **Local machine or shared infra:** also pass `--sandbox` (or set `QWEN_SANDBOX=1`) so shell / write / edit tools run inside the sandbox image.
-- **Long-running CI with retry-on-rate-limit:** combine `QWEN_CODE_UNATTENDED_RETRY=1` with `--max-session-turns` so 429 / 529 retries can't extend a run past its turn budget. Wall-clock and token budgets are tracked separately in [#4103](https://github.com/QwenLM/qwen-code/issues/4103).
+- **Long-running CI with retry-on-rate-limit:** combine `QWEN_CODE_UNATTENDED_RETRY=1` with `--max-session-turns` so 429 / 529 retries can't extend a run past its turn budget. Wall-clock, token, and tool-call budgets are planned as phase 2 of [QwenLM/qwen-code#4103](https://github.com/QwenLM/qwen-code/issues/4103).
 
 ## Examples
 

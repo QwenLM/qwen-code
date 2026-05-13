@@ -51,12 +51,28 @@ describe('getHeadlessYoloSafetyWarning', () => {
     ).toBeNull();
   });
 
-  it('respects the explicit suppression env var', () => {
+  it('respects the explicit suppression env var when set to 1 or true', () => {
     const cfg = makeConfig(ApprovalMode.YOLO, undefined);
     expect(
       getHeadlessYoloSafetyWarning(cfg, {
         QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
       }),
     ).toBeNull();
+    expect(
+      getHeadlessYoloSafetyWarning(cfg, {
+        QWEN_CODE_SUPPRESS_YOLO_WARNING: 'true',
+      }),
+    ).toBeNull();
+  });
+
+  it('does NOT suppress when QWEN_CODE_SUPPRESS_YOLO_WARNING is 0 / false / empty', () => {
+    const cfg = makeConfig(ApprovalMode.YOLO, undefined);
+    for (const val of ['0', 'false', '', 'no']) {
+      expect(
+        getHeadlessYoloSafetyWarning(cfg, {
+          QWEN_CODE_SUPPRESS_YOLO_WARNING: val,
+        }),
+      ).toBe(HEADLESS_YOLO_NO_SANDBOX_WARNING);
+    }
   });
 });

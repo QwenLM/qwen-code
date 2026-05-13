@@ -27,7 +27,15 @@ export function getHeadlessYoloSafetyWarning(
 ): string | null {
   if (config.getApprovalMode() !== ApprovalMode.YOLO) return null;
   if (config.getSandbox()) return null;
+  // SANDBOX is set by the sandbox transport itself (container / seatbelt
+  // wrapper) so any non-empty value means we're already inside a sandbox.
   if (env['SANDBOX']) return null;
-  if (env['QWEN_CODE_SUPPRESS_YOLO_WARNING']) return null;
+  // Explicit user opt-out. Match the project convention (cf. isUnattendedMode
+  // in core/utils/retry.ts) so `=0` / `=false` don't accidentally suppress.
+  if (isTruthyEnv(env['QWEN_CODE_SUPPRESS_YOLO_WARNING'])) return null;
   return HEADLESS_YOLO_NO_SANDBOX_WARNING;
+}
+
+function isTruthyEnv(val: string | undefined): boolean {
+  return val === '1' || val === 'true';
 }
