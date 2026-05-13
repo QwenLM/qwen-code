@@ -1442,10 +1442,20 @@ export class ShellExecutionService {
           // late bytes the PTY emits during the drain window flow to
           // the caller instead of falling on the floor — strictly an
           // improvement; without this they'd be dropped on the way to
-          // the snapshot anyway. The new disposables aren't tracked
-          // here (we hand ownership to the caller); when the caller's
-          // own `cancelChild` path fires, the PTY dies and these
-          // listeners fire `onSettle` then unregister with the PTY.
+          // the snapshot anyway.
+          //
+          // PR-2.5 wave-3 (deepseek-v4-pro T6): capture the IDisposable
+          // returned by `onData` / `onExit` and the listener function
+          // we register on `'error'`, then dispose them all when
+          // settle fires. node-pty's `ptyProcess` outlives the
+          // post-promote handlers (the child can sit dead for
+          // milliseconds before the caller's `cancelChild` finalizes
+          // it), and node's EventEmitter holds refs to listener
+          // closures (which in turn hold refs to `onPostData` /
+          // `onPostSettle` / `promoteArtifacts`). Disposing the
+          // listeners on settle releases those refs so they can be
+          // GC'd without waiting for the underlying PTY to be
+          // collected.
           //
           // Guard so `onSettle` fires AT MOST ONCE. Both `onExit` and
           // the post-promote `error` listener below funnel through
@@ -1454,9 +1464,50 @@ export class ShellExecutionService {
           // for the immediately-following exit) and the caller's
           // `transitionRegistry` would race itself.
           let postPromoteSettleFired = false;
+          let postPromoteDataDisposable: { dispose: () => void } | null = null;
+          let postPromoteExitDisposable: { dispose: () => void } | null = null;
+          let postPromoteErrorListener:
+            | ((err: NodeJS.ErrnoException) => void)
+            | null = null;
+          const disposePostPromoteListeners = () => {
+            if (postPromoteDataDisposable) {
+              try {
+                postPromoteDataDisposable.dispose();
+              } catch (e) {
+                debugLogger.warn(
+                  `disposing post-promote data listener threw: ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
+              postPromoteDataDisposable = null;
+            }
+            if (postPromoteExitDisposable) {
+              try {
+                postPromoteExitDisposable.dispose();
+              } catch (e) {
+                debugLogger.warn(
+                  `disposing post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
+              postPromoteExitDisposable = null;
+            }
+            if (postPromoteErrorListener) {
+              try {
+                ptyProcess.removeListener('error', postPromoteErrorListener);
+              } catch (e) {
+                debugLogger.warn(
+                  `removing post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
+                );
+              }
+              postPromoteErrorListener = null;
+            }
+          };
           const firePostSettle = (info: ShellPostPromoteSettleInfo) => {
             if (postPromoteSettleFired) return;
             postPromoteSettleFired = true;
+            // Dispose BEFORE invoking the caller — even if the caller
+            // throws, the listeners are gone (and idempotent if we
+            // come back through the error path).
+            disposePostPromoteListeners();
             if (!postPromote?.onSettle) return;
             try {
               postPromote.onSettle(info);
@@ -1469,7 +1520,7 @@ export class ShellExecutionService {
           if (postPromote?.onData) {
             const onPostData = postPromote.onData;
             try {
-              ptyProcess.onData((data: string) => {
+              postPromoteDataDisposable = ptyProcess.onData((data: string) => {
                 try {
                   onPostData({ type: 'data', chunk: data });
                 } catch (cbErr) {
@@ -1488,7 +1539,7 @@ export class ShellExecutionService {
           }
           if (postPromote?.onSettle) {
             try {
-              ptyProcess.onExit(
+              postPromoteExitDisposable = ptyProcess.onExit(
                 ({
                   exitCode,
                   signal,
@@ -1518,7 +1569,7 @@ export class ShellExecutionService {
             // path we want unexpected errors to FAIL the background task
             // via `onSettle`, not crash the CLI.
             try {
-              ptyProcess.on('error', (err: NodeJS.ErrnoException) => {
+              postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
                 if (isExpectedPtyReadExitError(err)) {
                   // EIO / EAGAIN during the PTY read-exit race — same
                   // as the foreground handler's filter. The onExit
@@ -1532,7 +1583,8 @@ export class ShellExecutionService {
                   signal: null,
                   endTime: Date.now(),
                 });
-              });
+              };
+              ptyProcess.on('error', postPromoteErrorListener);
             } catch (e) {
               debugLogger.warn(
                 `re-attaching post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,

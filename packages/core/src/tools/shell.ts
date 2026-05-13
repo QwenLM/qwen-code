@@ -927,12 +927,23 @@ interface PromoteArtifacts {
    */
   stream: fs.WriteStream | null;
   /**
-   * Latched true when `fs.createWriteStream` threw (or the fallback
-   * snapshot write fired). Subsequent `onData` chunks DROP instead
-   * of buffering — without this flag the buffer would grow without
-   * bound under a sustained child whose output file we can't open
-   * (the buffer drain only ever runs when `stream` becomes non-null,
-   * which never happens once we've recorded a failure).
+   * Latched true when the output stream is no longer accepting writes.
+   * Two paths set it:
+   *
+   * 1. Stream open failed (`fs.createWriteStream` threw OR fired an
+   *    async `'error'` event before bytes could land). The stream
+   *    will never reopen; future `onData` chunks must drop.
+   * 2. Settle has fired and `onSettleWired` has drained the buffer
+   *    and called `stream.end()`. The stream is closing; any chunk
+   *    that arrives during the `.end()` flush window (rare but
+   *    possible on PTY when kernel buffers deliver late) MUST drop
+   *    rather than be pushed into the buffer — at this point the
+   *    buffer has no remaining drain path (the foreground finalizer
+   *    has returned).
+   *
+   * Without this flag the buffer would grow without bound under a
+   * sustained child whose output file we can't open, OR strand
+   * late-arriving post-settle bytes in an undrainable buffer.
    */
   streamFailed: boolean;
   /**
@@ -2270,6 +2281,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // (the drain path only runs when `stream` becomes non-null,
       // which never happens after this branch).
       promoteArtifacts.streamFailed = true;
+      // PR-2.5 wave-3 (deepseek-v4-pro T3): record how many pre-
+      // finalizer post-promote chunks are being dropped. Without
+      // this an oncall engineer reading a truncated `bg_xxx.output`
+      // has no signal that the truncation is due to stream-open
+      // failure rather than the child not producing more output.
+      // The chunks themselves are gone (no salvage path exists once
+      // the stream open has failed and the buffer drain depends on
+      // a non-null stream slot).
+      if (promoteArtifacts.buffer.length > 0) {
+        debugLogger.warn(
+          `promote: dropping ${promoteArtifacts.buffer.length} buffered post-promote chunks for ${outputPath} (stream open failed before drain)`,
+        );
+        promoteArtifacts.buffer.length = 0;
+      }
       // Last-ditch: try a sync snapshot write so /tasks still has
       // SOMETHING readable; the buffer chunks are lost in this branch.
       try {
@@ -2463,7 +2488,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
           status: 'failed',
           failMsg: `Terminated by signal ${info.signal}`,
         };
-      return { status: 'failed', failMsg: 'Exited with unknown status' };
+      // PR-2.5 wave-3 (deepseek-v4-pro T5): this branch is meant to
+      // be unreachable — the service always populates one of
+      // `error` / `exitCode` / `signal`. Hitting it means the
+      // service emitted a defective settle info object, which is a
+      // logic bug. Capture the actual field values in the failure
+      // message AND warn-log so the oncall engineer reading
+      // `/tasks` or the debug log can tell THIS path apart from the
+      // other "failed" branches. (`info.error` has been narrowed to
+      // `never` by the preceding `if (info.error) return`, so we
+      // can't read `.message` here — by construction it would be
+      // `undefined` at runtime anyway.)
+      debugLogger.warn(
+        `promote: classifySettle all-null fallback hit for ${shellId} — ` +
+          `exitCode=${info.exitCode}, signal=${info.signal}, error=undefined`,
+      );
+      return {
+        status: 'failed',
+        failMsg: `Exited with unknown status (exitCode=${info.exitCode}, signal=${info.signal}, error=undefined)`,
+      };
     };
     const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
       const cls = classifySettle(info);
@@ -2487,7 +2530,35 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // `completed`/`failed` and read the output file BEFORE the
       // trailing bytes are on disk, producing truncated logs.
       const stream = promoteArtifacts.stream;
+      // PR-2.5 wave-3 (deepseek-v4-pro T2): drain the pre-settle
+      // buffer to the stream BEFORE nulling the shared slot. Service-
+      // side `onData` callbacks that race the foreground finalizer
+      // can land chunks in the buffer between when the wire fires
+      // and when the buffer drain (during stream-open) sees them.
+      // Without this drain those chunks are stranded. AND latch
+      // `streamFailed` together with the null so that any
+      // chunk arriving AFTER `.end()` (during the flush window —
+      // unlikely once the service has emitted settle, but kernel
+      // buffers can deliver late on PTY) is DROPPED via the
+      // `else if (promoteArtifacts.streamFailed)` arm in `onData`
+      // instead of being pushed into the now-undrainable buffer.
+      if (stream) {
+        while (promoteArtifacts.buffer.length > 0) {
+          try {
+            stream.write(promoteArtifacts.buffer.shift()!);
+          } catch (writeErr) {
+            // Stream write failure during pre-end drain — log + drop,
+            // same recovery posture as the foreground `onData` write
+            // path. The error event will fire async if the stream is
+            // dead, latching `streamFailed` via the 'error' handler.
+            debugLogger.warn(
+              `promote: pre-end buffer drain write failed: ${getErrorMessage(writeErr)}`,
+            );
+          }
+        }
+      }
       promoteArtifacts.stream = null;
+      promoteArtifacts.streamFailed = true;
       if (!stream) {
         // No stream (open failed or already ended) — transition right
         // away, no flush to wait on.

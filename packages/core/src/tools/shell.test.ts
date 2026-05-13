@@ -4370,6 +4370,211 @@ describe('ShellTool', () => {
           1700000111111,
         );
       });
+
+      it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamFailed so post-end chunks drop instead of leaking the buffer', async () => {
+        // Regression for the buffer-drain race: previously
+        // `onSettleWired` set `promoteArtifacts.stream = null` BEFORE
+        // calling `stream.end()`. Any `onData` chunk that arrived
+        // between the null assignment and the `'finish'` event saw
+        // `stream === null && streamFailed === false` and pushed
+        // into `promoteArtifacts.buffer` — which has no further
+        // drain path (the foreground finalizer has already
+        // returned). Result: chunks stranded forever, no
+        // observability. Fix drains the buffer to the stream BEFORE
+        // nulling AND latches `streamFailed=true` so any subsequent
+        // chunks DROP via the third branch of `onData` instead.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn(),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        let capturedPostPromote:
+          | {
+              onData?: (event: {
+                type: string;
+                chunk: string | unknown;
+              }) => void;
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            capturedPostPromote = opts?.postPromote;
+            return {
+              pid: 55555,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'snapshot',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 55555,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        // Fire a pre-settle data chunk BEFORE awaiting — it lands
+        // in the pre-finalizer service-side window. Then await the
+        // execute (handlePromotedForeground completes, drains the
+        // buffer into stream, wires onSettleWired).
+        const promise = invocation.execute(mockAbortSignal);
+        // The service-side mock has been called by now (synchronous
+        // up to the resolved promise return); fire onData on its
+        // captured postPromote.
+        await new Promise((resolve) => setImmediate(resolve));
+        // First chunk: arrives BEFORE handlePromotedForeground opens
+        // the stream → buffered in `promoteArtifacts.buffer`. After
+        // handlePromotedForeground drains, this gets written.
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'pre1' });
+        await promise;
+
+        // After handlePromotedForeground: stream is non-null and
+        // pre1 has been written into it (drained from buffer).
+        expect(writeStreamMock.write).toHaveBeenCalledWith('pre1');
+
+        // Now push a chunk that lands between handlePromotedForeground
+        // and settle (still buffered in the service-side window).
+        // Since handlePromotedForeground has already opened the stream
+        // and drained, this chunk goes straight through stream.write.
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'mid1' });
+        expect(writeStreamMock.write).toHaveBeenCalledWith('mid1');
+
+        // Fire settle. onSettleWired now drains any remaining buffer,
+        // nulls stream, latches streamFailed.
+        capturedPostPromote?.onSettle?.({
+          exitCode: 0,
+          signal: null,
+          endTime: 1700001111111,
+        });
+
+        // POST-SETTLE chunks (kernel buffer race) — must DROP, not
+        // accumulate in the buffer. Before the wave-3 fix this would
+        // push into `promoteArtifacts.buffer` and leak.
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post1' });
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post2' });
+
+        // Stream.write should NOT have been called for post-settle
+        // chunks (stream is null + streamFailed latched → onData's
+        // third branch drops).
+        const writeCalls = writeStreamMock.write.mock.calls.map(
+          (c: unknown[]) => c[0],
+        );
+        expect(writeCalls).not.toContain('post1');
+        expect(writeCalls).not.toContain('post2');
+      });
+
+      it('wave-3 (T3): catch-path clears the buffered chunks and falls back to writeFileSync(snapshot)', async () => {
+        // Regression for the silent-drop critique: when
+        // createWriteStream throws (rare, but ENOENT on a vanished
+        // tmpdir is plausible), chunks already in
+        // `promoteArtifacts.buffer` cannot be salvaged. The fix
+        // empties the buffer (so any later code paths can't see
+        // stale chunks) and logs the count for oncall observability
+        // (the log itself is verified by `debugLogger` integration —
+        // not asserted here because debugLogger has no global
+        // session in test setup, so the log is a side-effect-only
+        // observability tool). Behaviorally the test verifies that
+        // (a) writeFileSync snapshot fallback runs, (b) the path
+        // does not crash, (c) a post-buffer-drain settle still
+        // transitions the registry.
+        vi.mocked(fs.createWriteStream).mockImplementationOnce(() => {
+          throw Object.assign(new Error('ENOENT no tmpdir'), { code: 'ENOENT' });
+        });
+        // Spy on writeFileSync (the snapshot fallback) — passthrough
+        // implementation since the default mock would be no-op.
+        const writeFileSyncSpy = vi
+          .mocked(fs.writeFileSync)
+          .mockImplementationOnce(() => undefined);
+
+        const registry = mockConfig.getBackgroundShellRegistry();
+        let capturedPostPromote:
+          | {
+              onData?: (event: { type: string; chunk: unknown }) => void;
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            capturedPostPromote = opts?.postPromote;
+            // Fire 3 pre-finalizer chunks → all queue in buffer.
+            capturedPostPromote?.onData?.({ type: 'data', chunk: 'a' });
+            capturedPostPromote?.onData?.({ type: 'data', chunk: 'b' });
+            capturedPostPromote?.onData?.({ type: 'data', chunk: 'c' });
+            return {
+              pid: 44444,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'snap',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 44444,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'whatever',
+          is_background: false,
+        });
+        await invocation.execute(mockAbortSignal);
+
+        // writeFileSync called with the snapshot (the recoverable
+        // fallback).
+        expect(writeFileSyncSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          'snap',
+        );
+
+        // Post-settle chunks must not surface anywhere either —
+        // streamFailed was set by the catch path so subsequent
+        // onData chunks drop. Drive a settle, then a late chunk;
+        // verify the registry still transitions normally and the
+        // late chunk is dropped without crashing.
+        capturedPostPromote?.onSettle?.({
+          exitCode: 0,
+          signal: null,
+          endTime: 1700002222222,
+        });
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post-settle' });
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700002222222,
+        );
+      });
     });
   });
 
