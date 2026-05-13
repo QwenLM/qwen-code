@@ -4185,6 +4185,191 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('already exited');
         expect(result.llmContent).not.toContain('task_stop({');
       });
+
+      it("wave-2 (C3): llmContent reflects 'completed' even when stream.once('finish') fires asynchronously after the queued-settle drain", async () => {
+        // Regression for the C3 race: previously the model-facing
+        // status flag was only flipped INSIDE `transitionRegistry`,
+        // which `onSettleWired` defers until the output stream's
+        // `'finish'` event fires (libuv flush). For a fast-exited
+        // command whose settle arrives BEFORE handlePromotedForeground
+        // wires onSettleWired (queued-settle path), the drain happens
+        // synchronously but the actual registry transition is
+        // microtask-deferred. The old code built `llmContent` before
+        // the flag flipped → "Status: running" + `task_stop`
+        // instructions leaked into the model copy even though the
+        // child was already gone.
+        //
+        // Fix splits the flag into two: `postPromoteSettleObserved`
+        // (sync, set on classify) drives the model copy;
+        // `transitionRegistry` (async, behind finish) handles the
+        // registry side. This test captures the finish handler
+        // INSTEAD of firing it immediately, so the registry transition
+        // is genuinely deferred while we read `result.llmContent`.
+        let capturedFinishHandler: (() => void) | null = null;
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') capturedFinishHandler = handler;
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        let capturedPostPromote:
+          | {
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            // Fast-exit race: fire onSettle BEFORE resolve so
+            // settleQueued path is exercised.
+            capturedPostPromote?.onSettle?.({
+              exitCode: 0,
+              signal: null,
+              endTime: 1700000000999,
+            });
+            return {
+              pid: 88888,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'fast output',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 88888,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'true',
+          is_background: false,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        // Stream's 'finish' handler captured but NOT yet invoked, so
+        // the registry transition is genuinely deferred at this point.
+        expect(capturedFinishHandler).not.toBeNull();
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        // Model-facing copy still reports the correct terminal status
+        // because `postPromoteSettleObserved` was flipped sync inside
+        // onSettleWired BEFORE the stream-finish wait began.
+        expect(result.llmContent).toContain('Status: completed.');
+        expect(result.llmContent).not.toContain('Status: running.');
+        expect(result.llmContent).toContain('already exited');
+        expect(result.llmContent).not.toContain('task_stop({');
+
+        // Fire 'finish' now — registry transition runs post-flush.
+        capturedFinishHandler!();
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000000999,
+        );
+      });
+
+      it("wave-2 (C1): stream open async error transitions registry — does not hang waiting on `finish`", async () => {
+        // Regression for C1: `fs.createWriteStream` reports common
+        // open failures (ENOENT / EACCES / ENOSPC) via an async
+        // 'error' event, NOT by throwing. Before the fix, the
+        // 'error' listener only logged; `promoteArtifacts.stream`
+        // kept pointing at the already-broken stream, and
+        // `onSettleWired` attached a `.once('finish', ...)` listener
+        // that would never fire → registry stuck on `running` forever.
+        // Fix: the error listener latches `streamFailed`, nulls the
+        // shared `stream` slot, and `onSettleWired`'s existing
+        // `if (!stream)` branch transitions the registry immediately.
+        const errorListeners: Array<(err: Error) => void> = [];
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn((event: string, handler: (err: Error) => void) => {
+            if (event === 'error') errorListeners.push(handler);
+          }),
+          once: vi.fn((event: string, handler: () => void) => {
+            // Production code attaches finish/error AFTER stream is
+            // pulled into a local var; in the failure path it
+            // shouldn't reach here at all because `stream` is null.
+            // Capture but do nothing — the test verifies the registry
+            // transition runs WITHOUT firing this handler.
+            void event;
+            void handler;
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 99999,
+        });
+        await promise;
+
+        // Stream-open async error: emit ENOSPC AFTER stream is
+        // assigned to `promoteArtifacts.stream`. The latch nulls
+        // the shared slot.
+        expect(errorListeners.length).toBeGreaterThan(0);
+        errorListeners[0](
+          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
+        );
+
+        // Now drive onSettle — the wired handler sees
+        // `promoteArtifacts.stream === null` and transitions
+        // immediately (no finish wait), so the entry doesn't stay
+        // running.
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const onSettle = (
+          serviceCall[6] as {
+            postPromote: {
+              onSettle: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            };
+          }
+        ).postPromote.onSettle;
+        onSettle({ exitCode: 0, signal: null, endTime: 1700000111111 });
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000111111,
+        );
+      });
     });
   });
 

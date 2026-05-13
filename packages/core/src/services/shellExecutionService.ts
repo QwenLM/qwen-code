@@ -1446,6 +1446,26 @@ export class ShellExecutionService {
           // here (we hand ownership to the caller); when the caller's
           // own `cancelChild` path fires, the PTY dies and these
           // listeners fire `onSettle` then unregister with the PTY.
+          //
+          // Guard so `onSettle` fires AT MOST ONCE. Both `onExit` and
+          // the post-promote `error` listener below funnel through
+          // this latch — a PTY error during the read-exit race could
+          // otherwise fire onSettle twice (once for the error, once
+          // for the immediately-following exit) and the caller's
+          // `transitionRegistry` would race itself.
+          let postPromoteSettleFired = false;
+          const firePostSettle = (info: ShellPostPromoteSettleInfo) => {
+            if (postPromoteSettleFired) return;
+            postPromoteSettleFired = true;
+            if (!postPromote?.onSettle) return;
+            try {
+              postPromote.onSettle(info);
+            } catch (cbErr) {
+              debugLogger.warn(
+                `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+              );
+            }
+          };
           if (postPromote?.onData) {
             const onPostData = postPromote.onData;
             try {
@@ -1467,7 +1487,6 @@ export class ShellExecutionService {
             }
           }
           if (postPromote?.onSettle) {
-            const onPostSettle = postPromote.onSettle;
             try {
               ptyProcess.onExit(
                 ({
@@ -1477,22 +1496,46 @@ export class ShellExecutionService {
                   exitCode: number;
                   signal?: number;
                 }) => {
-                  try {
-                    onPostSettle({
-                      exitCode,
-                      signal: signal ?? null,
-                      endTime: Date.now(),
-                    });
-                  } catch (cbErr) {
-                    debugLogger.warn(
-                      `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
-                    );
-                  }
+                  firePostSettle({
+                    exitCode,
+                    signal: signal ?? null,
+                    endTime: Date.now(),
+                  });
                 },
               );
             } catch (e) {
               debugLogger.warn(
                 `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+            // PR-2.5 wave-2 (gpt-5.5 C2): the foreground `ptyErrorHandler`
+            // was removed above as part of the handoff. Without a
+            // replacement, a post-promote PTY error event has NO listener
+            // — Node treats an unhandled `error` from an EventEmitter
+            // as a fatal exception that takes the whole CLI down. The
+            // foreground handler `throw`s on unexpected errors (and
+            // ignores expected PTY-read-exit codes); for the post-promote
+            // path we want unexpected errors to FAIL the background task
+            // via `onSettle`, not crash the CLI.
+            try {
+              ptyProcess.on('error', (err: NodeJS.ErrnoException) => {
+                if (isExpectedPtyReadExitError(err)) {
+                  // EIO / EAGAIN during the PTY read-exit race — same
+                  // as the foreground handler's filter. The onExit
+                  // listener above will fire shortly with the real
+                  // status; let it carry the settle.
+                  return;
+                }
+                firePostSettle({
+                  error: err,
+                  exitCode: null,
+                  signal: null,
+                  endTime: Date.now(),
+                });
+              });
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote error listener threw: ${e instanceof Error ? e.message : String(e)}`,
               );
             }
           }
