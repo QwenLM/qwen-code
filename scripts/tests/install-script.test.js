@@ -264,6 +264,7 @@ describe('standalone release packaging', () => {
     expect(hostedInstallScript).toContain('HOSTED_INSTALLATION_ASSETS');
     expect(hostedInstallScript).toContain("output: 'install-qwen.sh'");
     expect(hostedInstallScript).toContain("output: 'install-qwen.bat'");
+    expect(hostedInstallScript).toContain("output: 'install-qwen.ps1'");
     expect(hostedInstallScript).not.toContain("output: 'install'");
 
     const releaseVerifyScript = readScript(
@@ -409,6 +410,15 @@ describe('standalone release packaging', () => {
     );
     expect(installBatchSource).toContain('"%~1"=="--version"');
     expect(installBatchSource).toContain('--version requires a value');
+
+    const installPowerShellSource = readScript(
+      'scripts/installation/install-qwen.ps1',
+    );
+    expect(installPowerShellSource).toContain('install-qwen.bat');
+    expect(installPowerShellSource).toContain('Invoke-WebRequest');
+    expect(installPowerShellSource).toContain('QWEN_INSTALL_VERSION');
+    expect(installPowerShellSource).toContain('--version vX.Y.Z');
+    expect(installPowerShellSource).toContain('@args');
   });
 
   it('stages hosted installation assets with checksums', async () => {
@@ -425,12 +435,14 @@ describe('standalone release packaging', () => {
 
       const installSh = path.join(tmpDir, 'install-qwen.sh');
       const installBat = path.join(tmpDir, 'install-qwen.bat');
+      const installPs1 = path.join(tmpDir, 'install-qwen.ps1');
       const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
       const checksumLines = checksums.trim().split('\n');
 
       expect(HOSTED_INSTALLATION_ASSET_NAMES).toEqual([
         'install-qwen.sh',
         'install-qwen.bat',
+        'install-qwen.ps1',
       ]);
       expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual(
         HOSTED_INSTALLATION_ASSET_NAMES,
@@ -444,14 +456,18 @@ describe('standalone release packaging', () => {
           '\r\n',
         ),
       );
+      expect(readScript(installPs1)).toBe(
+        readScript('scripts/installation/install-qwen.ps1'),
+      );
       expect(existsSync(path.join(tmpDir, 'install'))).toBe(false);
-      expect(existsSync(path.join(tmpDir, 'install-qwen.ps1'))).toBe(false);
       expect(checksumLines.map((line) => line.split('  ')[1])).toEqual([
         'install-qwen.bat',
+        'install-qwen.ps1',
         'install-qwen.sh',
       ]);
       expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.sh$/m);
       expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.bat$/m);
+      expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.ps1$/m);
       if (process.platform !== 'win32') {
         expect(lstatSync(installSh).mode & 0o111).not.toBe(0);
       }
@@ -484,6 +500,10 @@ describe('standalone release packaging', () => {
       writeFileSync(
         path.join(sourceDir, 'install-qwen.bat'),
         '@echo off\r\nset "VERSION=latest"\r\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'install-qwen.ps1'),
+        "# --version vX.Y.Z\n$env:QWEN_INSTALL_VERSION = 'latest'\n",
       );
 
       await expect(
@@ -598,7 +618,7 @@ describe('standalone release packaging', () => {
       ]);
     }
     for (const [url] of fetchedUrls) {
-      expect(url).not.toMatch(/install-qwen\.(sh|bat)$/);
+      expect(url).not.toMatch(/install-qwen\.(sh|bat|ps1)$/);
       expect(url).not.toMatch(/\/install$/);
     }
   });
@@ -831,6 +851,7 @@ describe('standalone release packaging', () => {
     expect(workflow).not.toContain('package:installation-assets');
     expect(workflow).not.toContain('install-qwen.sh');
     expect(workflow).not.toContain('install-qwen.bat');
+    expect(workflow).not.toContain('install-qwen.ps1');
     expect(workflow).not.toContain('verify_node_checksum()');
     expect(workflow).not.toContain('download_node()');
     expect(workflow).toContain('dist/standalone/qwen-code-*.tar.gz');
@@ -855,6 +876,8 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('package:hosted-installation');
     expect(guide).toContain('installation/install-qwen.sh');
     expect(guide).toContain('installation/install-qwen.bat');
+    expect(guide).toContain('installation/install-qwen.ps1');
+    expect(guide).toContain('irm https://qwen-code-assets');
     expect(guide).toContain('release operators must sync these staged files');
     expect(guide).toContain('Hosted endpoint status');
     expect(guide).toContain('legacy NVM-based installer');

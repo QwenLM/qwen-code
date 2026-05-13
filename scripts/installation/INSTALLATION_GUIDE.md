@@ -23,7 +23,7 @@ are only required when the installer falls back to npm or when
 ## Installation Scripts
 
 - Linux/macOS: `install-qwen.sh`
-- Windows: `install-qwen.bat`
+- Windows: `install-qwen.ps1`
 
 ## Release Artifacts
 
@@ -37,7 +37,7 @@ GitHub releases publish these standalone archives:
 - `SHA256SUMS`
 
 The installer scripts (`install-qwen.sh`,
-`install-qwen.bat`) are not republished per release. They are
+`install-qwen.ps1`) are not republished per release. They are
 served from a hosted installation endpoint and accept `--version` to pin a
 specific standalone release. This keeps the public install command on a stable
 hosted entrypoint while still allowing version pinning, rather than using
@@ -58,16 +58,15 @@ curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/in
 ```
 
 ```cmd
-powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
 ```
 
-To pin a release with the hosted Windows entrypoint, download `install-qwen.bat`
-and pass `--version`:
+To pin a release with the hosted Windows entrypoint, set
+`QWEN_INSTALL_VERSION` before invoking `install-qwen.ps1`:
 
 ```powershell
-$installer = Join-Path $env:TEMP 'install-qwen.bat'
-Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile $installer
-& $installer --version vX.Y.Z
+$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex
 ```
 
 `QWEN_INSTALL_VERSION` is the equivalent environment variable when arguments
@@ -76,7 +75,9 @@ cannot be passed through.
 Hosted installer assets are staged separately from GitHub Release archives:
 
 - `install-qwen.sh` is the Linux/macOS hosted entrypoint.
-- `install-qwen.bat` is the Windows hosted entrypoint (also runnable directly).
+- `install-qwen.ps1` is the Windows hosted entrypoint for `irm | iex`.
+- `install-qwen.bat` is the Windows installer implementation used by
+  `install-qwen.ps1` and can also be downloaded and run directly.
 
 Build them with:
 
@@ -84,9 +85,11 @@ Build them with:
 npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-The staged `install-qwen.sh` and `install-qwen.bat` files map to the fixed
+The staged `install-qwen.sh`, `install-qwen.ps1`, and `install-qwen.bat` files
+map to the fixed
 hosted URLs shown above. Upload their contents byte-for-byte to
-`installation/install-qwen.sh` and `installation/install-qwen.bat`; the staging
+`installation/install-qwen.sh`, `installation/install-qwen.ps1`, and
+`installation/install-qwen.bat`; the staging
 command also writes `SHA256SUMS` for upload verification. The hosted installers
 intentionally default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to
 pin a standalone release. OSS/CDN upload automation is still a follow-up release
