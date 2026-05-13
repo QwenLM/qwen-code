@@ -72,6 +72,25 @@ describe('buildAnthropicUsageMetadata', () => {
     });
   });
 
+  it('keeps summing when inputTokens grows past cache_creation in a long Anthropic conversation', () => {
+    // Regression: an earlier guard mis-classified this as OpenAI-style
+    // (because input >= cache_creation) and dropped the cache_creation
+    // portion, producing a one-shot Footer "drop" at the crossover point.
+    expect(
+      buildAnthropicUsageMetadata({
+        inputTokens: 50_000,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 32_088,
+        outputTokens: 200,
+      }),
+    ).toEqual({
+      promptTokenCount: 82_088,
+      candidatesTokenCount: 200,
+      totalTokenCount: 82_288,
+      cachedContentTokenCount: 0,
+    });
+  });
+
   it('handles all-zero usage cleanly', () => {
     expect(
       buildAnthropicUsageMetadata({
