@@ -6,6 +6,7 @@
 
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { isNodeError } from './errors.js';
 
 export interface AtomicWriteOptions {
@@ -53,13 +54,52 @@ export async function renameWithRetry(
 }
 
 /**
+ * Follow a symlink chain to its final target, supporting broken links.
+ *
+ * Unlike `fs.realpath()`, this resolves even when the final target does
+ * not exist (broken symlink). Returns the original path for non-symlinks.
+ */
+async function resolveSymlinkChain(filePath: string): Promise<string> {
+  const maxHops = 40; // matches POSIX SYMLOOP_MAX
+  let current = filePath;
+  for (let i = 0; i < maxHops; i++) {
+    let lstats;
+    try {
+      lstats = await fs.lstat(current);
+    } catch (err) {
+      if (isNodeError(err) && err.code === 'ENOENT') {
+        return current;
+      }
+      throw err;
+    }
+    if (!lstats.isSymbolicLink()) {
+      return current;
+    }
+    const linkTarget = await fs.readlink(current);
+    current = path.isAbsolute(linkTarget)
+      ? linkTarget
+      : path.resolve(path.dirname(current), linkTarget);
+  }
+  const err = new Error(
+    `ELOOP: too many levels of symbolic links, resolve '${filePath}'`,
+  );
+  (err as NodeJS.ErrnoException).code = 'ELOOP';
+  throw err;
+}
+
+/**
  * Atomically write arbitrary content (string or Buffer) to a file.
  *
- * 1. Resolve symlinks so the temp file lives next to the real target.
+ * 1. Resolve symlinks (including broken ones) so the temp file lives
+ *    next to the real target.
  * 2. Write to a temporary file with fsync (`flush: true` by default).
  * 3. Preserve the original file's permissions (or apply `options.mode`).
  * 4. Atomic rename (POSIX) with retry (Windows).
  * 5. On EXDEV (cross-device rename), fall back to direct write.
+ *    **Note:** the EXDEV fallback is non-atomic — a crash mid-write
+ *    can leave a partially-written file. EXDEV only occurs when the
+ *    resolved target path is on a different filesystem than its parent
+ *    directory, which is rare in practice.
  * 6. Always clean up the temp file on failure.
  *
  * The parent directory of `filePath` must already exist.
@@ -74,36 +114,15 @@ export async function atomicWriteFile(
   const flush = options?.flush ?? true;
   const encoding = options?.encoding ?? 'utf-8';
 
-  // Resolve symlinks so tmp lives on the same volume as the real target.
-  // Use lstat+readlink instead of realpath to handle broken symlinks
-  // (where the target doesn't exist yet).
-  let targetPath: string;
-  try {
-    const lstats = await fs.lstat(filePath);
-    if (lstats.isSymbolicLink()) {
-      targetPath = await fs.readlink(filePath);
-      // Resolve relative symlink targets against the symlink's directory.
-      if (!targetPath.startsWith('/')) {
-        const { dirname, resolve } = await import('node:path');
-        targetPath = resolve(dirname(filePath), targetPath);
-      }
-    } else {
-      targetPath = filePath;
-    }
-  } catch (err) {
-    if (!isNodeError(err) || err.code !== 'ENOENT') {
-      throw err;
-    }
-    targetPath = filePath;
-  }
+  const targetPath = await resolveSymlinkChain(filePath);
 
   const tmpPath = `${targetPath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
 
-  // Stat the target to preserve existing permissions.
+  // Stat the target to preserve existing permissions (mask out file-type bits).
   let existingMode: number | undefined;
   try {
     const stat = await fs.stat(targetPath);
-    existingMode = stat.mode;
+    existingMode = stat.mode & 0o7777;
   } catch (err) {
     if (!isNodeError(err) || err.code !== 'ENOENT') {
       throw err;

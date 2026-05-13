@@ -183,6 +183,44 @@ describe('atomicWriteFile', () => {
     expect(content).toBe('created via broken symlink');
   });
 
+  it('should resolve relative symlinks against the symlink directory', async () => {
+    const realFile = path.join(tmpDir, 'real.txt');
+    const linkFile = path.join(tmpDir, 'link.txt');
+
+    await fs.writeFile(realFile, 'original');
+    await fs.symlink('real.txt', linkFile); // relative target
+
+    await atomicWriteFile(linkFile, 'updated via relative symlink');
+
+    // The symlink should still exist.
+    const linkTarget = await fs.readlink(linkFile);
+    expect(linkTarget).toBe('real.txt');
+
+    // The real file should have the updated content.
+    const content = await fs.readFile(realFile, 'utf-8');
+    expect(content).toBe('updated via relative symlink');
+  });
+
+  it('should resolve multi-level symlink chains', async () => {
+    const realFile = path.join(tmpDir, 'real.txt');
+    const linkA = path.join(tmpDir, 'link-a.txt');
+    const linkB = path.join(tmpDir, 'link-b.txt');
+
+    await fs.writeFile(realFile, 'original');
+    await fs.symlink(realFile, linkA); // linkA → real
+    await fs.symlink(linkA, linkB); // linkB → linkA → real
+
+    await atomicWriteFile(linkB, 'updated via chain');
+
+    // Both symlinks should still exist.
+    expect(await fs.readlink(linkB)).toBe(linkA);
+    expect(await fs.readlink(linkA)).toBe(realFile);
+
+    // The real file should have the updated content.
+    const content = await fs.readFile(realFile, 'utf-8');
+    expect(content).toBe('updated via chain');
+  });
+
   it('should throw if parent directory does not exist', async () => {
     const filePath = path.join(tmpDir, 'no', 'such', 'dir', 'file.txt');
     await expect(atomicWriteFile(filePath, 'data')).rejects.toThrow();
