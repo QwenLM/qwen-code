@@ -598,7 +598,7 @@ export class McpClientManager {
     const timeoutMs = this.discoveryTimeoutFor(serverConfig);
     let timedOut = false;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = setTimeout(async () => {
         timedOut = true;
         // CRITICAL: rejecting `runWithDiscoveryTimeout` does NOT cancel
         // the underlying `discoverMcpToolsForServer` — it keeps trying
@@ -607,19 +607,31 @@ export class McpClientManager {
         // the live `toolRegistry` and re-emits `mcp-client-update`.
         // From the user's perspective the server "failed" but its tools
         // are silently active, including any that shadow built-ins.
-        // Disconnect the client to abort the handshake so the
-        // background promise rejects (the `connect()` call throws when
-        // its transport is closed mid-handshake), the underlying
-        // promise's `finally` clears the dedup Map entry, and no tools
-        // ever reach the registry.
+        //
+        // Disconnect the client to abort the handshake so the background
+        // promise rejects, then drop any tools that DID slip through the
+        // race window. A fire-and-forget `client.disconnect()` is NOT
+        // enough: `disconnect()` awaits `transport.close()`, and the
+        // in-flight `discover()` may have already pumped its `tools/list`
+        // response through the transport AND iterated
+        // `toolRegistry.registerTool(tool)` synchronously by the time
+        // the close lands. The earlier fix's comment described the
+        // pre-fix state as a "remote-exploitable silent-tool-registration
+        // vector" — `await` plus `removeMcpToolsByServer` closes it.
         const client = this.clients.get(serverName);
         if (client) {
-          void client.disconnect().catch((err) => {
+          try {
+            await client.disconnect();
+          } catch (err) {
             debugLogger.debug(
               `Forced disconnect of timed-out server '${serverName}' threw: ${getErrorMessage(err)}`,
             );
-          });
+          }
         }
+        // Drop any tools that registered during the disconnect window. No-op
+        // if the server hadn't reached `discover()` yet, so it's safe to
+        // always call.
+        this.toolRegistry.removeMcpToolsByServer(serverName);
         reject(
           new Error(
             `MCP server '${serverName}' discovery timed out after ${timeoutMs}ms`,

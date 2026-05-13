@@ -648,6 +648,56 @@ describe('mcp-client', () => {
       // The entry must remain absent — no resurrection.
       expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);
     });
+
+    it('disconnect() propagates DISCONNECTED to the global registry', async () => {
+      // Regression: a previous version set `isDisconnecting = true` BEFORE
+      // calling `updateStatus(DISCONNECTED)`, and `updateStatus`'s guard
+      // (designed to block stale `connect()` catch updates) silently
+      // swallowed the write. The global registry stayed CONNECTED forever,
+      // so `Config.getFailedMcpServerNames()` (which filters
+      // `status !== CONNECTED`) omitted timeout-disconnected servers from
+      // the non-interactive failure banner and the Footer's MCP health
+      // pill kept counting them as healthy.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      const mockedTransport = { close: vi.fn().mockResolvedValue(undefined) };
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        mockedTransport as unknown as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'healthy-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        { getDirectories: () => [] } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+      // After connect, the registry should show CONNECTED.
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.CONNECTED,
+      );
+
+      await client.disconnect();
+      // After an intentional disconnect, the global registry MUST reflect
+      // DISCONNECTED — otherwise downstream code (failure banner, health
+      // pill) treats the server as still healthy.
+      expect(getMCPServerStatus('healthy-server')).toBe(
+        MCPServerStatus.DISCONNECTED,
+      );
+
+      // Cleanup the registry entry so this test doesn't leak.
+      removeMCPServerStatus('healthy-server');
+    });
   });
 
   describe('hasNetworkTransport', () => {

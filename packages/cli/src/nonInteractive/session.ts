@@ -34,7 +34,10 @@ import {
 import { createMinimalSettings } from '../config/settings.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { runNonInteractive } from '../nonInteractiveCli.js';
-import { finalizeStartupProfile } from '../utils/startupProfiler.js';
+import {
+  finalizeStartupProfile,
+  profileCheckpoint,
+} from '../utils/startupProfiler.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
@@ -136,7 +139,17 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
+      // Bracket `config.initialize()` with the same profiler checkpoints
+      // the non-stream-json branch in `gemini.tsx` uses so the
+      // `config_initialize_dur` derived phase shows up in stream-json
+      // startup profiles. `profileCheckpoint` is a no-op when
+      // `QWEN_CODE_PROFILE_STARTUP` is unset, so this adds zero overhead
+      // off the profiling path. Without these, stream-json profiles read
+      // as missing the initialize phase entirely, which made the MCP
+      // discovery timings look like they happened "before init".
+      profileCheckpoint('config_initialize_start');
       await this.config.initialize(options);
+      profileCheckpoint('config_initialize_end');
       // Stream-json sessions feed prompts straight to the model after init.
       // Under progressive MCP availability `initialize()` returns before
       // MCP servers settle, so we must explicitly await discovery here —

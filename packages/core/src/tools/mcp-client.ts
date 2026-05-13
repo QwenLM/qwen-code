@@ -199,14 +199,28 @@ export class McpClient {
 
   /**
    * Disconnects from the MCP server.
+   *
+   * The intentional DISCONNECTED status update must reach the global
+   * registry — `getFailedMcpServerNames()` filters on `status !== CONNECTED`
+   * and the Footer's MCP health pill subscribes to the registry. Going
+   * through `updateStatus()` would have it swallowed by the
+   * `isDisconnecting` guard whose only purpose is to suppress LATE writes
+   * from a stale `connect()` catch. We therefore write the local field and
+   * the global registry directly, then flip `isDisconnecting = true` to
+   * shut down propagation from any in-flight `connect()` / `discover()`
+   * whose catch will fire after the transport has been torn down.
    */
   async disconnect(): Promise<void> {
+    // Set the local status BEFORE flipping `isDisconnecting`. A concurrent
+    // `discover()` reading `this.status` would otherwise see the stale
+    // CONNECTED value and try to register tools that we're about to drop.
+    this.status = MCPServerStatus.DISCONNECTED;
+    updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
       await this.transport.close();
     }
     this.client.close();
-    this.updateStatus(MCPServerStatus.DISCONNECTED);
   }
 
   /**

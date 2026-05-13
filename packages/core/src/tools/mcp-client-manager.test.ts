@@ -492,7 +492,9 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = new McpClientManager(mockConfig, {
+      removeMcpToolsByServer: vi.fn(),
+    } as unknown as ToolRegistry);
 
     const t0 = Date.now();
     await manager.discoverAllMcpToolsIncremental(mockConfig);
@@ -696,7 +698,9 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = new McpClientManager(mockConfig, {
+      removeMcpToolsByServer: vi.fn(),
+    } as unknown as ToolRegistry);
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     spy.mockRestore();
 
@@ -746,7 +750,9 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const manager = new McpClientManager(mockConfig, {
+      removeMcpToolsByServer: vi.fn(),
+    } as unknown as ToolRegistry);
     await manager.discoverAllMcpToolsIncremental(mockConfig);
     spy.mockRestore();
 
@@ -754,13 +760,19 @@ describe('McpClientManager', () => {
     expect(calls).not.toContain(30_000);
   });
 
-  it('runWithDiscoveryTimeout disconnects the client on timeout to abort silent tool registration', async () => {
+  it('runWithDiscoveryTimeout disconnects the client AND drops registered tools on timeout', async () => {
     // Before this fix, the inner `discoverMcpToolsForServer` kept running
     // after the timeout rejected the outer promise. If `client.discover()`
     // eventually succeeded it would register the late-arriving server's
     // tools into the live toolRegistry (a remote-exploitable silent
-    // registration). Disconnecting the client on timeout aborts the
-    // handshake so no tools land.
+    // registration).
+    //
+    // Disconnecting the client on timeout aborts the handshake, but a
+    // fire-and-forget `void disconnect()` doesn't help when `discover()`
+    // already pumped tools into the registry synchronously — the
+    // transport close lands a tick later. We therefore (a) await the
+    // disconnect and (b) call `removeMcpToolsByServer()` to drop any
+    // tools that slipped through the race window.
     let resolveConnect!: () => void;
     const hungConnect = new Promise<void>((res) => {
       resolveConnect = res;
@@ -786,13 +798,19 @@ describe('McpClientManager', () => {
       getDebugMode: () => false,
       isMcpServerDisabled: () => false,
     } as unknown as Config;
-    const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
+    const removeMcpToolsByServer = vi.fn();
+    const manager = new McpClientManager(mockConfig, {
+      removeMcpToolsByServer,
+    } as unknown as ToolRegistry);
 
     await manager.discoverAllMcpToolsIncremental(mockConfig);
 
     // The timeout must have triggered the disconnect — that's what
     // aborts the connect() handshake so no tools land.
     expect(mockedMcpClient.disconnect).toHaveBeenCalled();
+    // And any tools that registered during the disconnect race window
+    // must have been removed from the registry.
+    expect(removeMcpToolsByServer).toHaveBeenCalledWith('slow');
 
     // Cleanup the hung promise to avoid leaking it across tests.
     resolveConnect();
