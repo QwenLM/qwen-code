@@ -182,8 +182,12 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'installer options contain unsafe command characters',
     );
-    expect(script).toContain('-EncodedCommand');
-    expect(script).toContain('QWEN_VALIDATE_OPTIONS_COMMAND');
+    expect(script).not.toContain('-EncodedCommand');
+    expect(script).toContain('QWEN_VALIDATE_OPTIONS_SCRIPT');
+    expect(script).toContain('$unsafe = [char[]](10,13,33,34');
+    expect(script).toContain(
+      'powershell -NoProfile -ExecutionPolicy Bypass -File "!QWEN_VALIDATE_OPTIONS_SCRIPT!"',
+    );
     expect(script).toContain('if "!INSTALL_BASE:~1,2!"==":/"');
     expect(script).toContain('if "!INSTALL_DIR:~1,2!"==":/"');
     expect(script).toContain('if "!INSTALL_BIN_DIR:~1,2!"==":/"');
