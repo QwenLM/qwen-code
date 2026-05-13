@@ -306,9 +306,8 @@ export class FileHistoryService {
       return;
     }
 
-    // Re-check after async backup — concurrent trackEdit for the same path
-    // may have won the race. The losing call's backup file becomes orphaned
-    // on disk but data state stays correct.
+    // Re-check after async backup — concurrent calls write the same
+    // deterministic path, so the second overwrites the first harmlessly.
     if (!mostRecent.trackedFileBackups[trackingPath]) {
       mostRecent.trackedFileBackups[trackingPath] = backup;
       this.state.trackedFiles.add(trackingPath);
