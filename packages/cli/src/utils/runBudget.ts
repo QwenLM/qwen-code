@@ -48,11 +48,12 @@ export interface RunBudgetOptions {
    */
   maxApiCalls?: number;
   /**
-   * Max cumulative total tokens (input + output) across the run. `-1` /
-   * `undefined` disables. Enforced **retrospectively** (poll after each
-   * stream completes) because token counts are only knowable after the
-   * model emits them — so the run may overshoot by at most one final
-   * response.
+   * Max total tokens (input + output) for this run. `-1` / `undefined`
+   * disables. Enforced **retrospectively** (poll after each stream
+   * completes) because token counts are only knowable after the model
+   * emits them — so the run may overshoot by at most one final response.
+   * Caller passes per-run deltas, not raw cumulative totals; see
+   * `tickTokens` docstring.
    */
   maxTokens?: number;
 }
@@ -177,19 +178,21 @@ export class RunBudgetEnforcer {
   }
 
   /**
-   * Reports the cumulative total-token count observed so far and enforces
-   * `maxTokens`. The caller passes the total from telemetry after each
-   * model response. Unlike `tickApiCall` / `tickToolCall`, the enforcer
-   * does NOT maintain its own counter here — the source of truth lives in
-   * `uiTelemetryService`, and threading a separate count would risk drift.
+   * Reports the **per-run** total-token count and enforces `maxTokens`.
+   * The caller passes the run-scoped delta (current - baseline) computed
+   * from `uiTelemetryService`. Unlike `tickApiCall` / `tickToolCall`, the
+   * enforcer does NOT maintain its own counter here — the source of truth
+   * lives in `uiTelemetryService` (a process-global singleton), and the
+   * delta is the caller's responsibility so daemon / SDK callers sharing
+   * a process across runs don't see cumulative counts leak between runs.
    */
-  tickTokens(cumulativeTokens: number): void {
-    if (this.maxTokens >= 0 && cumulativeTokens > this.maxTokens) {
+  tickTokens(perRunTokens: number): void {
+    if (this.maxTokens >= 0 && perRunTokens > this.maxTokens) {
       this.markExceeded({
         kind: 'tokens',
         limit: this.maxTokens,
-        observed: cumulativeTokens,
-        message: `Run aborted: token budget of ${this.maxTokens} exceeded (--max-tokens); observed ${cumulativeTokens} cumulative tokens.`,
+        observed: perRunTokens,
+        message: `Run aborted: token budget of ${this.maxTokens} exceeded (--max-tokens); observed ${perRunTokens} tokens in this run.`,
       });
     }
   }

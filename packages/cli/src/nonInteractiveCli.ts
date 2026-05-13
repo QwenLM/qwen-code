@@ -45,7 +45,10 @@ import {
   handleBudgetExceededError,
 } from './utils/errors.js';
 import { RunBudgetEnforcer } from './utils/runBudget.js';
-import { getDangerousToolAuditLine } from './utils/headlessSafetyWarnings.js';
+import {
+  getDangerousToolAuditLine,
+  readDangerousToolCounts,
+} from './utils/headlessSafetyWarnings.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -238,6 +241,16 @@ export async function runNonInteractive(
     );
     budgetEnforcer.start();
 
+    // Baseline snapshots taken at run start. `uiTelemetryService` is a
+    // process-global singleton, so daemon / SDK callers that share a
+    // process across runs would otherwise see *cumulative* counts. The
+    // budget enforcer and YOLO audit both work in per-run deltas relative
+    // to these baselines.
+    const baselineMetrics = uiTelemetryService.getMetrics();
+    const baselineTokens =
+      computeUsageFromMetrics(baselineMetrics).total_tokens ?? 0;
+    const baselineDangerousCounts = readDangerousToolCounts(baselineMetrics);
+
     // YOLO exit-time audit. Idempotent — multiple call sites are intentional
     // because `process.exit()` (called from handleError /
     // handleCancellationError / handleBudgetExceededError /
@@ -249,10 +262,13 @@ export async function runNonInteractive(
     const emitYoloAudit = (): void => {
       if (auditEmitted) return;
       auditEmitted = true;
-      const line = getDangerousToolAuditLine(
-        config,
-        uiTelemetryService.getMetrics(),
-      );
+      const current = readDangerousToolCounts(uiTelemetryService.getMetrics());
+      const delta = {
+        shell: current.shell - baselineDangerousCounts.shell,
+        write: current.write - baselineDangerousCounts.write,
+        edit: current.edit - baselineDangerousCounts.edit,
+      };
+      const line = getDangerousToolAuditLine(config, delta);
       if (line) process.stderr.write(`${line}\n`);
     };
 
@@ -823,10 +839,12 @@ export async function runNonInteractive(
         // after each model response and abort before issuing the next
         // sendMessageStream / running any further tool calls. Overshoot
         // by at most one final response is unavoidable since the model
-        // has to emit the tokens before they're counted.
+        // has to emit the tokens before they're counted. The delta vs
+        // `baselineTokens` accounts for the process-global telemetry
+        // singleton (see baseline snapshot comment above).
         budgetEnforcer.tickTokens(
-          computeUsageFromMetrics(uiTelemetryService.getMetrics())
-            .total_tokens ?? 0,
+          (computeUsageFromMetrics(uiTelemetryService.getMetrics())
+            .total_tokens ?? 0) - baselineTokens,
         );
         if (abortController.signal.aborted) await routeAbort();
 
@@ -941,8 +959,8 @@ export async function runNonInteractive(
 
               // See main-loop tickTokens comment.
               budgetEnforcer.tickTokens(
-                computeUsageFromMetrics(uiTelemetryService.getMetrics())
-                  .total_tokens ?? 0,
+                (computeUsageFromMetrics(uiTelemetryService.getMetrics())
+                  .total_tokens ?? 0) - baselineTokens,
               );
               if (abortController.signal.aborted) await routeAbort();
 

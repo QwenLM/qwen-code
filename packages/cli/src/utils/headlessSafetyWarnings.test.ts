@@ -14,6 +14,7 @@ import {
   HEADLESS_YOLO_NO_SANDBOX_WARNING,
   getHeadlessYoloSafetyWarning,
   getDangerousToolAuditLine,
+  readDangerousToolCounts,
 } from './headlessSafetyWarnings.js';
 
 function makeConfig(
@@ -101,60 +102,112 @@ function makeYoloConfig(): Pick<Config, 'getApprovalMode'> {
   return { getApprovalMode: () => ApprovalMode.YOLO };
 }
 
-describe('getDangerousToolAuditLine', () => {
-  it('returns null when approval mode is not YOLO', () => {
-    const cfg = { getApprovalMode: () => ApprovalMode.DEFAULT };
-    const metrics = metricsWithToolCounts({
-      run_shell_command: 3,
-      write_file: 1,
-    });
-    expect(getDangerousToolAuditLine(cfg, metrics, {})).toBeNull();
+describe('readDangerousToolCounts', () => {
+  it('returns zeros when no relevant tools were invoked', () => {
+    const m = metricsWithToolCounts({ read_file: 5, grep_search: 2 });
+    expect(readDangerousToolCounts(m)).toEqual({ shell: 0, write: 0, edit: 0 });
   });
 
-  it('returns null when no dangerous tools were invoked', () => {
-    const metrics = metricsWithToolCounts({
-      read_file: 5,
-      grep_search: 2,
-    });
-    expect(getDangerousToolAuditLine(makeYoloConfig(), metrics, {})).toBeNull();
-  });
-
-  it('summarises shell / write / edit counts when YOLO and any are non-zero', () => {
-    const metrics = metricsWithToolCounts({
+  it('pulls counts by canonical tool name', () => {
+    const m = metricsWithToolCounts({
       run_shell_command: 4,
       write_file: 2,
       edit: 1,
-      read_file: 12, // ignored
+      read_file: 12,
     });
-    expect(getDangerousToolAuditLine(makeYoloConfig(), metrics, {})).toBe(
+    expect(readDangerousToolCounts(m)).toEqual({ shell: 4, write: 2, edit: 1 });
+  });
+
+  it('gracefully handles a metrics blob with no tools field', () => {
+    expect(readDangerousToolCounts({} as unknown as SessionMetrics)).toEqual({
+      shell: 0,
+      write: 0,
+      edit: 0,
+    });
+  });
+});
+
+describe('getDangerousToolAuditLine', () => {
+  it('returns null when approval mode is not YOLO', () => {
+    const cfg = { getApprovalMode: () => ApprovalMode.DEFAULT };
+    expect(
+      getDangerousToolAuditLine(cfg, { shell: 3, write: 1, edit: 0 }, {}),
+    ).toBeNull();
+  });
+
+  it('returns null when no dangerous tools were invoked', () => {
+    expect(
+      getDangerousToolAuditLine(
+        makeYoloConfig(),
+        { shell: 0, write: 0, edit: 0 },
+        {},
+      ),
+    ).toBeNull();
+  });
+
+  it('summarises shell / write / edit counts when YOLO and any are non-zero', () => {
+    expect(
+      getDangerousToolAuditLine(
+        makeYoloConfig(),
+        { shell: 4, write: 2, edit: 1 },
+        {},
+      ),
+    ).toBe(
       'YOLO audit: executed 4 shell, 2 write, 1 edit tool call(s) during this run.',
     );
   });
 
   it('reports zeros for tools that were not invoked but still emits when at least one dangerous tool ran', () => {
-    const metrics = metricsWithToolCounts({ edit: 3 });
-    expect(getDangerousToolAuditLine(makeYoloConfig(), metrics, {})).toBe(
+    expect(
+      getDangerousToolAuditLine(
+        makeYoloConfig(),
+        { shell: 0, write: 0, edit: 3 },
+        {},
+      ),
+    ).toBe(
       'YOLO audit: executed 0 shell, 0 write, 3 edit tool call(s) during this run.',
     );
   });
 
   it('respects QWEN_CODE_SUPPRESS_YOLO_WARNING=1', () => {
-    const metrics = metricsWithToolCounts({ run_shell_command: 1 });
     expect(
-      getDangerousToolAuditLine(makeYoloConfig(), metrics, {
-        QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
-      }),
+      getDangerousToolAuditLine(
+        makeYoloConfig(),
+        { shell: 1, write: 0, edit: 0 },
+        { QWEN_CODE_SUPPRESS_YOLO_WARNING: '1' },
+      ),
     ).toBeNull();
   });
 
   it('does NOT suppress on QWEN_CODE_SUPPRESS_YOLO_WARNING=0 / false', () => {
-    const metrics = metricsWithToolCounts({ run_shell_command: 1 });
     for (const val of ['0', 'false', '']) {
       expect(
-        getDangerousToolAuditLine(makeYoloConfig(), metrics, {
-          QWEN_CODE_SUPPRESS_YOLO_WARNING: val,
-        }),
+        getDangerousToolAuditLine(
+          makeYoloConfig(),
+          { shell: 1, write: 0, edit: 0 },
+          { QWEN_CODE_SUPPRESS_YOLO_WARNING: val },
+        ),
       ).toContain('YOLO audit');
     }
+  });
+
+  it('models the "daemon / multi-run" case via delta counts (current minus baseline)', () => {
+    // Simulating two consecutive runs in one process: telemetry singleton
+    // has 5 cumulative shell calls, but this run only added 2 of them. The
+    // caller subtracts the baseline before invoking the audit.
+    const baseline = readDangerousToolCounts(
+      metricsWithToolCounts({ run_shell_command: 3 }),
+    );
+    const current = readDangerousToolCounts(
+      metricsWithToolCounts({ run_shell_command: 5 }),
+    );
+    const delta = {
+      shell: current.shell - baseline.shell,
+      write: current.write - baseline.write,
+      edit: current.edit - baseline.edit,
+    };
+    expect(getDangerousToolAuditLine(makeYoloConfig(), delta, {})).toBe(
+      'YOLO audit: executed 2 shell, 0 write, 0 edit tool call(s) during this run.',
+    );
   });
 });

@@ -116,7 +116,7 @@ describe('RunBudgetEnforcer', () => {
     expect(enforcer.getExceeded()?.kind).toBe('tool-calls');
   });
 
-  it('aborts when the reported cumulative token count exceeds maxTokens', () => {
+  it('aborts when the reported per-run token count exceeds maxTokens', () => {
     const ac = new AbortController();
     const enforcer = new RunBudgetEnforcer({ maxTokens: 1000 }, ac);
     enforcer.tickTokens(500);

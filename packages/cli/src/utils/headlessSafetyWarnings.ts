@@ -11,6 +11,19 @@ import {
   type SessionMetrics,
 } from '@qwen-code/qwen-code-core';
 
+/**
+ * Per-run snapshot of dangerous-tool counts pulled from
+ * `uiTelemetryService.getMetrics().tools.byName`. The telemetry singleton
+ * is process-global, so daemon / SDK callers that invoke `runNonInteractive`
+ * multiple times in one process MUST snapshot at run start and pass deltas
+ * to the audit — otherwise later runs would report cumulative counts.
+ */
+export interface DangerousToolCounts {
+  shell: number;
+  write: number;
+  edit: number;
+}
+
 export const HEADLESS_YOLO_NO_SANDBOX_WARNING =
   'Warning: running headless with --yolo / approval-mode=yolo and no sandbox. ' +
   "All tool calls (shell, write, edit) auto-execute at this process's privilege level. " +
@@ -62,10 +75,32 @@ const DANGEROUS_TOOLS = {
 } as const;
 
 /**
+ * Extracts the dangerous-tool counts (shell / write / edit) from a
+ * SessionMetrics snapshot. Used by the audit caller to take a baseline
+ * snapshot at run start; the delta vs. the current snapshot at run end
+ * is the per-run count.
+ */
+export function readDangerousToolCounts(
+  metrics: SessionMetrics,
+): DangerousToolCounts {
+  const byName = metrics.tools?.byName ?? {};
+  return {
+    shell: byName[DANGEROUS_TOOLS.shell]?.count ?? 0,
+    write: byName[DANGEROUS_TOOLS.write]?.count ?? 0,
+    edit: byName[DANGEROUS_TOOLS.edit]?.count ?? 0,
+  };
+}
+
+/**
  * Returns a one-line stderr summary of dangerous tool calls (shell /
  * write / edit) for an exiting YOLO run, or `null` when no audit line
  * is warranted (not YOLO, no dangerous calls observed, or the user
  * explicitly suppressed the YOLO notice).
+ *
+ * Takes pre-computed **delta** counts (current - baseline) rather than
+ * raw metrics: the underlying `uiTelemetryService` singleton is
+ * process-global, so callers that share a process across runs (daemon,
+ * SDK) must subtract the baseline snapshot taken at run start.
  *
  * Distinct from the *startup* warning emitted by
  * `getHeadlessYoloSafetyWarning`: that one warns about the privilege
@@ -75,17 +110,11 @@ const DANGEROUS_TOOLS = {
  */
 export function getDangerousToolAuditLine(
   config: Pick<Config, 'getApprovalMode'>,
-  metrics: SessionMetrics,
+  counts: DangerousToolCounts,
   env: NodeJS.ProcessEnv = process.env,
 ): string | null {
   if (config.getApprovalMode() !== ApprovalMode.YOLO) return null;
   if (isTruthyEnv(env['QWEN_CODE_SUPPRESS_YOLO_WARNING'])) return null;
-  const byName = metrics.tools?.byName ?? {};
-  const counts = {
-    shell: byName[DANGEROUS_TOOLS.shell]?.count ?? 0,
-    write: byName[DANGEROUS_TOOLS.write]?.count ?? 0,
-    edit: byName[DANGEROUS_TOOLS.edit]?.count ?? 0,
-  };
   if (counts.shell + counts.write + counts.edit === 0) return null;
   return `YOLO audit: executed ${counts.shell} shell, ${counts.write} write, ${counts.edit} edit tool call(s) during this run.`;
 }
