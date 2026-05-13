@@ -432,8 +432,8 @@ export class LoggingContentGenerator implements ContentGenerator {
                 code: SpanStatusCode.ERROR,
                 message: 'Stream span timed out (idle)',
               });
-              spanEnded = true;
               span.end();
+              spanEnded = true;
             } catch {
               // OTel errors must not interrupt the consumer.
             }
@@ -463,6 +463,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         });
         resetSpanTimeout?.();
         yield response;
+      }
+      if (spanEndTimeout !== undefined) {
+        clearTimeout(spanEndTimeout);
+        spanEndTimeout = undefined;
       }
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;

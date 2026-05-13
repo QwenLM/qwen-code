@@ -162,7 +162,7 @@ export class LogToSpanProcessor implements LogRecordProcessor {
     // (e.g. after a session change via /clear or /resume).
     const parentSpanContext = getValidParentSpanContext(logRecord.spanContext);
     const sessionId =
-      logRecord.attributes?.['session.id'] ?? getCurrentSessionId();
+      logRecord.attributes?.['session.id'] || getCurrentSessionId();
     let traceId: string;
     if (parentSpanContext) {
       traceId = parentSpanContext.traceId;
