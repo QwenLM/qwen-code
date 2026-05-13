@@ -61,6 +61,7 @@ import {
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -429,6 +430,13 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Re-arm any `/goal` that was active when the prior session ended.
+        try {
+          restoreGoalFromHistory(historyItems, config);
+        } catch {
+          // Restore is best-effort — never block resume on it.
+        }
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),

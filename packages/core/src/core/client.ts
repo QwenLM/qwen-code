@@ -1359,20 +1359,23 @@ export class GeminiClient {
             continueReason,
           ];
 
-          // Emit StopHookLoop event for iterations after the first one.
-          // The first iteration (currentIterationCount === 1) is the initial request,
-          // so there's no prior stop hook execution to report. We only emit this event
-          // when stop hooks have been executed multiple times (loop detected).
-          if (currentIterationCount > 1) {
-            yield {
-              type: GeminiEventType.StopHookLoop,
-              value: {
-                iterationCount: currentIterationCount,
-                reasons: currentReasons,
-                stopHookCount: response.stopHookCount ?? 1,
-              },
-            };
-          }
+          // Emit StopHookLoop on EVERY blocking Stop hook execution, including
+          // the first. `currentIterationCount === 1` means a Stop hook just
+          // fired once and produced a blocking decision — the user benefits
+          // from seeing that immediately (e.g. `/goal` rendering "Goal check:
+          // not yet met" on the very first not-met turn, or a configured Stop
+          // hook surfacing its blocking reason before the agent attempts a
+          // retry). The previous `>1` guard hid the first reason until the
+          // hook fired twice, which made /goal's first iteration invisible
+          // and delayed visibility for regular hooks that only fire once.
+          yield {
+            type: GeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: currentIterationCount,
+              reasons: currentReasons,
+              stopHookCount: response.stopHookCount ?? 1,
+            },
+          };
 
           const continueRequest = [{ text: continueReason }];
           const hookTurn = yield* this.sendMessageStream(

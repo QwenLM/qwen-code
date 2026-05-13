@@ -28,6 +28,7 @@ import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
+import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
@@ -123,6 +124,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       ...(this.config?.getManagedAutoMemoryEnabled()
         ? [dreamCommand, forgetCommand]
         : []),
+      goalCommand,
       memoryCommand,
       modelCommand,
       manageModelsCommand,

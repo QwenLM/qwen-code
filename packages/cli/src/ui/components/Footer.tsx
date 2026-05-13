@@ -22,6 +22,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
+import { GoalPill, useFooterGoalState } from './GoalPill.js';
 import { t } from '../../i18n/index.js';
 
 export const Footer: React.FC = () => {
@@ -123,6 +124,13 @@ export const Footer: React.FC = () => {
         </Text>
       ),
     });
+  }
+  // Goal pill: only present in `rightItems` when a goal is active so the
+  // divider chain stays tight; the pill itself does the live elapsed-time
+  // refresh internally.
+  const goalActive = useFooterGoalState() !== undefined;
+  if (goalActive) {
+    rightItems.push({ key: 'goal', node: <GoalPill /> });
   }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
