@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
+import { StreamingState } from '../types.js';
 
 // --- Mock child_process (auto-mock, then override exec in beforeEach) ---
 vi.mock('child_process');
@@ -32,6 +33,7 @@ const mockUIState = {
   },
   currentModel: 'test-model',
   branchName: 'main' as string | undefined,
+  streamingState: StreamingState.Idle,
 };
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: () => mockUIState,

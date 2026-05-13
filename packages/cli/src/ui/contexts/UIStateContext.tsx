@@ -51,6 +51,7 @@ export interface UIState {
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isStatusLineDialogOpen: boolean;
   isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;

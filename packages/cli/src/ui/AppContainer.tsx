@@ -675,6 +675,15 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const [isStatusLineDialogOpen, setStatusLineDialogOpen] = useState(false);
+  const openStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(true),
+    [],
+  );
+  const closeStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(false),
+    [],
+  );
   const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
     useMemoryDialog();
 
@@ -769,6 +778,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openTrustDialog,
@@ -803,6 +813,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openArenaDialog,
@@ -1846,6 +1857,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
     isManageModelsDialogOpen ||
@@ -2191,6 +2203,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isStatusLineDialogOpen,
+    closeStatusLineDialog,
     isMemoryDialogOpen,
     closeMemoryDialog,
     activeArenaDialog,
@@ -2622,6 +2636,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -2740,6 +2755,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -2863,6 +2879,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
@@ -2937,6 +2954,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,

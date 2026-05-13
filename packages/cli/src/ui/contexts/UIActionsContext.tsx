@@ -37,6 +37,7 @@ export interface UIActions {
   ) => void;
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
+  closeStatusLineDialog: () => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;

@@ -12,6 +12,12 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
+import {
+  buildStatusLinePresetData,
+  buildStatusLinePresetLines,
+  normalizeStatusLinePresetConfig,
+  type StatusLinePresetConfig,
+} from '../statusLinePresets.js';
 
 /**
  * Structured JSON input passed to the status line command via stdin.
@@ -66,7 +72,7 @@ export interface StatusLineCommandInput {
   };
 }
 
-interface StatusLineConfig {
+interface StatusLineCommandConfig {
   type: 'command';
   command: string;
   // Re-run the command every N seconds so external data (git branch, quota,
@@ -74,6 +80,8 @@ interface StatusLineConfig {
   // rejected in getStatusLineConfig to avoid flooding the CLI with execs.
   refreshInterval?: number;
 }
+
+type StatusLineConfig = StatusLineCommandConfig | StatusLinePresetConfig;
 
 const debugLog = createDebugLogger('STATUS_LINE');
 // Footer's bottom row (hint/mode indicator) occupies 1 line, so the status
@@ -106,7 +114,7 @@ function getStatusLineConfig(
     }
     return config;
   }
-  return undefined;
+  return normalizeStatusLinePresetConfig(raw);
 }
 
 function buildMetricsPayload(
@@ -151,6 +159,7 @@ function buildMetricsPayload(
  */
 export function useStatusLine(): {
   lines: string[];
+  useThemeColors: boolean;
 } {
   const settings = useSettings();
   const uiState = useUIState();
@@ -158,8 +167,17 @@ export function useStatusLine(): {
   const { vimEnabled, vimMode } = useVimMode();
 
   const statusLineConfig = getStatusLineConfig(settings);
-  const statusLineCommand = statusLineConfig?.command;
-  const refreshInterval = statusLineConfig?.refreshInterval;
+  const statusLineCommand =
+    statusLineConfig?.type === 'command' ? statusLineConfig.command : undefined;
+  const statusLinePreset =
+    statusLineConfig?.type === 'preset' ? statusLineConfig : undefined;
+  const statusLinePresetKey = statusLinePreset
+    ? `${statusLinePreset.useThemeColors ? 'color' : 'plain'}:${statusLinePreset.items.join(',')}`
+    : undefined;
+  const refreshInterval =
+    statusLineConfig?.type === 'command'
+      ? statusLineConfig.refreshInterval
+      : undefined;
 
   const [output, setOutput] = useState<string[]>([]);
 
@@ -175,6 +193,8 @@ export function useStatusLine(): {
   vimModeRef.current = vimMode;
   const statusLineCommandRef = useRef(statusLineCommand);
   statusLineCommandRef.current = statusLineCommand;
+  const statusLinePresetRef = useRef(statusLinePreset);
+  statusLinePresetRef.current = statusLinePreset;
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -184,7 +204,7 @@ export function useStatusLine(): {
   // Initialized with current values so the state-change effect
   // does not fire redundantly on mount.
   const { lastPromptTokenCount } = uiState.sessionStats;
-  const { currentModel, branchName } = uiState;
+  const { currentModel, branchName, streamingState } = uiState;
   const totalToolCalls = uiState.sessionStats.metrics.tools.totalCalls;
   const totalLinesAdded = uiState.sessionStats.metrics.files.totalLinesAdded;
   const totalLinesRemoved =
@@ -198,6 +218,7 @@ export function useStatusLine(): {
     totalToolCalls: number;
     totalLinesAdded: number;
     totalLinesRemoved: number;
+    streamingState: string;
   }>({
     promptTokenCount: lastPromptTokenCount,
     currentModel,
@@ -206,6 +227,7 @@ export function useStatusLine(): {
     totalToolCalls,
     totalLinesAdded,
     totalLinesRemoved,
+    streamingState,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
@@ -217,6 +239,46 @@ export function useStatusLine(): {
   const generationRef = useRef(0);
 
   const doUpdate = useCallback(() => {
+    const preset = statusLinePresetRef.current;
+    if (preset) {
+      if (activeChildRef.current) {
+        activeChildRef.current.kill();
+        activeChildRef.current = undefined;
+        generationRef.current++;
+      }
+
+      const ui = uiStateRef.current;
+      const cfg = configRef.current;
+      const stats = ui.sessionStats;
+      const m = stats.metrics;
+
+      let totalInputTokens = 0;
+      let totalOutputTokens = 0;
+      for (const mm of Object.values(m.models)) {
+        totalInputTokens += mm.tokens.prompt;
+        totalOutputTokens += mm.tokens.candidates;
+      }
+
+      const contextWindowSize =
+        cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
+      const data = buildStatusLinePresetData({
+        sessionId: stats.sessionId,
+        version: cfg.getCliVersion(),
+        modelDisplayName: ui.currentModel || cfg.getModel(),
+        currentDir: cfg.getTargetDir(),
+        branch: ui.branchName,
+        contextWindowSize,
+        currentUsage: stats.lastPromptTokenCount,
+        totalInputTokens,
+        totalOutputTokens,
+        totalLinesAdded: m.files.totalLinesAdded,
+        totalLinesRemoved: m.files.totalLinesRemoved,
+        streamingState: ui.streamingState,
+      });
+      setOutput(buildStatusLinePresetLines(preset, data));
+      return;
+    }
+
     const cmd = statusLineCommandRef.current;
     if (!cmd) {
       setOutput([]);
@@ -356,7 +418,7 @@ export function useStatusLine(): {
 
   // Trigger update when meaningful state changes
   useEffect(() => {
-    if (!statusLineCommand) {
+    if (!statusLineCommand && !statusLinePresetKey) {
       // Command removed — kill any in-flight process and discard callbacks.
       activeChildRef.current?.kill();
       activeChildRef.current = undefined;
@@ -377,7 +439,8 @@ export function useStatusLine(): {
       branchName !== prev.branchName ||
       totalToolCalls !== prev.totalToolCalls ||
       totalLinesAdded !== prev.totalLinesAdded ||
-      totalLinesRemoved !== prev.totalLinesRemoved
+      totalLinesRemoved !== prev.totalLinesRemoved ||
+      streamingState !== prev.streamingState
     ) {
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
@@ -386,10 +449,12 @@ export function useStatusLine(): {
       prev.totalToolCalls = totalToolCalls;
       prev.totalLinesAdded = totalLinesAdded;
       prev.totalLinesRemoved = totalLinesRemoved;
+      prev.streamingState = streamingState;
       scheduleUpdate();
     }
   }, [
     statusLineCommand,
+    statusLinePresetKey,
     lastPromptTokenCount,
     currentModel,
     effectiveVim,
@@ -397,6 +462,7 @@ export function useStatusLine(): {
     totalToolCalls,
     totalLinesAdded,
     totalLinesRemoved,
+    streamingState,
     scheduleUpdate,
   ]);
 
@@ -404,7 +470,7 @@ export function useStatusLine(): {
   // Skip the first run — the mount effect below already handles it.
   useEffect(() => {
     if (!hasMountedRef.current) return;
-    if (statusLineCommand) {
+    if (statusLineCommand || statusLinePresetKey) {
       // Clear any pending debounce so we don't get a redundant second run.
       if (debounceTimerRef.current !== undefined) {
         clearTimeout(debounceTimerRef.current);
@@ -414,7 +480,7 @@ export function useStatusLine(): {
     }
     // Cleanup when command is removed is handled by the state-change effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusLineCommand]);
+  }, [statusLineCommand, statusLinePresetKey]);
 
   // Periodic refresh — re-run the command every `refreshInterval` seconds.
   // The tick yields if a previous exec is still running: unlike state-change
@@ -454,5 +520,8 @@ export function useStatusLine(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { lines: output };
+  return {
+    lines: output,
+    useThemeColors: statusLinePreset?.useThemeColors === true,
+  };
 }
