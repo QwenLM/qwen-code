@@ -409,7 +409,7 @@ describe('session-tracing', () => {
 
     it('returns NOOP span when SDK is not initialized', () => {
       mockState.sdkInitialized = false;
-      const _toolSpan = startToolSpan('Bash');
+      startToolSpan('Bash');
       const execSpan = startToolExecutionSpan();
 
       expect(execSpan.spanContext().traceId).toBe('0'.repeat(32));
@@ -441,7 +441,7 @@ describe('session-tracing', () => {
       const insideRecord = mockSpans.find(
         (s) =>
           s.name === 'qwen-code.tool.execution' &&
-          (s.parentContext as Record<string, unknown>)?.__parentSpan,
+          (s.parentContext as Record<string, unknown>)?.['__parentSpan'],
       );
       expect(insideRecord).toBeDefined();
 
@@ -451,7 +451,7 @@ describe('session-tracing', () => {
       );
       expect(outsideRecord).toHaveLength(2);
       const noParent = outsideRecord.find(
-        (s) => !(s.parentContext as Record<string, unknown>)?.__parentSpan,
+        (s) => !(s.parentContext as Record<string, unknown>)?.['__parentSpan'],
       );
       expect(noParent).toBeDefined();
 
