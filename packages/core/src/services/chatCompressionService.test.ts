@@ -672,6 +672,57 @@ describe('ChatCompressionService', () => {
     );
   });
 
+  it('strips inline media from side-query contents during compaction', async () => {
+    // Wire-up test: a real compaction should call slimCompactionInput
+    // before runSideQuery, so the base64 payload never reaches the
+    // summary model.
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'context msg' },
+          { inlineData: { mimeType: 'image/png', data: 'AAAA'.repeat(2000) } },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'ack' }] },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 200,
+        candidatesTokenCount: 50,
+        totalTokenCount: 250,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    // Inspect the actual contents passed to the summary model.
+    const call = mockGenerateText.mock.calls[0]?.[0] as { contents: Content[] };
+    expect(call).toBeDefined();
+    const serialized = JSON.stringify(call.contents);
+    // No base64 image bytes leaked through.
+    expect(serialized).not.toContain('AAAAAAAA');
+    // Placeholder is present.
+    expect(serialized).toContain('[image: image/png]');
+  });
+
   it('forwards model, maxAttempts, and thinkingConfig to runSideQuery', async () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },

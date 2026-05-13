@@ -12,7 +12,15 @@ import {
   evaluateTimeBasedTrigger,
   microcompactHistory,
   MICROCOMPACT_CLEARED_MESSAGE,
+  MICROCOMPACT_CLEARED_IMAGE_PREFIX,
 } from './microcompact.js';
+
+function makeInlineImage(mimeType = 'image/png', data = 'AAAA'): Content {
+  return {
+    role: 'user',
+    parts: [{ inlineData: { mimeType, data } }],
+  };
+}
 
 function clearEnv() {
   delete process.env['QWEN_MC_KEEP_RECENT'];
@@ -387,5 +395,76 @@ describe('microcompactHistory', () => {
 
     expect(result.meta).toBeDefined();
     expect(result.meta!.tokensSaved).toBe(100);
+  });
+
+  it('should clear old inline image parts and keep recent ones', () => {
+    const history: Content[] = [
+      makeUserMessage('look at this'),
+      makeInlineImage('image/png', 'OLDOLDOLDOLD'),
+      makeUserMessage('and this'),
+      makeInlineImage('image/jpeg', 'NEWNEWNEWNEW'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS);
+
+    // Old image cleared to placeholder
+    expect(result.history[1]!.parts![0]!.text).toBe(
+      `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/png]`,
+    );
+    expect(result.history[1]!.parts![0]!.inlineData).toBeUndefined();
+    // Recent image preserved (keepRecent=1)
+    expect(result.history[3]!.parts![0]!.inlineData?.data).toBe('NEWNEWNEWNEW');
+    expect(result.meta!.toolsCleared).toBe(1);
+  });
+
+  it('does not reclear an already-cleared image part', () => {
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/png]` }],
+      },
+      makeUserMessage('and this'),
+      makeInlineImage('image/jpeg', 'RECENTRECENT'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS);
+
+    // No metadata or no double-clearing.
+    if (result.meta) {
+      expect(result.meta.toolsCleared).toBe(0);
+    }
+    expect(result.history[0]!.parts![0]!.text).toBe(
+      `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/png]`,
+    );
+  });
+
+  it('clears both tool results and images when interleaved', () => {
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'old tool output'),
+      makeUserMessage('image incoming'),
+      makeInlineImage('image/png', 'OLDIMAGEOLDIMAGE'),
+      makeToolCall('run_shell_command'),
+      makeToolResult('run_shell_command', 'recent output'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    // Last (recent) tool result preserved.
+    expect(
+      result.history[5]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe('recent output');
+    // Older tool result cleared.
+    expect(
+      result.history[1]!.parts![0]!.functionResponse!.response!['output'],
+    ).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    // Old image cleared.
+    expect(result.history[3]!.parts![0]!.text).toBe(
+      `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/png]`,
+    );
+    expect(result.meta!.toolsCleared).toBe(2);
   });
 });

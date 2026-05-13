@@ -10,6 +10,7 @@ import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { ToolNames } from '../../tools/tool-names.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
+export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
 
 const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
@@ -50,17 +51,25 @@ export function evaluateTimeBasedTrigger(
 
 // --- Collection ---
 
-/** Pointer to a single compactable functionResponse part. */
+type PartKind = 'tool' | 'media';
+
+/** Pointer to a single compactable part. */
 interface PartRef {
   contentIndex: number;
   partIndex: number;
+  kind: PartKind;
 }
 
 /**
- * Collect references to individual compactable functionResponse parts
- * across the history, in encounter order. This counts per-part (not
- * per-Content-entry) so keepRecent applies to individual tool results
- * even when multiple results are batched into one Content message.
+ * Collect references to individual compactable parts across the
+ * history, in encounter order. Two kinds are tracked:
+ *
+ * - `tool`: functionResponse parts produced by compactable tools.
+ * - `media`: inlineData/fileData parts (typically MCP screenshots or
+ *   tool-returned attachments) under user-role entries.
+ *
+ * Per-part counting means keepRecent applies to individual results even
+ * when multiple are batched into one Content message.
  */
 function collectCompactablePartRefs(history: Content[]): PartRef[] {
   const refs: PartRef[] = [];
@@ -73,7 +82,9 @@ function collectCompactablePartRefs(history: Content[]): PartRef[] {
         part.functionResponse?.name &&
         COMPACTABLE_TOOLS.has(part.functionResponse.name)
       ) {
-        refs.push({ contentIndex: ci, partIndex: pi });
+        refs.push({ contentIndex: ci, partIndex: pi, kind: 'tool' });
+      } else if (part.inlineData || part.fileData) {
+        refs.push({ contentIndex: ci, partIndex: pi, kind: 'media' });
       }
     }
   }
@@ -88,15 +99,30 @@ function isErrorResponse(part: Part): boolean {
 }
 
 function estimatePartTokens(part: Part): number {
-  if (!part.functionResponse?.response) return 0;
-  const output = part.functionResponse.response['output'];
-  if (typeof output !== 'string') return 0;
-  return Math.ceil(output.length / 4);
+  if (part.functionResponse?.response) {
+    const output = part.functionResponse.response['output'];
+    if (typeof output === 'string') {
+      return Math.ceil(output.length / 4);
+    }
+    return 0;
+  }
+  if (part.inlineData?.data) {
+    // base64 expands ~4/3 over raw bytes; ~4 chars per token is the
+    // text equivalent. Conservative single-budget estimate per image.
+    return Math.ceil(part.inlineData.data.length / 4);
+  }
+  return 0;
 }
 
 function isAlreadyCleared(part: Part): boolean {
-  return (
+  if (
     part.functionResponse?.response?.['output'] === MICROCOMPACT_CLEARED_MESSAGE
+  ) {
+    return true;
+  }
+  return (
+    typeof part.text === 'string' &&
+    part.text.startsWith(MICROCOMPACT_CLEARED_IMAGE_PREFIX)
   );
 }
 
@@ -153,15 +179,15 @@ export function microcompactHistory(
     return { history };
   }
 
-  // Build a lookup: contentIndex → Set of partIndices to clear
-  const clearMap = new Map<number, Set<number>>();
+  // Build a lookup: contentIndex → Map of partIndex → kind
+  const clearMap = new Map<number, Map<number, PartKind>>();
   for (const ref of clearRefs) {
     let parts = clearMap.get(ref.contentIndex);
     if (!parts) {
-      parts = new Set();
+      parts = new Map();
       clearMap.set(ref.contentIndex, parts);
     }
-    parts.add(ref.partIndex);
+    parts.set(ref.partIndex, ref.kind);
   }
 
   let tokensSaved = 0;
@@ -173,11 +199,14 @@ export function microcompactHistory(
 
     let touched = false;
     const newParts = content.parts.map((part, pi) => {
+      const kind = partsToClean.get(pi);
+      if (kind === undefined) return part;
+      if (isAlreadyCleared(part)) return part;
+
       if (
-        partsToClean.has(pi) &&
+        kind === 'tool' &&
         part.functionResponse?.name &&
         COMPACTABLE_TOOLS.has(part.functionResponse.name) &&
-        !isAlreadyCleared(part) &&
         !isErrorResponse(part)
       ) {
         tokensSaved += estimatePartTokens(part);
@@ -190,6 +219,18 @@ export function microcompactHistory(
           },
         };
       }
+
+      if (kind === 'media' && (part.inlineData || part.fileData)) {
+        const mime =
+          part.inlineData?.mimeType ??
+          part.fileData?.mimeType ??
+          'application/octet-stream';
+        tokensSaved += estimatePartTokens(part);
+        toolsCleared++;
+        touched = true;
+        return { text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${mime}]` };
+      }
+
       return part;
     });
 

@@ -19,6 +19,12 @@ import {
   PreCompactTrigger,
   PostCompactTrigger,
 } from '../hooks/types.js';
+import {
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  estimateContentChars,
+  resolveSlimmingConfig,
+  slimCompactionInput,
+} from './compactionInputSlimming.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -114,12 +120,21 @@ export function findCompressSplitPoint(
   contents: Content[],
   fraction: number,
   retainCount = TOOL_ROUND_RETAIN_COUNT,
+  precomputedCharCounts?: number[],
 ): number {
   if (fraction <= 0 || fraction >= 1) {
     throw new Error('Fraction must be between 0 and 1');
   }
 
-  const charCounts = contents.map((content) => JSON.stringify(content).length);
+  // Slimming-aware char estimator: base64 payloads in inlineData
+  // would otherwise dominate the split. The caller can pre-compute and
+  // pass `precomputedCharCounts` to avoid a redundant walk when the
+  // surrounding compress() loop also needs the values.
+  const charCounts =
+    precomputedCharCounts ??
+    contents.map((content) =>
+      estimateContentChars(content, DEFAULT_IMAGE_TOKEN_ESTIMATE),
+    );
   const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
   const targetCharCount = totalCharCount * fraction;
 
@@ -189,9 +204,11 @@ export class ChatCompressionService {
       signal,
     } = opts;
     const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
+    const chatCompressionSettings = config.getChatCompression();
     const threshold =
-      config.getChatCompression()?.contextPercentageThreshold ??
+      chatCompressionSettings?.contextPercentageThreshold ??
       COMPRESSION_TOKEN_THRESHOLD;
+    const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
 
     // Cheap gates first — these don't need the curated history.
     if (threshold <= 0 || (hasFailedCompressionAttempt && !force)) {
@@ -268,9 +285,16 @@ export class ChatCompressionService {
       ? curatedHistory.slice(0, -1)
       : curatedHistory;
 
+    // Precompute charCounts once and share with the splitter + the
+    // MIN_COMPRESSION_FRACTION guard below, avoiding two extra walks.
+    const charCounts = historyForSplit.map((c) =>
+      estimateContentChars(c, slimmingConfig.imageTokenEstimate),
+    );
     const splitPoint = findCompressSplitPoint(
       historyForSplit,
       1 - COMPRESSION_PRESERVE_THRESHOLD,
+      TOOL_ROUND_RETAIN_COUNT,
+      charCounts,
     );
 
     const historyToCompress = historyForSplit.slice(0, splitPoint);
@@ -294,14 +318,9 @@ export class ChatCompressionService {
     // Guard: if historyToCompress is too small relative to the total history,
     // skip compression. This prevents futile API calls where the model receives
     // almost no context and generates a useless "summary" that inflates tokens.
-    const compressCharCount = historyToCompress.reduce(
-      (sum, c) => sum + JSON.stringify(c).length,
-      0,
-    );
-    const totalCharCount = historyForSplit.reduce(
-      (sum, c) => sum + JSON.stringify(c).length,
-      0,
-    );
+    let compressCharCount = 0;
+    for (let i = 0; i < splitPoint; i++) compressCharCount += charCounts[i]!;
+    const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
     if (
       totalCharCount > 0 &&
       compressCharCount / totalCharCount < MIN_COMPRESSION_FRACTION
@@ -316,6 +335,9 @@ export class ChatCompressionService {
       };
     }
 
+    // Slim the side-query; live history unchanged.
+    const slim = slimCompactionInput(historyToCompress);
+
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
       model,
@@ -324,7 +346,7 @@ export class ChatCompressionService {
       maxAttempts: 1,
       systemInstruction: getCompressionPrompt(),
       contents: [
-        ...historyToCompress,
+        ...slim.slimmedHistory,
         {
           role: 'user',
           parts: [
