@@ -36,8 +36,11 @@ import {
   createHttpAcpBridge,
   InvalidPermissionOptionError,
   SessionNotFoundError,
+  WorkspaceMismatchError,
   type AcpChannel,
+  type BridgeOptions,
   type ChannelFactory,
+  type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import type { BridgeEvent } from './eventBus.js';
 
@@ -50,6 +53,17 @@ import type { BridgeEvent } from './eventBus.js';
 const WS_A = path.resolve(path.sep, 'work', 'a');
 const WS_B = path.resolve(path.sep, 'work', 'b');
 const SESS_A = `sess:${WS_A}`;
+
+/**
+ * Convenience wrapper: `createHttpAcpBridge` now requires `boundWorkspace`
+ * (per #3803 §02 — 1 daemon = 1 workspace). Tests that only ever talk to
+ * `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere; this
+ * helper defaults it. Tests that need a different bind path (e.g. the
+ * mismatch test) pass `boundWorkspace` explicitly.
+ */
+function makeBridge(opts: Partial<BridgeOptions> = {}): HttpAcpBridge {
+  return createHttpAcpBridge({ boundWorkspace: WS_A, ...opts });
+}
 
 interface FakeAgentOpts {
   /** What the fake agent returns from `newSession`. */
@@ -211,7 +225,7 @@ describe('createHttpAcpBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    const bridge = makeBridge({ channelFactory: factory });
 
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     expect(session.sessionId).toBe(SESS_A);
@@ -232,7 +246,7 @@ describe('createHttpAcpBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    const bridge = makeBridge({ channelFactory: factory });
 
     const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
@@ -246,23 +260,38 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  it('does NOT reuse across workspaces', async () => {
+  it('rejects cross-workspace requests with WorkspaceMismatchError (#3803 §02)', async () => {
+    // Per #3803 §02 (1 daemon = 1 workspace), `spawnOrAttach` calls
+    // whose canonical `workspaceCwd` doesn't match `boundWorkspace`
+    // throw `WorkspaceMismatchError`. The server route translates
+    // this to a 400 with `code: 'workspace_mismatch'` so clients can
+    // route to (or spawn) a daemon for the other workspace.
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel();
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    const bridge = makeBridge({ channelFactory: factory });
 
     const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    const b = await bridge.spawnOrAttach({ workspaceCwd: WS_B });
+    expect(a.sessionId).toBe(SESS_A);
 
-    expect(a.sessionId).not.toBe(b.sessionId);
-    expect(a.attached).toBe(false);
-    expect(b.attached).toBe(false);
-    expect(handles).toHaveLength(2);
-    expect(bridge.sessionCount).toBe(2);
+    // Cross-workspace POST throws before touching the channel.
+    await expect(
+      bridge.spawnOrAttach({ workspaceCwd: WS_B }),
+    ).rejects.toBeInstanceOf(WorkspaceMismatchError);
+    // The error carries both paths for the route's 400 body.
+    const err = await bridge
+      .spawnOrAttach({ workspaceCwd: WS_B })
+      .catch((e: WorkspaceMismatchError) => e);
+    expect(err).toBeInstanceOf(WorkspaceMismatchError);
+    expect((err as WorkspaceMismatchError).bound).toBe(WS_A);
+    expect((err as WorkspaceMismatchError).requested).toBe(WS_B);
+
+    // Only the original WS_A spawn succeeded — no channel spawned for WS_B.
+    expect(handles).toHaveLength(1);
+    expect(bridge.sessionCount).toBe(1);
 
     await bridge.shutdown();
   });
@@ -274,7 +303,7 @@ describe('createHttpAcpBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({
+    const bridge = makeBridge({
       sessionScope: 'thread',
       channelFactory: factory,
     });
@@ -296,7 +325,7 @@ describe('createHttpAcpBridge', () => {
   });
 
   it('rejects relative workspace paths', async () => {
-    const bridge = createHttpAcpBridge({
+    const bridge = makeBridge({
       channelFactory: async () => {
         throw new Error('factory should not be called');
       },
@@ -313,7 +342,7 @@ describe('createHttpAcpBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    const bridge = makeBridge({ channelFactory: factory });
 
     const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     const aNoisy = await bridge.spawnOrAttach({ workspaceCwd: '/work/./a' });
@@ -334,7 +363,7 @@ describe('createHttpAcpBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    const bridge = makeBridge({ channelFactory: factory });
 
     // ACP SDK rewrites unhandled exceptions to a JSON-RPC Internal error
     // object (code -32603); the original message text is intentionally not
@@ -355,7 +384,7 @@ describe('createHttpAcpBridge', () => {
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({
+    const bridge = makeBridge({
       channelFactory: factory,
       initializeTimeoutMs: 50,
     });
@@ -367,59 +396,64 @@ describe('createHttpAcpBridge', () => {
     expect(bridge.sessionCount).toBe(0);
   });
 
-  it('shutdown kills every live channel', async () => {
+  it('shutdown kills the live channel and its multiplexed sessions', async () => {
+    // Stage 1.5 multi-session under single-workspace mode (#3803 §02):
+    // a daemon hosts one channel with N sessions multiplexed on it.
+    // Shutdown kills that one channel and tears down every multiplexed
+    // session.
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
-      const h = makeChannel();
+      const h = makeChannel({ sessionIdPrefix: 's' });
       handles.push(h);
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: factory,
+    });
 
     await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    await bridge.spawnOrAttach({ workspaceCwd: WS_B });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
     expect(bridge.sessionCount).toBe(2);
+    expect(handles).toHaveLength(1); // one channel multiplexing two sessions
 
     await bridge.shutdown();
-    expect(handles.every((h) => h.killed)).toBe(true);
+    expect(handles[0]?.killed).toBe(true);
     expect(bridge.sessionCount).toBe(0);
   });
 
-  it('killAllSync force-kills channels even after shutdown cleared byWorkspaceChannel (BkUyD)', async () => {
-    // tanzhenxin BkUyD regression: shutdown clears
-    // `byWorkspaceChannel` BEFORE awaiting per-child SIGTERM grace.
-    // If the operator double-Ctrl+C's during that window,
-    // killAllSync MUST still see the in-flight-being-killed
-    // channels. Pre-fix: killAllSync iterated `byWorkspaceChannel`
-    // and silently no-op'd; children orphaned. Fix: separate
-    // `liveChannels` set, only emptied on channel.exited.
-    const killSyncInvoked: number[] = [];
-    let nextChannelTag = 0;
+  it('killAllSync force-kills the live channel mid-shutdown (BkUyD)', async () => {
+    // tanzhenxin BkUyD regression: pre-fix, `shutdown()` cleared the
+    // live-channel reference BEFORE awaiting the child's SIGTERM
+    // grace. A mid-drain double-Ctrl+C invoked `killAllSync`, found
+    // nothing to force-kill, and `process.exit(1)` orphaned the
+    // child. Under #3803 §02 the bridge has at most one channel, but
+    // the invariant is the same: `channelInfo` MUST stay set until
+    // `channel.exited` fires (OS-level reap), not be eagerly cleared
+    // by `shutdown()`.
+    const killSyncInvoked: string[] = [];
     const factory: ChannelFactory = async () => {
-      const tag = nextChannelTag++;
-      const h = makeChannel({ sessionIdPrefix: `s${tag}` });
+      const h = makeChannel({ sessionIdPrefix: 's' });
       const realKillSync = h.channel.killSync;
-      // Spy on killSync calls so we can assert the force-kill path
-      // actually fired for every live channel.
       h.channel = {
         ...h.channel,
         kill: () =>
           // Never resolve — simulates a stuck SIGTERM grace window.
           new Promise(() => {}),
         killSync: () => {
-          killSyncInvoked.push(tag);
+          killSyncInvoked.push('called');
           realKillSync();
         },
       };
       return h.channel;
     };
-    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    const bridge = makeBridge({ channelFactory: factory });
     await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-    await bridge.spawnOrAttach({ workspaceCwd: WS_B });
 
     // Kick off shutdown — its `channel.kill()` will hang on the
-    // never-resolving Promise above, so `byWorkspaceChannel` clears
-    // but the awaits never finish. This is the mid-drain state.
+    // never-resolving Promise above, so the entry maps clear but
+    // the channel-kill await never finishes. This is the mid-drain
+    // state.
     const shutdownPromise = bridge.shutdown();
     // Yield twice so shutdown's sync prefix runs (clear maps,
     // publish session_died, start awaits).
@@ -429,9 +463,10 @@ describe('createHttpAcpBridge', () => {
     // Operator double-Ctrl+C arrives now.
     bridge.killAllSync();
 
-    // Both channels' killSync was invoked. Pre-fix this would have
-    // been an empty array.
-    expect(killSyncInvoked).toHaveLength(2);
+    // The channel's killSync fired. Pre-fix this would have been an
+    // empty array because `channelInfo` was cleared in shutdown's
+    // sync prefix.
+    expect(killSyncInvoked).toHaveLength(1);
 
     // Cleanup: the never-resolving kill keeps shutdownPromise
     // pending forever. Don't await it (would hang the test). The
@@ -449,7 +484,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const result = await bridge.sendPrompt(session.sessionId, {
@@ -469,7 +504,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await bridge.sendPrompt(session.sessionId, {
@@ -506,7 +541,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const p1 = bridge.sendPrompt(session.sessionId, {
@@ -551,7 +586,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const failed = await bridge
@@ -575,7 +610,7 @@ describe('createHttpAcpBridge', () => {
     });
 
     it('throws SessionNotFoundError for unknown session ids', async () => {
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: async () => {
           throw new Error('factory should not be called');
         },
@@ -597,7 +632,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       await bridge.cancelSession(session.sessionId);
@@ -612,7 +647,7 @@ describe('createHttpAcpBridge', () => {
     });
 
     it('throws SessionNotFoundError for unknown session ids', async () => {
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: async () => {
           throw new Error('factory should not be called');
         },
@@ -660,7 +695,7 @@ describe('createHttpAcpBridge', () => {
           },
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, conn: capturedConn!, handles };
     }
@@ -848,7 +883,7 @@ describe('createHttpAcpBridge', () => {
     });
 
     it('respondToPermission returns false for unknown requestId', async () => {
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: async () => makeChannel().channel,
       });
       const accepted = bridge.respondToPermission('does-not-exist', {
@@ -977,7 +1012,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => {},
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       // Kick off sendPrompt — agent will issue a permission request
@@ -1055,7 +1090,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => {},
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       return { bridge, setModelCalls };
     }
 
@@ -1160,7 +1195,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
 
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(bridge.sessionCount).toBe(1);
@@ -1204,7 +1239,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       // No subscribers; planned shutdown removes the entry first, THEN
@@ -1252,7 +1287,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => {},
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
         modelServiceId: 'first',
@@ -1332,7 +1367,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => {},
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       // First call spawns the session AND applies model "A".
       await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
@@ -1406,7 +1441,7 @@ describe('createHttpAcpBridge', () => {
 
     it('applies modelServiceId on attach via unstable_setSessionModel', async () => {
       const { factory, setModelCalls } = setupRecording();
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
 
       // First call spawns; second call attaches with a DIFFERENT model.
       const first = await bridge.spawnOrAttach({
@@ -1431,7 +1466,7 @@ describe('createHttpAcpBridge', () => {
 
     it('attach without modelServiceId does NOT issue setSessionModel', async () => {
       const { factory, setModelCalls } = setupRecording();
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
 
       await bridge.spawnOrAttach({
         workspaceCwd: WS_A,
@@ -1503,7 +1538,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => resolveExited!(),
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const promptResult = bridge.sendPrompt(session.sessionId, {
@@ -1522,17 +1557,17 @@ describe('createHttpAcpBridge', () => {
   describe('opts validation', () => {
     it('rejects an invalid sessionScope', () => {
       expect(() =>
-        createHttpAcpBridge({
+        makeBridge({
           sessionScope: 'bogus' as unknown as 'single',
         }),
       ).toThrow(/Invalid sessionScope/);
     });
 
     it('rejects a non-positive initializeTimeoutMs', () => {
-      expect(() => createHttpAcpBridge({ initializeTimeoutMs: 0 })).toThrow(
+      expect(() => makeBridge({ initializeTimeoutMs: 0 })).toThrow(
         /initializeTimeoutMs/,
       );
-      expect(() => createHttpAcpBridge({ initializeTimeoutMs: -1 })).toThrow(
+      expect(() => makeBridge({ initializeTimeoutMs: -1 })).toThrow(
         /initializeTimeoutMs/,
       );
     });
@@ -1541,17 +1576,13 @@ describe('createHttpAcpBridge', () => {
       // A typo / parse error in CLI / config that yields NaN must
       // NOT silently disable the daemon's resource cap. We fail
       // boot loud instead of serving unbounded.
-      expect(() => createHttpAcpBridge({ maxSessions: NaN })).toThrow(
+      expect(() => makeBridge({ maxSessions: NaN })).toThrow(
         /maxSessions: NaN/,
       );
-      expect(() => createHttpAcpBridge({ maxSessions: -5 })).toThrow(
-        /maxSessions: -5/,
-      );
+      expect(() => makeBridge({ maxSessions: -5 })).toThrow(/maxSessions: -5/);
       // Explicit zero or Infinity remain valid "unlimited" sentinels.
-      expect(() => createHttpAcpBridge({ maxSessions: 0 })).not.toThrow();
-      expect(() =>
-        createHttpAcpBridge({ maxSessions: Infinity }),
-      ).not.toThrow();
+      expect(() => makeBridge({ maxSessions: 0 })).not.toThrow();
+      expect(() => makeBridge({ maxSessions: Infinity })).not.toThrow();
     });
   });
 
@@ -1565,7 +1596,7 @@ describe('createHttpAcpBridge', () => {
         await new Promise((r) => setTimeout(r, 10));
         return makeChannel().channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
 
       const [a, b] = await Promise.all([
         bridge.spawnOrAttach({ workspaceCwd: WS_A }),
@@ -1595,7 +1626,7 @@ describe('createHttpAcpBridge', () => {
         }
         return makeChannel().channel;
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
 
       await expect(
         bridge.spawnOrAttach({ workspaceCwd: WS_A }),
@@ -1636,7 +1667,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => {},
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, conn: capturedConn! };
     }
@@ -1955,7 +1986,7 @@ describe('createHttpAcpBridge', () => {
   });
 
   describe('listWorkspaceSessions', () => {
-    it('returns sessions matching the canonical workspace cwd', async () => {
+    it('returns sessions matching the bound workspace cwd', async () => {
       let n = 0;
       const factory: ChannelFactory = async () => {
         // Distinct sessionIdPrefix per spawn so two thread-scope sessions
@@ -1964,22 +1995,24 @@ describe('createHttpAcpBridge', () => {
         const h = makeChannel({ sessionIdPrefix: `s${n++}` });
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         sessionScope: 'thread',
         channelFactory: factory,
       });
 
       const a1 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const a2 = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      await bridge.spawnOrAttach({ workspaceCwd: WS_B });
 
       const aList = bridge.listWorkspaceSessions(WS_A);
       expect(aList).toHaveLength(2);
       expect(aList.map((s) => s.sessionId).sort()).toEqual(
         [a1.sessionId, a2.sessionId].sort(),
       );
+      // Querying a different workspace returns an empty list (the
+      // bridge only hosts `boundWorkspace` per #3803 §02; a UI asking
+      // for sessions in some other path is correct to see "none").
       const bList = bridge.listWorkspaceSessions(WS_B);
-      expect(bList).toHaveLength(1);
+      expect(bList).toEqual([]);
       const idleList = bridge.listWorkspaceSessions('/work/c');
       expect(idleList).toEqual([]);
 
@@ -1988,7 +2021,7 @@ describe('createHttpAcpBridge', () => {
 
     it('canonicalizes the lookup path', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const list = bridge.listWorkspaceSessions('/work/./a');
@@ -1999,7 +2032,7 @@ describe('createHttpAcpBridge', () => {
     });
 
     it('returns empty for relative paths instead of throwing', async () => {
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: async () => {
           throw new Error('factory should not be called');
         },
@@ -2046,7 +2079,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => {},
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       return { bridge, session, setModelCalls };
     }
@@ -2085,7 +2118,7 @@ describe('createHttpAcpBridge', () => {
     });
 
     it('throws SessionNotFoundError for unknown session ids', async () => {
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: async () => {
           throw new Error('factory should not be called');
         },
@@ -2101,7 +2134,7 @@ describe('createHttpAcpBridge', () => {
 
   describe('subscribeEvents', () => {
     it('throws SessionNotFoundError for unknown session ids', () => {
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: async () => {
           throw new Error('factory should not be called');
         },
@@ -2132,7 +2165,7 @@ describe('createHttpAcpBridge', () => {
           killSync: () => {},
         };
       };
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const abort = new AbortController();
@@ -2163,7 +2196,7 @@ describe('createHttpAcpBridge', () => {
 
     it('shutdown closes live event subscriptions', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({ channelFactory: factory });
+      const bridge = makeBridge({ channelFactory: factory });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
       const abort = new AbortController();
@@ -2195,8 +2228,10 @@ describe('createHttpAcpBridge', () => {
 
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
-      const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({
+      let n = 0;
+      const factory: ChannelFactory = async () =>
+        makeChannel({ sessionIdPrefix: `s${n++}` }).channel;
+      const bridge = makeBridge({
         channelFactory: factory,
         maxSessions: 2,
         // `thread` so each call is a fresh session, not an attach.
@@ -2205,7 +2240,7 @@ describe('createHttpAcpBridge', () => {
 
       // First two spawns succeed.
       await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      await bridge.spawnOrAttach({ workspaceCwd: WS_B });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(bridge.sessionCount).toBe(2);
 
       // Third hits the cap.
@@ -2223,7 +2258,7 @@ describe('createHttpAcpBridge', () => {
 
     it('attach to an existing session under single scope is NOT counted toward the cap', async () => {
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         maxSessions: 1,
         sessionScope: 'single',
@@ -2240,12 +2275,11 @@ describe('createHttpAcpBridge', () => {
       expect(b.sessionId).toBe(a.sessionId);
       expect(bridge.sessionCount).toBe(1);
 
-      // But a NEW workspace (would need a fresh spawn) is rejected.
+      // A cross-workspace request rejects with WorkspaceMismatchError
+      // (#3803 §02) — the bridge is bound to one workspace.
       await expect(
         bridge.spawnOrAttach({ workspaceCwd: WS_B }),
-      ).rejects.toMatchObject({
-        name: 'SessionLimitExceededError',
-      });
+      ).rejects.toBeInstanceOf(WorkspaceMismatchError);
 
       await bridge.shutdown();
     });
@@ -2256,7 +2290,7 @@ describe('createHttpAcpBridge', () => {
       // for the same workspace and gets attached:true. Without the
       // race guard, A's reaper would tear down B's session.
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         sessionScope: 'single',
       });
@@ -2288,7 +2322,7 @@ describe('createHttpAcpBridge', () => {
         });
         return makeChannel().channel;
       };
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: slowFactory,
         sessionScope: 'single',
       });
@@ -2321,7 +2355,7 @@ describe('createHttpAcpBridge', () => {
       // when the spawn owner ALSO indicated they want it (via the
       // killSession-bail tombstone).
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         sessionScope: 'single',
       });
@@ -2345,7 +2379,7 @@ describe('createHttpAcpBridge', () => {
       // set during the spawn-owner bail, B's detach now completes
       // the deferred reap.
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         sessionScope: 'single',
       });
@@ -2369,7 +2403,7 @@ describe('createHttpAcpBridge', () => {
       // Counterpart: when client C is actively subscribed, detach
       // from a transient B must NOT reap C's session.
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         sessionScope: 'single',
       });
@@ -2400,7 +2434,7 @@ describe('createHttpAcpBridge', () => {
       // negative path so a future change can't accidentally make
       // it always-skip.
       const factory: ChannelFactory = async () => makeChannel().channel;
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         sessionScope: 'single',
       });
@@ -2420,7 +2454,7 @@ describe('createHttpAcpBridge', () => {
       let n = 0;
       const factory: ChannelFactory = async () =>
         makeChannel({ sessionIdPrefix: `s${n++}` }).channel;
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         maxSessions: 0,
         sessionScope: 'thread',
@@ -2449,7 +2483,7 @@ describe('createHttpAcpBridge', () => {
         factoryCalls++;
         return makeChannel({ sessionIdPrefix: `s${factoryCalls}` }).channel;
       };
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         maxSessions: 0,
         sessionScope: 'thread',
@@ -2478,7 +2512,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         sessionScope: 'thread',
       });
@@ -2512,7 +2546,7 @@ describe('createHttpAcpBridge', () => {
         handles.push(h);
         return h.channel;
       };
-      const bridge = createHttpAcpBridge({
+      const bridge = makeBridge({
         channelFactory: factory,
         sessionScope: 'thread',
       });

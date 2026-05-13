@@ -56,6 +56,26 @@ export interface ServeOptions {
    * (default cap 64) plus short-lived REST calls.
    */
   maxConnections?: number;
+  /**
+   * Absolute workspace path this daemon binds to. Per #3803 §02 the
+   * daemon is **1 daemon = 1 workspace × N sessions**: one bound
+   * workspace at boot, sessions multiplexed on the single
+   * `qwen --acp` child via `connection.newSession()`.
+   *
+   * `POST /session` calls whose `cwd` doesn't canonicalize to this
+   * path are rejected with `400 workspace_mismatch`. Clients may
+   * also omit `cwd` — the route falls back to this bound path.
+   *
+   * Multi-workspace deployments use **multiple daemon processes**
+   * (one per workspace, each on its own port), supervised by
+   * systemd / docker-compose / k8s / `qwen-coordinator` reference
+   * orchestrator. There is no intra-daemon multi-workspace mode
+   * (the previous Stage 1 `byWorkspaceChannel` routing layer was
+   * removed in the §02 design revision).
+   *
+   * Defaults to `process.cwd()` when omitted.
+   */
+  workspace?: string;
 }
 
 /**
@@ -77,6 +97,15 @@ export interface CapabilitiesEnvelope {
    * this field being non-empty.
    */
   modelServices: string[];
+  /**
+   * Absolute workspace path this daemon is bound to (per #3803 §02:
+   * `1 daemon = 1 workspace`). Clients use this to:
+   *   - Detect mismatch before posting `/session` (vs. waiting for
+   *     400 workspace_mismatch from the bridge).
+   *   - Omit `cwd` on `POST /session` — the route falls back to this
+   *     path when the body has no `cwd` field.
+   */
+  workspaceCwd: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

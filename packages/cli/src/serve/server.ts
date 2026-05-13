@@ -15,6 +15,7 @@ import {
   InvalidPermissionOptionError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
@@ -61,8 +62,17 @@ export function createServeApp(
   // cap they configured via `ServeOptions`. Previously the default
   // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
   // only the `runQwenServe` path piped the option through.
+  // Workspace binding mirrors `runQwenServe`: per #3803 §02 the
+  // daemon is bound to exactly one workspace (`opts.workspace` or
+  // `process.cwd()`). `POST /session` with a mismatched cwd is
+  // rejected with 400 `workspace_mismatch`.
+  const boundWorkspace = opts.workspace ?? process.cwd();
   const bridge =
-    deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
+    deps.bridge ??
+    createHttpAcpBridge({
+      maxSessions: opts.maxSessions,
+      boundWorkspace,
+    });
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -142,14 +152,23 @@ export function createServeApp(
       mode: opts.mode,
       features: [...STAGE1_FEATURES],
       modelServices: [],
+      // #3803 §02: surface the bound workspace so clients can detect
+      // mismatch pre-flight and omit `cwd` on `POST /session`.
+      workspaceCwd: boundWorkspace,
     };
     res.status(200).json(envelope);
   });
 
   app.post('/session', async (req, res) => {
     const body = safeBody(req);
-    const cwd = typeof body['cwd'] === 'string' ? (body['cwd'] as string) : '';
-    if (!cwd || !path.isAbsolute(cwd)) {
+    // #3803 §02: 1 daemon = 1 workspace. `cwd` may be omitted — the
+    // route falls back to the daemon's bound workspace. A non-empty
+    // `cwd` that doesn't match the bound path is rejected downstream
+    // by the bridge with WorkspaceMismatchError (translated to 400
+    // `workspace_mismatch` in `sendBridgeError`).
+    let cwd = typeof body['cwd'] === 'string' ? (body['cwd'] as string) : '';
+    if (!cwd) cwd = boundWorkspace;
+    if (!path.isAbsolute(cwd)) {
       res
         .status(400)
         .json({ error: '`cwd` is required and must be an absolute path' });
@@ -799,6 +818,21 @@ function sendBridgeError(
 ): void {
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    return;
+  }
+  if (err instanceof WorkspaceMismatchError) {
+    // #3803 §02 single-workspace mode: the daemon binds to one
+    // workspace at boot; cross-workspace POSTs are rejected here.
+    // 400 (not 404 — the daemon is "fine", the client just picked
+    // the wrong daemon for their workspace). Body includes both
+    // paths so orchestrator-aware clients can route to the right
+    // daemon / spawn a new one.
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_mismatch',
+      boundWorkspace: err.bound,
+      requestedWorkspace: err.requested,
+    });
     return;
   }
   if (err instanceof SessionLimitExceededError) {

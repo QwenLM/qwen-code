@@ -5,6 +5,7 @@
  */
 
 import { type Server } from 'node:http';
+import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { createHttpAcpBridge, type HttpAcpBridge } from './httpAcpBridge.js';
 import { isLoopbackBind } from './loopbackBinds.js';
@@ -100,8 +101,23 @@ export async function runQwenServe(
     );
   }
 
+  // Resolve the bound workspace per #3803 §02 (1 daemon = 1 workspace).
+  // Explicit `--workspace` wins; otherwise default to process.cwd().
+  // `POST /session` with a mismatched `cwd` is rejected by the bridge
+  // with `WorkspaceMismatchError`. Multi-workspace deployments use
+  // multiple daemon processes, not intra-daemon routing.
+  const boundWorkspace = opts.workspace ?? process.cwd();
+  if (!path.isAbsolute(boundWorkspace)) {
+    throw new Error(
+      `Invalid --workspace "${boundWorkspace}": must be an absolute path.`,
+    );
+  }
   const bridge =
-    deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
+    deps.bridge ??
+    createHttpAcpBridge({
+      maxSessions: opts.maxSessions,
+      boundWorkspace,
+    });
   let actualPort = opts.port;
   const app = createServeApp(opts, () => actualPort, { bridge });
 
@@ -188,7 +204,10 @@ export async function runQwenServe(
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
-      writeStdoutLine(`qwen serve listening on ${url} (mode=${opts.mode})`);
+      writeStdoutLine(
+        `qwen serve listening on ${url} (mode=${opts.mode}, ` +
+          `workspace=${boundWorkspace})`,
+      );
       if (!token) {
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,

@@ -20,6 +20,7 @@ import {
   InvalidPermissionOptionError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceMismatchError,
   type BridgeSession,
   type BridgeSessionSummary,
   type BridgeSpawnRequest,
@@ -199,6 +200,24 @@ describe('createServeApp', () => {
       expect(res.body.features).toEqual([...STAGE1_FEATURES]);
       expect(res.body.modelServices).toEqual([]);
     });
+
+    it('reports the bound workspace (#3803 §02)', async () => {
+      const app = createServeApp({ ...baseOpts, workspace: '/work/bound' });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.workspaceCwd).toBe('/work/bound');
+    });
+
+    it('falls back to process.cwd() when --workspace is omitted', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.workspaceCwd).toBe(process.cwd());
+    });
   });
 
   describe('host allowlist (loopback bind)', () => {
@@ -277,26 +296,64 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session', () => {
-    it('400 when cwd is missing', async () => {
+    it('200 when cwd is omitted (falls back to bound workspace, #3803 §02)', async () => {
+      // 1 daemon = 1 workspace: the daemon binds to
+      // `opts.workspace ?? process.cwd()` at boot, so clients may
+      // omit `cwd` and the route falls back to the bound path.
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: '/work/bound' },
+        undefined,
+        { bridge },
+      );
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({});
-      expect(res.status).toBe(400);
-      expect(bridge.calls).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(bridge.calls[0]?.workspaceCwd).toBe('/work/bound');
     });
 
     it('400 when cwd is relative', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: '/work/bound' },
+        undefined,
+        { bridge },
+      );
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: 'relative/path' });
       expect(res.status).toBe(400);
       expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('400 workspace_mismatch when bridge rejects cross-workspace cwd (#3803 §02)', async () => {
+      // Single-workspace mode: bridge throws WorkspaceMismatchError
+      // when the route forwards a non-bound cwd. Route translates
+      // to 400 with code `workspace_mismatch` + both paths in the
+      // body so orchestrator-aware clients can route correctly.
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => {
+          throw new WorkspaceMismatchError('/work/bound', req.workspaceCwd);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: '/work/bound' },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/different' });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_mismatch',
+        boundWorkspace: '/work/bound',
+        requestedWorkspace: '/work/different',
+      });
     });
 
     it('200 with the BridgeSession shape on success', async () => {

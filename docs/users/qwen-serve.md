@@ -8,9 +8,10 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 
 ## What it gives you
 
-- **One agent process, many clients** — under the default `sessionScope: 'single'`, every client connecting to the same workspace shares one ACP session. Live cross-client collaboration on the same conversation, the same file diffs, the same permission prompts.
+- **One agent process, many clients** — under the default `sessionScope: 'single'`, every client connecting to the daemon shares one ACP session. Live cross-client collaboration on the same conversation, the same file diffs, the same permission prompts.
 - **Reconnect-safe streaming** — SSE with `Last-Event-ID` reconnect lets a client drop and pick up exactly where it left off (within the ring's replay window).
 - **First-responder permissions** — when the agent asks for permission to run a tool, every connected client sees the request; whichever client answers first wins.
+- **One daemon, one workspace** — each `qwen serve` process binds to exactly one workspace at boot (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02). Multi-workspace deployments run one daemon per workspace on separate ports (or behind an orchestrator).
 
 ## Quickstart
 
@@ -19,11 +20,11 @@ Run Qwen Code as a local HTTP daemon so multiple clients (IDE plugins, web UIs, 
 ```bash
 cd your-project/
 qwen serve
-# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge)
+# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge, workspace=/path/to/your-project)
 # → qwen serve: bearer auth disabled (loopback default). Set QWEN_SERVER_TOKEN to enable.
 ```
 
-The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works".
+The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works". The daemon binds to the current working directory; use `--workspace /path/to/dir` to override.
 
 ### 2. Sanity-check it
 
@@ -32,19 +33,23 @@ curl http://127.0.0.1:4170/health
 # → {"status":"ok"}
 
 curl http://127.0.0.1:4170/capabilities
-# → {"v":1,"mode":"http-bridge","features":["health","capabilities","session_create",...]}
+# → {"v":1,"mode":"http-bridge","features":["health","capabilities","session_create",...],"workspaceCwd":"/path/to/your-project"}
 ```
+
+The `workspaceCwd` field surfaces the bound workspace so clients can pre-flight check + omit `cwd` on `POST /session`.
 
 ### 3. Open a session
 
 ```bash
 curl -X POST http://127.0.0.1:4170/session \
   -H 'Content-Type: application/json' \
-  -d '{"cwd":"'"$PWD"'"}'
+  -d '{}'
 # → {"sessionId":"<uuid>","workspaceCwd":"…","attached":false}
 ```
 
-A second client posting to `/session` with the same `cwd` gets `"attached": true` — they're now sharing the agent.
+`cwd` may be omitted — the route falls back to the daemon's bound workspace. Posting a `cwd` that doesn't match the bound workspace returns `400 workspace_mismatch` (the daemon is bound to exactly one workspace; start a separate daemon for a different one).
+
+A second client posting to `/session` (any matching `cwd` or none) gets `"attached": true` — they're now sharing the agent.
 
 ### 4. Subscribe to the event stream (in another terminal first)
 
@@ -102,14 +107,15 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 
 ## CLI flags
 
-| Flag                    | Default     | Purpose                                                                                                                                                                                                                                                                                                                                             |
-| ----------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--port <n>`            | `4170`      | TCP port. `0` = OS-assigned ephemeral port.                                                                                                                                                                                                                                                                                                         |
-| `--hostname <addr>`     | `127.0.0.1` | Bind interface. Anything beyond loopback requires a token.                                                                                                                                                                                                                                                                                          |
-| `--token <str>`         | —           | Bearer token. Falls back to `QWEN_SERVER_TOKEN` env var (with leading/trailing whitespace stripped — handy for `$(cat token.txt)`).                                                                                                                                                                                                                 |
-| `--max-sessions <n>`    | `20`        | Cap on concurrent live sessions. New `POST /session` requests that would spawn a fresh child return `503` (with `Retry-After: 5`) when the cap is hit; attaches to existing sessions are NOT counted. Set to `0` to disable. Sized for single-user / small-team usage; raise it if your deployment has the RAM/FD headroom (~30–50 MB per session). |
-| `--max-connections <n>` | `256`       | Listener-level TCP connection cap (`server.maxConnections`). Bounds raw socket count irrespective of session count — slow / phantom SSE clients get rejected at accept time once full. Raise alongside `--max-sessions` if your deployment expects many SSE subscribers per session.                                                                |
-| `--http-bridge`         | `true`      | Stage 1 mode: per-session `qwen --acp` child process. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                            |
+| Flag                    | Default         | Purpose                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--port <n>`            | `4170`          | TCP port. `0` = OS-assigned ephemeral port.                                                                                                                                                                                                                                                                                                         |
+| `--hostname <addr>`     | `127.0.0.1`     | Bind interface. Anything beyond loopback requires a token.                                                                                                                                                                                                                                                                                          |
+| `--token <str>`         | —               | Bearer token. Falls back to `QWEN_SERVER_TOKEN` env var (with leading/trailing whitespace stripped — handy for `$(cat token.txt)`).                                                                                                                                                                                                                 |
+| `--max-sessions <n>`    | `20`            | Cap on concurrent live sessions. New `POST /session` requests that would spawn a fresh child return `503` (with `Retry-After: 5`) when the cap is hit; attaches to existing sessions are NOT counted. Set to `0` to disable. Sized for single-user / small-team usage; raise it if your deployment has the RAM/FD headroom (~30–50 MB per session). |
+| `--workspace <path>`    | `process.cwd()` | Absolute workspace path this daemon binds to (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02 — 1 daemon = 1 workspace). `POST /session` requests with a mismatched `cwd` return `400 workspace_mismatch`. For multi-workspace deployments, run one `qwen serve` per workspace on separate ports.                                  |
+| `--max-connections <n>` | `256`           | Listener-level TCP connection cap (`server.maxConnections`). Bounds raw socket count irrespective of session count — slow / phantom SSE clients get rejected at accept time once full. Raise alongside `--max-sessions` if your deployment expects many SSE subscribers per session.                                                                |
+| `--http-bridge`         | `true`          | Stage 1 mode: per-session `qwen --acp` child process. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                            |
 
 > **Sizing the load knobs.** `--max-sessions` is the **new-child** cap.
 > Three other layers also limit load — when sizing for a high-concurrency
@@ -157,13 +163,15 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 > swallow RSTs may want to lower `server.keepAliveTimeout` via a
 > reverse proxy or accept periodic daemon restarts.
 
-## Multi-session & remote deployment
+## Multi-session & multi-workspace deployment
 
-A single `qwen serve` process can manage sessions for any workspace path passed via `cwd` on `POST /session` — under the default `sessionScope: 'single'` it keeps one ACP session per canonicalized workspace, sharing it across every client that posts the same `cwd`. So one daemon will happily host sessions for many workspaces at once.
+Per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02, each `qwen serve` process binds to **one workspace** at boot. Within that workspace it multiplexes N sessions onto a single `qwen --acp` child via the agent's native session map — sessions share the child's process / OAuth state / file-read cache / hierarchy-memory parse.
+
+To host **multiple workspaces** (one user, several repos; or several users on the same host), run **multiple daemon processes** — one per workspace, each on its own port, supervised by systemd / docker-compose / k8s / a `qwen-coordinator` reference orchestrator. The trade-off is intentional: one workspace per child means `loadSettings(cwd)` / OAuth / MCP server scope stay aligned with the bound directory and don't drift across requests.
 
 > **Subscribe BEFORE posting `modelServiceId` on attach.** When a client `POST /session` with a `modelServiceId` and the workspace already has a session running a different model, the daemon issues an internal `setSessionModel` call — failures are NOT propagated as an HTTP error (the session stays operational on its current model). The visible failure signal is a `model_switch_failed` event on the session's SSE stream. If you call `POST /session` and only THEN open `GET /session/:id/events`, you'll miss the failure event and silently keep talking to the wrong model. Open the SSE stream first, or pass `Last-Event-ID: 0` on subscribe to replay the ring's oldest available event.
 
-To handle multiple **users** (each with their own quota, audit log, sandbox) or to scale beyond one process's reach (cold-start budget, FD count, RSS), you spawn multiple daemon instances behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
+To handle multiple **users** (each with their own quota, audit log, sandbox) or to scale beyond one process's reach (cold-start budget, FD count, RSS), spawn one daemon per workspace per user behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
 
 ## Durability model
 
@@ -255,7 +263,7 @@ Concrete cost at N=5 sessions on the same workspace:
 | Auto-memory learned facts            | shared      | one knowledge base per child |
 | Cold start                           | first only  | <200 ms after first session  |
 
-The bridge keeps **one channel per workspace** (cross-workspace sharing is intentionally not done — different workspaces have different settings/auth scope, and `acpAgent.ts:601` reloads settings per newSession `cwd`, which would interfere). The channel stays alive while at least one session is live; the last `killSession` (or a channel-level crash) kills the child.
+The bridge keeps **one channel per daemon** (one daemon per workspace, per §02). The channel stays alive while at least one session is live; the last `killSession` (or a channel-level crash) kills the child.
 
 **MCP server children** are still per-session today — each session's config can specify different servers, so they're independently spawned. Stage 1.5 follow-up: refcount MCP server children by `(workspace, config-hash)` so identical configs share. Not in scope for this PR.
 
