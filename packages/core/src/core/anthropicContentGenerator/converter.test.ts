@@ -1306,6 +1306,7 @@ describe('AnthropicContentConverter', () => {
         promptTokenCount: 3,
         candidatesTokenCount: 5,
         totalTokenCount: 8,
+        cachedContentTokenCount: 0,
       });
 
       const parts = response.candidates?.[0]?.content?.parts || [];

@@ -2181,8 +2181,8 @@ describe('AnthropicContentGenerator', () => {
             delta: { stop_reason: 'end_turn' },
             usage: {
               output_tokens: 5,
-              input_tokens: 7,
-              cache_read_input_tokens: 2,
+              input_tokens: 2,
+              cache_read_input_tokens: 7,
             },
           };
           yield { type: 'message_stop' };
@@ -2243,8 +2243,8 @@ describe('AnthropicContentGenerator', () => {
       const last = chunks[chunks.length - 1]!;
       expect(last.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(last.usageMetadata).toEqual({
-        cachedContentTokenCount: 2,
-        promptTokenCount: 9, // cached(2) + input(7)
+        cachedContentTokenCount: 7,
+        promptTokenCount: 9, // input(2) + cached(7) — Anthropic-true (input < cache_read)
         candidatesTokenCount: 5,
         totalTokenCount: 14,
       });

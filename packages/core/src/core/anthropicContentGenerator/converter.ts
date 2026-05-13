@@ -18,6 +18,7 @@ import type {
   ToolListUnion,
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
+import { buildAnthropicUsageMetadata } from './usage.js';
 import type Anthropic from '@anthropic-ai/sdk';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import {
@@ -325,13 +326,12 @@ export class AnthropicContentConverter {
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
-      const promptTokens = response.usage.input_tokens || 0;
-      const completionTokens = response.usage.output_tokens || 0;
-      geminiResponse.usageMetadata = {
-        promptTokenCount: promptTokens,
-        candidatesTokenCount: completionTokens,
-        totalTokenCount: promptTokens + completionTokens,
-      };
+      geminiResponse.usageMetadata = buildAnthropicUsageMetadata({
+        inputTokens: response.usage.input_tokens || 0,
+        cacheReadTokens: response.usage.cache_read_input_tokens || 0,
+        cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
+        outputTokens: response.usage.output_tokens || 0,
+      });
     }
 
     return geminiResponse;
