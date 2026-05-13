@@ -344,6 +344,14 @@ export class ChatCompressionService {
 
     // Slim the side-query; live history unchanged.
     const slim = slimCompactionInput(historyToCompress);
+    if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
+            `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
+        );
+    }
 
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',

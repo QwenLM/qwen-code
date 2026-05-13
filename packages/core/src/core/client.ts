@@ -1009,8 +1009,8 @@ export class GeminiClient {
         const m = mcResult.meta;
         debugLogger.debug(
           `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-            `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
-            `kept last ${m.toolsKept}`,
+            `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+            `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
         );
       }
     }

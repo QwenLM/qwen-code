@@ -190,8 +190,14 @@ function stripNestedMedia(
 export interface MicrocompactMeta {
   gapMinutes: number;
   thresholdMinutes: number;
+  /** Count of `tool`-kind results cleared (compactable tool outputs). */
   toolsCleared: number;
+  /** Count of media parts cleared (`media` top-level + `nested-media` under non-compactable tools). */
+  mediaCleared: number;
+  /** Count of `tool`-kind results retained (recent-budget protected). */
   toolsKept: number;
+  /** Count of media parts retained across both media kinds. */
+  mediaKept: number;
   keepRecent: number;
   tokensSaved: number;
 }
@@ -257,6 +263,7 @@ export function microcompactHistory(
 
   let tokensSaved = 0;
   let toolsCleared = 0;
+  let mediaCleared = 0;
 
   const result: Content[] = history.map((content, ci) => {
     const partsToClean = clearMap.get(ci);
@@ -293,7 +300,7 @@ export function microcompactHistory(
         // Non-compactable tool result: keep response.output, drop only
         // the nested media on functionResponse.parts.
         tokensSaved += estimatePartTokens(part);
-        toolsCleared++;
+        mediaCleared++;
         touched = true;
         return {
           functionResponse: stripNestedMedia(part.functionResponse),
@@ -306,7 +313,7 @@ export function microcompactHistory(
           part.fileData?.mimeType ??
           'application/octet-stream';
         tokensSaved += estimatePartTokens(part);
-        toolsCleared++;
+        mediaCleared++;
         touched = true;
         return {
           text: `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} ${sanitizeMimeForPlaceholder(mime)}]`,
@@ -325,6 +332,8 @@ export function microcompactHistory(
   }
 
   const thresholdMinutes = settings.toolResultsThresholdMinutes ?? 60;
+  const toolsKept = tool.length - toolsCleared;
+  const mediaKept = media.length + nestedMedia.length - mediaCleared;
 
   return {
     history: result,
@@ -332,7 +341,9 @@ export function microcompactHistory(
       gapMinutes: Math.round(gapMs / 60_000),
       thresholdMinutes,
       toolsCleared,
-      toolsKept: allRefs.length - clearRefs.length,
+      mediaCleared,
+      toolsKept,
+      mediaKept,
       keepRecent,
       tokensSaved,
     },

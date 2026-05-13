@@ -414,7 +414,8 @@ describe('microcompactHistory', () => {
     expect(result.history[1]!.parts![0]!.inlineData).toBeUndefined();
     // Recent image preserved (keepRecent=1)
     expect(result.history[3]!.parts![0]!.inlineData?.data).toBe('NEWNEWNEWNEW');
-    expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.toolsCleared).toBe(0);
+    expect(result.meta!.mediaCleared).toBe(1);
   });
 
   it('does not reclear an already-cleared image part', () => {
@@ -432,6 +433,7 @@ describe('microcompactHistory', () => {
     // No metadata or no double-clearing.
     if (result.meta) {
       expect(result.meta.toolsCleared).toBe(0);
+      expect(result.meta.mediaCleared).toBe(0);
     }
     expect(result.history[0]!.parts![0]!.text).toBe(
       `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/png]`,
@@ -469,6 +471,7 @@ describe('microcompactHistory', () => {
       'OLDIMAGEOLDIMAGE',
     );
     expect(result.meta!.toolsCleared).toBe(1);
+    expect(result.meta!.mediaCleared).toBe(0);
   });
 
   it('clears older media when there are more than keepRecent of them', () => {
@@ -493,7 +496,8 @@ describe('microcompactHistory', () => {
       `${MICROCOMPACT_CLEARED_IMAGE_PREFIX} image/jpeg]`,
     );
     expect(result.history[5]!.parts![0]!.inlineData?.data).toBe('IMAGE-NEWEST');
-    expect(result.meta!.toolsCleared).toBe(2);
+    expect(result.meta!.toolsCleared).toBe(0);
+    expect(result.meta!.mediaCleared).toBe(2);
   });
 
   it('clears stale fileData parts (not just inlineData)', () => {

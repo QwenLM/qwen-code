@@ -408,6 +408,7 @@ describe('ChatCompressionService', () => {
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
+        debug: vi.fn(),
       }),
     } as unknown as Config;
 
