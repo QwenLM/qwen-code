@@ -33,6 +33,37 @@ export const BASELINE_COMMIT_MESSAGE = 'baseline (dirty state overlay)';
  */
 export const WORKTREES_DIR = 'worktrees';
 
+// ──────────────────────────────────────────────────────────────────────
+// Ephemeral agent-worktree slug format. Shared between the producer
+// (`AgentTool isolation: 'worktree'`), the consumer
+// (`cleanupStaleAgentWorktrees`) and the validator
+// (`validateUserWorktreeSlug` reserves the prefix). Changing any of
+// these constants must be done in one place so a regex / generator
+// mismatch can never silently leak or destroy work.
+// ──────────────────────────────────────────────────────────────────────
+
+/** Slug prefix used for worktrees created by `AgentTool isolation:'worktree'`. */
+export const AGENT_WORKTREE_PREFIX = 'agent';
+
+/** Number of random hex characters appended after the prefix. */
+export const AGENT_WORKTREE_HEX_LENGTH = 7;
+
+/** Regex that matches the exact ephemeral-agent slug shape. */
+export const AGENT_WORKTREE_SLUG_PATTERN = new RegExp(
+  `^${AGENT_WORKTREE_PREFIX}-[0-9a-f]{${AGENT_WORKTREE_HEX_LENGTH}}$`,
+);
+
+/**
+ * Generates a fresh ephemeral-agent slug. Centralised so the format
+ * stays in lock-step with {@link AGENT_WORKTREE_SLUG_PATTERN}.
+ */
+export function generateAgentWorktreeSlug(): string {
+  const hex = randomBytes(Math.ceil(AGENT_WORKTREE_HEX_LENGTH / 2))
+    .toString('hex')
+    .slice(0, AGENT_WORKTREE_HEX_LENGTH);
+  return `${AGENT_WORKTREE_PREFIX}-${hex}`;
+}
+
 export interface WorktreeInfo {
   /** Unique identifier for this worktree */
   id: string;
@@ -172,7 +203,14 @@ export class GitWorktreeService {
       const out = await this.git.revparse(['--show-toplevel']);
       const top = out.trim();
       return top.length > 0 ? top : null;
-    } catch {
+    } catch (error) {
+      // Caller falls back to its cwd via `?? cwd`. Log so a corrupt
+      // repo / permission failure leaves a trail — otherwise the
+      // worktree creator and startup sweep can disagree silently about
+      // where worktrees live, and the sweep would never find them.
+      debugLogger.warn(
+        `getRepoTopLevel failed at ${this.sourceRepoPath}: ${error}`,
+      );
       return null;
     }
   }
@@ -908,6 +946,12 @@ export class GitWorktreeService {
    * - Non-empty, ≤ 64 chars
    * - Only `[a-zA-Z0-9._-]` characters; no path separators
    * - No `..` or leading/trailing dots (would resolve outside the worktrees dir)
+   * - Must not start with `agent-`: that prefix is reserved for the
+   *   ephemeral worktrees `AgentTool isolation:'worktree'` produces.
+   *   The startup sweep auto-removes anything matching
+   *   {@link AGENT_WORKTREE_SLUG_PATTERN}, so a user-named
+   *   `agent-1234567` would be silently deleted after 30 days along
+   *   with any work it contained.
    */
   static validateUserWorktreeSlug(slug: string): string | null {
     if (typeof slug !== 'string' || slug.length === 0) {
@@ -921,6 +965,13 @@ export class GitWorktreeService {
     }
     if (slug.includes('..') || slug.startsWith('.') || slug.startsWith('-')) {
       return 'Worktree name must not start with "." or "-" or contain "..".';
+    }
+    if (slug.startsWith(`${AGENT_WORKTREE_PREFIX}-`)) {
+      return (
+        `Worktree name must not start with "${AGENT_WORKTREE_PREFIX}-": that prefix ` +
+        `is reserved for ephemeral agent worktrees and is subject to ` +
+        `automatic cleanup after 30 days.`
+      );
     }
     return null;
   }
@@ -1113,17 +1164,28 @@ export class GitWorktreeService {
     try {
       await this.git.branch(['-d', branchName]);
       return { success: true };
-    } catch {
-      // Fall through to forced delete or preservation.
+    } catch (error) {
+      // Refused either because the branch carries unmerged commits
+      // (the common case, handled below by surfacing `branchPreserved`)
+      // or because of a real failure (locked ref, permissions, disk
+      // full). Log so the caller's "branch preserved" message can be
+      // cross-referenced with a concrete reason.
+      debugLogger.warn(
+        `removeUserWorktree: safe branch delete failed for ${branchName}: ${error}`,
+      );
     }
 
     if (options.forceDeleteBranch) {
       try {
         await this.git.branch(['-D', branchName]);
         return { success: true };
-      } catch {
+      } catch (error) {
         // Best-effort: branch may have been deleted already, or may not
-        // exist (a no-op).
+        // exist (a no-op). Still log because a true filesystem error
+        // would otherwise be invisible.
+        debugLogger.warn(
+          `removeUserWorktree: force branch delete failed for ${branchName}: ${error}`,
+        );
       }
     }
 

@@ -63,6 +63,32 @@ describe('GitWorktreeService.validateUserWorktreeSlug', () => {
       GitWorktreeService.validateUserWorktreeSlug('a'.repeat(64)),
     ).toBeNull();
   });
+
+  it('reserves the `agent-` prefix for ephemeral agent worktrees', () => {
+    // A user-named `agent-1234567` would match
+    // AGENT_WORKTREE_SLUG_PATTERN and be silently swept after 30 days.
+    expect(
+      GitWorktreeService.validateUserWorktreeSlug('agent-1234567'),
+    ).toMatch(/reserved/i);
+    expect(
+      GitWorktreeService.validateUserWorktreeSlug('agent-feature'),
+    ).toMatch(/reserved/i);
+    // The standalone word "agent" or a different prefix is fine.
+    expect(GitWorktreeService.validateUserWorktreeSlug('agent')).toBeNull();
+    expect(GitWorktreeService.validateUserWorktreeSlug('agentic')).toBeNull();
+    expect(GitWorktreeService.validateUserWorktreeSlug('my-agent')).toBeNull();
+  });
+});
+
+describe('generateAgentWorktreeSlug', () => {
+  it('produces slugs that match AGENT_WORKTREE_SLUG_PATTERN', async () => {
+    const { generateAgentWorktreeSlug, AGENT_WORKTREE_SLUG_PATTERN } =
+      await import('../services/gitWorktreeService.js');
+    for (let i = 0; i < 50; i++) {
+      const slug = generateAgentWorktreeSlug();
+      expect(slug).toMatch(AGENT_WORKTREE_SLUG_PATTERN);
+    }
+  });
 });
 
 describe('GitWorktreeService.generateAutoSlug', () => {

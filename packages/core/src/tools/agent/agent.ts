@@ -42,8 +42,10 @@ import {
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
-import { randomBytes } from 'node:crypto';
-import { GitWorktreeService } from '../../services/gitWorktreeService.js';
+import {
+  generateAgentWorktreeSlug,
+  GitWorktreeService,
+} from '../../services/gitWorktreeService.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
@@ -1191,12 +1193,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // covered", but the safe-delete still refused — most likely a
           // race where commits landed between the checks and the delete.
           // Be loud rather than silently force-deleting.
+          //
+          // Critical: do NOT return `preservedPath` here. The worktree
+          // *directory* is already gone (removeUserWorktree removes the
+          // dir before attempting `git branch -d`). The branch alone is
+          // what's preserved. Reporting the old path as preserved would
+          // tell the parent model / user the worktree is recoverable at
+          // a location that no longer exists.
           debugLogger.warn(
-            `[Agent] Removed worktree ${isolation.path} but kept branch ` +
-              `${isolation.branch} (unmerged commits at delete time)`,
+            `[Agent] Removed worktree directory ${isolation.path} but kept ` +
+              `branch ${isolation.branch} (unmerged commits at delete time)`,
           );
           return {
-            preservedPath: isolation.path,
             preservedBranch: isolation.branch,
           };
         }
@@ -1216,11 +1224,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       preservedPath?: string;
       preservedBranch?: string;
     }): string => {
-      if (!info.preservedPath) return '';
-      return (
-        `\n\n[worktree preserved: ${info.preservedPath} ` +
-        `(branch ${info.preservedBranch ?? 'unknown'})]`
-      );
+      if (info.preservedPath) {
+        return (
+          `\n\n[worktree preserved: ${info.preservedPath} ` +
+          `(branch ${info.preservedBranch ?? 'unknown'})]`
+        );
+      }
+      if (info.preservedBranch) {
+        // Worktree directory was removed but the branch was kept (race:
+        // unmerged commits landed after the pre-checks passed). Tell
+        // the user which branch holds the work so they can recover via
+        // `git worktree add <new-path> <branch>` or by force-deleting
+        // it if they really meant to discard.
+        return (
+          `\n\n[worktree directory removed; branch ${info.preservedBranch} ` +
+          `preserved — recover with \`git worktree add <path> ${info.preservedBranch}\`]`
+        );
+      }
+      return '';
     };
 
     try {
@@ -1324,7 +1345,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
         const wtService =
           projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
-        const slug = `agent-${randomBytes(4).toString('hex').slice(0, 7)}`;
+        const slug = generateAgentWorktreeSlug();
         const created = await wtService.createUserWorktree(slug);
         if (!created.success || !created.worktree) {
           return failWorktreeProvisioning(

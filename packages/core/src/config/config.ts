@@ -1263,9 +1263,22 @@ export class Config {
           const { cleanupStaleAgentWorktrees } = await import(
             '../services/worktreeCleanup.js'
           );
-          await cleanupStaleAgentWorktrees(root);
+          const removed = await cleanupStaleAgentWorktrees(root);
+          if (removed > 0) {
+            // Promote to `info` so operators chasing a worktree leak in
+            // production can grep the logs and see the sweep actually
+            // ran. The cleanup helper itself uses `debug`-level
+            // per-entry logs, which are silent at default verbosity.
+            this.debugLogger.info(
+              `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`,
+            );
+          }
         } catch (error: unknown) {
-          this.debugLogger.debug(
+          // Promote sweep errors to `warn` for the same reason: a
+          // permission failure / disk full / repo-corruption case
+          // should leave a visible breadcrumb instead of being
+          // invisible at the default log level.
+          this.debugLogger.warn(
             `Stale worktree sweep failed (non-fatal): ${error}`,
           );
         }

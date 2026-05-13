@@ -7,7 +7,10 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { simpleGit } from 'simple-git';
-import { GitWorktreeService } from './gitWorktreeService.js';
+import {
+  AGENT_WORKTREE_SLUG_PATTERN,
+  GitWorktreeService,
+} from './gitWorktreeService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 // Branch name produced by `GitWorktreeService.createUserWorktree`: the
@@ -23,12 +26,16 @@ const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
  * Currently only the `agent-<7hex>` shape produced by
  * `AgentTool isolation:'worktree'` qualifies. User-named worktrees created
  * via `EnterWorktreeTool` are NEVER swept — they are managed manually via
- * `ExitWorktreeTool` and would surprise the user if removed under them.
+ * `ExitWorktreeTool`, and `validateUserWorktreeSlug` reserves the
+ * `agent-` prefix so a user-named slug can never accidentally match
+ * here.
  *
  * Mirrors claude-code's `EPHEMERAL_WORKTREE_PATTERNS` in
  * `utils/worktree.ts`, restricted to the patterns qwen-code actually emits.
  */
-const EPHEMERAL_WORKTREE_PATTERNS: readonly RegExp[] = [/^agent-[0-9a-f]{7}$/];
+const EPHEMERAL_WORKTREE_PATTERNS: readonly RegExp[] = [
+  AGENT_WORKTREE_SLUG_PATTERN,
+];
 
 /**
  * Default age threshold for stale ephemeral worktree cleanup (30 days).
@@ -151,7 +158,15 @@ async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
       status.renamed.length > 0 ||
       status.created.length > 0
     );
-  } catch {
+  } catch (error) {
+    // Fail-closed (assume dirty so the worktree is preserved) but log
+    // so the operator can distinguish "has real changes — leave alone"
+    // from "git index is unreadable — repo may be corrupt". Without
+    // this, a permission error or unmounted filesystem would silently
+    // keep the worktree forever with no breadcrumb.
+    debugLogger.warn(
+      `hasTrackedChanges: cannot inspect ${worktreePath} — assuming dirty: ${error}`,
+    );
     return true;
   }
 }
