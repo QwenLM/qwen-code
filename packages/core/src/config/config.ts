@@ -882,7 +882,8 @@ export class Config {
     };
     this.checkpointing = params.checkpointing ?? false;
     this.fileCheckpointingEnabled =
-      params.fileCheckpointingEnabled ?? !params.sdkMode;
+      params.fileCheckpointingEnabled ??
+      (!params.sdkMode && params.interactive !== false);
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;

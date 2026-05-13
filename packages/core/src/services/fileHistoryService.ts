@@ -46,6 +46,11 @@ export interface DiffStats {
   deletions: number;
 }
 
+export interface RewindResult {
+  filesChanged: string[];
+  filesFailed: string[];
+}
+
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_DIR = 'file-history';
 
@@ -396,8 +401,11 @@ export class FileHistoryService {
     );
   }
 
-  async rewind(promptId: string, truncateHistory = true): Promise<string[]> {
-    if (!this.enabled) return [];
+  async rewind(
+    promptId: string,
+    truncateHistory = true,
+  ): Promise<RewindResult> {
+    if (!this.enabled) return { filesChanged: [], filesFailed: [] };
 
     const targetSnapshot = this.findSnapshot(promptId);
     if (!targetSnapshot) {
@@ -405,7 +413,7 @@ export class FileHistoryService {
     }
 
     debugLogger.debug(`FileHistory: Rewinding to snapshot for ${promptId}`);
-    const filesChanged = await this.applySnapshot(targetSnapshot);
+    const result = await this.applySnapshot(targetSnapshot);
 
     if (truncateHistory) {
       const targetIdx = this.state.snapshots.indexOf(targetSnapshot);
@@ -420,7 +428,7 @@ export class FileHistoryService {
     }
 
     debugLogger.debug(`FileHistory: Finished rewinding to ${promptId}`);
-    return filesChanged;
+    return result;
   }
 
   async getDiffStats(promptId: string): Promise<DiffStats | undefined> {
@@ -485,8 +493,9 @@ export class FileHistoryService {
 
   private async applySnapshot(
     targetSnapshot: FileHistorySnapshot,
-  ): Promise<string[]> {
+  ): Promise<RewindResult> {
     const filesChanged: string[] = [];
+    const filesFailed: string[] = [];
     for (const trackingPath of this.state.trackedFiles) {
       try {
         const filePath = this.maybeExpandFilePath(trackingPath);
@@ -500,6 +509,7 @@ export class FileHistoryService {
           debugLogger.error(
             'FileHistory: Error finding the backup file to apply',
           );
+          filesFailed.push(filePath);
           continue;
         }
 
@@ -527,15 +537,18 @@ export class FileHistoryService {
               `FileHistory: Restored ${filePath} from ${backupFileName}`,
             );
             filesChanged.push(filePath);
+          } else {
+            filesFailed.push(filePath);
           }
         }
       } catch (error) {
         debugLogger.error(
           `FileHistory: Error restoring file ${trackingPath}: ${error}`,
         );
+        filesFailed.push(this.maybeExpandFilePath(trackingPath));
       }
     }
-    return filesChanged;
+    return { filesChanged, filesFailed };
   }
 
   private getBackupFileNameFirstVersion(

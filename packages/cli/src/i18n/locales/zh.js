@@ -136,6 +136,8 @@ export default {
   'Computing file changes...': '正在计算文件变更...',
   'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
   'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '恢复 {{count}} 个文件失败：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     '无法恢复文件：该轮对话创建时尚未启用文件检查点功能。',
   'No files needed restoration.': '没有文件需要恢复。',

@@ -2020,23 +2020,37 @@ export const AppContainer = (props: AppContainerProps) => {
       // and their snapshots must stay available for future rewinds.
       let fileRestoreMessage: string | undefined;
       let fileRestoreError: string | undefined;
+      let hasRestoreFailure = false;
       if (option === 'code' || option === 'both') {
         const promptId = (userItem as HistoryItemUser).promptId;
         if (promptId) {
           try {
             const truncateHistory =
               option === 'both' && !!geminiClient && apiTruncateIndex >= 0;
-            const filesChanged = await config
+            const result = await config
               .getFileHistoryService()
               .rewind(promptId, truncateHistory);
-            if (filesChanged.length > 0) {
+            if (result.filesChanged.length > 0) {
               fileRestoreMessage = t('Restored {{count}} file(s).', {
-                count: String(filesChanged.length),
+                count: String(result.filesChanged.length),
               });
-            } else {
+            } else if (result.filesFailed.length === 0) {
               fileRestoreMessage = t('No files needed restoration.');
             }
+            if (result.filesFailed.length > 0) {
+              hasRestoreFailure = true;
+              fileRestoreError = t(
+                'Failed to restore {{count}} file(s): {{files}}',
+                {
+                  count: String(result.filesFailed.length),
+                  files: result.filesFailed
+                    .map((f) => f.split('/').pop())
+                    .join(', '),
+                },
+              );
+            }
           } catch (error) {
+            hasRestoreFailure = true;
             fileRestoreError = t('Failed to restore files: {{error}}', {
               error: error instanceof Error ? error.message : String(error),
             });
@@ -2049,7 +2063,13 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Truncate conversation (already validated above).
-      if (needsConversation && geminiClient && apiTruncateIndex >= 0) {
+      // Skip if file restore had failures in "both" mode to avoid inconsistent state.
+      if (
+        needsConversation &&
+        geminiClient &&
+        apiTruncateIndex >= 0 &&
+        !(option === 'both' && hasRestoreFailure)
+      ) {
         const originalHistory = historyManager.history;
         const originalLength = originalHistory.length;
 
