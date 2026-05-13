@@ -34,8 +34,15 @@ export interface DaemonCapabilities {
    * body has no `cwd` field. Multi-workspace deployments expose
    * multiple daemons on different ports, each advertising its own
    * `workspaceCwd`.
+   *
+   * Optional at the type level because the field is an additive
+   * extension to v=1 envelopes (added by #3803 §02). Daemons
+   * predating §02 still announce `v: 1` but omit this field; the
+   * protocol's "bump v only on incompatible frame changes" stance
+   * (see `qwen-serve-protocol.md`) makes additive optionality the
+   * correct shape. All post-§02 daemons populate it.
    */
-  workspaceCwd: string;
+  workspaceCwd?: string;
 }
 
 /** Returned from `POST /session`. */

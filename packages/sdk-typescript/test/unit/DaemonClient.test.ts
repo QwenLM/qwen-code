@@ -151,6 +151,25 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
     });
 
+    it('omits cwd when workspaceCwd is not provided (#3803 §02)', async () => {
+      // Per #3803 §02 the daemon route falls back to its bound
+      // workspace when `cwd` is absent. The SDK must therefore NOT
+      // send `cwd: undefined` (or any other placeholder) when the
+      // caller omits `workspaceCwd` — otherwise the wire body
+      // carries an explicit empty field that wouldn't ever match
+      // the fallback semantics on a future stricter daemon.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/bound',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.createOrAttachSession({});
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
     it('forwards modelServiceId when supplied', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {

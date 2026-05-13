@@ -184,7 +184,7 @@ export function createServeApp(
     if (!path.isAbsolute(cwd)) {
       res
         .status(400)
-        .json({ error: '`cwd` is required and must be an absolute path' });
+        .json({ error: '`cwd` must be an absolute path when provided' });
       return;
     }
     const modelServiceId =
@@ -840,6 +840,19 @@ function sendBridgeError(
     // the wrong daemon for their workspace). Body includes both
     // paths so orchestrator-aware clients can route to the right
     // daemon / spawn a new one.
+    //
+    // Operator log line: unlike SessionNotFoundError (per-session
+    // 404 with rich URL context), workspace_mismatch indicates an
+    // orchestration / deployment drift (operator booted with the
+    // wrong workspace, or client is routing to the wrong daemon).
+    // Without a breadcrumb the daemon's log looks healthy while
+    // every client request silently 400s. Limited to authenticated
+    // requests by the upstream bearer-token gate, so probing-DoS
+    // log noise stays bounded.
+    writeStderrLine(
+      `qwen serve: workspace_mismatch (POST /session): ` +
+        `daemon bound to "${err.bound}", rejected "${err.requested}"`,
+    );
     res.status(400).json({
       error: err.message,
       code: 'workspace_mismatch',

@@ -36,11 +36,15 @@ const caps = await client.capabilities();
 console.log('Daemon features:', caps.features);
 console.log('Daemon workspace:', caps.workspaceCwd); // canonical bound path
 
-// 2. Spawn-or-attach a session. The `workspaceCwd` MUST match the
-//    daemon's bound workspace (`caps.workspaceCwd`) — pass it
-//    explicitly, OR omit it and the route falls back to the bound
-//    path. A mismatched `workspaceCwd` returns
-//    `400 workspace_mismatch` (see "Workspace mismatch" below).
+// 2. Spawn-or-attach a session. Two equally-valid shapes:
+//    (a) pass `workspaceCwd: caps.workspaceCwd` to be explicit, or
+//    (b) omit `workspaceCwd` entirely — the SDK then sends no `cwd`
+//        field and the daemon route falls back to its bound
+//        workspace. The (b) shape is concise but assumes you trust
+//        `caps.workspaceCwd` to be whatever you intended.
+//    A non-empty `workspaceCwd` that doesn't canonicalize to the
+//    daemon's bound path yields `400 workspace_mismatch` (see
+//    "Workspace mismatch" below).
 const session = await client.createOrAttachSession({
   workspaceCwd: caps.workspaceCwd,
 });

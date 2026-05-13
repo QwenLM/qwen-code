@@ -139,6 +139,20 @@ export async function runQwenServe(
           `Invalid --workspace "${rawWorkspace}": directory does not exist.`,
         );
       }
+      // EACCES / EPERM: the path exists but the current user can't
+      // stat it (typical for SIP-protected paths on macOS, root-owned
+      // dirs the daemon's user can't traverse, etc.). The raw Node
+      // SystemError has the path AND the syscall but no operator-
+      // facing breadcrumb that this came from `--workspace`. Wrap
+      // both codes so the boot failure points at the flag the
+      // operator actually set.
+      if (code === 'EACCES' || code === 'EPERM') {
+        throw new Error(
+          `Invalid --workspace "${rawWorkspace}": permission denied ` +
+            `(${String(code)}). The path exists but cannot be stat'd ` +
+            `by the current user.`,
+        );
+      }
     }
     throw err;
   }

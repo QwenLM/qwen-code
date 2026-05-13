@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -217,7 +218,13 @@ describe('createServeApp', () => {
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
-      expect(res.body.workspaceCwd).toBe(process.cwd());
+      // `createServeApp` runs `canonicalizeWorkspace` on
+      // `process.cwd()`, which collapses symlinks via
+      // `realpathSync.native`. On macOS the default tmpdir is
+      // `/var/folders/...` whose canonical form is
+      // `/private/var/folders/...`; a raw `process.cwd()` assertion
+      // would diverge there. Use the same realpath the route does.
+      expect(res.body.workspaceCwd).toBe(realpathSync.native(process.cwd()));
     });
   });
 
