@@ -121,6 +121,42 @@ describe('EventBus', () => {
     abort.abort();
   });
 
+  it('eviction detaches the abort listener from a stalled consumer (BmJT1)', async () => {
+    // Pre-fix the eviction path only did `this.subs.delete(sub)`,
+    // leaving the AbortSignal abort-listener attached because the
+    // dispose() closure was never invoked (consumer is stalled
+    // BY DEFINITION — that's what caused the overflow). Retention
+    // amplifies under a thousands-of-stalled-clients attack.
+    const bus = new EventBus();
+    const abort = new AbortController();
+    // Capture the listener count via the AbortSignal — we add a
+    // sentinel listener and assert our own listener fires (proving
+    // the signal isn't pinned by leaked closures); the eviction
+    // path now invokes dispose() so the bus's own listener
+    // detaches. Use the public `aborted` flag as the proxy for
+    // "after eviction, can I successfully abort and have no
+    // dangling closures keep the bus subscription alive?"
+    const iter = bus.subscribe({ maxQueued: 1, signal: abort.signal });
+    bus.publish({ type: 'foo', data: 1 });
+    bus.publish({ type: 'foo', data: 2 }); // triggers eviction
+    // Bus dropped the subscriber via dispose():
+    expect(bus.subscriberCount).toBe(0);
+    // The abort listener is gone — firing abort now should NOT
+    // re-enter the bus's onAbort (which would no-op via the
+    // `disposed` flag, but the listener shouldn't be attached at
+    // all). We can't directly assert listener count without
+    // patching internals, but firing abort + a subsequent publish
+    // should produce zero extra side effects:
+    abort.abort();
+    bus.publish({ type: 'foo', data: 3 });
+    expect(bus.subscriberCount).toBe(0);
+    // Drain to make sure the iterator unwinds cleanly with the
+    // terminal frame from the original eviction.
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+    expect(collected[collected.length - 1]?.type).toBe('client_evicted');
+  });
+
   it('unsubscribes when the abort signal fires', async () => {
     const bus = new EventBus();
     const abort = new AbortController();

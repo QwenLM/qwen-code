@@ -86,6 +86,17 @@ const DEFAULT_MAX_SUBSCRIBERS = 64;
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
   evicted: boolean;
+  /**
+   * BmJT1: cleanup hook for the eviction path (overflow → close queue
+   * → remove from `subs`). Without this, the abort listener registered
+   * in `subscribe()` would stay attached against the consumer's
+   * AbortSignal — and the consumer is by definition stalled (that's
+   * what caused the overflow), so `next()` / `return()` / consumer's
+   * own abort never fire to detach it. Closures over the queue +
+   * signal stay live until the AbortSignal itself goes out of scope.
+   * The eviction path calls this to break that retention.
+   */
+  dispose: () => void;
 }
 
 /**
@@ -198,16 +209,16 @@ export class EventBus {
         // consumer iterator unwinds with a final synthetic event.
         sub.queue.forcePush(evictionFrame);
         sub.queue.close();
-        // Drop the evicted sub from the Set IMMEDIATELY rather than
-        // waiting for the consumer's next `next()` call. A stalled
-        // (already-evicted, never-iterated) consumer would otherwise
-        // linger in `this.subs` forever — every subsequent `publish()`
-        // pays its `if (sub.evicted) continue` cost AND the
-        // `BoundedAsyncQueue` it owns is never GC'd. Under attack
-        // (thousands of opened-then-stalled SSE connections) this
-        // amplifies every event into thousands of dead-sub iterations
-        // and pins memory.
-        this.subs.delete(sub);
+        // BmJT1: dispose the subscription cleanly. `sub.dispose()`
+        // both removes from `this.subs` AND detaches the
+        // AbortSignal listener that `subscribe()` registered. Pre-
+        // fix the eviction path only did `this.subs.delete(sub)`,
+        // leaving the abort listener attached against the stalled
+        // consumer's signal — the queue + sub closures were
+        // retained until the AbortSignal itself went out of scope.
+        // Under attack (thousands of stalled SSE clients) this
+        // amplified into significant heap retention.
+        sub.dispose();
       }
     }
     return event;
@@ -246,7 +257,11 @@ export class EventBus {
       opts.maxQueued ?? DEFAULT_MAX_QUEUED,
     );
 
-    const sub: InternalSub = { queue, evicted: false };
+    // `dispose` is assigned below (mutable so the closure can reference
+    // `sub.dispose`); placeholder no-op covers the brief window between
+    // `subs.add(sub)` and the real assignment so an absurdly fast
+    // `publish() → forcePush → close → dispose()` race can't crash.
+    const sub: InternalSub = { queue, evicted: false, dispose: () => {} };
     this.subs.add(sub);
 
     if (opts.lastEventId !== undefined) {
@@ -275,6 +290,7 @@ export class EventBus {
       this.subs.delete(sub);
       opts.signal?.removeEventListener('abort', onAbort);
     };
+    sub.dispose = dispose;
 
     // Abort tears the subscription down immediately, even if the consumer
     // never iterates again — without this the entry would linger in
