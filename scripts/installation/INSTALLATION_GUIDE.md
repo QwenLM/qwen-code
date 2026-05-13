@@ -43,57 +43,10 @@ standalone release. The `standalone` suffix intentionally avoids overwriting the
 existing production `install-qwen.sh` / `install-qwen.bat` OSS objects during
 the staged rollout.
 
-> ⚠️ **Hosted endpoint status — read before copying the one-liners below.**
-> Until the hosted endpoint is re-synced after the next non-dry-run release with
-> OSS credentials configured, the
-> `qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/` URLs still
-> serve the legacy NVM-based installer. The legacy installer ignores
-> `--version` and `QWEN_INSTALL_VERSION`, so the pinning examples below will
-> silently install `latest`. To get the standalone-archive-first behavior
-> today, run `install-qwen-standalone.sh` from a local checkout of this
-> repository (see "Run today, before the OSS sync" below), or upload the
-> staged standalone-suffixed files to separate OSS keys for testing.
-
-### Run today, before the OSS sync
-
-From a local checkout of this repository:
-
-```bash
-bash scripts/installation/install-qwen-standalone.sh
-bash scripts/installation/install-qwen-standalone.sh --version vX.Y.Z
-```
-
-```cmd
-scripts\installation\install-qwen-standalone.bat
-scripts\installation\install-qwen-standalone.bat --version vX.Y.Z
-```
-
-### After the OSS sync
-
-These hosted one-liners only honor `--version` / `QWEN_INSTALL_VERSION` once
-the OSS objects have been re-synced as described in
-"Hosted endpoint status" above; before that they fall back to the legacy
-NVM-based installer.
-
-```bash
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash -s -- --version vX.Y.Z
-```
-
-```cmd
-powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex"
-```
-
-To pin a release with the hosted Windows entrypoint, set
-`QWEN_INSTALL_VERSION` before invoking `install-qwen-standalone.ps1`:
-
-```powershell
-$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'
-irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
-```
-
-`QWEN_INSTALL_VERSION` is the equivalent environment variable when arguments
-cannot be passed through.
+Public installation documentation intentionally continues to use the existing
+production installer in this PR. Update README and other public quick-install
+instructions in a follow-up after the standalone-suffixed hosted installers and
+release archive sync have been validated in production.
 
 Hosted installer assets are staged separately from GitHub Release archives:
 

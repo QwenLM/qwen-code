@@ -1080,37 +1080,6 @@ describe('standalone release packaging', () => {
     );
   });
 
-  it('defines a temporary OSS credentials smoke workflow', () => {
-    const workflow = readScript('.github/workflows/oss-smoke-test.yml');
-
-    expect(workflow).toContain("name: 'OSS Smoke Test'");
-    expect(workflow).toContain(
-      "branches:\n      - 'codex/installer-release-assets'",
-    );
-    expect(workflow).toContain('workflow_dispatch:');
-    expect(workflow).toContain("name: 'production-release'");
-    expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
-    expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
-    expect(workflow).toContain('vars.ALIYUN_OSS_BUCKET');
-    expect(workflow).toContain('qwen-code-oss-ak-check');
-    expect(workflow).toContain('ossutil cp');
-    expect(workflow).toContain('--acl public-read');
-    expect(workflow).toContain('ossutil rm');
-    expect(workflow).toContain('actions/checkout');
-    expect(workflow).toContain('actions/setup-node');
-    expect(workflow).toContain('npm run bundle');
-    expect(workflow).toContain('scripts/create-standalone-package.js');
-    expect(workflow).toContain('--target linux-x64');
-    expect(workflow).toContain('qwen-code-linux-x64.tar.gz');
-    expect(workflow).toContain(
-      'install-qwen-standalone.sh --method standalone',
-    );
-    expect(workflow).toContain('"${QWEN_INSTALL_ROOT}/bin/qwen" --version');
-    expect(workflow).not.toContain('npm publish');
-    expect(workflow).not.toContain('gh release create');
-    expect(workflow).not.toContain('releases/qwen-code/latest');
-  });
-
   it('does not whitelist internal planning documents in gitignore', () => {
     const gitignore = readScript('.gitignore');
 
@@ -1126,13 +1095,11 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('installation/install-qwen-standalone.sh');
     expect(guide).toContain('installation/install-qwen-standalone.bat');
     expect(guide).toContain('installation/install-qwen-standalone.ps1');
-    expect(guide).toContain('irm https://qwen-code-assets');
     expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_ID');
     expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(guide).toContain('ALIYUN_OSS_BUCKET');
     expect(guide).toContain('ALIYUN_OSS_ENDPOINT');
-    expect(guide).toContain('Hosted endpoint status');
-    expect(guide).toContain('legacy NVM-based installer');
+    expect(guide).toContain('Public installation documentation');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
   });
