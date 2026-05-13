@@ -113,9 +113,43 @@ const OUTPUT_RECOVERY_MESSAGE =
   'you were doing. Pick up mid-thought if that is where the cut happened. ' +
   'Break remaining work into smaller pieces.';
 
+/**
+ * Maximum length of the previous-response tail embedded inside the
+ * `<previous_response_suffix>` block of the recovery user-turn. Chosen as a
+ * pragmatic balance: large enough to give the model enough trailing context to
+ * resume coherently (covers ~200–400 tokens of prose, or a multi-row Markdown
+ * table), and small enough to keep the recovery prompt well under any
+ * provider's input budget even when combined with the rest of history.
+ */
 const OUTPUT_RECOVERY_TAIL_CHARS = 1200;
+
+/**
+ * Hard cap on the inner overlap/contained-prefix scan loops. Bounds both the
+ * suffix-anchored overlap search in {@link getRecoveryContinuationSuffix} and
+ * the contained-prefix scan in {@link findContainedRecoveryPrefixReplayLength}
+ * so recovery dedup stays O(min(previous, continuation, 4000)) in iteration
+ * count instead of unbounded against pathologically large continuations.
+ */
 const RECOVERY_OVERLAP_MAX_SCAN_CHARS = 4000;
+
+/**
+ * Minimum byte-length before a plain-text overlap (between previous tail and
+ * continuation prefix) is considered "significant" enough to dedup. Short
+ * coincidental matches like `". "`, `"the "`, or `", and "` happen routinely
+ * across unrelated turns; requiring ≥6 bytes makes accidental matches on
+ * common short suffixes vanishingly unlikely while still catching meaningful
+ * replayed phrases.
+ */
 const RECOVERY_OVERLAP_MIN_BYTES = 6;
+
+/**
+ * Lower floor for overlaps that contain Markdown structural characters
+ * (`#`, `|`, backtick, newline). Structural anchors are far less likely to
+ * collide coincidentally than prose — a 4-byte overlap like `"| a "` or
+ * `"## "` is almost certainly a replayed block-level marker, so we accept a
+ * smaller match to catch table/heading replays that the 6-byte prose floor
+ * would otherwise miss.
+ */
 const RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES = 4;
 // Plain-prose substring matches outside the suffix-anchored path are very
 // prone to false positives on common opener phrases ("In summary, …", "Here is
@@ -189,13 +223,42 @@ function findContainedRecoveryPrefixReplayLength(
     const prefix = continuationText.slice(0, length);
     if (
       byteLength(prefix) >= RECOVERY_CONTAINED_PREFIX_MIN_BYTES &&
-      previousTail.includes(prefix)
+      previousTailContainsAtLineBoundary(previousTail, prefix)
     ) {
       return length;
     }
   }
 
   return 0;
+}
+
+/**
+ * Symmetric line-boundary check for the contained-prefix scan: returns true
+ * iff `prefix` occurs in `previousTail` starting at index 0 or immediately
+ * after a newline. The structural-anchor check on the continuation side only
+ * enforces that the *continuation* starts at a Markdown block boundary;
+ * without this guard, a plain substring match could land mid-paragraph in
+ * `previousTail` (e.g. inside a code block that contains the literal string
+ * `"### Heading\nfoo"`) and silently strip legitimate continuation text. All
+ * occurrences are checked so a benign mid-paragraph hit doesn't shadow a real
+ * line-anchored replay later in the tail.
+ */
+function previousTailContainsAtLineBoundary(
+  previousTail: string,
+  prefix: string,
+): boolean {
+  let searchFrom = 0;
+  while (searchFrom <= previousTail.length) {
+    const matchIndex = previousTail.indexOf(prefix, searchFrom);
+    if (matchIndex === -1) {
+      return false;
+    }
+    if (matchIndex === 0 || previousTail.charAt(matchIndex - 1) === '\n') {
+      return true;
+    }
+    searchFrom = matchIndex + 1;
+  }
+  return false;
 }
 
 function getRecoveryContinuationSuffix(
@@ -219,6 +282,13 @@ function getRecoveryContinuationSuffix(
     RECOVERY_OVERLAP_MAX_SCAN_CHARS,
   );
 
+  // Worst-case complexity here is O(n²): up to RECOVERY_OVERLAP_MAX_SCAN_CHARS
+  // iterations, each calling `previousText.endsWith(overlap)` plus
+  // `byteLength(overlap)` (both O(m)). At the current 4000-char scan cap that
+  // is ~16M char-ops per recovery event, which is fine because recovery is
+  // rare and the cap is small. If the cap ever grows materially, this can be
+  // rewritten with a precomputed Z-array / failure function on
+  // `continuationText` to scan once instead of repeatedly slicing/comparing.
   for (let length = maxOverlap; length > 0; length -= 1) {
     const overlap = continuationText.slice(0, length);
     if (
@@ -346,6 +416,10 @@ function appendRecoveryContinuationParts(
     if (suffix.length > 0) {
       previousLastPart.text += suffix;
     }
+    // Always drop the first continuation text part: a non-empty suffix has
+    // already been appended to previousLastPart above, and an empty suffix
+    // means the part was a pure replay of the previous tail and should be
+    // discarded so it does not duplicate into history.
     nextParts.shift();
   }
 
