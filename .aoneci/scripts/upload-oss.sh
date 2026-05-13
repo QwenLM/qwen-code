@@ -5,7 +5,7 @@
 # 上传 qwen-code standalone 构建产物到阿里云 OSS。
 #
 # 最终链接格式:
-#   https://<bucket>.oss-cn-hangzhou.aliyuncs.com/aone-release/<group>/<project>/<version>/<file>
+#   https://<bucket>.oss-cn-shanghai.aliyuncs.com/public-datasets/aone-release/<group>/<project>/<version>/<file>
 #
 # 同时上传 deploy-qwen.sh / upgrade-qwen.sh 到:
 #   - 版本目录: .../<version>/deploy-qwen.sh
@@ -34,8 +34,8 @@ SOURCE_DIR="${SOURCE_DIR:-${AONE_CI_SOURCE:-.}}"
 WORKSPACE_DIR="${WORKSPACE_DIR:-/workspace}"
 OSS_GROUP="${OSS_GROUP:?OSS_GROUP is required}"
 OSS_PROJECT="${OSS_PROJECT:?OSS_PROJECT is required}"
-OSS_ENDPOINT="${OSS_ENDPOINT:-https://oss-cn-hangzhou.aliyuncs.com}"
-OSS_BUCKET="${OSS_BUCKET:-dw-vscode}"
+OSS_ENDPOINT="${OSS_ENDPOINT:-https://oss-cn-shanghai.aliyuncs.com}"
+OSS_BUCKET="${OSS_BUCKET:-dataworks-notebook-cn-shanghai}"
 OSS_ACCESS_KEY_ID="${OSS_ACCESS_KEY_ID:?OSS_ACCESS_KEY_ID is required}"
 OSS_ACCESS_KEY_SECRET="${OSS_ACCESS_KEY_SECRET:?OSS_ACCESS_KEY_SECRET is required}"
 SKIP_METADATA="${SKIP_METADATA:-}"
@@ -49,8 +49,8 @@ case "${ARCH}" in
 esac
 
 VERSION=$(cat "${WORKSPACE_DIR}/.resolved_version")
-OSS_PREFIX="aone-release/${OSS_GROUP}/${OSS_PROJECT}/${VERSION}"
-OSS_PROJECT_ROOT="aone-release/${OSS_GROUP}/${OSS_PROJECT}"
+OSS_PREFIX="public-datasets/aone-release/${OSS_GROUP}/${OSS_PROJECT}/${VERSION}"
+OSS_PROJECT_ROOT="public-datasets/aone-release/${OSS_GROUP}/${OSS_PROJECT}"
 TARBALL="qwen-code-${VERSION}-${TARGET_PLATFORM}-${ARCH}.tar.gz"
 
 # ── 定位部署脚本 ──
@@ -126,7 +126,7 @@ else
 fi
 
 # ── 打印下载链接 ──
-OSS_HOST="${OSS_BUCKET}.oss-cn-hangzhou.aliyuncs.com"
+OSS_HOST="${OSS_BUCKET}.oss-cn-shanghai.aliyuncs.com"
 OSS_BASE="https://${OSS_HOST}/${OSS_PREFIX}"
 OSS_ROOT="https://${OSS_HOST}/${OSS_PROJECT_ROOT}"
 

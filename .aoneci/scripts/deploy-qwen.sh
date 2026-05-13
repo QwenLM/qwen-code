@@ -28,9 +28,9 @@
 set -euo pipefail
 
 # ── 默认配置 ──
-OSS_BUCKET="dw-vscode"
-OSS_HOST="${OSS_BUCKET}.oss-cn-hangzhou.aliyuncs.com"
-OSS_PREFIX="aone-release/alishu/qwen-code"
+OSS_BUCKET="dataworks-notebook-cn-shanghai"
+OSS_HOST="${OSS_BUCKET}.oss-cn-shanghai.aliyuncs.com"
+OSS_PREFIX="public-datasets/aone-release/alishu/qwen-code"
 
 VERSION="${QWEN_VERSION:-}"
 ARCH="${QWEN_ARCH:-}"

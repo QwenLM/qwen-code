@@ -19,9 +19,9 @@
 set -euo pipefail
 
 # ── OSS 配置 ──
-OSS_BUCKET="dw-vscode"
-OSS_HOST="${OSS_BUCKET}.oss-cn-hangzhou.aliyuncs.com"
-OSS_PREFIX="aone-release/alishu/qwen-code"
+OSS_BUCKET="dataworks-notebook-cn-shanghai"
+OSS_HOST="${OSS_BUCKET}.oss-cn-shanghai.aliyuncs.com"
+OSS_PREFIX="public-datasets/aone-release/alishu/qwen-code"
 METADATA_URL="https://${OSS_HOST}/${OSS_PREFIX}/latest/metadata.json"
 DEPLOY_URL="https://${OSS_HOST}/${OSS_PREFIX}/deploy-qwen.sh"
 

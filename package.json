@@ -154,5 +154,17 @@
     "*.{json,md}": [
       "prettier --write"
     ]
-  }
+  },
+  "description": "<div align=\"center\">",
+  "main": "esbuild.config.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/QwenLM/qwen-code/issues"
+  },
+  "homepage": "https://github.com/QwenLM/qwen-code#readme"
 }

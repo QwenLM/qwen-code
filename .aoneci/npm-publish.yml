@@ -177,6 +177,8 @@ jobs:
           WORKSPACE_DIR="/workspace" \
           OSS_GROUP="alishu" \
           OSS_PROJECT="qwen-code" \
+          OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com" \
+          OSS_BUCKET="dataworks-notebook-cn-shanghai" \
           SKIP_METADATA="${SKIP_METADATA}" \
           SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER}" \
           SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS}" \
