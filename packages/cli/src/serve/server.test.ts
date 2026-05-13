@@ -5,6 +5,7 @@
  */
 
 import { realpathSync } from 'node:fs';
+import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
@@ -40,6 +41,16 @@ const baseOpts: ServeOptions = {
   port: 4170,
   mode: 'http-bridge',
 };
+
+// Workspace fixtures must round-trip through `path.resolve` so the
+// expected values match the canonicalized form the route produces on
+// every platform. On Windows `path.resolve('/work/bound')` returns
+// `D:\work\bound` (drive-relative absolute), so hardcoding `/work/bound`
+// as a literal makes the test fail on Windows CI even though the code
+// is correct. Mirror the pattern used by httpAcpBridge.test.ts (WS_A /
+// WS_B).
+const WS_BOUND = path.resolve(path.sep, 'work', 'bound');
+const WS_DIFFERENT = path.resolve(path.sep, 'work', 'different');
 
 interface FakeBridgeOpts {
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
@@ -204,12 +215,12 @@ describe('createServeApp', () => {
     });
 
     it('reports the bound workspace (#3803 §02)', async () => {
-      const app = createServeApp({ ...baseOpts, workspace: '/work/bound' });
+      const app = createServeApp({ ...baseOpts, workspace: WS_BOUND });
       const res = await request(app)
         .get('/capabilities')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
-      expect(res.body.workspaceCwd).toBe('/work/bound');
+      expect(res.body.workspaceCwd).toBe(WS_BOUND);
     });
 
     it('falls back to process.cwd() when --workspace is omitted', async () => {
@@ -310,7 +321,7 @@ describe('createServeApp', () => {
       // omit `cwd` and the route falls back to the bound path.
       const bridge = fakeBridge();
       const app = createServeApp(
-        { ...baseOpts, workspace: '/work/bound' },
+        { ...baseOpts, workspace: WS_BOUND },
         undefined,
         { bridge },
       );
@@ -319,13 +330,13 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({});
       expect(res.status).toBe(200);
-      expect(bridge.calls[0]?.workspaceCwd).toBe('/work/bound');
+      expect(bridge.calls[0]?.workspaceCwd).toBe(WS_BOUND);
     });
 
     it('400 when cwd is relative', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
-        { ...baseOpts, workspace: '/work/bound' },
+        { ...baseOpts, workspace: WS_BOUND },
         undefined,
         { bridge },
       );
@@ -344,23 +355,23 @@ describe('createServeApp', () => {
       // body so orchestrator-aware clients can route correctly.
       const bridge = fakeBridge({
         spawnImpl: async (req) => {
-          throw new WorkspaceMismatchError('/work/bound', req.workspaceCwd);
+          throw new WorkspaceMismatchError(WS_BOUND, req.workspaceCwd);
         },
       });
       const app = createServeApp(
-        { ...baseOpts, workspace: '/work/bound' },
+        { ...baseOpts, workspace: WS_BOUND },
         undefined,
         { bridge },
       );
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ cwd: '/work/different' });
+        .send({ cwd: WS_DIFFERENT });
       expect(res.status).toBe(400);
       expect(res.body).toMatchObject({
         code: 'workspace_mismatch',
-        boundWorkspace: '/work/bound',
-        requestedWorkspace: '/work/different',
+        boundWorkspace: WS_BOUND,
+        requestedWorkspace: WS_DIFFERENT,
       });
     });
 
