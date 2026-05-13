@@ -130,9 +130,15 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     if (!this.params.discard_changes) {
       const counts = await service.countWorktreeChanges(worktreePath);
       if (counts === null) {
+        // Inspecting the worktree itself failed — most likely a corrupt
+        // git index, a permission problem, or the worktree dir was
+        // mutated under us. Refuse rather than suggesting
+        // `discard_changes: true`, which would tell the user to bypass
+        // a safety check whose precondition is unknown. The user should
+        // diagnose the underlying repo problem first.
         return errorResult(
-          `Cannot inspect worktree "${this.params.name}" to verify it has no changes. ` +
-            `Pass \`discard_changes: true\` to remove anyway.`,
+          `Cannot inspect worktree "${this.params.name}" — git status failed against ${worktreePath}. ` +
+            `Check filesystem permissions and repository integrity, then call ${ToolNames.EXIT_WORKTREE} again.`,
         );
       }
       const total = counts.tracked + counts.untracked;

@@ -66,12 +66,24 @@ describe('GitWorktreeService.validateUserWorktreeSlug', () => {
 });
 
 describe('GitWorktreeService.generateAutoSlug', () => {
-  it('produces a slug matching the {adj}-{noun}-{4hex} pattern', () => {
-    for (let i = 0; i < 10; i++) {
+  it('produces a slug matching the {adj}-{noun}-{6hex} pattern', () => {
+    for (let i = 0; i < 50; i++) {
       const slug = GitWorktreeService.generateAutoSlug();
-      expect(slug).toMatch(/^[a-z]+-[a-z]+-[0-9a-f]{4}$/);
+      expect(slug).toMatch(/^[a-z]+-[a-z]+-[0-9a-f]{6}$/);
       expect(GitWorktreeService.validateUserWorktreeSlug(slug)).toBeNull();
     }
+  });
+
+  it('uses a strong RNG so 100 consecutive slugs are unique', () => {
+    // Math.random in the prior implementation had a 1/65k chance per
+    // suffix; with 100 slugs that was ~7% chance of a collision in
+    // tests. The randomBytes-backed 6-hex suffix should be essentially
+    // collision-free at this sample size.
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i++) {
+      seen.add(GitWorktreeService.generateAutoSlug());
+    }
+    expect(seen.size).toBe(100);
   });
 });
 

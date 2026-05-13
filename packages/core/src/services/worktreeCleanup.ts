@@ -10,6 +10,11 @@ import { simpleGit } from 'simple-git';
 import { GitWorktreeService } from './gitWorktreeService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
+// Branch name produced by `GitWorktreeService.createUserWorktree`: the
+// directory slug prefixed with `worktree-`. Re-derived here rather than
+// imported to keep this module's only external dep on the service light.
+const branchNameForSlug = (slug: string): string => `worktree-${slug}`;
+
 const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
 
 /**
@@ -57,6 +62,16 @@ export async function cleanupStaleAgentWorktrees(
   const service = new GitWorktreeService(projectRoot);
   const worktreesDir = service.getUserWorktreesDir();
 
+  // Fast bail-out for the common case (user has never used worktrees):
+  // skip the dynamic readdir entirely instead of relying on the catch
+  // path's ENOENT handler, which preserves the original stack on any
+  // other I/O error.
+  try {
+    await fs.access(worktreesDir);
+  } catch {
+    return 0;
+  }
+
   let entries;
   try {
     entries = await fs.readdir(worktreesDir, { withFileTypes: true });
@@ -84,21 +99,32 @@ export async function cleanupStaleAgentWorktrees(
     }
     if (mtimeMs >= cutoffDate) continue;
 
-    // Fail-closed: any sign of in-progress work or unpushed commits → keep.
+    // Fail-closed: any sign of in-progress work or unmerged commits → keep.
     if (await hasTrackedChanges(worktreePath)) continue;
-    if (await hasUnpushedCommits(worktreePath)) continue;
+    if (await service.hasUnmergedWorktreeCommits(entry.name)) continue;
 
     const result = await service.removeUserWorktree(entry.name, {
       deleteBranch: true,
     });
-    if (result.success) {
-      removed += 1;
-      debugLogger.debug(`Removed stale agent worktree ${worktreePath}`);
-    } else {
+    if (!result.success) {
       debugLogger.warn(
         `Failed to remove stale agent worktree ${worktreePath}: ${result.error}`,
       );
+      continue;
     }
+    if (result.branchPreserved) {
+      // Race: commits landed between hasUnmergedWorktreeCommits and
+      // git branch -d. The directory is gone but the branch remains so
+      // those commits can still be recovered. Surface it so an operator
+      // grepping logs can spot orphan branches.
+      debugLogger.warn(
+        `Removed stale agent worktree ${worktreePath} but kept branch ` +
+          `${branchNameForSlug(entry.name)} (unmerged commits at delete time)`,
+      );
+    } else {
+      debugLogger.debug(`Removed stale agent worktree ${worktreePath}`);
+    }
+    removed += 1;
   }
 
   if (removed > 0) {
@@ -125,24 +151,6 @@ async function hasTrackedChanges(worktreePath: string): Promise<boolean> {
       status.renamed.length > 0 ||
       status.created.length > 0
     );
-  } catch {
-    return true;
-  }
-}
-
-async function hasUnpushedCommits(worktreePath: string): Promise<boolean> {
-  try {
-    const wtGit = simpleGit(worktreePath);
-    // Empty output → all commits have a remote ref above them.
-    // Non-empty output → at least one commit not reachable from any remote.
-    const out = await wtGit.raw([
-      'log',
-      '--branches',
-      '--not',
-      '--remotes',
-      '--oneline',
-    ]);
-    return out.trim().length > 0;
   } catch {
     return true;
   }

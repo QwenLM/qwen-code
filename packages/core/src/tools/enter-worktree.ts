@@ -64,20 +64,35 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
-    const projectRoot = this.config.getTargetDir();
-    const service = new GitWorktreeService(projectRoot);
+    const cwd = this.config.getTargetDir();
 
-    const gitCheck = await service.checkGitAvailable();
+    // First-pass service rooted at cwd, only to find the repo top-level.
+    // We can't use cwd as the worktree anchor because launching from a
+    // monorepo subdirectory would scatter `.qwen/worktrees/` under each
+    // package's directory, and the startup sweep at `Config.initialize`
+    // would never find them.
+    const probe = new GitWorktreeService(cwd);
+
+    const gitCheck = await probe.checkGitAvailable();
     if (!gitCheck.available) {
-      return errorResult(gitCheck.error ?? 'Git is not available.');
+      const reason = gitCheck.error ?? 'Git is not available.';
+      debugLogger.warn(`enter_worktree: ${reason}`);
+      return errorResult(reason);
     }
 
-    const isRepo = await service.isGitRepository();
+    const isRepo = await probe.isGitRepository();
     if (!isRepo) {
-      return errorResult(
-        `Cannot create a worktree: ${projectRoot} is not a git repository. Initialize the repo with \`git init\` first.`,
-      );
+      const reason = `Cannot create a worktree: ${cwd} is not a git repository. Initialize the repo with \`git init\` first.`;
+      debugLogger.warn(`enter_worktree: ${reason}`);
+      return errorResult(reason);
     }
+
+    // Resolve to the repo's top-level so worktrees always live under
+    // `<repoRoot>/.qwen/worktrees/`, regardless of which subdirectory
+    // the user invoked the tool from.
+    const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+    const service =
+      projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
 
     // Treat an empty `name` ('') the same as undefined — some models pass
     // `{ name: '' }` when the schema marks `name` as optional, expecting
@@ -90,12 +105,15 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
     const slug = requested ?? GitWorktreeService.generateAutoSlug();
     const validation = GitWorktreeService.validateUserWorktreeSlug(slug);
     if (validation) {
+      debugLogger.warn(`enter_worktree: invalid slug ${slug}: ${validation}`);
       return errorResult(validation);
     }
 
     const result = await service.createUserWorktree(slug);
     if (!result.success || !result.worktree) {
-      return errorResult(result.error ?? 'Failed to create worktree.');
+      const reason = result.error ?? 'Failed to create worktree.';
+      debugLogger.warn(`enter_worktree: createUserWorktree failed: ${reason}`);
+      return errorResult(reason);
     }
 
     const output: EnterWorktreeOutput = {

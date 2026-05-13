@@ -6,13 +6,17 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { simpleGit, CheckRepoActions } from 'simple-git';
 import type { SimpleGit } from 'simple-git';
 import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
+
+const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
 /**
  * Commit message used for the baseline snapshot in worktrees.
@@ -150,6 +154,27 @@ export class GitWorktreeService {
       };
     }
     return { available: true };
+  }
+
+  /**
+   * Resolves the absolute path of the enclosing git repository's top
+   * directory. Used by callers that need to anchor general-purpose
+   * worktrees at the *repo* root rather than the cwd they were invoked
+   * from — otherwise running `qwen` from a monorepo subdirectory would
+   * scatter `.qwen/worktrees/` under each subdirectory instead of
+   * gathering them under the repo root.
+   *
+   * Returns the canonical top-level path on success, or `null` when the
+   * cwd is not inside a git repo (caller should error).
+   */
+  async getRepoTopLevel(): Promise<string | null> {
+    try {
+      const out = await this.git.revparse(['--show-toplevel']);
+      const top = out.trim();
+      return top.length > 0 ? top : null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -848,7 +873,13 @@ export class GitWorktreeService {
   }
 
   /**
-   * Generates an auto-slug `{adj}-{noun}-{4hex}` for an unnamed worktree.
+   * Generates an auto-slug `{adj}-{noun}-{6hex}` for an unnamed worktree.
+   *
+   * Uses `randomBytes` (the same source as agent slugs) so the two
+   * RNG paths in this file stay consistent and so the suffix is genuinely
+   * unpredictable rather than `Math.random()`-derived. The 6-hex suffix
+   * yields ~16M combinations × 8 adj × 8 noun ≈ 1B distinct slugs,
+   * eliminating the practical collision concern called out in review.
    */
   static generateAutoSlug(): string {
     const ADJECTIVES = [
@@ -862,9 +893,10 @@ export class GitWorktreeService {
       'quick',
     ];
     const NOUNS = ['fox', 'owl', 'elm', 'oak', 'ray', 'sky', 'leaf', 'pine'];
-    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-    const suffix = Math.random().toString(16).slice(2, 6).padEnd(4, '0');
+    const bytes = randomBytes(4);
+    const adj = ADJECTIVES[bytes[0] % ADJECTIVES.length];
+    const noun = NOUNS[bytes[1] % NOUNS.length];
+    const suffix = bytes.toString('hex').slice(0, 6);
     return `${adj}-${noun}-${suffix}`;
   }
 
@@ -896,6 +928,12 @@ export class GitWorktreeService {
    * Creates a general-purpose worktree at `<projectRoot>/.qwen/worktrees/<slug>`
    * with branch `worktree-<slug>`. Used by `EnterWorktreeTool` and
    * `AgentTool isolation:'worktree'`.
+   *
+   * Refuses to overwrite an existing branch: if `worktree-<slug>` already
+   * exists (e.g., from a manual `git checkout -b worktree-foo` or a
+   * teammate's push), the call fails with a clear error rather than
+   * silently resetting the branch. The previous `-B` form would have
+   * dropped any commits unique to that branch — see review #4073.
    */
   async createUserWorktree(
     slug: string,
@@ -903,6 +941,9 @@ export class GitWorktreeService {
   ): Promise<CreateWorktreeResult> {
     const validationError = GitWorktreeService.validateUserWorktreeSlug(slug);
     if (validationError) {
+      debugLogger.warn(
+        `createUserWorktree: invalid slug ${slug}: ${validationError}`,
+      );
       return { success: false, error: validationError };
     }
 
@@ -912,21 +953,38 @@ export class GitWorktreeService {
       const worktreePath = path.join(worktreesDir, slug);
 
       if (await this.pathExists(worktreePath)) {
-        return {
-          success: false,
-          error: `Worktree already exists at ${worktreePath}`,
-        };
+        const error = `Worktree already exists at ${worktreePath}`;
+        debugLogger.warn(`createUserWorktree: ${error}`);
+        return { success: false, error };
       }
+
+      // Keep the worktrees directory and its contents out of the parent
+      // repo's `git status` and any subsequent glob/grep that walks from
+      // the parent root. Only writes when the file is missing — never
+      // touches an existing user-managed `.qwen/.gitignore`.
+      await this.ensureWorktreesGitignored();
 
       const base = baseBranch || (await this.getCurrentBranch());
       const branchName = `worktree-${slug}`;
 
-      // `-B` resets the branch if it already exists (e.g., from a previous
-      // worktree at the same slug that was removed without deleting the branch).
+      // Refuse to clobber a pre-existing branch with the same name. Use
+      // `git show-ref --verify --quiet refs/heads/<branch>` (exit 0 →
+      // branch exists). The previous `-B` form would have force-reset
+      // such a branch and silently dropped unmerged commits.
+      const branchExists = await this.localBranchExists(branchName);
+      if (branchExists) {
+        const error =
+          `Cannot create worktree "${slug}": branch ${branchName} already exists. ` +
+          `Choose a different name, or delete the branch first ` +
+          `(e.g. \`git branch -d ${branchName}\`).`;
+        debugLogger.warn(`createUserWorktree: ${error}`);
+        return { success: false, error };
+      }
+
       await this.git.raw([
         'worktree',
         'add',
-        '-B',
+        '-b',
         branchName,
         worktreePath,
         base,
@@ -942,10 +1000,72 @@ export class GitWorktreeService {
       };
       return { success: true, worktree };
     } catch (error) {
-      return {
-        success: false,
-        error: `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`,
-      };
+      const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
+      debugLogger.warn(`createUserWorktree: ${message}`);
+      return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Returns true if a local branch with the given name exists.
+   *
+   * Uses `for-each-ref` because `simple-git.raw` swallows the non-zero
+   * exit of `show-ref --quiet` and always resolves with empty stdout —
+   * so the previous `show-ref` form would always return `true` and
+   * permanently block worktree creation. `for-each-ref` instead prints
+   * the ref name when it exists and prints nothing when it does not,
+   * always exiting 0, so we can decide on the output.
+   *
+   * Conservative on error: returns false so the caller's "not exists"
+   * fast path attempts the create (which itself will fail loudly if the
+   * branch exists for some reason this check missed).
+   */
+  private async localBranchExists(branchName: string): Promise<boolean> {
+    try {
+      const out = await this.git.raw([
+        'for-each-ref',
+        '--count=1',
+        '--format=%(refname)',
+        `refs/heads/${branchName}`,
+      ]);
+      return out.trim().length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Ensures `<projectRoot>/.qwen/.gitignore` ignores the worktrees
+   * directory. Idempotent: writes only when the file is missing. If the
+   * file exists (user may have curated it), this method is a no-op so
+   * we never disturb intentional configuration.
+   */
+  private async ensureWorktreesGitignored(): Promise<void> {
+    try {
+      const qwenDir = path.join(this.sourceRepoPath, '.qwen');
+      await fs.mkdir(qwenDir, { recursive: true });
+      const gitignorePath = path.join(qwenDir, '.gitignore');
+      try {
+        await fs.access(gitignorePath);
+        return;
+      } catch {
+        // File missing — fall through to write a default.
+      }
+      await fs.writeFile(
+        gitignorePath,
+        // Keep ephemeral worktrees out of the parent repo's git status,
+        // glob/grep results, and bundling tools. Users can edit this
+        // file freely; we only write it when it does not already exist.
+        `# Auto-generated by qwen-code.\n${WORKTREES_DIR}/\n`,
+        'utf8',
+      );
+    } catch (error) {
+      // Best-effort: if writing the gitignore fails (read-only fs, etc.)
+      // it is not worth aborting the worktree creation. Surface in debug
+      // logs only.
+      debugLogger.warn(
+        `ensureWorktreesGitignored failed (non-fatal): ${error}`,
+      );
     }
   }
 
@@ -1014,7 +1134,8 @@ export class GitWorktreeService {
    * removing the worktree would lose work the subagent committed but
    * never merged or pushed.
    *
-   * Fail-closed: returns `true` on any git error.
+   * Fail-closed: returns `true` on any git error so the caller defaults
+   * to preserving rather than destroying the worktree.
    */
   async hasUnmergedWorktreeCommits(slug: string): Promise<boolean> {
     const branchName = `worktree-${slug}`;
@@ -1038,7 +1159,14 @@ export class GitWorktreeService {
         .map((s) => s.trim())
         .filter((s) => s.length > 0 && s !== `refs/heads/${branchName}`);
       return refs.length === 0;
-    } catch {
+    } catch (error) {
+      // Fail-closed but log so a corrupted ref store or permission
+      // problem can be diagnosed: without this, callers see the
+      // conservative "has unmerged commits" reply with no clue about
+      // the underlying git failure.
+      debugLogger.warn(
+        `hasUnmergedWorktreeCommits failed for slug ${slug}: ${error}`,
+      );
       return true;
     }
   }
