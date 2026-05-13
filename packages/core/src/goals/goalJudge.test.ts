@@ -4,10 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { judgeGoal } from './goalJudge.js';
+
+const reportErrorMock = vi.hoisted(() => vi.fn());
+vi.mock('../utils/errorReporting.js', () => ({
+  reportError: reportErrorMock,
+}));
 
 interface MockClient {
   generateContent: ReturnType<typeof vi.fn>;
@@ -46,6 +51,11 @@ function makeConfig(opts: {
 }
 
 describe('judgeGoal', () => {
+  beforeEach(() => {
+    reportErrorMock.mockReset();
+    reportErrorMock.mockResolvedValue(undefined);
+  });
+
   it('parses a clean ok=true JSON reply', async () => {
     const client = makeMockClient({
       reply: '{"ok": true, "reason": "tests passing"}',
@@ -135,6 +145,24 @@ describe('judgeGoal', () => {
       signal: new AbortController().signal,
     });
     expect(verdict.ok).toBe(false);
+    expect(reportErrorMock).toHaveBeenCalledTimes(1);
+    expect(reportErrorMock.mock.calls[0][1]).toMatch(/goal judge failed/i);
+  });
+
+  it('reports malformed JSON without logging the raw judge reply', async () => {
+    const client = makeMockClient({ reply: 'SECRET_TOKEN_PREFIX not json' });
+    const config = makeConfig({ client });
+
+    const verdict = await judgeGoal(config, {
+      condition: 'x',
+      lastAssistantText: 'y',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict.ok).toBe(false);
+    expect(reportErrorMock).toHaveBeenCalledTimes(1);
+    const serializedCall = JSON.stringify(reportErrorMock.mock.calls[0]);
+    expect(serializedCall).not.toContain('SECRET_TOKEN_PREFIX');
   });
 
   it('short-circuits to not-met when signal is already aborted', async () => {
@@ -248,5 +276,38 @@ describe('judgeGoal', () => {
     const part = (contents[0] as Content).parts?.[0];
     expect((part?.text ?? '').length).toBeLessThan(big.length);
     expect(part?.text).toMatch(/truncated/);
+  });
+
+  it('bounds function response history parts before sending them to the judge', async () => {
+    const largeOutput = 'A'.repeat(8000);
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              response: { output: largeOutput },
+            },
+          },
+        ],
+      } as unknown as Content,
+    ];
+    const client = makeMockClient({ history });
+    const config = makeConfig({ client });
+
+    await judgeGoal(config, {
+      condition: 'x',
+      lastAssistantText: 'y',
+      signal: new AbortController().signal,
+    });
+
+    const [contents] = client.generateContent.mock.calls[0];
+    const part = (contents[0] as Content).parts?.[0] as unknown as {
+      functionResponse?: { response?: unknown };
+    };
+    const sent = JSON.stringify(part.functionResponse?.response);
+    expect(sent.length).toBeLessThan(largeOutput.length);
+    expect(sent).toContain('truncated');
   });
 });

@@ -44,11 +44,36 @@ export const MAX_GOAL_ITERATIONS = 50;
  * passing this through, the hook is killed mid-flight, no `continue:false` is
  * emitted, and the `/goal` loop silently dies after the second turn.
  */
+export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
 
 const GOAL_ABORTED_REASON =
   'Goal max iterations reached; cleared. Re-set with `/goal <condition>` if you still need it.';
+const GOAL_JUDGE_TIMEOUT_REASON =
+  'Goal judge timed out; continue working toward the goal and run `/goal clear` to stop early.';
+
+async function judgeGoalWithTimeout(
+  config: Config,
+  args: Parameters<typeof judgeGoal>[1],
+): Promise<Awaited<ReturnType<typeof judgeGoal>>> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      judgeGoal(config, args),
+      new Promise<Awaited<ReturnType<typeof judgeGoal>>>((resolve) => {
+        timeoutId = setTimeout(() => {
+          debugLogger.debug(
+            `Goal judge exceeded ${GOAL_JUDGE_TIMEOUT_MS}ms; defaulting to not-met`,
+          );
+          resolve({ ok: false, reason: GOAL_JUDGE_TIMEOUT_REASON });
+        }, GOAL_JUDGE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 
 function removeGoalFunctionHook(
   config: Config,
@@ -105,7 +130,7 @@ export function createGoalStopHookCallback(args: {
     }
 
     const signal = context?.signal ?? new AbortController().signal;
-    const verdict = await judgeGoal(config, {
+    const verdict = await judgeGoalWithTimeout(config, {
       condition,
       lastAssistantText,
       signal,
@@ -197,7 +222,7 @@ export function registerGoalHook(args: {
   const hookId = system.addFunctionHook(
     sessionId,
     HookEventName.Stop,
-    '',
+    '*',
     callback,
     'Goal evaluator failed',
     {

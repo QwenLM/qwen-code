@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, Schema } from '@google/genai';
+import type { Content, Part, Schema } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { reportError } from '../utils/errorReporting.js';
 
 const debugLogger = createDebugLogger('GOAL_JUDGE');
 
@@ -60,6 +61,21 @@ export interface JudgeResult {
 const JUDGE_REASON_FALLBACK =
   'Goal judge unavailable; continue working toward the goal and run `/goal clear` to stop early.';
 const MAX_REASON_LEN = 240;
+
+function reportGoalJudgeFailure(error: unknown, stage: string): void {
+  void reportError(
+    error,
+    'Goal judge failed',
+    { stage },
+    `goal-judge-${stage}`,
+  ).catch((reportErr) => {
+    debugLogger.debug(
+      `Goal judge error reporting failed: ${
+        reportErr instanceof Error ? reportErr.message : String(reportErr)
+      }`,
+    );
+  });
+}
 
 /**
  * Max number of trailing conversation messages we feed to the judge. Capping
@@ -128,12 +144,20 @@ export async function judgeGoal(
       debugLogger.debug(
         'Goal judge returned empty content; defaulting to not-met',
       );
+      reportGoalJudgeFailure(
+        new Error('Empty judge response'),
+        'empty-response',
+      );
       return { ok: false, reason: JUDGE_REASON_FALLBACK };
     }
     const parsed = parseJudgeReply(text);
     if (!parsed) {
       debugLogger.debug(
-        `Goal judge reply not parseable as JSON: ${text.slice(0, 200)}`,
+        `Goal judge reply not parseable as JSON (length=${text.length})`,
+      );
+      reportGoalJudgeFailure(
+        new Error('Judge response was not parseable as JSON'),
+        'parse',
       );
       return { ok: false, reason: JUDGE_REASON_FALLBACK };
     }
@@ -142,6 +166,7 @@ export async function judgeGoal(
     debugLogger.debug(
       `Goal judge threw: ${err instanceof Error ? err.message : String(err)}`,
     );
+    reportGoalJudgeFailure(err, 'generate-content');
     return { ok: false, reason: JUDGE_REASON_FALLBACK };
   }
 }
@@ -197,16 +222,63 @@ function capContent(content: Content): Content {
   if (!content.parts) return content;
   return {
     ...content,
-    parts: content.parts.map((p) => {
-      if (typeof p.text !== 'string') return p;
-      return p.text.length > TRANSCRIPT_PART_CHAR_CAP
-        ? {
-            ...p,
-            text: p.text.slice(0, TRANSCRIPT_PART_CHAR_CAP) + '…[truncated]',
-          }
-        : p;
-    }),
+    parts: content.parts.map(capPart),
   };
+}
+
+function capPart(part: Part): Part {
+  if (typeof part.text === 'string') {
+    return part.text.length > TRANSCRIPT_PART_CHAR_CAP
+      ? {
+          ...part,
+          text: part.text.slice(0, TRANSCRIPT_PART_CHAR_CAP) + '…[truncated]',
+        }
+      : part;
+  }
+
+  if (part.functionResponse) {
+    return {
+      ...part,
+      functionResponse: {
+        ...part.functionResponse,
+        response: capStructuredValue(
+          part.functionResponse.response,
+        ) as typeof part.functionResponse.response,
+      },
+    };
+  }
+
+  if (part.functionCall) {
+    return {
+      ...part,
+      functionCall: {
+        ...part.functionCall,
+        args: capStructuredValue(
+          part.functionCall.args,
+        ) as typeof part.functionCall.args,
+      },
+    };
+  }
+
+  return part;
+}
+
+function capStructuredValue(value: unknown): unknown {
+  const serialized = safeStringify(value);
+  if (serialized.length <= TRANSCRIPT_PART_CHAR_CAP) return value;
+  return {
+    truncated: true,
+    originalLength: serialized.length,
+    preview: serialized.slice(0, TRANSCRIPT_PART_CHAR_CAP) + '…[truncated]',
+  };
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function lastModelTextOf(transcript: Content[]): string {

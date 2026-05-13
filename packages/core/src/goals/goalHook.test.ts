@@ -21,6 +21,7 @@ import {
 import {
   createGoalStopHookCallback,
   GOAL_HOOK_TIMEOUT_MS,
+  GOAL_JUDGE_TIMEOUT_MS,
   MAX_GOAL_ITERATIONS,
   registerGoalHook,
   unregisterGoalHook,
@@ -257,9 +258,9 @@ describe('registerGoalHook / unregisterGoalHook', () => {
     expect(addFunctionHook).toHaveBeenCalledTimes(1);
     const [, eventName, matcher, , , options] = addFunctionHook.mock.calls[0];
     expect(eventName).toBe(HookEventName.Stop);
-    expect(matcher).toBe('');
+    expect(matcher).toBe('*');
     expect(options).toMatchObject({ timeout: GOAL_HOOK_TIMEOUT_MS });
-    expect(GOAL_HOOK_TIMEOUT_MS).toBeGreaterThan(10_000);
+    expect(GOAL_HOOK_TIMEOUT_MS).toBeGreaterThan(GOAL_JUDGE_TIMEOUT_MS);
     expect(getActiveGoal('sess-1')).toMatchObject({ condition: 'tests pass' });
   });
 
