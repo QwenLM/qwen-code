@@ -13,6 +13,8 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 const MAX_CONTENT_SIZE = 60 * 1024; // 60KB
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 500;
 
+// Process-global; intentionally never cleared in production. Bounded by the
+// number of unique system prompts + tool schemas seen in one session.
 const seenHashes = new Set<string>();
 
 function isEnabled(config: Config): boolean {
@@ -55,11 +57,9 @@ export function addUserPromptAttributes(
 ): void {
   if (!isEnabled(config) || !promptText) return;
 
-  const { content, truncated } = truncateContent(
-    `[USER PROMPT]\n${promptText}`,
-  );
+  const { content, truncated } = truncateContent(promptText);
   span.setAttributes({
-    new_context: content,
+    new_context: `[USER PROMPT]\n${content}`,
     ...(truncated && {
       new_context_truncated: true,
       new_context_original_length: promptText.length,
@@ -88,8 +88,11 @@ export function addSystemPromptAttributes(
 
   if (!seenHashes.has(hash)) {
     seenHashes.add(hash);
-    const { content } = truncateContent(text);
+    const { content, truncated } = truncateContent(text);
     span.setAttribute('system_prompt', content);
+    if (truncated) {
+      span.setAttribute('system_prompt_truncated', true);
+    }
   }
 }
 
@@ -105,10 +108,10 @@ export function addToolSchemaAttributes(
   const summary: Array<{ name: string; hash: string }> = [];
 
   for (const tool of tools) {
-    const toolJson = safeJsonStringify(tool) ?? '';
     const toolObj = tool as Record<string, unknown>;
     const name =
       typeof toolObj['name'] === 'string' ? toolObj['name'] : 'unknown_tool';
+    const toolJson = safeJsonStringify(tool) ?? `unstringifiable_${name}`;
     const hash = shortHash(toolJson);
     summary.push({ name, hash });
 
@@ -159,11 +162,9 @@ export function addToolInputAttributes(
 ): void {
   if (!isEnabled(config)) return;
 
-  const { content, truncated } = truncateContent(
-    `[TOOL INPUT: ${toolName}]\n${toolInput}`,
-  );
+  const { content, truncated } = truncateContent(toolInput);
   span.setAttributes({
-    tool_input: content,
+    tool_input: `[TOOL INPUT: ${toolName}]\n${content}`,
     ...(truncated && {
       tool_input_truncated: true,
       tool_input_original_length: toolInput.length,
@@ -181,11 +182,9 @@ export function addToolResultAttributes(
 ): void {
   if (!isEnabled(config)) return;
 
-  const { content, truncated } = truncateContent(
-    `[TOOL RESULT: ${toolName}]\n${toolResult}`,
-  );
+  const { content, truncated } = truncateContent(toolResult);
   span.setAttributes({
-    tool_result: content,
+    tool_result: `[TOOL RESULT: ${toolName}]\n${content}`,
     ...(truncated && {
       tool_result_truncated: true,
       tool_result_original_length: toolResult.length,

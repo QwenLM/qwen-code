@@ -194,6 +194,16 @@ describe('detailed-span-attributes', () => {
       expect(span.attrs['system_prompt_length']).toBeGreaterThan(0);
     });
 
+    it('sets system_prompt_truncated for large content', () => {
+      const config = createMockConfig();
+      const span = createMockSpan();
+      const largePrompt = 'p'.repeat(70_000);
+      addSystemPromptAttributes(config, span, largePrompt);
+
+      expect(span.attrs['system_prompt_truncated']).toBe(true);
+      expect(span.attrs['system_prompt_length']).toBe(70_000);
+    });
+
     it('no-ops when flag is disabled', () => {
       mockState.sensitiveEnabled = false;
       const config = createMockConfig();
