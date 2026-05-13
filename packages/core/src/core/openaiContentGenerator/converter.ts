@@ -611,10 +611,9 @@ function createToolMessage(
   // model would receive an empty tool response with no indication that
   // an image was ever there.
   for (const part of response.parts || []) {
-    const maybeText = (part as { text?: unknown }).text;
-    if (typeof maybeText === 'string') {
-      if (maybeText.length > 0) {
-        contentParts.push({ type: 'text' as const, text: maybeText });
+    if ('text' in part && typeof part.text === 'string') {
+      if (part.text.length > 0) {
+        contentParts.push({ type: 'text' as const, text: part.text });
       }
       continue;
     }

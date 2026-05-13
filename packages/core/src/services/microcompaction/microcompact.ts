@@ -167,17 +167,7 @@ function estimatePartTokens(part: Part): number {
   return 0;
 }
 
-/**
- * Already-cleared parts can be skipped to make repeated microcompact
- * runs idempotent. Each clearing branch yields a part shape the next
- * collector pass won't pick up — top-level media becomes a plain text
- * part (no longer collected as 'media'), tool results have their
- * response.output replaced with the sentinel, and nested-media tool
- * results have their `functionResponse.parts` dropped (so the
- * `hasNestedMedia` check returns false). Detecting the sentinel here
- * is therefore a belt-and-suspenders guard in case a future change
- * leaves a part collectable after clearing.
- */
+/** Defensive guard against re-clearing if a future change reshapes a cleared part into a collectable form. */
 function isAlreadyCleared(part: Part): boolean {
   return (
     part.functionResponse?.response?.['output'] === MICROCOMPACT_CLEARED_MESSAGE
@@ -187,10 +177,12 @@ function isAlreadyCleared(part: Part): boolean {
 function stripNestedMedia(
   fnResp: NonNullable<Part['functionResponse']>,
 ): NonNullable<Part['functionResponse']> {
+  // `parts` isn't declared on the standard FunctionResponse type but is
+  // a qwen-code extension — see `coreToolScheduler.createFunctionResponsePart`.
   const { parts: _droppedNested, ...rest } = fnResp as typeof fnResp & {
     parts?: unknown;
   };
-  return rest as NonNullable<Part['functionResponse']>;
+  return rest;
 }
 
 // --- Main entry point ---
