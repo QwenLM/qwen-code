@@ -121,6 +121,7 @@ export default tseslint.config(
             'react-dom/test-utils',
             'react-dom/client',
             'memfs/lib/volume.js',
+            'mime/lite',
             'yargs/**',
             'msw/node',
             '**/generated/**',

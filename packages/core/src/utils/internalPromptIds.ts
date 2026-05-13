@@ -26,7 +26,7 @@ const SIDE_QUERY_PROMPT_PREFIX = 'side-query:';
 /**
  * Returns true if the prompt_id belongs to an internal background operation
  * whose events should not be recorded to the chatRecordingService,
- * OpenAI logs, or other persistent stores visible in the UI.
+ * telemetry payloads, or other persistent stores visible in the UI.
  */
 export function isInternalPromptId(promptId: string | undefined): boolean {
   if (!promptId) return false;

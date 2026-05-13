@@ -21,7 +21,6 @@ import { OTLPTraceExporter as OTLPTraceExporterHttp } from '@opentelemetry/expor
 import { OTLPLogExporter as OTLPLogExporterHttp } from '@opentelemetry/exporter-logs-otlp-http';
 import { OTLPMetricExporter as OTLPMetricExporterHttp } from '@opentelemetry/exporter-metrics-otlp-http';
 import { NodeSDK } from '@opentelemetry/sdk-node';
-import { TelemetryTarget } from './index.js';
 
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -136,7 +135,6 @@ describe('Telemetry SDK', () => {
       getTelemetryOtlpLogsEndpoint: () => undefined,
       getTelemetryOtlpMetricsEndpoint: () => undefined,
       getTelemetryTarget: () => 'local',
-      getTelemetryUseCollector: () => false,
       getTelemetryOutfile: () => undefined,
       getTelemetryIncludeSensitiveSpanAttributes: () => false,
       getDebugMode: () => false,
@@ -382,28 +380,6 @@ describe('Telemetry SDK', () => {
     }
   });
 
-  it('should use OTLP exporters when target is gcp but useCollector is true', () => {
-    vi.spyOn(mockConfig, 'getTelemetryTarget').mockReturnValue(
-      TelemetryTarget.GCP,
-    );
-    vi.spyOn(mockConfig, 'getTelemetryUseCollector').mockReturnValue(true);
-
-    initializeTelemetry(mockConfig);
-
-    expect(OTLPTraceExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPLogExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPMetricExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-  });
-
   it('should not use OTLP exporters when telemetryOutfile is set', () => {
     vi.spyOn(mockConfig, 'getTelemetryOutfile').mockReturnValue(
       path.join(os.tmpdir(), 'test.log'),
@@ -551,7 +527,6 @@ describe('refreshSessionContext', () => {
       getTelemetryOtlpLogsEndpoint: () => undefined,
       getTelemetryOtlpMetricsEndpoint: () => undefined,
       getTelemetryTarget: () => 'local',
-      getTelemetryUseCollector: () => false,
       getTelemetryOutfile: () => undefined,
       getDebugMode: () => false,
       getSessionId: () => 'test-session',

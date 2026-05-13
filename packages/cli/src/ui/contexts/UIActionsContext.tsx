@@ -85,6 +85,7 @@ export interface UIActions {
   openDeleteDialog: () => void;
   closeDeleteDialog: () => void;
   handleDelete: (sessionId: string) => void;
+  handleDeleteMany: (sessionIds: string[]) => void;
   // Help dialog
   openHelpDialog: () => void;
   closeHelpDialog: () => void;
