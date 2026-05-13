@@ -927,6 +927,15 @@ interface PromoteArtifacts {
    */
   stream: fs.WriteStream | null;
   /**
+   * Latched true when `fs.createWriteStream` threw (or the fallback
+   * snapshot write fired). Subsequent `onData` chunks DROP instead
+   * of buffering — without this flag the buffer would grow without
+   * bound under a sustained child whose output file we can't open
+   * (the buffer drain only ever runs when `stream` becomes non-null,
+   * which never happens once we've recorded a failure).
+   */
+  streamFailed: boolean;
+  /**
    * Settle handler installed by `handlePromotedForeground` once the
    * registry entry exists. Null until then; `onSettle` calls below
    * queue into `settleQueued` if this isn't yet set.
@@ -1664,6 +1673,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const promoteArtifacts: PromoteArtifacts = {
       buffer: [],
       stream: null,
+      streamFailed: false,
       onSettleWired: null,
       settleQueued: null,
     };
@@ -1688,6 +1698,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
               `promote: postPromote stream.write failed: ${getErrorMessage(err)}`,
             );
           }
+        } else if (promoteArtifacts.streamFailed) {
+          // Stream-open already failed permanently — drop chunks
+          // rather than buffer them. Without this guard the buffer
+          // would grow without bound under a sustained child whose
+          // output file we couldn't open.
+          debugLogger.debug(
+            'promote: dropping post-promote chunk because output stream open failed',
+          );
         } else {
           promoteArtifacts.buffer.push(chunk);
         }
@@ -2232,6 +2250,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // (their warns will accumulate in the log, which is enough
       // observability for a rare disk failure case).
       promoteArtifacts.stream = null;
+      // Latch streamFailed so the foreground postPromote.onData
+      // handler stops buffering chunks that would never be drained
+      // (the drain path only runs when `stream` becomes non-null,
+      // which never happens after this branch).
+      promoteArtifacts.streamFailed = true;
       // Last-ditch: try a sync snapshot write so /tasks still has
       // SOMETHING readable; the buffer chunks are lost in this branch.
       try {
@@ -2382,17 +2405,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // `entryAc.abort() → registry.cancel` (task_stop fired during the
     // exit window) is safe: whichever lands first wins, the other
     // becomes a no-op.
-    promoteArtifacts.onSettleWired = (info) => {
-      // Close the stream first so any pending writes flush before the
-      // file is consumable by a /tasks Read.
-      try {
-        promoteArtifacts.stream?.end();
-      } catch (closeErr) {
-        debugLogger.warn(
-          `promote: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
-        );
-      }
-      promoteArtifacts.stream = null;
+    // Latch so the queued-settle drain at the bottom of this method
+    // can observe whether the settle has already finished (and the
+    // registry entry is no longer `'running'`) before the model-facing
+    // copy is constructed. Mutated by `onSettleWired` after
+    // `transitionRegistry()` returns.
+    let postPromoteAlreadySettled = false;
+    let postPromoteFinalStatus: 'completed' | 'failed' | null = null;
+    const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
       // Map service settle info to the registry transition. Decision
       // table: `error` → fail (spawn-side failure); `exitCode === 0`
       // → complete; non-zero exitCode → fail (non-zero is treated as
@@ -2401,38 +2421,111 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // rare-everything-null case → fail with a generic message.
       if (info.error) {
         registry.fail(shellId, info.error.message, info.endTime);
+        postPromoteFinalStatus = 'failed';
       } else if (info.exitCode === 0) {
         registry.complete(shellId, info.exitCode, info.endTime);
+        postPromoteFinalStatus = 'completed';
       } else if (info.exitCode !== null) {
         registry.fail(
           shellId,
           `Exited with code ${info.exitCode}`,
           info.endTime,
         );
+        postPromoteFinalStatus = 'failed';
       } else if (info.signal !== null) {
         registry.fail(
           shellId,
           `Terminated by signal ${info.signal}`,
           info.endTime,
         );
+        postPromoteFinalStatus = 'failed';
       } else {
         registry.fail(shellId, 'Exited with unknown status', info.endTime);
+        postPromoteFinalStatus = 'failed';
+      }
+      postPromoteAlreadySettled = true;
+    };
+    promoteArtifacts.onSettleWired = (info) => {
+      // Wait for the output stream to fully FLUSH before transitioning
+      // the registry. `stream.end()` is asynchronous — pending writes
+      // can still be in the libuv queue when it returns. Without the
+      // 'finish' wait, `/tasks` consumers can observe the entry as
+      // `completed`/`failed` and read the output file BEFORE the
+      // trailing bytes are on disk, producing truncated logs.
+      const stream = promoteArtifacts.stream;
+      promoteArtifacts.stream = null;
+      if (!stream) {
+        // No stream (open failed or already ended) — transition right
+        // away, no flush to wait on.
+        transitionRegistry(info);
+        return;
+      }
+      try {
+        // `finish` fires after all queued writes have been flushed to
+        // the underlying fd. `error` covers a late EIO / ENOSPC that
+        // doesn't reach the existing `'error'` listener — race with
+        // `.end()` itself. Either way, run the transition once.
+        let transitioned = false;
+        const finalize = () => {
+          if (transitioned) return;
+          transitioned = true;
+          transitionRegistry(info);
+        };
+        stream.once('finish', finalize);
+        stream.once('error', () => {
+          // Stream already logged via its general 'error' listener at
+          // open time; just make sure we still transition the entry.
+          finalize();
+        });
+        stream.end();
+      } catch (closeErr) {
+        debugLogger.warn(
+          `promote: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
+        );
+        transitionRegistry(info);
       }
     };
     // Drain a settle that landed BEFORE the wire installed (fast
     // commands can exit between `result.promoted` and this line).
+    // After this call returns, `postPromoteAlreadySettled` may be true
+    // — that's the case the model-facing copy below branches on so
+    // the message doesn't say "Status: running" for a process that
+    // already finished during the registration window.
+    //
+    // Note on async ordering: when there's an output stream, the wired
+    // handler returns BEFORE `transitionRegistry` runs (it waits for
+    // the 'finish' event). For the fast-exit-no-buffer case the stream
+    // has typically already flushed and 'finish' fires on the next
+    // microtask — fast enough that the typical /tasks read after the
+    // model sees the promote message lands AFTER the transition. The
+    // stream-null branch (open failed) transitions synchronously, so
+    // the copy below sees the final status immediately.
     if (promoteArtifacts.settleQueued) {
       const queued = promoteArtifacts.settleQueued;
       promoteArtifacts.settleQueued = null;
       promoteArtifacts.onSettleWired(queued);
     }
 
+    // Build the model-facing status line based on whether the settle
+    // already drained synchronously. PR-2.5 review feedback: blindly
+    // saying "Status: running" for an entry that already finished
+    // misdirects the agent (it then suggests `task_stop` on a process
+    // that's already gone).
+    const statusLine = postPromoteAlreadySettled
+      ? `Status: ${postPromoteFinalStatus ?? 'settled'}. PID: ${result.pid ?? '(unknown)'}.`
+      : `Status: running. PID: ${result.pid ?? '(unknown)'}.`;
+    const inspectLine = postPromoteAlreadySettled
+      ? `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`
+      : `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
+    const stopLine = postPromoteAlreadySettled
+      ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
+      : `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`;
     const llmContent = [
       `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
-      `Status: running. PID: ${result.pid ?? '(unknown)'}.`,
+      statusLine,
       `Output snapshot at promote time saved to: ${outputPath}`,
-      `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`,
-      `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`,
+      inspectLine,
+      stopLine,
     ].join('\n');
 
     debugLogger.debug(

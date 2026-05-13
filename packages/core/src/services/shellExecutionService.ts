@@ -775,10 +775,22 @@ export class ShellExecutionService {
           // settle the registry entry on natural child exit. When
           // postPromote is undefined we fall back to the PR-2 detach-
           // everything contract: no listeners re-attach.
+          // SEPARATE decoders for stdout and stderr. A single shared
+          // decoder corrupts interleaved multibyte UTF-8 (the streaming
+          // state machine assumes one byte source); independent
+          // decoders preserve each stream's continuation-byte context.
+          // Both decoders are flushed (with `stream: false`) once the
+          // child has fully closed so any trailing multibyte bytes
+          // surface instead of being silently dropped.
+          const stdoutDecoder = postPromote?.onData
+            ? new TextDecoder('utf-8', { fatal: false })
+            : null;
+          const stderrDecoder = postPromote?.onData
+            ? new TextDecoder('utf-8', { fatal: false })
+            : null;
           if (postPromote?.onData) {
             const onPostData = postPromote.onData;
-            const decoder = new TextDecoder('utf-8', { fatal: false });
-            const safeData = (chunk: Buffer) => {
+            const safeData = (decoder: TextDecoder) => (chunk: Buffer) => {
               try {
                 onPostData({
                   type: 'data',
@@ -791,8 +803,10 @@ export class ShellExecutionService {
               }
             };
             try {
-              child.stdout?.on('data', safeData);
-              child.stderr?.on('data', safeData);
+              if (stdoutDecoder)
+                child.stdout?.on('data', safeData(stdoutDecoder));
+              if (stderrDecoder)
+                child.stderr?.on('data', safeData(stderrDecoder));
             } catch (e) {
               debugLogger.warn(
                 `re-attaching post-promote data listeners threw: ${e instanceof Error ? e.message : String(e)}`,
@@ -801,13 +815,53 @@ export class ShellExecutionService {
           }
           if (postPromote?.onSettle) {
             const onPostSettle = postPromote.onSettle;
+            // Listen on 'close' (all stdio fully drained) NOT 'exit'
+            // (which can fire while stdout/stderr still have buffered
+            // bytes pending). Without this, late chunks emitted between
+            // 'exit' and 'close' land in the caller's onData AFTER
+            // onSettle already closed the output stream and transitioned
+            // the registry — they're dropped silently and `/tasks`
+            // shows a truncated log. The (code, signal) payload on
+            // 'close' is identical to 'exit', so callers see the same
+            // info just with proper ordering guarantees.
             try {
               child.once(
-                'exit',
+                'close',
                 (
                   exitCode: number | null,
                   signalCode: NodeJS.Signals | null,
                 ) => {
+                  // Flush the streaming decoders so any trailing
+                  // multibyte continuation bytes surface as their final
+                  // characters (or replacement char if truncated). Done
+                  // BEFORE calling onSettle so the last emit lands
+                  // ahead of the settle's stream-close.
+                  if (postPromote.onData) {
+                    try {
+                      if (stdoutDecoder) {
+                        const trailing = stdoutDecoder.decode();
+                        if (trailing) {
+                          postPromote.onData({
+                            type: 'data',
+                            chunk: trailing,
+                          });
+                        }
+                      }
+                      if (stderrDecoder) {
+                        const trailing = stderrDecoder.decode();
+                        if (trailing) {
+                          postPromote.onData({
+                            type: 'data',
+                            chunk: trailing,
+                          });
+                        }
+                      }
+                    } catch (flushErr) {
+                      debugLogger.warn(
+                        `post-promote decoder flush threw: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+                      );
+                    }
+                  }
                   try {
                     onPostSettle({
                       exitCode,
