@@ -250,6 +250,16 @@ constant
 The shared constant prevents drift between the two surfaces. Tool-call
 metrics (duration, success, decision) are preserved.
 
+The redaction is intentionally scoped to **on-device** persistence
+surfaces (telemetry exports + chat-recording JSONL). The schema
+itself still travels to the model provider on every request as the
+`structured_output` function declaration's `parameters` block — no
+provider-side redaction is possible, since the model needs the
+schema to satisfy the tool-call contract. The user-doc Privacy
+section warns users to keep `enum` / `const` / `default` /
+`examples` / `description` payloads free of secrets for the same
+reason.
+
 ## Permission gating
 
 `structured_output` is deliberately excluded from

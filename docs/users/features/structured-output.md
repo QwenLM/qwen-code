@@ -203,6 +203,16 @@ the machine, args are redacted with the placeholder
 Tool-call metrics (duration, success, decision) and surrounding event
 metadata are preserved.
 
+> **Schema is sent to the model provider.** Redaction covers the
+> *call arguments* on local surfaces only. The schema itself rides
+> on every model request as the `structured_output` function
+> declaration's `parameters` block — so any literal values you put
+> inside it (`enum`, `const`, `default`, `examples`, `description`,
+> `$comment`, etc.) reach the provider in cleartext just like prompt
+> text. Schemas should describe shape and constraints; treat them as
+> public toward the provider and keep secrets, customer records, and
+> other sensitive payloads out of the schema body.
+
 ## Session resumption (`--continue` / `--resume`)
 
 `--json-schema` is a per-run flag, not a per-session property. The
