@@ -143,6 +143,7 @@ export {
   endLLMRequestSpan,
   startToolSpan,
   endToolSpan,
+  runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
   clearSessionTracingForTesting,

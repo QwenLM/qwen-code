@@ -53,7 +53,13 @@ interface SpanContext {
   startTime: number;
   attributes: Record<string, string | number | boolean>;
   ended?: boolean;
-  type: 'interaction' | 'llm_request' | 'tool' | 'tool.execution';
+  type:
+    | 'interaction'
+    | 'llm_request'
+    | 'tool'
+    | 'tool.execution'
+    | 'tool.blocked_on_user'
+    | 'hook';
 }
 
 const NOOP_SPAN = trace.wrapSpanContext({
@@ -63,6 +69,7 @@ const NOOP_SPAN = trace.wrapSpanContext({
 });
 
 const interactionContext = new AsyncLocalStorage<SpanContext | undefined>();
+const toolContext = new AsyncLocalStorage<SpanContext | undefined>();
 
 const activeSpans = new Map<string, WeakRef<SpanContext>>();
 const strongSpans = new Map<string, SpanContext>();
@@ -222,30 +229,34 @@ export function endLLMRequestSpan(
 
   spanCtx.ended = true;
 
-  const duration = metadata?.durationMs ?? Date.now() - spanCtx.startTime;
-  const endAttributes: Attributes = { duration_ms: duration };
+  try {
+    const duration = metadata?.durationMs ?? Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = { duration_ms: duration };
 
-  if (metadata) {
-    if (metadata.inputTokens !== undefined)
-      endAttributes['input_tokens'] = metadata.inputTokens;
-    if (metadata.outputTokens !== undefined)
-      endAttributes['output_tokens'] = metadata.outputTokens;
-    endAttributes['success'] = metadata.success;
-    if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+    if (metadata) {
+      if (metadata.inputTokens !== undefined)
+        endAttributes['input_tokens'] = metadata.inputTokens;
+      if (metadata.outputTokens !== undefined)
+        endAttributes['output_tokens'] = metadata.outputTokens;
+      endAttributes['success'] = metadata.success;
+      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+    }
+
+    span.setAttributes(endAttributes);
+
+    if (metadata === undefined || metadata.success) {
+      span.setStatus({ code: SpanStatusCode.OK });
+    } else {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: metadata.error ?? 'unknown error',
+      });
+    }
+
+    span.end();
+  } catch {
+    // OTel errors must not affect API behavior.
   }
-
-  span.setAttributes(endAttributes);
-
-  if (metadata === undefined || metadata.success) {
-    span.setStatus({ code: SpanStatusCode.OK });
-  } else {
-    span.setStatus({
-      code: SpanStatusCode.ERROR,
-      message: metadata.error ?? 'unknown error',
-    });
-  }
-
-  span.end();
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
 }
@@ -289,6 +300,18 @@ export function startToolSpan(
   return span;
 }
 
+/**
+ * Runs a callback within the tool span's AsyncLocalStorage context.
+ * Use this instead of enterWith() to scope the context to a single
+ * async call tree — safe for concurrent tool calls.
+ */
+export function runInToolSpanContext<T>(span: Span, fn: () => T): T {
+  const spanId = getSpanId(span);
+  const spanCtx = activeSpans.get(spanId)?.deref();
+  if (!spanCtx) return fn();
+  return toolContext.run(spanCtx, fn);
+}
+
 export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
@@ -296,39 +319,48 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
 
   spanCtx.ended = true;
 
-  const duration = Date.now() - spanCtx.startTime;
-  const endAttributes: Attributes = { duration_ms: duration };
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = { duration_ms: duration };
 
-  if (metadata) {
-    if (metadata.success !== undefined)
-      endAttributes['success'] = metadata.success;
-    if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+    if (metadata) {
+      if (metadata.success !== undefined)
+        endAttributes['success'] = metadata.success;
+      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+    }
+
+    spanCtx.span.setAttributes(endAttributes);
+
+    if (metadata) {
+      if (metadata.success !== false) {
+        spanCtx.span.setStatus({ code: SpanStatusCode.OK });
+      } else {
+        spanCtx.span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: metadata.error ?? 'tool error',
+        });
+      }
+    }
+
+    spanCtx.span.end();
+  } catch {
+    // OTel errors must not affect tool scheduling.
   }
-
-  spanCtx.span.setAttributes(endAttributes);
-
-  if (metadata?.success !== false) {
-    spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-  } else {
-    spanCtx.span.setStatus({
-      code: SpanStatusCode.ERROR,
-      message: metadata?.error ?? 'tool error',
-    });
-  }
-
-  spanCtx.span.end();
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
 }
 
 // --- Tool Execution Sub-Spans ---
 
-export function startToolExecutionSpan(parentToolSpan: Span): Span {
+export function startToolExecutionSpan(): Span {
   if (!isTelemetrySdkInitialized()) {
     return NOOP_SPAN;
   }
 
-  const ctx = trace.setSpan(otelContext.active(), parentToolSpan);
+  const parentCtx = toolContext.getStore();
+  const ctx = parentCtx
+    ? trace.setSpan(otelContext.active(), parentCtx.span)
+    : otelContext.active();
 
   const span = getTracer().startSpan(
     SPAN_TOOL_EXECUTION,
@@ -362,27 +394,31 @@ export function endToolExecutionSpan(
 
   spanCtx.ended = true;
 
-  const duration = Date.now() - spanCtx.startTime;
-  const endAttributes: Attributes = { duration_ms: duration };
+  try {
+    const duration = Date.now() - spanCtx.startTime;
+    const endAttributes: Attributes = { duration_ms: duration };
 
-  if (metadata) {
-    if (metadata.success !== undefined)
-      endAttributes['success'] = metadata.success;
-    if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+    if (metadata) {
+      if (metadata.success !== undefined)
+        endAttributes['success'] = metadata.success;
+      if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
+    }
+
+    spanCtx.span.setAttributes(endAttributes);
+
+    if (metadata?.success !== false) {
+      spanCtx.span.setStatus({ code: SpanStatusCode.OK });
+    } else {
+      spanCtx.span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: metadata?.error ?? 'tool execution error',
+      });
+    }
+
+    spanCtx.span.end();
+  } catch {
+    // OTel errors must not affect tool scheduling.
   }
-
-  spanCtx.span.setAttributes(endAttributes);
-
-  if (metadata?.success !== false) {
-    spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-  } else {
-    spanCtx.span.setStatus({
-      code: SpanStatusCode.ERROR,
-      message: metadata?.error ?? 'tool execution error',
-    });
-  }
-
-  spanCtx.span.end();
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
 }
@@ -393,6 +429,7 @@ export function clearSessionTracingForTesting(): void {
   activeSpans.clear();
   strongSpans.clear();
   interactionContext.enterWith(undefined);
+  toolContext.enterWith(undefined);
   interactionSequence = 0;
   lastInteractionCtx = undefined;
 }
