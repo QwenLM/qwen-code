@@ -92,26 +92,32 @@ describe('atomicWriteFile', () => {
     expect(content).toEqual(buf);
   });
 
-  it('should preserve existing file permissions', async () => {
-    const filePath = path.join(tmpDir, 'test.txt');
-    await fs.writeFile(filePath, 'original');
-    await fs.chmod(filePath, 0o600);
+  it.skipIf(process.platform === 'win32')(
+    'should preserve existing file permissions',
+    async () => {
+      const filePath = path.join(tmpDir, 'test.txt');
+      await fs.writeFile(filePath, 'original');
+      await fs.chmod(filePath, 0o600);
 
-    await atomicWriteFile(filePath, 'updated');
+      await atomicWriteFile(filePath, 'updated');
 
-    const stat = await fs.stat(filePath);
-    expect(stat.mode & 0o777).toBe(0o600);
-    const content = await fs.readFile(filePath, 'utf-8');
-    expect(content).toBe('updated');
-  });
+      const stat = await fs.stat(filePath);
+      expect(stat.mode & 0o777).toBe(0o600);
+      const content = await fs.readFile(filePath, 'utf-8');
+      expect(content).toBe('updated');
+    },
+  );
 
-  it('should apply explicit mode option for new files', async () => {
-    const filePath = path.join(tmpDir, 'secret.txt');
-    await atomicWriteFile(filePath, 'secret', { mode: 0o600 });
+  it.skipIf(process.platform === 'win32')(
+    'should apply explicit mode option for new files',
+    async () => {
+      const filePath = path.join(tmpDir, 'secret.txt');
+      await atomicWriteFile(filePath, 'secret', { mode: 0o600 });
 
-    const stat = await fs.stat(filePath);
-    expect(stat.mode & 0o777).toBe(0o600);
-  });
+      const stat = await fs.stat(filePath);
+      expect(stat.mode & 0o777).toBe(0o600);
+    },
+  );
 
   it('should not leave temp files on success', async () => {
     const filePath = path.join(tmpDir, 'test.txt');
