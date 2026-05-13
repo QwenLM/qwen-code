@@ -385,6 +385,60 @@ describe('createHttpAcpBridge', () => {
     expect(bridge.sessionCount).toBe(0);
   });
 
+  it('killAllSync force-kills channels even after shutdown cleared byWorkspaceChannel (BkUyD)', async () => {
+    // tanzhenxin BkUyD regression: shutdown clears
+    // `byWorkspaceChannel` BEFORE awaiting per-child SIGTERM grace.
+    // If the operator double-Ctrl+C's during that window,
+    // killAllSync MUST still see the in-flight-being-killed
+    // channels. Pre-fix: killAllSync iterated `byWorkspaceChannel`
+    // and silently no-op'd; children orphaned. Fix: separate
+    // `liveChannels` set, only emptied on channel.exited.
+    const killSyncInvoked: number[] = [];
+    let nextChannelTag = 0;
+    const factory: ChannelFactory = async () => {
+      const tag = nextChannelTag++;
+      const h = makeChannel({ sessionIdPrefix: `s${tag}` });
+      const realKillSync = h.channel.killSync;
+      // Spy on killSync calls so we can assert the force-kill path
+      // actually fired for every live channel.
+      h.channel = {
+        ...h.channel,
+        kill: () =>
+          // Never resolve — simulates a stuck SIGTERM grace window.
+          new Promise(() => {}),
+        killSync: () => {
+          killSyncInvoked.push(tag);
+          realKillSync();
+        },
+      };
+      return h.channel;
+    };
+    const bridge = createHttpAcpBridge({ channelFactory: factory });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge.spawnOrAttach({ workspaceCwd: WS_B });
+
+    // Kick off shutdown — its `channel.kill()` will hang on the
+    // never-resolving Promise above, so `byWorkspaceChannel` clears
+    // but the awaits never finish. This is the mid-drain state.
+    const shutdownPromise = bridge.shutdown();
+    // Yield twice so shutdown's sync prefix runs (clear maps,
+    // publish session_died, start awaits).
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    // Operator double-Ctrl+C arrives now.
+    bridge.killAllSync();
+
+    // Both channels' killSync was invoked. Pre-fix this would have
+    // been an empty array.
+    expect(killSyncInvoked).toHaveLength(2);
+
+    // Cleanup: the never-resolving kill keeps shutdownPromise
+    // pending forever. Don't await it (would hang the test). The
+    // test runner GCs it when this `it` returns.
+    void shutdownPromise;
+  });
+
   describe('sendPrompt', () => {
     it('forwards a prompt and returns the agent response', async () => {
       const handles: ChannelHandle[] = [];

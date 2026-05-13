@@ -951,6 +951,16 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   // while `sessionIds.size > 0`; the last `killSession` (or the
   // `channel.exited` cleanup) drops the entry from this map.
   const byWorkspaceChannel = new Map<string, ChannelInfo>();
+  // tanzhenxin BkUyD: source of truth for "channels with potentially-
+  // alive child processes" — independent of `byWorkspaceChannel`,
+  // which `shutdown()` clears BEFORE awaiting per-child SIGTERM-
+  // grace kills. `killAllSync()` (the double-Ctrl+C force-exit
+  // path) iterates THIS set so a mid-shutdown second signal still
+  // sees the children that haven't yet finished their SIGTERM grace.
+  // Only removed when `channel.exited` fires (the OS-level "really
+  // dead" signal). The earlier design iterated `byWorkspaceChannel`
+  // and silently no-op'd during the shutdown await window.
+  const liveChannels = new Set<ChannelInfo>();
   // Coalesces concurrent channel-spawn requests for the same workspace
   // (regardless of sessionScope). Without this, two parallel callers
   // would both `channelFactory(workspaceKey)` and one of the
@@ -1106,6 +1116,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         sessionIds: new Set(),
       };
       byWorkspaceChannel.set(workspaceKey, info);
+      liveChannels.add(info);
 
       // One-time channel.exited cleanup. The child dying takes ALL
       // multiplexed sessions with it — iterate `sessionIds` (snapshot
@@ -1113,6 +1124,13 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // iteration), publish `session_died` on each session's bus,
       // remove from byId / byWorkspace / pending tables.
       void channel.exited.then((exitInfo) => {
+        // tanzhenxin BkUyD: drop from `liveChannels` ONLY when the
+        // OS process is actually gone. Async kill paths
+        // (`killSession` reap, `shutdown()` await) remove from
+        // `byWorkspaceChannel` early but the child's SIGTERM grace
+        // can still be in-flight; the force-kill path needs the
+        // entry until `channel.exited` fires here.
+        liveChannels.delete(info);
         const stillOurs = byWorkspaceChannel.get(workspaceKey) === info;
         if (stillOurs) byWorkspaceChannel.delete(workspaceKey);
         const sessions = Array.from(info.sessionIds);
@@ -1917,10 +1935,18 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     killAllSync() {
       // Bd1y6: synchronous best-effort SIGKILL on every live channel.
       // Set `shuttingDown` so any racing async path fails fast.
-      // Iterate the deduplicated set of channels (multi-session per
-      // channel means one channel can back many entries).
+      // tanzhenxin BkUyD fix: iterate `liveChannels` (the OS-level
+      // source of truth) NOT `byWorkspaceChannel`. The latter is
+      // cleared by `shutdown()` BEFORE awaiting per-child SIGTERM
+      // grace; if the operator double-Ctrl+C's during that window,
+      // iterating `byWorkspaceChannel` would find nothing and
+      // `process.exit(1)` would orphan children still inside their
+      // SIGTERM grace. `liveChannels` only loses an entry when
+      // `channel.exited` fires (OS exit), so the force-kill path
+      // catches every still-alive child regardless of where the
+      // graceful drain is.
       shuttingDown = true;
-      const channels = Array.from(byWorkspaceChannel.values());
+      const channels = Array.from(liveChannels);
       byWorkspaceChannel.clear();
       byWorkspace.clear();
       byId.clear();
