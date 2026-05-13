@@ -824,6 +824,61 @@ describe('ShellExecutionService', () => {
       expect(typeof settleCalls[0].endTime).toBe('number');
     });
 
+    it('PR-2.5 wave-2 (C2): unexpected post-promote PTY error routes to onSettle as failure (does NOT crash the CLI)', async () => {
+      // Foreground PTY error handler removed at promote handoff. Before
+      // the wave-2 fix the post-promote path attached NO error listener,
+      // so an unhandled `error` event would take Node down. Now we
+      // attach a forwarder: unexpected errors flow through onSettle
+      // with `error` populated; expected PTY read-exit errors
+      // (EIO / EAGAIN) are filtered.
+      const settleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'long-running-with-error',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_pty_err',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onSettle: (info) => settleCalls.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // 1. An expected PTY read-exit error (EIO) is FILTERED — onSettle
+      //    is NOT invoked yet (the upcoming onExit will carry status).
+      mockPtyProcess.emit(
+        'error',
+        Object.assign(new Error('read EIO'), { code: 'EIO' }),
+      );
+      expect(settleCalls).toHaveLength(0);
+
+      // 2. An UNEXPECTED error (EPIPE) routes to onSettle as a failure.
+      //    Critically: emitting must NOT throw (no unhandled `error`).
+      const unexpectedErr = Object.assign(new Error('disk gone'), {
+        code: 'EPIPE',
+      });
+      expect(() => mockPtyProcess.emit('error', unexpectedErr)).not.toThrow();
+      expect(settleCalls).toHaveLength(1);
+      expect(settleCalls[0].error).toBe(unexpectedErr);
+      expect(settleCalls[0].exitCode).toBeNull();
+      expect(settleCalls[0].signal).toBeNull();
+      expect(typeof settleCalls[0].endTime).toBe('number');
+
+      // 3. A subsequent onExit MUST NOT fire onSettle again (single-fire
+      //    latch): callers like the registry's `complete`/`fail`
+      //    transitions are not idempotent across status types.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      expect(settleCalls).toHaveLength(1);
+    });
+
     it('PR-2.5 backwards compat: without postPromote, listeners stay fully detached (no regression on PR-2 contract)', async () => {
       // Pin that omitting `postPromote` preserves the PR-2 detach-
       // everything contract. The pre-existing post-promote test at

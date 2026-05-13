@@ -2225,10 +2225,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let outputStream: fs.WriteStream | null = null;
     try {
       outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
+      // PR-2.5 wave-2 (gpt-5.5 C1): `createWriteStream` reports common
+      // failures (ENOENT / EACCES / ENOSPC during the async libuv
+      // `open`) via an `'error'` event AFTER this synchronous call
+      // returns — they do NOT throw. Without latching the failure
+      // here, `promoteArtifacts.stream` would still point at an
+      // already-broken stream, `postPromote.onData` would `write` into
+      // it (catching the throw via its own try/catch but never
+      // releasing the buffer), and `onSettleWired` would attach a
+      // `'finish'` listener that never fires → registry stuck on
+      // `running` forever. Latch the failure: null the stream,
+      // mark `streamFailed` so `onData` drops chunks, and let
+      // `onSettleWired` transition the registry immediately (its
+      // existing `if (!stream)` branch handles that case).
       outputStream.on('error', (err) => {
         debugLogger.warn(
           `promote: output write stream error for ${outputPath}: ${getErrorMessage(err)}`,
         );
+        promoteArtifacts.stream = null;
+        promoteArtifacts.streamFailed = true;
       });
       // Initial snapshot first, so it always precedes post-promote
       // bytes in the file (write ordering is FIFO on a single stream).
@@ -2405,47 +2420,66 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // `entryAc.abort() → registry.cancel` (task_stop fired during the
     // exit window) is safe: whichever lands first wins, the other
     // becomes a no-op.
-    // Latch so the queued-settle drain at the bottom of this method
-    // can observe whether the settle has already finished (and the
-    // registry entry is no longer `'running'`) before the model-facing
-    // copy is constructed. Mutated by `onSettleWired` after
-    // `transitionRegistry()` returns.
-    let postPromoteAlreadySettled = false;
+    // Status flags consumed by the model-facing copy below.
+    //
+    // - `postPromoteSettleObserved`: SET SYNCHRONOUSLY inside
+    //   `onSettleWired` the moment we know the child has exited (the
+    //   service has called us with settle info). Independent of
+    //   whether the registry transition has actually completed yet,
+    //   because the transition may be deferred awaiting the output
+    //   stream's `'finish'` event (libuv flush). This is the flag
+    //   the model-facing copy branches on: once we know the child has
+    //   exited, saying "Status: running" + suggesting `task_stop`
+    //   would mislead the agent.
+    // - `postPromoteFinalStatus`: classified from the settle info at
+    //   the same synchronous moment, so the status line can report
+    //   the right terminal status even if the registry transition is
+    //   still in flight.
+    //
+    // PR-2.5 wave-2 (gpt-5.5 C3): originally the model-facing copy
+    // checked a `postPromoteAlreadySettled` flag that was only flipped
+    // AFTER the registry transition fired (post-flush). A fast-exited
+    // promoted command could therefore land "Status: running" +
+    // `task_stop` instructions in the model copy even when settle was
+    // already queued, because the queued-settle drain returned before
+    // the stream's 'finish' event fired. The two flags decouple
+    // "child has exited" (what the agent cares about) from "registry
+    // transition has run" (which can lag behind libuv flush).
+    let postPromoteSettleObserved = false;
     let postPromoteFinalStatus: 'completed' | 'failed' | null = null;
+    const classifySettle = (
+      info: ShellPostPromoteSettleInfo,
+    ): { status: 'completed' | 'failed'; failMsg: string | null } => {
+      // Decision table: `error` → fail (spawn-side failure); `exitCode
+      // === 0` → complete; non-zero exitCode → fail; signal-killed
+      // (no exitCode, signal set) → fail with descriptive message;
+      // everything-null → fail with generic message.
+      if (info.error) return { status: 'failed', failMsg: info.error.message };
+      if (info.exitCode === 0) return { status: 'completed', failMsg: null };
+      if (info.exitCode !== null)
+        return { status: 'failed', failMsg: `Exited with code ${info.exitCode}` };
+      if (info.signal !== null)
+        return {
+          status: 'failed',
+          failMsg: `Terminated by signal ${info.signal}`,
+        };
+      return { status: 'failed', failMsg: 'Exited with unknown status' };
+    };
     const transitionRegistry = (info: ShellPostPromoteSettleInfo) => {
-      // Map service settle info to the registry transition. Decision
-      // table: `error` → fail (spawn-side failure); `exitCode === 0`
-      // → complete; non-zero exitCode → fail (non-zero is treated as
-      // failure consistent with shell convention); signal-killed (no
-      // exitCode, signal set) → fail with descriptive message; the
-      // rare-everything-null case → fail with a generic message.
-      if (info.error) {
-        registry.fail(shellId, info.error.message, info.endTime);
-        postPromoteFinalStatus = 'failed';
-      } else if (info.exitCode === 0) {
-        registry.complete(shellId, info.exitCode, info.endTime);
-        postPromoteFinalStatus = 'completed';
-      } else if (info.exitCode !== null) {
-        registry.fail(
-          shellId,
-          `Exited with code ${info.exitCode}`,
-          info.endTime,
-        );
-        postPromoteFinalStatus = 'failed';
-      } else if (info.signal !== null) {
-        registry.fail(
-          shellId,
-          `Terminated by signal ${info.signal}`,
-          info.endTime,
-        );
-        postPromoteFinalStatus = 'failed';
+      const cls = classifySettle(info);
+      if (cls.status === 'completed') {
+        registry.complete(shellId, info.exitCode as number, info.endTime);
       } else {
-        registry.fail(shellId, 'Exited with unknown status', info.endTime);
-        postPromoteFinalStatus = 'failed';
+        registry.fail(shellId, cls.failMsg as string, info.endTime);
       }
-      postPromoteAlreadySettled = true;
     };
     promoteArtifacts.onSettleWired = (info) => {
+      // Synchronous observation — the child has exited; classify now
+      // so the model-facing copy can branch correctly even when the
+      // registry transition is deferred behind the stream's flush.
+      const cls = classifySettle(info);
+      postPromoteFinalStatus = cls.status;
+      postPromoteSettleObserved = true;
       // Wait for the output stream to fully FLUSH before transitioning
       // the registry. `stream.end()` is asynchronous — pending writes
       // can still be in the libuv queue when it returns. Without the
@@ -2487,19 +2521,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
     // Drain a settle that landed BEFORE the wire installed (fast
     // commands can exit between `result.promoted` and this line).
-    // After this call returns, `postPromoteAlreadySettled` may be true
-    // — that's the case the model-facing copy below branches on so
-    // the message doesn't say "Status: running" for a process that
-    // already finished during the registration window.
-    //
-    // Note on async ordering: when there's an output stream, the wired
-    // handler returns BEFORE `transitionRegistry` runs (it waits for
-    // the 'finish' event). For the fast-exit-no-buffer case the stream
-    // has typically already flushed and 'finish' fires on the next
-    // microtask — fast enough that the typical /tasks read after the
-    // model sees the promote message lands AFTER the transition. The
-    // stream-null branch (open failed) transitions synchronously, so
-    // the copy below sees the final status immediately.
+    // After this call returns, `postPromoteSettleObserved` is true
+    // if a settle was queued — that's the case the model-facing copy
+    // below branches on so the message doesn't say "Status: running"
+    // for a process that already finished during the registration
+    // window.
     if (promoteArtifacts.settleQueued) {
       const queued = promoteArtifacts.settleQueued;
       promoteArtifacts.settleQueued = null;
@@ -2507,17 +2533,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     // Build the model-facing status line based on whether the settle
-    // already drained synchronously. PR-2.5 review feedback: blindly
-    // saying "Status: running" for an entry that already finished
-    // misdirects the agent (it then suggests `task_stop` on a process
-    // that's already gone).
-    const statusLine = postPromoteAlreadySettled
+    // was observed synchronously (i.e. the child has exited). Branch
+    // on `postPromoteSettleObserved` rather than the post-flush latch
+    // — see the flag block above for the rationale.
+    const statusLine = postPromoteSettleObserved
       ? `Status: ${postPromoteFinalStatus ?? 'settled'}. PID: ${result.pid ?? '(unknown)'}.`
       : `Status: running. PID: ${result.pid ?? '(unknown)'}.`;
-    const inspectLine = postPromoteAlreadySettled
+    const inspectLine = postPromoteSettleObserved
       ? `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`
       : `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
-    const stopLine = postPromoteAlreadySettled
+    const stopLine = postPromoteSettleObserved
       ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
       : `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`;
     const llmContent = [
