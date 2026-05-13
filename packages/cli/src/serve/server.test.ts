@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createServeApp } from './server.js';
@@ -1207,14 +1208,18 @@ describe('runQwenServe', () => {
     // Pointing the daemon at a file (vs. a directory) is operator error
     // — the agent would fail at child-spawn time with ENOTDIR. Catch
     // it at boot for a clearer error message.
+    //
+    // `fileURLToPath` (not `new URL(...).pathname`) — on Windows the
+    // latter returns `/C:/path/...` with a leading slash, which
+    // `statSync` resolves as path-from-current-drive-root and the
+    // test would then see ENOENT instead of the expected
+    // "not a directory" branch.
     await expect(
       runQwenServe({
         hostname: '127.0.0.1',
         port: 0,
         mode: 'http-bridge',
-        // `import.meta.url` resolves to this test file's URL on Node;
-        // strip `file://` to get an absolute path that's known to exist.
-        workspace: new URL(import.meta.url).pathname,
+        workspace: fileURLToPath(import.meta.url),
       }),
     ).rejects.toThrow(/exists but is not a directory/);
   });

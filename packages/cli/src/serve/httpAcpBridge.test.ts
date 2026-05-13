@@ -80,6 +80,16 @@ interface FakeAgentOpts {
     p: PromptRequest,
     self: FakeAgent,
   ) => Promise<PromptResponse> | PromptResponse;
+  /**
+   * Custom `newSession` handler. Default returns a synthesized id (see
+   * `newSession` below). Used by tests that need to exercise the
+   * doSpawn newSession-failure path (e.g. throwing to cover the
+   * `isDying`-mark-then-kill cleanup).
+   */
+  newSessionImpl?: (
+    p: NewSessionRequest,
+    self: FakeAgent,
+  ) => Promise<NewSessionResponse> | NewSessionResponse;
 }
 
 class FakeAgent implements Agent {
@@ -103,6 +113,9 @@ class FakeAgent implements Agent {
 
   async newSession(p: NewSessionRequest): Promise<NewSessionResponse> {
     this.newSessionCalls.push(p);
+    if (this.opts.newSessionImpl) {
+      return this.opts.newSessionImpl(p, this);
+    }
     const prefix = this.opts.sessionIdPrefix ?? 'sess';
     // Stage 1.5 multi-session: one FakeAgent can host multiple
     // sessions (same as the real ACP agent), so each newSession call
@@ -519,6 +532,153 @@ describe('createHttpAcpBridge', () => {
     // overrides it). Don't await killSession or shutdown — same
     // pattern as the BkUyD test above. The test runner GCs the
     // dangling promises when this `it` returns.
+    void killPromise;
+  });
+
+  it('doSpawn newSession-failure marks the empty channel dying so the next spawn gets a fresh one', async () => {
+    // Parallel to "killSession marks the channel dying" above, but
+    // covers the OTHER `isDying = true` site: `doSpawn`'s
+    // `connection.newSession()` rejection path. When the channel's
+    // first/only `newSession` fails (auth, bad config, agent crash
+    // during init), the bridge marks the empty channel dying and
+    // kicks off `channel.kill()`. The kill awaits a SIGTERM grace,
+    // and during that window the next `spawnOrAttach` retry MUST
+    // get a FRESH channel — not reuse the one whose newSession just
+    // failed (which would re-issue newSession to a transport about
+    // to close, almost certainly hanging or failing identically).
+    // Pre-fix the equivalent code eagerly cleared `channelInfo` so
+    // the BkUyD invariant was violated; the round-2 fix uses
+    // `isDying` + `aliveChannels` instead.
+    let factoryCount = 0;
+    const killSyncCalls: string[] = [];
+    const factory: ChannelFactory = async () => {
+      const tag = `c${factoryCount++}`;
+      // First channel's newSession rejects; subsequent channels succeed.
+      const firstChannel = factoryCount === 1;
+      const h = makeChannel({
+        sessionIdPrefix: tag,
+        newSessionImpl: firstChannel
+          ? () => {
+              throw new Error('agent refused newSession (test)');
+            }
+          : undefined,
+      });
+      const realKillSync = h.channel.killSync;
+      h.channel = {
+        ...h.channel,
+        // Hang kill() so the SIGTERM grace stays open for the
+        // duration of the test. We don't await spawnOrAttach's
+        // rejection (which would block on the kill) — instead we
+        // catch it via .catch() and yield enough cycles for the
+        // sync prefix (`isDying = true`) to settle.
+        kill: () => new Promise(() => {}),
+        killSync: () => {
+          killSyncCalls.push(tag);
+          realKillSync();
+        },
+      };
+      return h.channel;
+    };
+    // Thread scope so calls don't coalesce via `inFlightSpawns` —
+    // the second spawn must not wait on the first one's hanging
+    // doSpawn. Without thread scope the single-scope coalescing
+    // would make `spawnOrAttach` call 2 await call 1's in-flight
+    // promise (still pending on the never-resolving kill).
+    const bridge = makeBridge({
+      channelFactory: factory,
+      sessionScope: 'thread',
+    });
+
+    // First spawn: newSession on c0 fails. `doSpawn`'s catch runs
+    // `ci.isDying = true` synchronously, then `await ci.channel.kill()`
+    // (hangs in this test). The original error never propagates
+    // because the kill never resolves — so we DON'T await the
+    // rejection. Capture it for cleanup.
+    let firstErr: unknown;
+    const firstAttempt = bridge
+      .spawnOrAttach({ workspaceCwd: WS_A })
+      .catch((err) => {
+        firstErr = err;
+      });
+
+    // Yield enough times for `ensureChannel`'s spawn to complete,
+    // newSession to reject, and doSpawn's catch sync prefix
+    // (`ci.isDying = true`) to run before the kill-await hangs.
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+    expect(factoryCount).toBe(1);
+
+    // Second attempt: `ensureChannel` finds c0 with `isDying: true`,
+    // skips it, spawns a fresh c1. Pre-fix the equivalent code
+    // (eagerly clearing `channelInfo`) made this work via a
+    // different mechanism that violated BkUyD; the current fix uses
+    // `isDying` + `aliveChannels` for both correctness AND BkUyD.
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(factoryCount).toBe(2);
+    expect(second.attached).toBe(false);
+
+    // Both channels live in `aliveChannels` (c0 is dying but its
+    // `channel.exited` hasn't fired; c1 is freshly attached).
+    // `killAllSync` MUST find both.
+    bridge.killAllSync();
+    expect(killSyncCalls.sort()).toEqual(['c0', 'c1']);
+
+    // Cleanup: firstAttempt is pending forever (kill never resolves).
+    // Touch firstErr to satisfy linters about the variable.
+    void firstAttempt;
+    void firstErr;
+  });
+
+  it('killAllSync force-kills BOTH the dying channel AND the fresh attach-target (BkUyD overwrite race)', async () => {
+    // The killSession → spawnOrAttach race opens a window where two
+    // channels are simultaneously "alive" from the daemon's
+    // perspective: the dying one (sessionIds.size === 0, in
+    // SIGTERM grace) and the fresh one (just spawned to serve the new
+    // request). Pre-fix `killAllSync()` iterated only `channelInfo`
+    // (the fresh one), missing the dying channel and orphaning its
+    // child when `process.exit(1)` fired before its SIGTERM
+    // escalation timer. Fix: separate `aliveChannels: Set<ChannelInfo>`
+    // that `killAllSync` iterates, only cleared by each channel's
+    // `channel.exited` (the OS-reap signal).
+    const killSyncCalls: string[] = [];
+    let factoryCount = 0;
+    const factory: ChannelFactory = async () => {
+      const tag = `c${factoryCount++}`;
+      const h = makeChannel({ sessionIdPrefix: tag });
+      const realKillSync = h.channel.killSync;
+      h.channel = {
+        ...h.channel,
+        // kill() hangs forever so the dying channel stays in
+        // SIGTERM grace for the duration of the test.
+        kill: () => new Promise(() => {}),
+        killSync: () => {
+          killSyncCalls.push(tag);
+          realKillSync();
+        },
+      };
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    // Trigger the overwrite race: kill the only session → channel
+    // marked dying, kill awaits a never-resolving Promise; then
+    // spawn a new session → fresh channel, `channelInfo` reassigned.
+    const killPromise = bridge.killSession(first.sessionId);
+    await new Promise((r) => setImmediate(r));
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    // Both channels are alive from the OS's perspective. A
+    // double-Ctrl+C arrives.
+    bridge.killAllSync();
+
+    // BOTH channels received killSync. Pre-fix only `c1` (the fresh
+    // one in `channelInfo`) would have fired — `c0` was dying in
+    // unreachable state and would have orphaned its child.
+    expect(killSyncCalls.sort()).toEqual(['c0', 'c1']);
+
+    // Cleanup: dangling never-resolving promises GC'd by the runner.
     void killPromise;
   });
 

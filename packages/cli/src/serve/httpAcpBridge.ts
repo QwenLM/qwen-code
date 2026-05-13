@@ -996,19 +996,35 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const boundWorkspace = canonicalizeWorkspace(opts.boundWorkspace);
 
   // #3803 §02 single-workspace model: the bridge hosts AT MOST one
-  // channel and one default attach-target entry. Multi-session
-  // multiplexing happens through `channelInfo.sessionIds`; the
-  // `defaultEntry` slot is the FIRST session created (the one a
+  // ATTACH-AVAILABLE channel and one default attach-target entry.
+  // Multi-session multiplexing happens through `channelInfo.sessionIds`;
+  // the `defaultEntry` slot is the FIRST session created (the one a
   // same-workspace attach under `single` scope reuses). Thread-scope
   // sessions add to `byId` but don't displace `defaultEntry`.
   let defaultEntry: SessionEntry | undefined;
+  // `channelInfo` is the SINGLE attach-available channel. Cleared when
+  // `killSession` marks the last session leaving (via `isDying`),
+  // when `doSpawn`'s newSession fails on an empty channel, or when
+  // `channel.exited` fires for the channel currently in this slot.
+  // Race-aware code paths (`ensureChannel`, `killAllSync`) gate on
+  // `isDying` rather than presence — see ChannelInfo.isDying for the
+  // BkUyD invariant.
   let channelInfo: ChannelInfo | undefined;
-  // tanzhenxin BkUyD: the channel reference is cleared ONLY when
-  // `channel.exited` fires (OS-level "really dead" signal), NOT
-  // eagerly during `shutdown()`. The double-Ctrl+C force-exit path
-  // (`killAllSync`) needs the reference until the OS has reaped the
-  // child — otherwise a second signal mid-SIGTERM-grace finds
-  // nothing to force-kill and `process.exit(1)` orphans the child.
+  // tanzhenxin BkUyD: superset of `channelInfo` covering channels
+  // that are dying but not yet OS-reaped. `killSession` /
+  // `doSpawn`-newSession-failure / `shutdown` mark a channel as
+  // `isDying` and start its async kill; meanwhile a concurrent
+  // `spawnOrAttach` can spawn a FRESH channel and reassign
+  // `channelInfo`. Without this set, the dying channel becomes
+  // unreachable — a double-Ctrl+C arriving mid-grace would call
+  // `killAllSync()`, find only the fresh channel in `channelInfo`,
+  // force-kill it, and `process.exit(1)` would orphan the dying one
+  // whose SIGTERM hadn't yet completed. The set is the OS-level
+  // "still alive" source of truth: entries are added when a channel
+  // is created and removed when its `channel.exited` resolves.
+  // `killAllSync` iterates THIS set to fire SIGKILL on every alive
+  // child regardless of whether it's still the attach target.
+  const aliveChannels = new Set<ChannelInfo>();
   // Coalesces a concurrent second `ensureChannel()` call onto the
   // first one's spawn so we never create two children for the same
   // daemon. Cleared in the `finally` of the creator.
@@ -1162,6 +1178,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         isDying: false,
       };
       channelInfo = info;
+      aliveChannels.add(info);
 
       // One-time channel.exited cleanup. The child dying takes ALL
       // multiplexed sessions with it — iterate `sessionIds` (snapshot
@@ -1169,14 +1186,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // iteration), publish `session_died` on each session's bus,
       // remove from byId / defaultEntry / pending tables.
       //
-      // tanzhenxin BkUyD: this is also where `channelInfo` is cleared.
-      // The async kill paths (`killSession` reap, `shutdown()` await,
-      // `doSpawn`'s newSession-failure tear-down) all leave
-      // `channelInfo` set until the OS has reaped the child, so the
-      // double-Ctrl+C `killAllSync` force-kill path still has a
-      // reference to fire SIGKILL against during the SIGTERM grace
-      // window.
+      // tanzhenxin BkUyD: drop from `aliveChannels` ONLY when the OS
+      // process is actually gone. Async kill paths (`killSession`
+      // reap, `shutdown()` await, `doSpawn`'s newSession-failure
+      // tear-down) mark `isDying = true` but leave the entry in
+      // `aliveChannels` until this handler fires, so the double-Ctrl+C
+      // `killAllSync` force-kill path still has a reference to fire
+      // SIGKILL against during the SIGTERM grace window — even if a
+      // concurrent `spawnOrAttach` has already reassigned
+      // `channelInfo` to a fresh channel.
       void channel.exited.then((exitInfo) => {
+        aliveChannels.delete(info);
         if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
         info.sessionIds.clear();
@@ -1990,19 +2010,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     },
 
     killAllSync() {
-      // Bd1y6: synchronous best-effort SIGKILL on the live channel.
-      // Set `shuttingDown` so any racing async path fails fast.
-      // tanzhenxin BkUyD: read `channelInfo` directly — it's only
-      // cleared by `channel.exited` (OS-level reap), NOT eagerly by
-      // `shutdown()`, so a mid-SIGTERM-grace double-signal still
-      // finds the live reference and force-kills.
+      // Bd1y6: synchronous best-effort SIGKILL on EVERY alive channel
+      // (typically 1, but during a `killSession`-then-`spawnOrAttach`
+      // overlap there can be 2 — the dying one in `aliveChannels`
+      // plus a fresh attach-target in `channelInfo`). Set
+      // `shuttingDown` so any racing async path fails fast.
+      //
+      // tanzhenxin BkUyD: iterate `aliveChannels` (the OS-level "still
+      // alive" source of truth) — `channelInfo` only points at the
+      // CURRENT attach target, missing any dying channel whose
+      // `channel.exited` hasn't fired yet. Pre-fix this iterated
+      // `channelInfo` alone; if a fresh spawn had already overwritten
+      // it during the prior channel's SIGTERM grace, the dying child
+      // received SIGTERM but no SIGKILL escalation when `process.exit(1)`
+      // fires and was orphaned.
       shuttingDown = true;
-      const ci = channelInfo;
+      const channels = Array.from(aliveChannels);
       defaultEntry = undefined;
       byId.clear();
-      if (ci) {
+      for (const info of channels) {
         try {
-          ci.channel.killSync();
+          info.channel.killSync();
         } catch {
           /* best-effort — already-dead child / pid race */
         }
@@ -2016,18 +2044,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // spawning a child this teardown won't see.
       shuttingDown = true;
       const entries = Array.from(byId.values());
-      // Snapshot the live channel (if any) — `channelInfo` itself is
-      // intentionally NOT cleared here; the `channel.exited` handler
-      // clears it once the OS has reaped the child. That preserves
-      // the BkUyD invariant: a double-Ctrl+C arriving mid-SIGTERM-
-      // grace can still find the channel via `killAllSync`. Setting
-      // `isDying` makes the dying channel invisible to any racing
-      // `ensureChannel` call — but `shuttingDown` already blocks new
-      // `spawnOrAttach` upstream, so this is mostly belt-and-suspenders
-      // (a direct internal `ensureChannel` past the gate would still
-      // see the dying state and not attach).
-      const ci = channelInfo;
-      if (ci) ci.isDying = true;
+      // Snapshot every alive channel (typically 1; up to 2 during a
+      // `killSession`-then-`spawnOrAttach` overlap) — entries are
+      // intentionally NOT removed from `aliveChannels` here; their
+      // `channel.exited` handlers clear them once the OS has reaped
+      // each child. That preserves the BkUyD invariant: a
+      // double-Ctrl+C arriving mid-SIGTERM-grace can still find every
+      // alive channel via `killAllSync`. Marking each `isDying` makes
+      // them invisible to any racing `ensureChannel` call — but
+      // `shuttingDown` already blocks new `spawnOrAttach` upstream,
+      // so this is mostly belt-and-suspenders (a direct internal
+      // `ensureChannel` past the gate would still see the dying
+      // state and not attach).
+      const channels = Array.from(aliveChannels);
+      for (const ci of channels) ci.isDying = true;
       // Resolve every still-pending permission as cancelled before clearing
       // the maps so callers awaiting `requestPermission` unwind cleanly.
       for (const e of entries) {
@@ -2080,7 +2110,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           )
         : Promise.resolve();
       await Promise.all([
-        ci ? ci.channel.kill().catch(() => {}) : Promise.resolve(),
+        ...channels.map((ci) => ci.channel.kill().catch(() => {})),
         ...inFlightSessionAwaits,
         inFlightChannelAwait,
       ]);
