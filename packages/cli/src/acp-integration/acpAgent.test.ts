@@ -846,6 +846,38 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('newSession does not fire SessionStart directly in ACP agent', async () => {
+    const innerConfig = await setupSessionMocks(
+      'session-no-direct-session-start',
+    );
+    const fireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
+    innerConfig.getHookSystem = vi.fn().mockReturnValue({
+      fireSessionStartEvent,
+    });
+    innerConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    innerConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(fireSessionStartEvent).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('rewindSession extension method rewinds the active session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);

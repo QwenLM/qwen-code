@@ -36,6 +36,7 @@
     "src/nonInteractiveCli.test.ts",
     "src/services/FileCommandLoader.test.ts",
     "src/services/prompt-processors/argumentProcessor.test.ts",
+    "src/serve/server.test.ts",
     "src/utils/cleanup.test.ts",
     "src/utils/handleAutoUpdate.test.ts",
     "src/utils/startupWarnings.test.ts",

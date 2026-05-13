@@ -516,6 +516,18 @@ export class GeminiChat {
     this.generationConfig.systemInstruction = sysInstr;
   }
 
+  appendSystemInstruction(extraInstruction: string) {
+    const trimmed = extraInstruction.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const current = this.generationConfig.systemInstruction;
+    this.generationConfig.systemInstruction = current
+      ? `${current}\n\n---\n\n${trimmed}`
+      : trimmed;
+  }
+
   /**
    * Sends a message to the model and returns the response in chunks.
    *

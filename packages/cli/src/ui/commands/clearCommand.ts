@@ -101,6 +101,12 @@ export const clearCommand: SlashCommand = {
           config.getModel() ?? '',
           String(config.getApprovalMode()) as PermissionMode,
         )
+        .then((hookOutput) => {
+          const additionalContext = hookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            geminiClient.getChat().appendSystemInstruction(additionalContext);
+          }
+        })
         .catch((err) => {
           config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
         });

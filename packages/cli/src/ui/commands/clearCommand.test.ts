@@ -29,6 +29,7 @@ import type { GeminiClient } from '@qwen-code/qwen-code-core';
 describe('clearCommand', () => {
   let mockContext: CommandContext;
   let mockResetChat: ReturnType<typeof vi.fn>;
+  let mockAppendSystemInstruction: ReturnType<typeof vi.fn>;
   let mockStartNewSession: ReturnType<typeof vi.fn>;
   let mockFireSessionEndEvent: ReturnType<typeof vi.fn>;
   let mockFireSessionStartEvent: ReturnType<typeof vi.fn>;
@@ -42,6 +43,7 @@ describe('clearCommand', () => {
 
   beforeEach(() => {
     mockResetChat = vi.fn().mockResolvedValue(undefined);
+    mockAppendSystemInstruction = vi.fn();
     mockStartNewSession = vi.fn().mockReturnValue('new-session-id');
     mockFireSessionEndEvent = vi.fn().mockResolvedValue(undefined);
     mockFireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
@@ -63,6 +65,9 @@ describe('clearCommand', () => {
           getGeminiClient: () =>
             ({
               resetChat: mockResetChat,
+              getChat: vi.fn().mockReturnValue({
+                appendSystemInstruction: mockAppendSystemInstruction,
+              }),
             }) as unknown as GeminiClient,
           getBackgroundTaskRegistry: vi.fn().mockReturnValue({
             hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
@@ -146,6 +151,23 @@ describe('clearCommand', () => {
     const sessionStartCallOrder =
       mockFireSessionStartEvent.mock.invocationCallOrder[0];
     expect(sessionEndCallOrder).toBeLessThan(sessionStartCallOrder);
+  });
+
+  it('appends SessionStart additionalContext to the reset chat system instruction', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    mockFireSessionStartEvent.mockResolvedValue({
+      getAdditionalContext: () => 'Clear hook context',
+    });
+
+    await clearCommand.action(mockContext, '');
+    await Promise.resolve();
+
+    expect(mockAppendSystemInstruction).toHaveBeenCalledWith(
+      'Clear hook context',
+    );
   });
 
   it('aborts old background work before starting a new session', async () => {

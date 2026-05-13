@@ -459,7 +459,7 @@ export class ChatCompressionService {
         const permissionMode = String(
           config.getApprovalMode(),
         ) as PermissionMode;
-        await config
+        const hookOutput = await config
           .getHookSystem()
           ?.fireSessionStartEvent(
             SessionStartSource.Compact,
@@ -468,6 +468,10 @@ export class ChatCompressionService {
             undefined,
             signal,
           );
+        const additionalContext = hookOutput?.getAdditionalContext();
+        if (additionalContext) {
+          chat.appendSystemInstruction(additionalContext);
+        }
       } catch (err) {
         config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
       }

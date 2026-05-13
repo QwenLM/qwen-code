@@ -369,6 +369,7 @@ describe('ChatCompressionService', () => {
     service = new ChatCompressionService();
     mockChat = {
       getHistory: vi.fn(),
+      appendSystemInstruction: vi.fn(),
     } as unknown as GeminiChat;
     mockFireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
     mockGetHookSystem = vi.fn().mockReturnValue({
@@ -628,6 +629,46 @@ describe('ChatCompressionService', () => {
       'default',
       undefined,
       undefined,
+    );
+  });
+
+  it('appends SessionStart additionalContext after successful compression', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+    mockFireSessionStartEvent.mockResolvedValue({
+      getAdditionalContext: () => 'Compact hook context',
+    });
+
+    const mockGenerateContent = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 1100,
+        candidatesTokenCount: 50,
+        totalTokenCount: 1150,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(mockChat.appendSystemInstruction).toHaveBeenCalledWith(
+      'Compact hook context',
     );
   });
 

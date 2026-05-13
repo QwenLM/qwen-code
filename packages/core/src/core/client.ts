@@ -94,12 +94,12 @@ import {
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
 import { partToString } from '../utils/partUtils.js';
-import { createHookOutput } from '../hooks/types.js';
+import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import type { StopHookOutput } from '../hooks/types.js';
+import type { StopHookOutput, PermissionMode } from '../hooks/types.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
@@ -443,6 +443,32 @@ export class GeminiClient {
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
+      let sessionStartAdditionalContext: string | undefined;
+      const hookSystem = this.config.getHookSystem();
+      const hooksEnabled = !this.config.getDisableAllHooks();
+      if (
+        hooksEnabled &&
+        hookSystem &&
+        this.config.hasHooksForEvent('SessionStart')
+      ) {
+        try {
+          const permissionMode = String(
+            this.config.getApprovalMode(),
+          ) as PermissionMode;
+          const startHookOutput = await hookSystem.fireSessionStartEvent(
+            extraHistory
+              ? SessionStartSource.Resume
+              : SessionStartSource.Startup,
+            this.config.getModel() ?? '',
+            permissionMode,
+          );
+          sessionStartAdditionalContext =
+            startHookOutput?.getAdditionalContext();
+        } catch (err) {
+          this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+        }
+      }
+
       // Warm the tool registry before building the system prompt so we know
       // which tools are marked `shouldDefer`. The deferred list is appended to
       // the prompt so the model knows which tools are reachable via
@@ -510,6 +536,10 @@ export class GeminiClient {
         this.config.getChatRecordingService(),
         uiTelemetryService,
       );
+
+      if (sessionStartAdditionalContext) {
+        this.chat.appendSystemInstruction(sessionStartAdditionalContext);
+      }
 
       await this.setTools();
 

@@ -19,9 +19,7 @@ import {
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
-  SessionStartSource,
   SessionEndReason,
-  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -766,24 +764,6 @@ class QwenAgent implements Agent {
       this.settings,
     );
     this.sessions.set(sessionId, session);
-
-    // Fire SessionStart hook (aligned with core path)
-    const hookSystem = config.getHookSystem();
-    const hooksEnabled = !config.getDisableAllHooks();
-    if (hooksEnabled && hookSystem && config.hasHooksForEvent('SessionStart')) {
-      const source = conversation
-        ? SessionStartSource.Resume
-        : SessionStartSource.Startup;
-      const model = config.getModel();
-      const permissionMode = String(config.getApprovalMode()) as PermissionMode;
-      try {
-        await hookSystem.fireSessionStartEvent(source, model, permissionMode);
-      } catch (err) {
-        debugLogger.warn(
-          `SessionStart hook failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
 
     setTimeout(async () => {
       await session.sendAvailableCommandsUpdate();

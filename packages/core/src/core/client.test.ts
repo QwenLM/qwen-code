@@ -29,6 +29,11 @@ import { buildAgentContentGeneratorConfig } from '../models/content-generator-co
 import { type GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import {
+  createHookOutput,
+  PermissionMode,
+  SessionStartSource,
+} from '../hooks/types.js';
 import type { ModelsConfig } from '../models/modelsConfig.js';
 import { retryWithBackoff } from '../utils/retry.js';
 import { CompressionStatus, GeminiEventType, Turn } from './turn.js';
@@ -638,6 +643,62 @@ describe('Gemini Client (client.ts)', () => {
 
       // No history scan match, ToolSearch available → no reveal at all.
       expect(reg.revealDeferredTool).not.toHaveBeenCalled();
+    });
+
+    it('injects SessionStart additionalContext into the startup system instruction', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Startup hook context',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat();
+
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Startup,
+        'test-model',
+        PermissionMode.Default,
+      );
+      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
+        'Startup hook context',
+      );
+    });
+
+    it('injects SessionStart additionalContext into the resumed system instruction', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Resume hook context',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat([{ role: 'user', parts: [{ text: 'hi' }] }]);
+
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Resume,
+        'test-model',
+        PermissionMode.Default,
+      );
+      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
+        'Resume hook context',
+      );
     });
   });
 
