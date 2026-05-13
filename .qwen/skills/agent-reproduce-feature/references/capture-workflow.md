@@ -4,10 +4,21 @@ This skill follows the nested-agent pattern described in "解决问题的原始�
 
 ## Local Roles
 
-- Outer harness: the current Codex session.
-- Reference program: a nested `codex` command that demonstrates the feature.
+- Outer harness: the current agent session.
+- Reference program: a nested `codex`, `claude`, or `claude-code` command that demonstrates the feature.
 - Target program: Qwen Code in the current working directory unless the user explicitly provides another path.
 - Capture layer: `mitmdump` plus terminal transcript capture.
+
+## Reference Adapters
+
+Select one reference adapter before capture:
+
+| Adapter | Interactive command | Headless command |
+| --- | --- | --- |
+| `codex` | `codex` | `codex exec "<prompt>"` |
+| `claude-code` | `claude` or `claude-code` | Discover locally; if unavailable, use tmux interaction |
+
+Do not assume Claude Code's exact non-interactive flags. Check `claude --help` or `claude-code --help` in the user's environment and record the command used.
 
 ## Choosing Execution Mode
 
@@ -36,7 +47,7 @@ python -m pip install --user mitmproxy
 Run a command under capture:
 
 ```sh
-skills/codex-reproduce-feature/scripts/run_with_mitm.sh OUT_DIR -- COMMAND ARG...
+skills/agent-reproduce-feature/scripts/run_with_mitm.sh OUT_DIR -- COMMAND ARG...
 ```
 
 Generated files:
@@ -60,7 +71,7 @@ The default CA path is `~/.mitmproxy/mitmproxy-ca-cert.pem`. Some CLIs ignore on
 Run:
 
 ```sh
-skills/codex-reproduce-feature/scripts/run_tmux_capture.sh OUT_DIR COMMAND ARG...
+skills/agent-reproduce-feature/scripts/run_tmux_capture.sh OUT_DIR COMMAND ARG...
 ```
 
 Generated files:

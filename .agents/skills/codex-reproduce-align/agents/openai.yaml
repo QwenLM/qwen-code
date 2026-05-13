@@ -1,4 +1,0 @@
-interface:
-  display_name: "Codex Reproduce Align"
-  short_description: "Compare Codex and Qwen Code traces for parity"
-  default_prompt: "Use $codex-reproduce-align to compare Codex and Qwen Code traces for a reproduced feature."

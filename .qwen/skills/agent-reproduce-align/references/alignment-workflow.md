@@ -1,6 +1,6 @@
 # Alignment Workflow Reference
 
-The alignment phase starts after Qwen Code has a candidate implementation. Use it to create a tight loop: run both tools, compare traces, patch the target, and rerun only the failing scenario.
+The alignment phase starts after Qwen Code has a candidate implementation. Use it to create a tight loop: run the selected reference agent and Qwen Code, compare traces, patch the target, and rerun only the failing scenario.
 
 ## Trace Inputs
 
@@ -8,7 +8,7 @@ Expected raw capture layout:
 
 ```text
 .repro-runs/<scenario>/
-  codex/
+  reference/
     http.jsonl
     command.stdout
     command.stderr
@@ -20,7 +20,7 @@ Expected raw capture layout:
     command.exit
 ```
 
-Use capture scripts from `$codex-reproduce-feature` for raw capture, or use `run_pair_capture.sh` for simple non-interactive shell scenarios.
+Use capture scripts from `$agent-reproduce-feature` for raw capture, or use `run_pair_capture.sh` for simple non-interactive shell scenarios.
 
 ## Normalization
 

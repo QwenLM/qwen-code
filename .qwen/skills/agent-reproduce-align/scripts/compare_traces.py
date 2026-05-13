@@ -53,7 +53,7 @@ def compare_request(idx: int, left: dict[str, Any], right: dict[str, Any]) -> li
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("left", type=Path, help="Reference normalized trace, usually Codex")
+    parser.add_argument("left", type=Path, help="Reference normalized trace")
     parser.add_argument("right", type=Path, help="Target normalized trace, usually Qwen Code")
     args = parser.parse_args()
 
