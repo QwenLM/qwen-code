@@ -31,6 +31,10 @@ const HOSTED_INSTALLATION_ASSETS = [
     sourcePath: ['scripts', 'installation', 'install-qwen-with-source.bat'],
     output: 'install-qwen.bat',
   },
+  {
+    sourcePath: ['scripts', 'installation', 'install-qwen-with-source.ps1'],
+    output: 'install-qwen.ps1',
+  },
 ];
 const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
   ({ output }) => output,

@@ -635,12 +635,14 @@ describe('standalone release packaging', () => {
 
       const installSh = path.join(tmpDir, 'install-qwen.sh');
       const installBat = path.join(tmpDir, 'install-qwen.bat');
+      const installPs1 = path.join(tmpDir, 'install-qwen.ps1');
       const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
       const checksumLines = checksums.trim().split('\n');
 
       expect(HOSTED_INSTALLATION_ASSET_NAMES).toEqual([
         'install-qwen.sh',
         'install-qwen.bat',
+        'install-qwen.ps1',
       ]);
       expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual(
         HOSTED_INSTALLATION_ASSET_NAMES,
@@ -677,11 +679,15 @@ describe('standalone release packaging', () => {
       expect(readScript(installBat)).toBe(
         readScript('scripts/installation/install-qwen-with-source.bat'),
       );
+      expect(readScript(installPs1)).toBe(
+        readScript('scripts/installation/install-qwen-with-source.ps1'),
+      );
       expect(existsSync(path.join(tmpDir, 'install'))).toBe(false);
       const checksumNames = checksumLines.map((line) => line.split('  ')[1]);
       expect(checksumNames).toEqual([...checksumNames].sort());
       expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.sh$/m);
       expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.bat$/m);
+      expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.ps1$/m);
       expect(checksums).not.toMatch(/ {2}install$/m);
       if (process.platform !== 'win32') {
         expect(lstatSync(installSh).mode & 0o111).not.toBe(0);

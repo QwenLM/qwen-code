@@ -31,9 +31,10 @@ const EXPECTED_STANDALONE_ARCHIVE_NAMES = RELEASE_TARGETS.map(
   ({ qwenTarget }) => standaloneArchiveName(qwenTarget),
 );
 // Release artifacts that the installer chain expects in a GitHub Release.
-// Hosted installer scripts (install-qwen.sh / install-qwen.bat) are served
-// from a separate hosted endpoint and are intentionally not part of this set;
-// they have their own staging path in `package:hosted-installation`.
+// Hosted installer scripts (install-qwen.sh / install-qwen.bat /
+// install-qwen.ps1) are served from a separate hosted endpoint and are
+// intentionally not part of this set; they have their own staging path in
+// `package:hosted-installation`.
 const EXPECTED_RELEASE_ASSET_NAMES = [
   ...EXPECTED_STANDALONE_ARCHIVE_NAMES,
   'SHA256SUMS',

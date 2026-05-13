@@ -27,7 +27,7 @@ curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/in
 **Windows (Run as Administrator)**
 
 ```cmd
-powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
+powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
 ```
 
 > [!note]

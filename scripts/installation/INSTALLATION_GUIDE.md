@@ -57,6 +57,19 @@ curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/in
 curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --version vX.Y.Z
 ```
 
+```cmd
+powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
+```
+
+To pin a release with the hosted PowerShell entrypoint, set the env var first:
+
+```powershell
+$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'
+powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
+```
+
+Or download `install-qwen.bat` directly and pass `--version`:
+
 ```powershell
 $installer = Join-Path $env:TEMP 'install-qwen.bat'
 Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile $installer
@@ -69,7 +82,9 @@ cannot be passed through.
 Hosted installer assets are staged separately from GitHub Release archives:
 
 - `install-qwen.sh` is the Linux/macOS hosted entrypoint.
-- `install-qwen.bat` is the Windows hosted entrypoint.
+- `install-qwen.bat` is the Windows hosted entrypoint (also runnable directly).
+- `install-qwen.ps1` is the Windows hosted PowerShell shim that wraps
+  `install-qwen.bat` so the documented one-liner can use `irm | iex`.
 
 Build them with:
 
@@ -77,13 +92,14 @@ Build them with:
 npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-The staged `install-qwen.sh` and `install-qwen.bat` files map to the fixed
-hosted URLs shown above. Upload their contents byte-for-byte to
-`installation/install-qwen.sh` and `installation/install-qwen.bat`; the staging
-command also writes `SHA256SUMS` for upload verification. The hosted installers
-intentionally default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to
-pin a standalone release. OSS/CDN upload automation is still a follow-up release
-operation; until then, release operators must sync these staged files manually.
+The staged `install-qwen.sh`, `install-qwen.bat`, and `install-qwen.ps1` files
+map to the fixed hosted URLs shown above. Upload their contents byte-for-byte
+to `installation/install-qwen.sh`, `installation/install-qwen.bat`, and
+`installation/install-qwen.ps1`; the staging command also writes `SHA256SUMS`
+for upload verification. The hosted installers intentionally default to
+`latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a standalone
+release. OSS/CDN upload automation is still a follow-up release operation;
+until then, release operators must sync these staged files manually.
 
 Archive layout:
 
