@@ -7,28 +7,19 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import { TARGETS, writeSha256Sums } from './create-standalone-package.js';
-import { isStandaloneArchiveName } from './release-asset-config.js';
-import {
-  fail,
-  isMainModule,
-  parseCliArgs,
-  parseSha256Sums,
-  sha256File,
-} from './release-script-utils.js';
+import { writeSha256Sums } from './create-standalone-package.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
-// RELEASE_TARGETS must stay in sync with TARGETS in create-standalone-package.js;
-// every release qwenTarget should map to a package target and output extension.
 const RELEASE_TARGETS = [
   {
     qwenTarget: 'darwin-arm64',
@@ -53,16 +44,8 @@ const RELEASE_TARGETS = [
   { qwenTarget: 'win-x64', nodeTarget: 'win-x64', nodeArchiveExtension: 'zip' },
 ];
 const EXPECTED_ARCHIVE_COUNT = RELEASE_TARGETS.length;
-const CLI_OPTIONS = {
-  '--help': { name: 'help', type: 'boolean' },
-  '-h': { name: 'help', type: 'boolean' },
-  '--node-version': { name: 'nodeVersion' },
-  '--out-dir': { name: 'outDir' },
-  '--runtime-dir': { name: 'runtimeDir' },
-  '--version': { name: 'version' },
-};
 
-if (isMainModule(import.meta.url)) {
+if (isMainModule()) {
   try {
     await main();
   } catch (error) {
@@ -72,21 +55,13 @@ if (isMainModule(import.meta.url)) {
 }
 
 async function main() {
-  const args = parseCliArgs(process.argv.slice(2), CLI_OPTIONS, {
-    help: false,
-    nodeVersion: undefined,
-    outDir: undefined,
-    runtimeDir: undefined,
-    version: undefined,
-  });
+  const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     printUsage();
     return;
   }
 
-  const nodeVersion = normalizeNodeVersion(
-    args.nodeVersion || process.versions.node,
-  );
+  const nodeVersion = args.nodeVersion || process.versions.node;
   const outDir = path.resolve(
     args.outDir || path.join(rootDir, 'dist', 'standalone'),
   );
@@ -100,37 +75,21 @@ async function main() {
   const nodeDistUrl = `https://nodejs.org/dist/v${nodeVersion}`;
 
   try {
-    cleanOutputDirectory(outDir);
+    fs.mkdirSync(outDir, { recursive: true });
     const checksumsPath = path.join(runtimeDir, 'SHASUMS256.txt');
     await downloadFile(`${nodeDistUrl}/SHASUMS256.txt`, checksumsPath);
     const checksums = parseChecksums(fs.readFileSync(checksumsPath, 'utf8'));
 
-    const targetResults = await Promise.allSettled(
-      RELEASE_TARGETS.map(async (target) => {
-        await packageTarget({
-          ...target,
-          nodeDistUrl,
-          nodeVersion,
-          outDir,
-          releaseVersion: args.version,
-          runtimeDir,
-          checksums,
-        });
-        return target.qwenTarget;
-      }),
-    );
-    const failures = targetResults.flatMap((result, index) =>
-      result.status === 'rejected'
-        ? [
-            `${RELEASE_TARGETS[index].qwenTarget}: ${formatErrorReason(
-              result.reason,
-            )}`,
-          ]
-        : [],
-    );
-
-    if (failures.length > 0) {
-      fail(`Failed to package standalone target(s): ${failures.join('; ')}`);
+    for (const target of RELEASE_TARGETS) {
+      await packageTarget({
+        ...target,
+        nodeDistUrl,
+        nodeVersion,
+        outDir,
+        releaseVersion: args.version,
+        runtimeDir,
+        checksums,
+      });
     }
 
     await writeSha256Sums(outDir);
@@ -140,8 +99,8 @@ async function main() {
   }
 }
 
-function normalizeNodeVersion(version) {
-  return version.replace(/^v/i, '');
+function isMainModule() {
+  return process.argv[1] && path.resolve(process.argv[1]) === __filename;
 }
 
 async function packageTarget({
@@ -181,18 +140,6 @@ async function packageTarget({
   });
 }
 
-function formatErrorReason(reason) {
-  if (reason instanceof Error) {
-    return reason.message;
-  }
-  return String(reason);
-}
-
-function cleanOutputDirectory(outDir) {
-  fs.rmSync(outDir, { recursive: true, force: true });
-  fs.mkdirSync(outDir, { recursive: true });
-}
-
 async function downloadFile(url, destination) {
   console.log(`Downloading ${url}`);
   const response = await fetch(url);
@@ -211,7 +158,14 @@ async function downloadFile(url, destination) {
 }
 
 function parseChecksums(content) {
-  return parseSha256Sums(content);
+  const checksums = new Map();
+  for (const line of content.split(/\r?\n/)) {
+    const [hash, fileName] = line.trim().split(/\s+/, 2);
+    if (hash && fileName) {
+      checksums.set(fileName.replace(/^\*/, ''), hash);
+    }
+  }
+  return checksums;
 }
 
 async function verifyNodeArchive(archivePath, archiveName, checksums) {
@@ -228,19 +182,28 @@ async function verifyNodeArchive(archivePath, archiveName, checksums) {
   console.log(`Verified Node.js runtime checksum for ${archiveName}`);
 }
 
+async function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest('hex');
+}
+
 function assertStandaloneOutput(outDir) {
   const checksumPath = path.join(outDir, 'SHA256SUMS');
   if (!fs.existsSync(checksumPath)) {
     fail(`Standalone SHA256SUMS was not created at ${checksumPath}`);
   }
 
-  const archiveNames = Array.from(
-    parseSha256Sums(fs.readFileSync(checksumPath, 'utf8')).keys(),
-  )
-    .filter(isStandaloneArchiveName)
+  const archiveNames = fs
+    .readFileSync(checksumPath, 'utf8')
+    .split(/\r?\n/)
+    .filter((line) => /^[0-9a-f]{64}\s+/.test(line))
+    .map((line) => line.trim().split(/\s+/, 2)[1]?.replace(/^\*/, ''))
+    .filter(Boolean)
     .sort();
-  const expectedArchiveNames = RELEASE_TARGETS.map(({ qwenTarget }) =>
-    standaloneArchiveName(qwenTarget),
+  const expectedArchiveNames = RELEASE_TARGETS.map(
+    ({ qwenTarget }) =>
+      `qwen-code-${qwenTarget}.${qwenTarget === 'win-x64' ? 'zip' : 'tar.gz'}`,
   ).sort();
   const missing = expectedArchiveNames.filter(
     (archiveName) => !archiveNames.includes(archiveName),
@@ -269,12 +232,52 @@ function assertStandaloneOutput(outDir) {
   console.log(`Verified ${archiveNames.length} standalone release checksums.`);
 }
 
-function standaloneArchiveName(qwenTarget) {
-  const targetConfig = TARGETS.get(qwenTarget);
-  if (!targetConfig) {
-    fail(`No standalone package target config found for ${qwenTarget}`);
+function parseArgs(argv) {
+  const args = {
+    help: false,
+    nodeVersion: undefined,
+    outDir: undefined,
+    runtimeDir: undefined,
+    version: undefined,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case '--help':
+      case '-h':
+        args.help = true;
+        break;
+      case '--node-version':
+        args.nodeVersion = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--out-dir':
+        args.outDir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--runtime-dir':
+        args.runtimeDir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--version':
+        args.version = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      default:
+        fail(`Unknown option: ${arg}`);
+    }
   }
-  return `qwen-code-${qwenTarget}.${targetConfig.outputExtension}`;
+
+  return args;
+}
+
+function readOptionValue(argv, index, optionName) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith('-')) {
+    fail(`${optionName} requires a value`);
+  }
+  return value;
 }
 
 function printUsage() {
@@ -287,17 +290,11 @@ Options:
   --out-dir PATH         Output directory. Defaults to dist/standalone.
   --runtime-dir PATH     Temporary Node.js runtime download directory.
   --node-version VERSION Node.js version to download. Defaults to current Node.
-
-Host requirements:
-  Linux Node.js runtimes are downloaded as tar.xz archives, so the host
-  needs xz support (Ubuntu/Debian: xz-utils; Alpine: xz; macOS/Windows: built-in).
 `);
 }
 
-export {
-  assertStandaloneOutput,
-  normalizeNodeVersion,
-  parseChecksums,
-  RELEASE_TARGETS,
-  standaloneArchiveName,
-};
+function fail(message) {
+  throw new Error(`ERROR: ${message}`);
+}
+
+export { assertStandaloneOutput, parseChecksums, RELEASE_TARGETS };

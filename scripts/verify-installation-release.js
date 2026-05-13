@@ -6,30 +6,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
-import {
-  RELEASE_TARGETS,
-  standaloneArchiveName,
-} from './build-standalone-release.js';
-import {
-  fail,
-  isMainModule,
-  parseCliArgs,
-  parseSha256Sums,
-  sha256File,
-} from './release-script-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
-// This import-time computation intentionally asserts release/package target
-// consistency via standaloneArchiveName(); keep RELEASE_TARGETS backed by TARGETS.
-const EXPECTED_STANDALONE_ARCHIVE_NAMES = RELEASE_TARGETS.map(
-  ({ qwenTarget }) => standaloneArchiveName(qwenTarget),
-);
+const EXPECTED_STANDALONE_ARCHIVE_NAMES = [
+  'qwen-code-darwin-arm64.tar.gz',
+  'qwen-code-darwin-x64.tar.gz',
+  'qwen-code-linux-arm64.tar.gz',
+  'qwen-code-linux-x64.tar.gz',
+  'qwen-code-win-x64.zip',
+];
 // Release artifacts that the installer chain expects in a GitHub Release.
 // Hosted installer scripts (install-qwen.sh / install-qwen.bat) are served
 // from a separate hosted endpoint and are
@@ -39,13 +32,6 @@ const EXPECTED_RELEASE_ASSET_NAMES = [
   ...EXPECTED_STANDALONE_ARCHIVE_NAMES,
   'SHA256SUMS',
 ];
-
-const CLI_OPTIONS = {
-  '--help': { name: 'help', type: 'boolean' },
-  '-h': { name: 'help', type: 'boolean' },
-  '--dir': { name: 'dir' },
-  '--base-url': { name: 'baseUrl' },
-};
 
 if (isMainModule(import.meta.url)) {
   try {
@@ -57,11 +43,7 @@ if (isMainModule(import.meta.url)) {
 }
 
 async function main() {
-  const args = parseCliArgs(process.argv.slice(2), CLI_OPTIONS, {
-    help: false,
-    dir: undefined,
-    baseUrl: undefined,
-  });
+  const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     printUsage();
     return;
@@ -92,6 +74,36 @@ Options:
                      prefix). Cannot be combined with --dir.
   -h, --help         Show this help message.
 `);
+}
+
+function parseArgs(argv) {
+  const args = {
+    help: false,
+    dir: undefined,
+    baseUrl: undefined,
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    switch (arg) {
+      case '--help':
+      case '-h':
+        args.help = true;
+        break;
+      case '--dir':
+        args.dir = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--base-url':
+        args.baseUrl = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      default:
+        fail(`Unknown option: ${arg}`);
+    }
+  }
+
+  return args;
 }
 
 async function verifyReleaseDirectory(dir) {
@@ -172,25 +184,20 @@ function assertExpectedArchiveFiles(dir) {
 }
 
 async function assertRemoteAssetsAvailable(normalizedBaseUrl, fetchImpl) {
-  const results = await Promise.allSettled(
-    EXPECTED_STANDALONE_ARCHIVE_NAMES.map(async (assetName) => {
+  const failures = [];
+  for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
+    try {
       await assertRemoteAssetAvailable(
         new URL(assetName, normalizedBaseUrl).toString(),
         fetchImpl,
       );
-      return assetName;
-    }),
-  );
-  const failures = results.flatMap((result, index) =>
-    result.status === 'rejected'
-      ? [
-          {
-            assetName: EXPECTED_STANDALONE_ARCHIVE_NAMES[index],
-            reason: formatErrorReason(result.reason),
-          },
-        ]
-      : [],
-  );
+    } catch (reason) {
+      failures.push({
+        assetName,
+        reason: formatErrorReason(reason),
+      });
+    }
+  }
 
   if (failures.length === 0) {
     return;
@@ -263,6 +270,46 @@ function normalizeHttpsBaseUrl(baseUrl) {
     parsed.pathname = `${parsed.pathname}/`;
   }
   return parsed.toString();
+}
+
+function isMainModule(importMetaUrl) {
+  const filename = fileURLToPath(importMetaUrl);
+  return process.argv[1] && path.resolve(process.argv[1]) === filename;
+}
+
+function readOptionValue(argv, index, optionName) {
+  const value = argv[index + 1];
+  if (!value || value.startsWith('-')) {
+    fail(`${optionName} requires a value`);
+  }
+  return value;
+}
+
+function parseSha256Sums(content) {
+  const checksums = new Map();
+  for (const [index, line] of content.split(/\r?\n/).entries()) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const match = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(trimmed);
+    if (!match) {
+      fail(`Malformed SHA256SUMS line ${index + 1}: ${trimmed}`);
+    }
+    checksums.set(match[2], match[1].toLowerCase());
+  }
+  return checksums;
+}
+
+async function sha256File(filePath) {
+  const hash = crypto.createHash('sha256');
+  await pipeline(fs.createReadStream(filePath), hash);
+  return hash.digest('hex');
+}
+
+function fail(message) {
+  throw new Error(`ERROR: ${message}`);
 }
 
 export {
