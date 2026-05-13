@@ -23,6 +23,7 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
+import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
@@ -391,22 +392,28 @@ export class GeminiClient {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
+    // Mirror claude-code: append git status (branch + recent commits) to the
+    // system prompt so the main agent treats version history as authoritative
+    // context, not background noise. Only injected when cwd is a git repo.
+    const gitStatus = getRecentGitStatus(this.config.getCwd());
 
     if (overrideSystemPrompt) {
-      return getCustomSystemPrompt(
+      const base = getCustomSystemPrompt(
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
         deferredTools,
       );
+      return gitStatus ? base + '\n\n' + gitStatus : base;
     }
 
-    return getCoreSystemPrompt(
+    const base = getCoreSystemPrompt(
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
       deferredTools,
     );
+    return gitStatus ? base + '\n\n' + gitStatus : base;
   }
 
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
