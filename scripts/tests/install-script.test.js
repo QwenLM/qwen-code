@@ -33,6 +33,9 @@ const hostedInstallationScriptUrl = pathToFileURL(
 const installationReleaseVerificationScriptUrl = pathToFileURL(
   path.resolve('scripts/verify-installation-release.js'),
 ).href;
+const releaseScriptUtilsUrl = pathToFileURL(
+  path.resolve('scripts/release-script-utils.js'),
+).href;
 // These E2E cases execute the Unix shell installer and POSIX symlink behavior.
 // Windows batch behavior has separate Windows-only E2E coverage below.
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
@@ -231,6 +234,87 @@ describe('installation scripts', () => {
   });
 });
 
+describe('release-script-utils', () => {
+  it('parses SHA256SUMS with BOM, empty lines, and CRLF', async () => {
+    const { parseSha256Sums } = await import(releaseScriptUtilsUrl);
+
+    const checksums = parseSha256Sums(
+      `\uFEFF${'a'.repeat(64)}  install-qwen-standalone.sh\n\n${'b'.repeat(64)} *install-qwen-standalone.bat\r\n${'c'.repeat(64)}  install-qwen-standalone.ps1\n`,
+    );
+
+    expect(checksums.get('install-qwen-standalone.sh')).toBe('a'.repeat(64));
+    expect(checksums.get('install-qwen-standalone.bat')).toBe('b'.repeat(64));
+    expect(checksums.get('install-qwen-standalone.ps1')).toBe('c'.repeat(64));
+  });
+
+  it('rejects malformed SHA256SUMS entries', async () => {
+    const { parseSha256Sums } = await import(releaseScriptUtilsUrl);
+
+    expect(() =>
+      parseSha256Sums('short-hash  install-qwen-standalone.sh\n'),
+    ).toThrow(/Malformed SHA256SUMS line 1/);
+  });
+
+  it('supports --key=value form in parseArgs', async () => {
+    const { parseArgs } = await import(releaseScriptUtilsUrl);
+    const defs = {
+      '--out-dir': { key: 'outDir', type: 'value' },
+      '--verbose': { key: 'verbose', type: 'flag' },
+    };
+
+    const args = parseArgs(['--out-dir=/tmp/build', '--verbose'], defs);
+    expect(args.outDir).toBe('/tmp/build');
+    expect(args.verbose).toBe(true);
+    expect(args.help).toBe(false);
+  });
+
+  it('supports --key value form in parseArgs', async () => {
+    const { parseArgs } = await import(releaseScriptUtilsUrl);
+    const defs = { '--out-dir': { key: 'outDir', type: 'value' } };
+
+    const args = parseArgs(['--out-dir', '/tmp/build'], defs);
+    expect(args.outDir).toBe('/tmp/build');
+  });
+
+  it('rejects unknown options and missing values', async () => {
+    const { parseArgs } = await import(releaseScriptUtilsUrl);
+    const defs = { '--out-dir': { key: 'outDir', type: 'value' } };
+
+    expect(() => parseArgs(['--unknown'], defs)).toThrow(
+      /Unknown option: --unknown/,
+    );
+    expect(() => parseArgs(['--out-dir'], defs)).toThrow(
+      /--out-dir requires a value/,
+    );
+    expect(() => parseArgs(['--out-dir', '--help'], defs)).toThrow(
+      /--out-dir requires a value/,
+    );
+  });
+
+  it('rejects --key=value for flag-type options', async () => {
+    const { parseArgs } = await import(releaseScriptUtilsUrl);
+    const defs = { '--verbose': { key: 'verbose', type: 'flag' } };
+
+    expect(() => parseArgs(['--verbose=true'], defs)).toThrow(
+      /--verbose does not accept a value/,
+    );
+  });
+
+  it('recognises -h and --help without definitions', async () => {
+    const { parseArgs } = await import(releaseScriptUtilsUrl);
+
+    expect(parseArgs(['--help'], {}).help).toBe(true);
+    expect(parseArgs(['-h'], {}).help).toBe(true);
+  });
+
+  it('fail() wraps messages with ERROR: prefix', async () => {
+    const { fail } = await import(releaseScriptUtilsUrl);
+    expect(() => fail('something went wrong')).toThrow(
+      'ERROR: something went wrong',
+    );
+  });
+});
+
 describe('standalone release packaging', () => {
   it('defines a standalone packaging script', () => {
     const packageJson = JSON.parse(readScript('package.json'));
@@ -387,6 +471,18 @@ describe('standalone release packaging', () => {
         'https://example.com/r/',
       ],
       /Pass --dir or --base-url, not both/,
+    );
+    expectFail(
+      [
+        'scripts/verify-installation-release.js',
+        '--dir=/tmp',
+        '--base-url=https://example.com/r/',
+      ],
+      /Pass --dir or --base-url, not both/,
+    );
+    expectFail(
+      ['scripts/verify-installation-release.js', '--unknown=foo'],
+      /Unknown option: --unknown/,
     );
   });
 

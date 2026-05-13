@@ -32,19 +32,19 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 log_info() {
-    echo -e "${BLUE}INFO:${NC} $1"
+    printf '%bINFO:%b %s\n' "${BLUE}" "${NC}" "$1"
 }
 
 log_success() {
-    echo -e "${GREEN}SUCCESS:${NC} $1"
+    printf '%bSUCCESS:%b %s\n' "${GREEN}" "${NC}" "$1"
 }
 
 log_warning() {
-    echo -e "${YELLOW}WARNING:${NC} $1"
+    printf '%bWARNING:%b %s\n' "${YELLOW}" "${NC}" "$1"
 }
 
 log_error() {
-    echo -e "${RED}ERROR:${NC} $1"
+    printf '%bERROR:%b %s\n' "${RED}" "${NC}" "$1" >&2
 }
 
 command_exists() {

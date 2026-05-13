@@ -6,11 +6,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import {
+  fail,
+  isMainModule,
+  parseArgs,
+  parseSha256Sums,
+  sha256File,
+} from './release-script-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -91,6 +96,10 @@ const HOSTED_INSTALLATION_OUTPUT_NAMES = new Set([
   'SHA256SUMS',
 ]);
 
+const ARG_DEFS = {
+  '--out-dir': { key: 'outDir', type: 'value' },
+};
+
 if (isMainModule(import.meta.url)) {
   try {
     await main();
@@ -101,7 +110,7 @@ if (isMainModule(import.meta.url)) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(process.argv.slice(2), ARG_DEFS);
   if (args.help) {
     printUsage();
     return;
@@ -122,31 +131,6 @@ Options:
   --out-dir PATH        Output directory. Defaults to dist/installation.
   -h, --help            Show this help message.
 `);
-}
-
-function parseArgs(argv) {
-  const args = {
-    help: false,
-    outDir: undefined,
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    switch (arg) {
-      case '--help':
-      case '-h':
-        args.help = true;
-        break;
-      case '--out-dir':
-        args.outDir = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      default:
-        fail(`Unknown option: ${arg}`);
-    }
-  }
-
-  return args;
 }
 
 async function buildHostedInstallationAssets(outDir, options = {}) {
@@ -239,46 +223,6 @@ async function assertHostedInstallationAssetChecksums(outDir) {
       fail(`Checksum verification failed for ${output}`);
     }
   }
-}
-
-function isMainModule(importMetaUrl) {
-  const filename = fileURLToPath(importMetaUrl);
-  return process.argv[1] && path.resolve(process.argv[1]) === filename;
-}
-
-function readOptionValue(argv, index, optionName) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith('-')) {
-    fail(`${optionName} requires a value`);
-  }
-  return value;
-}
-
-function parseSha256Sums(content) {
-  const checksums = new Map();
-  for (const [index, line] of content.split(/\r?\n/).entries()) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const match = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(trimmed);
-    if (!match) {
-      fail(`Malformed SHA256SUMS line ${index + 1}: ${trimmed}`);
-    }
-    checksums.set(match[2], match[1].toLowerCase());
-  }
-  return checksums;
-}
-
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await pipeline(fs.createReadStream(filePath), hash);
-  return hash.digest('hex');
-}
-
-function fail(message) {
-  throw new Error(`ERROR: ${message}`);
 }
 
 export {

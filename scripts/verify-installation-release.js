@@ -6,11 +6,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import {
+  fail,
+  isMainModule,
+  parseArgs,
+  parseSha256Sums,
+  sha256File,
+} from './release-script-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -33,6 +38,11 @@ const EXPECTED_RELEASE_ASSET_NAMES = [
 ];
 const REMOTE_FETCH_TIMEOUT_MS = 30_000;
 
+const ARG_DEFS = {
+  '--dir': { key: 'dir', type: 'value' },
+  '--base-url': { key: 'baseUrl', type: 'value' },
+};
+
 if (isMainModule(import.meta.url)) {
   try {
     await main();
@@ -43,7 +53,7 @@ if (isMainModule(import.meta.url)) {
 }
 
 async function main() {
-  const args = parseArgs(process.argv.slice(2));
+  const args = parseArgs(process.argv.slice(2), ARG_DEFS);
   if (args.help) {
     printUsage();
     return;
@@ -74,36 +84,6 @@ Options:
                      prefix). Cannot be combined with --dir.
   -h, --help         Show this help message.
 `);
-}
-
-function parseArgs(argv) {
-  const args = {
-    help: false,
-    dir: undefined,
-    baseUrl: undefined,
-  };
-
-  for (let index = 0; index < argv.length; index += 1) {
-    const arg = argv[index];
-    switch (arg) {
-      case '--help':
-      case '-h':
-        args.help = true;
-        break;
-      case '--dir':
-        args.dir = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      case '--base-url':
-        args.baseUrl = readOptionValue(argv, index, arg);
-        index += 1;
-        break;
-      default:
-        fail(`Unknown option: ${arg}`);
-    }
-  }
-
-  return args;
 }
 
 async function verifyReleaseDirectory(dir) {
@@ -222,9 +202,6 @@ async function assertRemoteAssetAvailable(url, fetchImpl) {
   }
   await response.body?.cancel?.();
 
-  // Some object-storage hosts disable HEAD; fall back to a 1-byte ranged GET
-  // so the verifier can still confirm reachability without downloading the
-  // full archive.
   response = await fetchWithTimeout(fetchImpl, url, {
     headers: {
       Range: 'bytes=0-0',
@@ -267,9 +244,6 @@ function normalizeHttpsBaseUrl(baseUrl) {
   } catch {
     fail(`--base-url must be a valid URL: ${baseUrl}`);
   }
-  // Real release URLs are always HTTPS. Tests use injected fetchImpl, so
-  // they don't need a real protocol. Rejecting non-https early prevents an
-  // operator from accidentally pointing the verifier at a plain-http mirror.
   if (parsed.protocol !== 'https:') {
     fail(`--base-url must use https: ${baseUrl}`);
   }
@@ -277,50 +251,6 @@ function normalizeHttpsBaseUrl(baseUrl) {
     parsed.pathname = `${parsed.pathname}/`;
   }
   return parsed.toString();
-}
-
-function isMainModule(importMetaUrl) {
-  const filename = fileURLToPath(importMetaUrl);
-  return process.argv[1] && path.resolve(process.argv[1]) === filename;
-}
-
-function readOptionValue(argv, index, optionName) {
-  const value = argv[index + 1];
-  if (!value || value.startsWith('-')) {
-    fail(`${optionName} requires a value`);
-  }
-  return value;
-}
-
-function parseSha256Sums(content) {
-  // Strip a leading UTF-8 BOM so a SHA256SUMS file uploaded via a Windows tool
-  // that prepends one still reports a useful "Missing checksum entry" error
-  // instead of "Malformed SHA256SUMS line 1".
-  const normalized = content.replace(/^\uFEFF/, '');
-  const checksums = new Map();
-  for (const [index, line] of normalized.split(/\r?\n/).entries()) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    const match = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(trimmed);
-    if (!match) {
-      fail(`Malformed SHA256SUMS line ${index + 1}: ${trimmed}`);
-    }
-    checksums.set(match[2], match[1].toLowerCase());
-  }
-  return checksums;
-}
-
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await pipeline(fs.createReadStream(filePath), hash);
-  return hash.digest('hex');
-}
-
-function fail(message) {
-  throw new Error(`ERROR: ${message}`);
 }
 
 export {
