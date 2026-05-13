@@ -12,6 +12,18 @@ import {
 } from './useResumeCommand.js';
 import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 
+import type { LoadedSettings } from '../../config/settings.js';
+
+const mockSettings = {
+  merged: {
+    ui: {
+      history: {
+        defaultCollapsed: false,
+      },
+    },
+  },
+} as unknown as LoadedSettings;
+
 const resumeMocks = vi.hoisted(() => {
   let resolveLoadSession:
     | ((value: { conversation: unknown } | undefined) => void)
@@ -71,13 +83,35 @@ vi.mock('@qwen-code/qwen-code-core', () => {
 
 describe('useResumeCommand', () => {
   it('should initialize with dialog closed', () => {
-    const { result } = renderHook(() => useResumeCommand());
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        settings: mockSettings,
+        config: null,
+        historyManager: {
+          addItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+      }),
+    );
 
     expect(result.current.isResumeDialogOpen).toBe(false);
   });
 
   it('should open the dialog when openResumeDialog is called', () => {
-    const { result } = renderHook(() => useResumeCommand());
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        settings: mockSettings,
+        config: null,
+        historyManager: {
+          addItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+      }),
+    );
 
     act(() => {
       result.current.openResumeDialog();
@@ -87,7 +121,18 @@ describe('useResumeCommand', () => {
   });
 
   it('should close the dialog when closeResumeDialog is called', () => {
-    const { result } = renderHook(() => useResumeCommand());
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        settings: mockSettings,
+        config: null,
+        historyManager: {
+          addItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+      }),
+    );
 
     // Open the dialog first
     act(() => {
@@ -105,7 +150,18 @@ describe('useResumeCommand', () => {
   });
 
   it('should maintain stable function references across renders', () => {
-    const { result, rerender } = renderHook(() => useResumeCommand());
+    const { result, rerender } = renderHook(() =>
+      useResumeCommand({
+        settings: mockSettings,
+        config: null,
+        historyManager: {
+          addItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+        },
+        startNewSession: vi.fn(),
+      }),
+    );
 
     const initialOpenFn = result.current.openResumeDialog;
     const initialCloseFn = result.current.closeResumeDialog;
@@ -129,6 +185,7 @@ describe('useResumeCommand', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
         config: null,
+        settings: mockSettings,
         historyManager,
         startNewSession,
       }),
@@ -190,6 +247,7 @@ describe('useResumeCommand', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
         config,
+        settings: mockSettings,
         historyManager,
         startNewSession,
       }),
@@ -288,6 +346,7 @@ describe('useResumeCommand', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
         config,
+        settings: mockSettings,
         historyManager,
         startNewSession,
       }),
@@ -341,6 +400,7 @@ describe('useResumeCommand', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
         config,
+        settings: mockSettings,
         historyManager,
         startNewSession,
       }),
@@ -405,6 +465,7 @@ describe('useResumeCommand', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
         config,
+        settings: mockSettings,
         historyManager,
         startNewSession,
       }),

@@ -81,6 +81,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'delete',
   'branch',
   'btw',
+  'history',
 ]);
 
 export interface SlashCommandProcessorActions {

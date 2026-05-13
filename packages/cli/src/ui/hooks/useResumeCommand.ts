@@ -10,16 +10,22 @@ import {
   type Config,
   type SessionListItem,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
+import {
+  buildResumedHistoryItems,
+  applyResumeDisplayPolicy,
+  createHistoryCollapseSummaryItem,
+} from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItem } from '../types.js';
 import {
   hasBlockingBackgroundWork,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
+  settings: LoadedSettings;
   historyManager: Pick<
     UseHistoryManagerReturn,
     'addItem' | 'clearItems' | 'loadHistory'
@@ -68,8 +74,14 @@ export function useResumeCommand(
     setResumeMatchedSessions(undefined);
   }, []);
 
-  const { config, historyManager, startNewSession, setSessionName, remount } =
-    options ?? {};
+  const {
+    config,
+    settings,
+    historyManager,
+    startNewSession,
+    setSessionName,
+    remount,
+  } = options ?? {};
 
   const hasHistoryManager = !!historyManager;
   const { addItem, clearItems, loadHistory } = historyManager || {};
@@ -110,9 +122,23 @@ export function useResumeCommand(
       setSessionName?.(customTitle ?? null);
 
       // Reset UI history.
-      const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
+      const rawItems = buildResumedHistoryItems(sessionData, config);
+      const defaultCollapsed =
+        settings?.merged.ui?.history?.defaultCollapsed ?? false;
+
+      const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
+        defaultCollapsed,
+      });
+
       clearItems?.();
       loadHistory?.(uiHistoryItems);
+
+      if (defaultCollapsed && rawItems.length > 0) {
+        addItem?.(
+          createHistoryCollapseSummaryItem(rawItems.length),
+          Date.now(),
+        );
+      }
 
       // Update session history core.
       resetBackgroundStateForSessionSwitch(config);
@@ -165,6 +191,7 @@ export function useResumeCommand(
       startNewSession,
       setSessionName,
       remount,
+      settings?.merged.ui?.history?.defaultCollapsed,
     ],
   );
 

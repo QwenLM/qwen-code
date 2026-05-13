@@ -9,6 +9,7 @@ import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { createHistoryCollapseSummaryItem } from '../utils/resumeHistoryUtils.js';
+import { SettingScope } from '../../config/settings.js';
 
 const collapseCommand: SlashCommand = {
   name: 'collapse',
@@ -19,6 +20,10 @@ const collapseCommand: SlashCommand = {
   supportedModes: ['interactive'] as const,
   action: (context): MessageActionReturn | void => {
     const { history, loadHistory, addItem, refreshStatic } = context.ui;
+    const { settings } = context.services;
+
+    // Persist the user's preference
+    settings.setValue(SettingScope.User, 'ui.history.defaultCollapsed', true);
 
     // Count items that are not already suppressed and are NOT collapse summaries.
     const visibleCount = history.filter(
@@ -60,6 +65,10 @@ const expandCommand: SlashCommand = {
   supportedModes: ['interactive'] as const,
   action: (context): MessageActionReturn | void => {
     const { history, loadHistory, refreshStatic } = context.ui;
+    const { settings } = context.services;
+
+    // Persist the user's preference
+    settings.setValue(SettingScope.User, 'ui.history.defaultCollapsed', false);
 
     const hasSuppressed = history.some(
       (item) => item.display?.suppressOnRestore,

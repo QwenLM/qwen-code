@@ -61,7 +61,11 @@ import {
   type WaitingToolCall,
   ToolNames,
 } from '@qwen-code/qwen-code-core';
-import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import {
+  buildResumedHistoryItems,
+  applyResumeDisplayPolicy,
+  createHistoryCollapseSummaryItem,
+} from './utils/resumeHistoryUtils.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -486,11 +490,21 @@ export const AppContainer = (props: AppContainerProps) => {
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
-        const historyItems = buildResumedHistoryItems(
-          resumedSessionData,
-          config,
-        );
+        const rawItems = buildResumedHistoryItems(resumedSessionData, config);
+        const defaultCollapsed =
+          settings.merged.ui?.history?.defaultCollapsed ?? false;
+
+        const historyItems = applyResumeDisplayPolicy(rawItems, {
+          defaultCollapsed,
+        });
         historyManager.loadHistory(historyItems);
+
+        if (defaultCollapsed && rawItems.length > 0) {
+          historyManager.addItem(
+            createHistoryCollapseSummaryItem(rawItems.length),
+            Date.now(),
+          );
+        }
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -919,6 +933,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleResume,
   } = useResumeCommand({
     config,
+    settings,
     historyManager,
     startNewSession,
     setSessionName,

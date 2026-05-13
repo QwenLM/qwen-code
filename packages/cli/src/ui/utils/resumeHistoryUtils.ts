@@ -486,6 +486,23 @@ export function buildResumedHistoryItems(
 }
 
 /**
+ * Applies the quiet-restore display policy to resumed history items.
+ * When `defaultCollapsed` is true, marks each item with
+ * `display.suppressOnRestore` so the rendering layer skips them while
+ * the canonical history (used by /rewind turn mapping) is preserved.
+ */
+export function applyResumeDisplayPolicy(
+  items: HistoryItem[],
+  options: { defaultCollapsed?: boolean },
+): HistoryItem[] {
+  if (!options.defaultCollapsed) return items;
+  return items.map((item) => ({
+    ...item,
+    display: { ...item.display, suppressOnRestore: true },
+  }));
+}
+
+/**
  * Creates the summary INFO item shown when /history collapse suppresses
  * the transcript display.
  */
