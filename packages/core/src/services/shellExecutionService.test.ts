@@ -1323,6 +1323,7 @@ describe('ShellExecutionService child_process fallback', () => {
   const simulateExecution = async (
     command: string,
     simulation: (cp: typeof mockChildProcess, ac: AbortController) => void,
+    options: ShellExecuteOptions = {},
   ) => {
     const abortController = new AbortController();
     const handle = await ShellExecutionService.execute(
@@ -1332,6 +1333,7 @@ describe('ShellExecutionService child_process fallback', () => {
       abortController.signal,
       true,
       shellExecutionConfig,
+      options,
     );
 
     await new Promise((resolve) => process.nextTick(resolve));
@@ -1667,6 +1669,108 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.promoted).toBe(true);
       expect(result.exitCode).toBeNull();
       expect(result.signal).toBeNull();
+    });
+
+    it('PR-2.5 child_process: post-promote stdout/stderr forward to postPromote.onData with SEPARATE decoders', async () => {
+      // Pin: post-promote bytes from the still-running child route to
+      // the caller's onData handler. Separate decoders for stdout vs
+      // stderr — a single shared decoder would corrupt interleaved
+      // multibyte UTF-8 (the continuation-byte state machine assumes
+      // one byte source).
+      mockPlatform.mockReturnValue('linux');
+      const events: Array<{ type: string; chunk?: string | unknown }> = [];
+      const { result } = await simulateExecution(
+        'tail -f',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_data',
+          } satisfies ShellAbortReason);
+          // Drive post-promote chunks — should now flow to onData.
+          cp.stdout?.emit('data', Buffer.from('post-promote-stdout\n'));
+          cp.stderr?.emit('data', Buffer.from('post-promote-stderr\n'));
+        },
+        {
+          postPromote: {
+            onData: (event) => events.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // Both streams forwarded.
+      const dataChunks = events
+        .filter((e) => e.type === 'data')
+        .map((e) => e.chunk);
+      expect(dataChunks).toContain('post-promote-stdout\n');
+      expect(dataChunks).toContain('post-promote-stderr\n');
+    });
+
+    it('PR-2.5 child_process: onSettle fires on `close` (NOT `exit`) so late chunks land before the registry transitions', async () => {
+      // Pin the `close`-not-`exit` contract: child can emit buffered
+      // data AFTER 'exit' but BEFORE 'close'. If onSettle fired on
+      // 'exit' the caller would close the output stream + transition
+      // the registry while late chunks were still in flight — they'd
+      // hit a closed stream and be dropped, producing truncated logs.
+      mockPlatform.mockReturnValue('linux');
+      const events: Array<{ type: string; chunk?: string | unknown }> = [];
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_close',
+          } satisfies ShellAbortReason);
+          // Order matters: emit 'exit' first (this would have settled
+          // PR-1 of PR-2.5 too early), then a final stdout chunk, then
+          // 'close'. With the new contract, onSettle only fires on
+          // 'close' so the late chunk is captured.
+          cp.emit('exit', 0, null);
+          cp.stdout?.emit('data', Buffer.from('late-chunk\n'));
+          cp.emit('close', 0, null);
+        },
+        {
+          postPromote: {
+            onData: (event) => events.push(event),
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // Late chunk made it through.
+      const dataChunks = events
+        .filter((e) => e.type === 'data')
+        .map((e) => e.chunk);
+      expect(dataChunks).toContain('late-chunk\n');
+      // onSettle fired exactly once with exitCode 0.
+      expect(settles).toHaveLength(1);
+      expect(settles[0].exitCode).toBe(0);
+      expect(settles[0].signal).toBeNull();
+    });
+
+    it('PR-2.5 child_process: post-promote spawn error routes to onSettle with error populated', async () => {
+      mockPlatform.mockReturnValue('linux');
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_err',
+          } satisfies ShellAbortReason);
+          cp.emit('error', new Error('post-promote spawn boom'));
+        },
+        {
+          postPromote: {
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      expect(settles).toHaveLength(1);
+      expect(settles[0].error?.message).toBe('post-promote spawn boom');
+      expect(settles[0].exitCode).toBeNull();
+      expect(settles[0].signal).toBeNull();
     });
 
     it('should gracefully attempt SIGKILL on linux if SIGTERM fails', async () => {

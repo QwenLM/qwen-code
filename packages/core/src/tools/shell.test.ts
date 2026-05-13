@@ -3926,6 +3926,14 @@ describe('ShellTool', () => {
           write: vi.fn(),
           end: vi.fn(),
           on: vi.fn(),
+          // PR-2.5: settle path uses `once('finish', ...)` to wait
+          // for the stream flush before transitioning the registry.
+          // Default impl: immediately invoke the handler so the test
+          // doesn't hang waiting for an event the mocked stream
+          // never emits naturally.
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
         };
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
@@ -3970,6 +3978,14 @@ describe('ShellTool', () => {
           write: vi.fn(),
           end: vi.fn(),
           on: vi.fn(),
+          // PR-2.5: settle path uses `once('finish', ...)` to wait
+          // for the stream flush before transitioning the registry.
+          // Default impl: immediately invoke the handler so the test
+          // doesn't hang waiting for an event the mocked stream
+          // never emits naturally.
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
         };
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
@@ -4079,6 +4095,95 @@ describe('ShellTool', () => {
           endTime: 3,
         });
         expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
+      });
+
+      it('queued-settle race: onSettle fires BEFORE handlePromotedForeground completes — entry settles + llmContent reflects final status', async () => {
+        // Pin the queued-settle path: a very fast command can exit
+        // between the service-side promote-resolve and the
+        // shell.ts-side handlePromotedForeground completing the
+        // registry register + onSettleWired install. PR-2.5 absorbs
+        // that race by queueing settle info into
+        // `promoteArtifacts.settleQueued`; handlePromotedForeground
+        // drains it synchronously after wiring. Without that drain
+        // the entry would stay 'running' forever (no further onSettle
+        // ever fires — the service only emits once per promote).
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        // Custom one-shot service impl that captures postPromote and
+        // FIRES onSettle BEFORE resolving the promise — simulates the
+        // fast-exit race window.
+        let capturedPostPromote:
+          | {
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            // Fire onSettle SYNCHRONOUSLY before resolving (the race
+            // we're testing — settle lands while handlePromotedForeground
+            // hasn't run yet).
+            capturedPostPromote?.onSettle?.({
+              exitCode: 0,
+              signal: null,
+              endTime: 1700000000123,
+            });
+            return {
+              pid: 77777,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'final output',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 77777,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        // Registry transitioned to completed via the queued-settle drain.
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000000123,
+        );
+
+        // Model-facing copy now says 'completed', not 'running', AND
+        // does NOT suggest task_stop (process is already gone).
+        expect(result.llmContent).toContain('Status: completed.');
+        expect(result.llmContent).not.toContain('Status: running.');
+        expect(result.llmContent).toContain('already exited');
+        expect(result.llmContent).not.toContain('task_stop({');
       });
     });
   });
