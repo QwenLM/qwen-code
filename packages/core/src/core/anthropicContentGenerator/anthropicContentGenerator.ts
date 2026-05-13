@@ -28,7 +28,10 @@ type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
-import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import {
+  buildRuntimeFetchOptions,
+  redactProxyError,
+} from '../../utils/runtimeFetchOptions.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
@@ -138,12 +141,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
   async generateContent(
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
-    const anthropicRequest = await this.buildRequest(request);
-    const headers = this.buildPerRequestHeaders(anthropicRequest);
-    const response = (await this.client.messages.create(anthropicRequest, {
-      signal: request.config?.abortSignal,
-      ...(headers ? { headers } : {}),
-    })) as Message;
+    let response: Message;
+    try {
+      const anthropicRequest = await this.buildRequest(request);
+      const headers = this.buildPerRequestHeaders(anthropicRequest);
+      response = (await this.client.messages.create(anthropicRequest, {
+        signal: request.config?.abortSignal,
+        ...(headers ? { headers } : {}),
+      })) as Message;
+    } catch (error) {
+      throw redactProxyError(error);
+    }
 
     return this.converter.convertAnthropicResponseToGemini(response);
   }
@@ -160,15 +168,20 @@ export class AnthropicContentGenerator implements ContentGenerator {
       stream: true,
     };
 
-    const stream = (await this.client.messages.create(
-      streamingRequest as MessageCreateParamsStreaming,
-      {
-        signal: request.config?.abortSignal,
-        ...(headers ? { headers } : {}),
-      },
-    )) as AsyncIterable<RawMessageStreamEvent>;
+    let stream: AsyncIterable<RawMessageStreamEvent>;
+    try {
+      stream = (await this.client.messages.create(
+        streamingRequest as MessageCreateParamsStreaming,
+        {
+          signal: request.config?.abortSignal,
+          ...(headers ? { headers } : {}),
+        },
+      )) as AsyncIterable<RawMessageStreamEvent>;
+    } catch (error) {
+      throw redactProxyError(error);
+    }
 
-    return this.processStream(stream);
+    return this.processStream(this.redactStreamErrors(stream));
   }
 
   async countTokens(
@@ -504,6 +517,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // backends. Just consume the value here.
     if (effectiveEffort === undefined) return undefined;
     return { effort: effectiveEffort };
+  }
+
+  private async *redactStreamErrors(
+    stream: AsyncIterable<RawMessageStreamEvent>,
+  ): AsyncGenerator<RawMessageStreamEvent> {
+    try {
+      for await (const event of stream) {
+        yield event;
+      }
+    } catch (error) {
+      throw redactProxyError(error);
+    }
   }
 
   private async *processStream(

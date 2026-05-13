@@ -55,6 +55,7 @@ import {
   extractHostnameFromProxyUrl,
   getOrCreateSharedDispatcher,
   redactProxyCredentials,
+  redactProxyError,
   resetDispatcherCache,
 } from './runtimeFetchOptions.js';
 
@@ -351,6 +352,164 @@ describe('redactProxyCredentials', () => {
     expect(result).not.toContain('user');
     expect(result).not.toContain('pass');
     expect(result).toContain('proxy.local');
+  });
+});
+
+describe('redactProxyError', () => {
+  it('redacts proxy credentials from Error message and stack in-place', () => {
+    const error = new Error('connect ECONNREFUSED token@proxy.local:8080');
+    error.stack =
+      'Error: connect ECONNREFUSED token@proxy.local:8080\n    at test';
+
+    const result = redactProxyError(error);
+
+    expect(result).toBe(error);
+    expect(error.message).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+    expect(error.stack).toContain('<redacted>@proxy.local:8080');
+    expect(error.stack).not.toContain('token@');
+  });
+
+  it('redacts proxy credentials from string errors', () => {
+    expect(redactProxyError('407 via http://user:pass@proxy.local')).toBe(
+      '407 via http://<redacted>@proxy.local',
+    );
+  });
+
+  it('preserves SDK error metadata while redacting nested causes', () => {
+    const cause = new Error('connect ECONNREFUSED token@localhost:8080');
+    const error = Object.assign(
+      new Error('request failed via http://user:pass@proxy.local'),
+      { status: 407, code: 'proxy_auth_required', cause },
+    );
+
+    const result = redactProxyError(error);
+
+    expect(result).toBe(error);
+    expect(error.status).toBe(407);
+    expect(error.code).toBe('proxy_auth_required');
+    expect(error.message).toBe(
+      'request failed via http://<redacted>@proxy.local',
+    );
+    expect(cause.message).toBe(
+      'connect ECONNREFUSED <redacted>@localhost:8080',
+    );
+  });
+
+  it('does not throw on circular causes', () => {
+    const error = new Error(
+      'connect ECONNREFUSED token@proxy.local:8080',
+    ) as Error & { cause?: unknown };
+    error.cause = error;
+
+    expect(() => redactProxyError(error)).not.toThrow();
+    expect(error.message).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+    expect(error.cause).toBe(error);
+  });
+
+  it('returns a redacted clone when an error-like object has read-only fields', () => {
+    const error: { message?: string; stack?: string } = {};
+    Object.defineProperty(error, 'message', {
+      value: 'connect ECONNREFUSED token@proxy.local:8080',
+      writable: false,
+    });
+    Object.defineProperty(error, 'status', {
+      value: 407,
+      enumerable: true,
+    });
+
+    const result = redactProxyError(error) as {
+      message?: string;
+      status?: number;
+    };
+
+    expect(result).not.toBe(error);
+    expect(result.message).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+    expect(result.status).toBe(407);
+    expect(error.message).toBe('connect ECONNREFUSED token@proxy.local:8080');
+  });
+
+  it('preserves Error subclass prototype when cloning read-only fields', () => {
+    class ProxySdkError extends Error {
+      status = 407;
+    }
+
+    const error = new ProxySdkError(
+      'connect ECONNREFUSED token@proxy.local:8080',
+    );
+    Object.defineProperty(error, 'message', {
+      value: error.message,
+      writable: false,
+      configurable: false,
+    });
+
+    const result = redactProxyError(error) as ProxySdkError;
+
+    expect(result).not.toBe(error);
+    expect(result).toBeInstanceOf(ProxySdkError);
+    expect(result.status).toBe(407);
+    expect(result.message).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+  });
+
+  it('keeps read-only circular causes on the redacted clone', () => {
+    class ProxySdkError extends Error {
+      status = 407;
+      override cause?: unknown;
+    }
+
+    const error = new ProxySdkError(
+      'connect ECONNREFUSED token@proxy.local:8080',
+    );
+    Object.defineProperty(error, 'message', {
+      value: error.message,
+      writable: false,
+      configurable: false,
+    });
+    Object.defineProperty(error, 'cause', {
+      value: error,
+      writable: false,
+      configurable: false,
+    });
+
+    const result = redactProxyError(error) as ProxySdkError;
+
+    expect(result).not.toBe(error);
+    expect(result).toBeInstanceOf(ProxySdkError);
+    expect(result.status).toBe(407);
+    expect(result.message).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+    expect(result.cause).toBe(result);
+    expect((result.cause as Error).message).not.toContain('token@');
+  });
+
+  it('redacts nested AggregateError errors', () => {
+    const nestedError = new Error(
+      'connect ECONNREFUSED token@proxy.local:8080',
+    );
+    const aggregateError = new AggregateError(
+      [nestedError],
+      'fetch failed via http://user:pass@proxy.local',
+    );
+
+    const result = redactProxyError(aggregateError) as AggregateError;
+    const [redactedNestedError] = result.errors as Error[];
+
+    expect(result).toBe(aggregateError);
+    expect(result.message).toBe(
+      'fetch failed via http://<redacted>@proxy.local',
+    );
+    expect(redactedNestedError).toBe(nestedError);
+    expect(redactedNestedError.message).toBe(
+      'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
   });
 });
 

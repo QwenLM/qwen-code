@@ -313,6 +313,267 @@ export function redactProxyCredentials(message: string): string {
   return result;
 }
 
+/**
+ * Redact proxy credentials from thrown SDK errors in-place where possible.
+ *
+ * Preserving or cloning from the original error object keeps SDK-specific
+ * fields such as status, code, and retry metadata intact while preventing
+ * proxy credentials from leaking through message, stack, logs, or upstream
+ * crash reports.
+ *
+ * @param error - Error-like value that may contain proxy credentials
+ * @returns A redacted error value, reusing the original object when writable
+ */
+export function redactProxyError(error: unknown): unknown {
+  return redactProxyErrorValue(error, new WeakMap<object, unknown>());
+}
+
+function redactProxyErrorValue(
+  error: unknown,
+  seen: WeakMap<object, unknown>,
+): unknown {
+  if (typeof error === 'string') {
+    return redactProxyCredentials(error);
+  }
+
+  if (!error || typeof error !== 'object') {
+    return error;
+  }
+
+  if (seen.has(error)) {
+    return seen.get(error);
+  }
+
+  const errorRecord = error as {
+    message?: unknown;
+    stack?: unknown;
+    cause?: unknown;
+    errors?: unknown;
+  };
+  const needsClone = shouldCloneForRedaction(error, errorRecord);
+  const redactedMessage =
+    typeof errorRecord.message === 'string'
+      ? redactProxyCredentials(errorRecord.message)
+      : undefined;
+  const redactedStack =
+    typeof errorRecord.stack === 'string'
+      ? redactProxyCredentials(errorRecord.stack)
+      : undefined;
+  let redactedCause: unknown = errorRecord.cause;
+  let redactedErrors: unknown = errorRecord.errors;
+
+  if (needsClone) {
+    const clone = Object.create(Object.getPrototypeOf(error));
+    seen.set(error, clone);
+
+    if (errorRecord.cause !== undefined) {
+      redactedCause = redactProxyErrorValue(errorRecord.cause, seen);
+    }
+    if (errorRecord.errors !== undefined) {
+      redactedErrors = redactProxyErrorCollection(errorRecord.errors, seen);
+    }
+
+    cloneErrorWithRedactedFields(
+      error,
+      clone,
+      redactedMessage,
+      redactedStack,
+      redactedCause,
+      redactedErrors,
+    );
+    return clone;
+  }
+
+  seen.set(error, error);
+
+  try {
+    if (redactedMessage !== undefined) {
+      errorRecord.message = redactedMessage;
+    }
+    if (redactedStack !== undefined) {
+      errorRecord.stack = redactedStack;
+    }
+    if (errorRecord.cause !== undefined) {
+      redactedCause = redactProxyErrorValue(errorRecord.cause, seen);
+      errorRecord.cause = redactedCause;
+    }
+    if (errorRecord.errors !== undefined) {
+      redactedErrors = redactProxyErrorCollection(errorRecord.errors, seen);
+      errorRecord.errors = redactedErrors;
+    }
+    return error;
+  } catch {
+    const clone = Object.create(Object.getPrototypeOf(error));
+    seen.set(error, clone);
+    if (errorRecord.cause !== undefined) {
+      redactedCause = redactProxyErrorValue(errorRecord.cause, seen);
+    }
+    if (errorRecord.errors !== undefined) {
+      redactedErrors = redactProxyErrorCollection(errorRecord.errors, seen);
+    }
+    cloneErrorWithRedactedFields(
+      error,
+      clone,
+      redactedMessage,
+      redactedStack,
+      redactedCause,
+      redactedErrors,
+    );
+    return clone;
+  }
+}
+
+function redactProxyErrorCollection(
+  errors: unknown,
+  seen: WeakMap<object, unknown>,
+): unknown {
+  if (!Array.isArray(errors)) {
+    return redactProxyErrorValue(errors, seen);
+  }
+
+  if (seen.has(errors)) {
+    return seen.get(errors);
+  }
+
+  const redactedErrors: unknown[] = [];
+  seen.set(errors, redactedErrors);
+  for (const error of errors) {
+    redactedErrors.push(redactProxyErrorValue(error, seen));
+  }
+  return redactedErrors;
+}
+
+function shouldCloneForRedaction(
+  error: object,
+  errorRecord: {
+    message?: unknown;
+    stack?: unknown;
+    cause?: unknown;
+    errors?: unknown;
+  },
+): boolean {
+  return (
+    (typeof errorRecord.message === 'string' &&
+      !canAssignProperty(error, 'message')) ||
+    (typeof errorRecord.stack === 'string' &&
+      !canAssignProperty(error, 'stack')) ||
+    (errorRecord.cause !== undefined && !canAssignProperty(error, 'cause')) ||
+    (errorRecord.errors !== undefined && !canAssignProperty(error, 'errors'))
+  );
+}
+
+function canAssignProperty(target: object, key: PropertyKey): boolean {
+  let current: object | null = target;
+
+  while (current) {
+    const descriptor = Object.getOwnPropertyDescriptor(current, key);
+    if (descriptor) {
+      if ('writable' in descriptor) {
+        return descriptor.writable === true;
+      }
+      return typeof descriptor.set === 'function';
+    }
+    current = Object.getPrototypeOf(current);
+  }
+
+  return Object.isExtensible(target);
+}
+
+function cloneErrorWithRedactedFields(
+  error: object,
+  clone: object,
+  redactedMessage: string | undefined,
+  redactedStack: string | undefined,
+  redactedCause: unknown,
+  redactedErrors: unknown,
+): void {
+  const copiedKeys = new Set<PropertyKey>();
+  for (const key of Reflect.ownKeys(error)) {
+    const descriptor = Object.getOwnPropertyDescriptor(error, key);
+    if (!descriptor) {
+      continue;
+    }
+
+    copiedKeys.add(key);
+    const updatedDescriptor = getRedactedPropertyDescriptor(
+      key,
+      descriptor,
+      redactedMessage,
+      redactedStack,
+      redactedCause,
+      redactedErrors,
+    );
+
+    try {
+      Object.defineProperty(clone, key, updatedDescriptor);
+    } catch {
+      // Ignore non-critical metadata that cannot be copied.
+    }
+  }
+
+  defineMissingRedactedValue(clone, copiedKeys, 'message', redactedMessage);
+  defineMissingRedactedValue(clone, copiedKeys, 'stack', redactedStack);
+  defineMissingRedactedValue(clone, copiedKeys, 'cause', redactedCause);
+  defineMissingRedactedValue(clone, copiedKeys, 'errors', redactedErrors);
+}
+
+function getRedactedPropertyDescriptor(
+  key: PropertyKey,
+  descriptor: PropertyDescriptor,
+  redactedMessage: string | undefined,
+  redactedStack: string | undefined,
+  redactedCause: unknown,
+  redactedErrors: unknown,
+): PropertyDescriptor {
+  const redactedValue =
+    key === 'message'
+      ? redactedMessage
+      : key === 'stack'
+        ? redactedStack
+        : key === 'cause'
+          ? redactedCause
+          : key === 'errors'
+            ? redactedErrors
+            : undefined;
+
+  if (redactedValue === undefined) {
+    return { ...descriptor };
+  }
+
+  if ('value' in descriptor) {
+    return { ...descriptor, value: redactedValue };
+  }
+
+  return {
+    configurable: descriptor.configurable,
+    enumerable: descriptor.enumerable,
+    value: redactedValue,
+    writable: true,
+  };
+}
+
+function defineMissingRedactedValue(
+  target: object,
+  copiedKeys: Set<PropertyKey>,
+  key: PropertyKey,
+  value: unknown,
+): void {
+  if (value === undefined || copiedKeys.has(key)) {
+    return;
+  }
+
+  try {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      enumerable: false,
+      value,
+      writable: true,
+    });
+  } catch {
+    // Ignore non-critical metadata that cannot be copied.
+  }
+}
+
 function recordProxyFailure(hostname: string): number {
   const failureCount = (proxyFailureCounts.get(hostname) ?? 0) + 1;
   proxyFailureCounts.set(hostname, failureCount);
