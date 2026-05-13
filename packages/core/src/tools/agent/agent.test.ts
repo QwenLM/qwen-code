@@ -2079,6 +2079,51 @@ describe('AgentTool', () => {
       patchMetaSpy.mockRestore();
     });
 
+    it.each([
+      [AgentTerminateMode.ERROR, 'failed'],
+      [AgentTerminateMode.MAX_TURNS, 'failed'],
+      [AgentTerminateMode.TIMEOUT, 'failed'],
+    ] as const)(
+      'foreground %s terminate mode patches meta as %s',
+      async (mode, expectedStatus) => {
+        // The fgTerminalStatus ternary maps GOAL → completed, CANCELLED →
+        // cancelled, and *everything else* → failed. Without coverage for
+        // the fallback branch, a regression that flips the default back to
+        // 'completed' (an earlier bug that shipped and was fixed in
+        // d67db4c50) would slip through the suite — the GOAL test stays
+        // green either way.
+        const fgSubagent: SubagentConfig = {
+          ...bgSubagent,
+          name: 'file-search',
+          background: undefined,
+        };
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+          fgSubagent,
+        );
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+
+        const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        await invocation.execute();
+
+        expect(patchMetaSpy).toHaveBeenCalledWith(
+          expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+          expect.objectContaining({ status: expectedStatus }),
+        );
+
+        patchMetaSpy.mockRestore();
+      },
+    );
+
     it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
       // Without this prefix, a user-cancelled foreground subagent returns
       // the same `{ llmContent: [{ text: finalText }] }` shape as a
