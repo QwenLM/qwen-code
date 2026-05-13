@@ -1,0 +1,121 @@
+name: OSS Upload Smoke Test
+
+# Lightweight preflight for the qwen-code OSS release target.
+# It uploads a tiny text object, verifies it via ossutil, then verifies the
+# public HTTPS URL. This avoids waiting for npm publish/build before detecting
+# missing AK permissions, wrong bucket, wrong region, or wrong path prefix.
+triggers:
+  push:
+    branches:
+      - 'sync/upstream-*'
+      - 'release/*'
+      - 'test/oss-upload'
+    paths:
+      - '.aoneci/oss-upload-smoke.yml'
+      - '.aoneci/npm-publish.yml'
+      - '.aoneci/build-standalone.yml'
+      - '.aoneci/upload-qwen-scripts.yml'
+      - '.aoneci/scripts/upload-oss.sh'
+      - '.aoneci/scripts/upload-scripts.sh'
+      - '.aoneci/scripts/deploy-qwen.sh'
+      - '.aoneci/scripts/upgrade-qwen.sh'
+
+envs:
+  oss_endpoint: 'https://oss-cn-shanghai.aliyuncs.com'
+  oss_bucket: 'dataworks-notebook-cn-shanghai'
+  oss_prefix: 'public-datasets/aone-release/alishu/qwen-code/oss-upload-test'
+
+params:
+  test_id:
+    description: '测试对象 ID，留空时使用 commit + UTC 时间'
+    type: string
+    default: ''
+
+jobs:
+  oss-upload-smoke:
+    name: OSS Upload Smoke
+    image: reg.docker.alibaba-inc.com/dataworks-ide/opencode-build:ubuntu22.04-node20-bun1.3.10
+    runs-on:
+      - 8-16Gi
+    steps:
+      - uses: checkout
+
+      - name: upload and verify tiny object
+        run: |
+          set -euo pipefail
+
+          OSS_ENDPOINT="${{envs.oss_endpoint}}"
+          OSS_BUCKET="${{envs.oss_bucket}}"
+          OSS_PREFIX="${{envs.oss_prefix}}"
+          OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}"
+          OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}"
+
+          test -n "${OSS_ACCESS_KEY_ID}"
+          test -n "${OSS_ACCESS_KEY_SECRET}"
+
+          if ! command -v ossutil64 >/dev/null 2>&1 && ! command -v ossutil >/dev/null 2>&1; then
+            curl -fsSL "https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip" -o /tmp/ossutil.zip
+            unzip -o /tmp/ossutil.zip -d /tmp/ossutil >/dev/null
+            chmod +x /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil64
+            cp /tmp/ossutil/ossutil-v1.7.18-linux-amd64/ossutil64 /usr/local/bin/ossutil64
+          fi
+          OSSUTIL="$(command -v ossutil64 || command -v ossutil)"
+
+          "${OSSUTIL}" config \
+            -e "${OSS_ENDPOINT}" \
+            -i "${OSS_ACCESS_KEY_ID}" \
+            -k "${OSS_ACCESS_KEY_SECRET}"
+
+          RAW_BRANCH="${{git.branch}}"
+          SAFE_BRANCH="$(printf '%s' "${RAW_BRANCH}" | tr -c 'A-Za-z0-9._-' '-')"
+          COMMIT_SHORT="$(printf '%s' "${{git.commitId}}" | cut -c1-12)"
+          TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          TEST_ID="${{params.test_id}}"
+          if [ -z "${TEST_ID}" ]; then
+            TEST_ID="${COMMIT_SHORT}-${TIMESTAMP}"
+          fi
+
+          OBJECT_KEY="${OSS_PREFIX}/${SAFE_BRANCH}/${TEST_ID}.txt"
+          TEST_FILE="/tmp/qwen-code-oss-upload-smoke.txt"
+          DOWNLOAD_FILE="/tmp/qwen-code-oss-upload-smoke.downloaded.txt"
+          HTTP_FILE="/tmp/qwen-code-oss-upload-smoke.http.txt"
+
+          cat > "${TEST_FILE}" <<EOF
+          qwen-code OSS upload smoke test
+          branch=${RAW_BRANCH}
+          commit=${{git.commitId}}
+          timestamp=${TIMESTAMP}
+          bucket=${OSS_BUCKET}
+          key=${OBJECT_KEY}
+          EOF
+
+          echo "Uploading smoke object to oss://${OSS_BUCKET}/${OBJECT_KEY}"
+          "${OSSUTIL}" cp -f "${TEST_FILE}" "oss://${OSS_BUCKET}/${OBJECT_KEY}"
+
+          echo "Verifying object with ossutil stat/download"
+          "${OSSUTIL}" stat "oss://${OSS_BUCKET}/${OBJECT_KEY}" >/dev/null
+          "${OSSUTIL}" cp -f "oss://${OSS_BUCKET}/${OBJECT_KEY}" "${DOWNLOAD_FILE}"
+          cmp "${TEST_FILE}" "${DOWNLOAD_FILE}"
+
+          PUBLIC_URL="https://${OSS_BUCKET}.oss-cn-shanghai.aliyuncs.com/${OBJECT_KEY}"
+          echo "Verifying public HTTPS URL: ${PUBLIC_URL}"
+          curl -fsSL "${PUBLIC_URL}" -o "${HTTP_FILE}"
+          cmp "${TEST_FILE}" "${HTTP_FILE}"
+
+          echo "OSS upload smoke test passed: ${PUBLIC_URL}"
+
+traits:
+  - type: notification
+    properties:
+      when:
+        - success
+      types:
+        - dingtalk
+      users:
+        - ${{git.employeeId}}
+      content: |
+        **Qwen Code OSS 上传冒烟测试通过**
+        - Branch: ${{git.branch}}
+        - Commit: ${{git.commitId}}
+        - Bucket: dataworks-notebook-cn-shanghai
+        - Prefix: public-datasets/aone-release/alishu/qwen-code/oss-upload-test

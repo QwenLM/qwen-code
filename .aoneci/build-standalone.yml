@@ -107,8 +107,8 @@ jobs:
           SKIP_METADATA="${SKIP_METADATA}" \
           SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER}" \
           SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS}" \
-          OSS_ACCESS_KEY_ID="${{secrets.DWCODE_OSS_ACCESS_KEY_ID}}" \
-          OSS_ACCESS_KEY_SECRET="${{secrets.DWCODE_OSS_ACCESS_KEY_SECRET}}" \
+          OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
+          OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}" \
           bash "${AONE_CI_SOURCE}/.aoneci/scripts/upload-oss.sh"
 
       - name: export version
