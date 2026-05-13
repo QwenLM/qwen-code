@@ -10,13 +10,9 @@ import { simpleGit } from 'simple-git';
 import {
   AGENT_WORKTREE_SLUG_PATTERN,
   GitWorktreeService,
+  worktreeBranchForSlug,
 } from './gitWorktreeService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-
-// Branch name produced by `GitWorktreeService.createUserWorktree`: the
-// directory slug prefixed with `worktree-`. Re-derived here rather than
-// imported to keep this module's only external dep on the service light.
-const branchNameForSlug = (slug: string): string => `worktree-${slug}`;
 
 const debugLogger = createDebugLogger('WORKTREE_CLEANUP');
 
@@ -107,8 +103,13 @@ export async function cleanupStaleAgentWorktrees(
     if (mtimeMs >= cutoffDate) continue;
 
     // Fail-closed: any sign of in-progress work or unmerged commits → keep.
-    if (await hasTrackedChanges(worktreePath)) continue;
-    if (await service.hasUnmergedWorktreeCommits(entry.name)) continue;
+    // Run both checks concurrently — neither depends on the other and each
+    // spawns its own git invocation.
+    const [dirty, unmerged] = await Promise.all([
+      hasTrackedChanges(worktreePath),
+      service.hasUnmergedWorktreeCommits(entry.name),
+    ]);
+    if (dirty || unmerged) continue;
 
     const result = await service.removeUserWorktree(entry.name, {
       deleteBranch: true,
@@ -126,7 +127,7 @@ export async function cleanupStaleAgentWorktrees(
       // grepping logs can spot orphan branches.
       debugLogger.warn(
         `Removed stale agent worktree ${worktreePath} but kept branch ` +
-          `${branchNameForSlug(entry.name)} (unmerged commits at delete time)`,
+          `${worktreeBranchForSlug(entry.name)} (unmerged commits at delete time)`,
       );
     } else {
       debugLogger.debug(`Removed stale agent worktree ${worktreePath}`);

@@ -1144,24 +1144,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // produce a bogus `[worktree preserved: <missing path>]` suffix.
       worktreeIsolation = null;
       const wtService = new GitWorktreeService(isolation.repoRoot);
-      let hasChanges = true;
-      try {
-        hasChanges = await wtService.hasWorktreeChanges(isolation.path);
-      } catch (error) {
-        debugLogger.warn(
-          `[Agent] hasWorktreeChanges failed for ${isolation.path}: ${error}`,
-        );
-      }
-      let hasUnmerged = true;
-      try {
-        hasUnmerged = await wtService.hasUnmergedWorktreeCommits(
-          isolation.slug,
-        );
-      } catch (error) {
-        debugLogger.warn(
-          `[Agent] hasUnmergedWorktreeCommits failed for ${isolation.slug}: ${error}`,
-        );
-      }
+      // The two checks have no data dependency on each other and each
+      // spawns its own `git` invocation. Run them concurrently so
+      // cleanup wall-clock on the common case is the slower of the two
+      // instead of their sum.
+      const [hasChanges, hasUnmerged] = await Promise.all([
+        wtService.hasWorktreeChanges(isolation.path).catch((error) => {
+          debugLogger.warn(
+            `[Agent] hasWorktreeChanges failed for ${isolation.path}: ${error}`,
+          );
+          // Fail-closed: assume changes exist so we preserve.
+          return true;
+        }),
+        wtService.hasUnmergedWorktreeCommits(isolation.slug).catch((error) => {
+          debugLogger.warn(
+            `[Agent] hasUnmergedWorktreeCommits failed for ${isolation.slug}: ${error}`,
+          );
+          // Fail-closed: assume uncovered work exists so we preserve.
+          return true;
+        }),
+      ]);
       if (hasChanges || hasUnmerged) {
         debugLogger.info(
           `[Agent] Preserving isolation worktree ${isolation.path} ` +
@@ -1393,36 +1395,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // override to the worktree path so the subagent's tools cannot
       // leak into the parent project tree.
       //
-      // Two layers of override are needed because Config getters mix
-      // "read the field" and "read the getter":
-      //
-      // 1. Field shadow on `targetDir` and `cwd`. Several Config methods
-      //    (e.g. `getProjectRoot`, `getFileService`,
-      //    `cleanupStaleAgentWorktrees(this.targetDir)` paths) read
-      //    `this.targetDir` directly rather than going through a getter.
-      //    `Object.create(base)` does not shadow fields without an
-      //    own-property assignment, so any direct read still resolves
-      //    via the prototype chain to the parent's `targetDir`. Setting
-      //    `ov.targetDir` (and `ov.cwd`) shadows the field for those
-      //    paths.
-      //
-      // 2. Getter overrides on `getTargetDir`/`getCwd`/`getWorkingDir`/
-      //    `getProjectRoot` for the same reason in reverse: they call
-      //    `this.targetDir` on the override, which is what we want, but
-      //    explicit getters defined on `base` would still call methods
-      //    on `this` that read other fields. Overriding the getters
-      //    keeps the contract obvious to grep.
-      //
-      // 3. `getFileService()` returns a memoised `FileDiscoveryService`
-      //    constructed against the parent's `targetDir`. We must
-      //    return a service rooted at the worktree so .gitignore /
-      //    .qwenignore filtering treats the worktree as the project
-      //    root.
-      //
-      // 4. `getWorkspaceContext()` is the membership check used by
-      //    Edit/Write/Read to refuse out-of-workspace edits. We rebuild
-      //    it pointing at the worktree only so the subagent cannot
-      //    write to absolute paths under the parent project.
+      // We override at two layers because Config getters mix direct
+      // field reads and getter calls. Shadowing only the methods would
+      // leave call sites like `this.targetDir` (e.g. inside
+      // `getProjectRoot`, `getFileService`) resolving via the
+      // prototype chain to the parent's `targetDir` — JS does not
+      // promote a getter assignment to a field shadow. Setting both
+      // `ov.targetDir` (own-property field) AND `ov.getTargetDir`
+      // (own-property method) covers both lookup paths.
       if (worktreeIsolation) {
         const wtPath = worktreeIsolation.path;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1477,10 +1457,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         taskPrompt = `${notice}\n\n${taskPrompt}`;
       }
-
-      // (cleanupWorktreeIsolation and formatWorktreeSuffix are hoisted
-      // to execute()'s outer scope — see the top of this method — so
-      // the outer catch can also invoke them.)
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
@@ -1987,19 +1963,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
-      // Tracks whether the cleanup helper has already run, so the
-      // finally block can skip a duplicate call when the try block
-      // already ran it. Without this, a worktree provisioned for an
-      // isolation run would leak when `runFramed()` throws — the catch
-      // path is the outer execute() catch, which is too far away to
-      // see the closure.
-      let worktreeCleanupRan = false;
       try {
         await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
-        worktreeCleanupRan = true;
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {
             llmContent: (finalText || 'Subagent execution failed.') + wtSuffix,
@@ -2033,16 +2001,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } finally {
         // Mirror the background path: ensure the isolation worktree is
         // reaped on every termination shape (success, failure, cancel,
-        // and any uncaught throw inside runFramed). The success path
-        // already invoked the helper; this fallback only fires when
-        // the try block bailed before reaching it.
-        if (!worktreeCleanupRan) {
-          try {
-            await cleanupWorktreeIsolation();
-          } catch {
-            // Helper logs its own failures; never mask the original
-            // error path with cleanup noise.
-          }
+        // and any uncaught throw inside runFramed). The helper itself
+        // nulls `worktreeIsolation` on its first call (see the comment
+        // at its definition), so this fallback fires once at most even
+        // when the success path already ran it.
+        try {
+          await cleanupWorktreeIsolation();
+        } catch {
+          // Helper logs its own failures; never mask the original
+          // error path with cleanup noise.
         }
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);

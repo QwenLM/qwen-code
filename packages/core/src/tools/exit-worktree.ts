@@ -9,7 +9,10 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import {
+  GitWorktreeService,
+  worktreeBranchForSlug,
+} from '../services/gitWorktreeService.js';
 import * as fs from 'node:fs/promises';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -95,7 +98,7 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
       projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
 
     const worktreePath = service.getUserWorktreePath(this.params.name);
-    const branch = `worktree-${this.params.name}`;
+    const branch = worktreeBranchForSlug(this.params.name);
 
     // Confirm the worktree directory actually exists before doing anything.
     let exists = false;

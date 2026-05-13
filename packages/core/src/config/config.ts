@@ -43,6 +43,8 @@ import {
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
@@ -1255,14 +1257,8 @@ export class Config {
     if (!this.getBareMode()) {
       void (async () => {
         try {
-          const { GitWorktreeService } = await import(
-            '../services/gitWorktreeService.js'
-          );
           const probe = new GitWorktreeService(this.targetDir);
           const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
-          const { cleanupStaleAgentWorktrees } = await import(
-            '../services/worktreeCleanup.js'
-          );
           const removed = await cleanupStaleAgentWorktrees(root);
           if (removed > 0) {
             // Promote to `info` so operators chasing a worktree leak in
