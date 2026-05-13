@@ -389,6 +389,56 @@ jobs:
       - name: 'Verify Installation Release Assets'
         run: 'npm run verify:installation-release -- --dir dist/standalone'
 
+      - name: 'Package Hosted Installation Assets'
+        run: 'npm run package:hosted-installation -- --out-dir dist/installation'
+
+      - name: 'Install ossutil'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          OSSUTIL_URL: 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip'
+          OSSUTIL_SHA256: 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343'
+        run: |-
+          set -euo pipefail
+
+          tmp_dir="$(mktemp -d)"
+          curl -fsSL "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
+          echo "${OSSUTIL_SHA256}  ${tmp_dir}/ossutil.zip" | sha256sum -c -
+          unzip -q "${tmp_dir}/ossutil.zip" -d "${tmp_dir}"
+
+          ossutil_path="$(find "${tmp_dir}" -type f \( -name 'ossutil' -o -name 'ossutil64' \) -print -quit)"
+          if [[ -z "${ossutil_path}" ]]; then
+            echo "::error::ossutil binary not found in downloaded archive"
+            exit 1
+          fi
+
+          chmod +x "${ossutil_path}"
+          sudo install -m 0755 "${ossutil_path}" /usr/local/bin/ossutil
+          rm -rf "${tmp_dir}"
+          ossutil >/dev/null
+
+      - name: 'Configure Aliyun OSS Credentials'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          ALIYUN_OSS_ACCESS_KEY_ID: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }}'
+          ALIYUN_OSS_ACCESS_KEY_SECRET: '${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}'
+          ALIYUN_OSS_ENDPOINT: "${{ vars.ALIYUN_OSS_ENDPOINT || 'https://oss-cn-hangzhou.aliyuncs.com' }}"
+        run: |-
+          set -euo pipefail
+
+          if [[ -z "${ALIYUN_OSS_ACCESS_KEY_ID}" || -z "${ALIYUN_OSS_ACCESS_KEY_SECRET}" ]]; then
+            echo "::error::Missing Aliyun OSS credentials. Set ALIYUN_OSS_ACCESS_KEY_ID and ALIYUN_OSS_ACCESS_KEY_SECRET in the production-release environment secrets."
+            exit 1
+          fi
+
+          ossutil config \
+            -e "${ALIYUN_OSS_ENDPOINT}" \
+            -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \
+            -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" \
+            -L EN \
+            -c "${RUNNER_TEMP}/.ossutilconfig"
+
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
@@ -429,6 +479,63 @@ jobs:
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
             --generate-notes \
             ${PRERELEASE_FLAG}
+
+      - name: 'Sync Release Assets to Aliyun OSS'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          set -euo pipefail
+
+          upload_asset() {
+            local source="$1"
+            local key="$2"
+            ossutil cp "${source}" "oss://${ALIYUN_OSS_BUCKET}/${key}" -c "${RUNNER_TEMP}/.ossutilconfig" -f
+          }
+
+          upload_release_assets() {
+            local prefix="$1"
+            for asset in dist/standalone/qwen-code-*.tar.gz dist/standalone/qwen-code-*.zip dist/standalone/SHA256SUMS; do
+              upload_asset "${asset}" "${prefix}/$(basename "${asset}")"
+            done
+          }
+
+          upload_release_assets "releases/qwen-code/${RELEASE_TAG}"
+
+          if [[ "${IS_NIGHTLY}" == "false" && "${IS_PREVIEW}" == "false" ]]; then
+            upload_release_assets "releases/qwen-code/latest"
+          fi
+
+          upload_asset "dist/installation/install-qwen-standalone.sh" "installation/install-qwen-standalone.sh"
+          upload_asset "dist/installation/install-qwen-standalone.ps1" "installation/install-qwen-standalone.ps1"
+          upload_asset "dist/installation/install-qwen-standalone.bat" "installation/install-qwen-standalone.bat"
+          upload_asset "dist/installation/SHA256SUMS" "installation/SHA256SUMS"
+
+      - name: 'Verify Aliyun OSS Release Assets'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
+        env:
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          set -euo pipefail
+
+          npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
+
+          if [[ "${IS_NIGHTLY}" == "false" && "${IS_PREVIEW}" == "false" ]]; then
+            npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"
+          fi
+
+          for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat SHA256SUMS; do
+            url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${asset}"
+            curl -fsSIL "${url}" >/dev/null || curl -fsSL --range 0-0 "${url}" >/dev/null
+          done
 
       - name: 'Create PR to merge release branch into main'
         if: |-

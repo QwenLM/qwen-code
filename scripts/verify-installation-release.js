@@ -293,8 +293,12 @@ function readOptionValue(argv, index, optionName) {
 }
 
 function parseSha256Sums(content) {
+  // Strip a leading UTF-8 BOM so a SHA256SUMS file uploaded via a Windows tool
+  // that prepends one still reports a useful "Missing checksum entry" error
+  // instead of "Malformed SHA256SUMS line 1".
+  const normalized = content.replace(/^\uFEFF/, '');
   const checksums = new Map();
-  for (const [index, line] of content.split(/\r?\n/).entries()) {
+  for (const [index, line] of normalized.split(/\r?\n/).entries()) {
     const trimmed = line.trim();
     if (!trimmed) {
       continue;

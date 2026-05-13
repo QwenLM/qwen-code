@@ -569,7 +569,9 @@ aliyun_base_url_for_version() {
 }
 
 # Race two HEAD probes; print "aliyun" or "github" based on which mirror's
-# SHA256SUMS responds first. Default to github if both time out.
+# SHA256SUMS responds first, or "timeout" if neither responds before the
+# deadline. Caller decides what to do with "timeout" (currently: log it and
+# fall back to github).
 race_mirror_head() {
     local timeout="${1:-2}"
     local gh_url="$2"
@@ -598,7 +600,7 @@ race_mirror_head() {
     wait "${oss_pid}" "${gh_pid}" 2>/dev/null || true
     rm -rf "${tmpdir}" 2>/dev/null || true
 
-    echo "${winner:-github}"
+    echo "${winner:-timeout}"
 }
 
 standalone_base_url() {
@@ -615,7 +617,12 @@ standalone_base_url() {
         gh_head="$(github_base_url_for_version "${version_path}")/SHA256SUMS"
         oss_head="$(aliyun_base_url_for_version "${version_path}")/SHA256SUMS"
         selected=$(race_mirror_head 2 "${gh_head}" "${oss_head}")
-        log_info "Mirror auto-selected via HEAD probe: ${selected}" >&2
+        if [[ "${selected}" == "timeout" ]]; then
+            log_info "Mirror auto-selection timed out; defaulting to github." >&2
+            selected="github"
+        else
+            log_info "Mirror auto-selected via HEAD probe: ${selected}" >&2
+        fi
         MIRROR="${selected}"
     fi
 

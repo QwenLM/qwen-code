@@ -713,6 +713,134 @@ describe('standalone release packaging', () => {
     ).rejects.toThrow(/--base-url must use https/);
   });
 
+  it('falls back to a ranged GET when a release asset HEAD fails', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+    const fetchedUrls = [];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await expect(
+        verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+          fetchImpl: async (url, options = {}) => {
+            const method = options.method || 'GET';
+            const range = options.headers?.Range || '';
+            fetchedUrls.push([url, method, range]);
+            if (url.endsWith('/SHA256SUMS')) {
+              return new Response(checksumContent);
+            }
+            // Simulate an object-storage host that disables HEAD: the verifier
+            // must retry with a 1-byte ranged GET before treating the asset as
+            // unavailable.
+            if (method === 'HEAD') {
+              return new Response(null, { status: 405 });
+            }
+            if (range === 'bytes=0-0') {
+              return new Response('a', { status: 206 });
+            }
+            return new Response(null, { status: 500 });
+          },
+        }),
+      ).resolves.not.toThrow();
+    } finally {
+      warnSpy.mockRestore();
+    }
+
+    for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
+      const assetUrl = `https://example.com/qwen-code/v0.0.0/${assetName}`;
+      expect(fetchedUrls).toContainEqual([assetUrl, 'HEAD', '']);
+      expect(fetchedUrls).toContainEqual([assetUrl, 'GET', 'bytes=0-0']);
+    }
+  });
+
+  it('reports each unavailable asset with its reason', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+    const unavailableAsset = EXPECTED_STANDALONE_ARCHIVE_NAMES[0];
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await expect(
+        verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+          fetchImpl: async (url) => {
+            if (url.endsWith('/SHA256SUMS')) {
+              return new Response(checksumContent);
+            }
+            // The first asset always fails (HEAD and Range); the rest succeed
+            // on HEAD. Verifier should list only the failing one in the error.
+            if (url.endsWith(`/${unavailableAsset}`)) {
+              return new Response(null, { status: 404 });
+            }
+            return new Response(null, { status: 200 });
+          },
+        }),
+      ).rejects.toThrow(
+        new RegExp(
+          `Unavailable release asset URL\\(s\\): ${escapeRegExp(unavailableAsset)} \\(.*\\)`,
+        ),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('reports a single error when every asset URL is unavailable', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent = placeholderChecksumContent(
+      EXPECTED_STANDALONE_ARCHIVE_NAMES,
+    );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await expect(
+        verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+          fetchImpl: async (url) => {
+            if (url.endsWith('/SHA256SUMS')) {
+              return new Response(checksumContent);
+            }
+            return new Response(null, { status: 503 });
+          },
+        }),
+      ).rejects.toThrow(
+        new RegExp(
+          `All ${EXPECTED_STANDALONE_ARCHIVE_NAMES.length} release asset URLs are unavailable; check --base-url: https://example\\.com/qwen-code/v0\\.0\\.0/`,
+        ),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('parses SHA256SUMS even when the file starts with a UTF-8 BOM', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+    const checksumContent =
+      '\uFEFF' + placeholderChecksumContent(EXPECTED_STANDALONE_ARCHIVE_NAMES);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    try {
+      await expect(
+        verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+          fetchImpl: async (url) => {
+            if (url.endsWith('/SHA256SUMS')) {
+              return new Response(checksumContent);
+            }
+            return new Response(null, { status: 200 });
+          },
+        }),
+      ).resolves.not.toThrow();
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it('rejects a runtime archive without a Node executable', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -921,14 +1049,14 @@ describe('standalone release packaging', () => {
     }
   });
 
-  it('uploads standalone archives during release', () => {
+  it('syncs standalone and hosted installation assets during release', () => {
     const workflow = readScript('.github/workflows/release.yml');
 
     expect(workflow).toContain('npm run package:standalone:release --');
+    expect(workflow).toContain(
+      'npm run package:hosted-installation -- --out-dir dist/installation',
+    );
     expect(workflow).not.toContain('package:installation-assets');
-    expect(workflow).not.toContain('install-qwen-standalone.sh');
-    expect(workflow).not.toContain('install-qwen-standalone.bat');
-    expect(workflow).not.toContain('install-qwen-standalone.ps1');
     expect(workflow).not.toContain('verify_node_checksum()');
     expect(workflow).not.toContain('download_node()');
     expect(workflow).toContain('dist/standalone/qwen-code-*.tar.gz');
@@ -936,6 +1064,18 @@ describe('standalone release packaging', () => {
     expect(workflow).toContain('dist/standalone/SHA256SUMS');
     expect(workflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
+    );
+    expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_ID');
+    expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
+    expect(workflow).toContain('vars.ALIYUN_OSS_BUCKET');
+    expect(workflow).toContain('vars.ALIYUN_OSS_ENDPOINT');
+    expect(workflow).toContain('releases/qwen-code/${RELEASE_TAG}');
+    expect(workflow).toContain('releases/qwen-code/latest');
+    expect(workflow).toContain('installation/install-qwen-standalone.sh');
+    expect(workflow).toContain('installation/install-qwen-standalone.bat');
+    expect(workflow).toContain('installation/install-qwen-standalone.ps1');
+    expect(workflow).toContain(
+      'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
     );
   });
 
@@ -955,7 +1095,10 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('installation/install-qwen-standalone.bat');
     expect(guide).toContain('installation/install-qwen-standalone.ps1');
     expect(guide).toContain('irm https://qwen-code-assets');
-    expect(guide).toContain('release operators must sync these staged files');
+    expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_ID');
+    expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_SECRET');
+    expect(guide).toContain('ALIYUN_OSS_BUCKET');
+    expect(guide).toContain('ALIYUN_OSS_ENDPOINT');
     expect(guide).toContain('Hosted endpoint status');
     expect(guide).toContain('legacy NVM-based installer');
     expect(guide).toContain('node-pty');

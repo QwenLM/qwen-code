@@ -43,15 +43,37 @@ standalone release. The `standalone` suffix intentionally avoids overwriting the
 existing production `install-qwen.sh` / `install-qwen.bat` OSS objects during
 the staged rollout.
 
-> **Hosted endpoint status**: Until the hosted endpoint is re-synced after the
-> next release, the URL below still serves the legacy NVM-based installer,
-> which does not honor `--version` or `QWEN_INSTALL_VERSION` in the way
-> documented here. To get the standalone-archive-first behavior immediately,
-> run `install-qwen-standalone.sh` from a local checkout of this repository, or
-> upload the staged standalone-suffixed files to separate OSS keys for testing.
-> The `--version` examples below describe the post-sync behavior.
+> ⚠️ **Hosted endpoint status — read before copying the one-liners below.**
+> Until the hosted endpoint is re-synced after the next non-dry-run release with
+> OSS credentials configured, the
+> `qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/` URLs still
+> serve the legacy NVM-based installer. The legacy installer ignores
+> `--version` and `QWEN_INSTALL_VERSION`, so the pinning examples below will
+> silently install `latest`. To get the standalone-archive-first behavior
+> today, run `install-qwen-standalone.sh` from a local checkout of this
+> repository (see "Run today, before the OSS sync" below), or upload the
+> staged standalone-suffixed files to separate OSS keys for testing.
 
-Standalone hosted entrypoints for staged rollout:
+### Run today, before the OSS sync
+
+From a local checkout of this repository:
+
+```bash
+bash scripts/installation/install-qwen-standalone.sh
+bash scripts/installation/install-qwen-standalone.sh --version vX.Y.Z
+```
+
+```cmd
+scripts\installation\install-qwen-standalone.bat
+scripts\installation\install-qwen-standalone.bat --version vX.Y.Z
+```
+
+### After the OSS sync
+
+These hosted one-liners only honor `--version` / `QWEN_INSTALL_VERSION` once
+the OSS objects have been re-synced as described in
+"Hosted endpoint status" above; before that they fall back to the legacy
+NVM-based installer.
 
 ```bash
 curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
@@ -88,14 +110,29 @@ npm run package:hosted-installation -- --out-dir dist/installation
 
 The staged `install-qwen-standalone.sh`, `install-qwen-standalone.ps1`, and
 `install-qwen-standalone.bat` files map to the standalone-suffixed hosted URLs
-shown above. Upload their contents byte-for-byte to
+shown above. During a non-dry-run release, the publish workflow uploads their
+contents byte-for-byte to
 `installation/install-qwen-standalone.sh`,
 `installation/install-qwen-standalone.ps1`, and
 `installation/install-qwen-standalone.bat`; the staging command also writes
 `SHA256SUMS` for upload verification. The hosted installers intentionally
 default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a
-standalone release. OSS/CDN upload automation is still a follow-up release
-operation; until then, release operators must sync these staged files manually.
+standalone release.
+
+Configure the `production-release` GitHub environment with these required
+secrets before enabling OSS sync:
+
+- `ALIYUN_OSS_ACCESS_KEY_ID`
+- `ALIYUN_OSS_ACCESS_KEY_SECRET`
+
+The workflow defaults to the production OSS bucket and Hangzhou endpoint. Set
+these GitHub Actions variables only when the bucket, endpoint, or public base
+URL changes:
+
+- `ALIYUN_OSS_BUCKET` (default: `qwen-code-assets`)
+- `ALIYUN_OSS_ENDPOINT` (default: `https://oss-cn-hangzhou.aliyuncs.com`)
+- `ALIYUN_OSS_PUBLIC_BASE_URL` (default:
+  `https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com`)
 
 Archive layout:
 
@@ -226,9 +263,10 @@ Use `--base-url` for private mirrors. The URL must contain
 `qwen-code-<target>` archives and `SHA256SUMS` in the same directory. Custom
 base URLs must use `https://`.
 
-For Aliyun OSS/CDN, release publishing must upload byte-identical artifacts to
-both the versioned directory, for example `vX.Y.Z/`, and the `latest/`
-directory used by the default installer path.
+For Aliyun OSS/CDN, release publishing uploads byte-identical artifacts to the
+versioned directory, for example `vX.Y.Z/`. Stable releases also update the
+`latest/` directory used by the default installer path; nightly and preview
+releases do not overwrite `latest/`.
 
 ## Supported Source Values
 

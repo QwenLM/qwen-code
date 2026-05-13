@@ -464,15 +464,16 @@ exit /b 0
 
 :RaceMirrorHead
 rem args: %~1=timeout_seconds %~2=gh_url %~3=oss_url
-rem Sets QWEN_RACE_RESULT to "aliyun" or "github". Sequential (OSS first, GH
-rem fallback) keeps the PowerShell snippet small; a true parallel race adds a
-rem lot of escaping for marginal speedup since OSS HEAD is sub-second when
-rem reachable. Default fallback: github.
+rem Sets QWEN_RACE_RESULT to "aliyun", "github", or "timeout". Sequential
+rem (OSS first, GH fallback) keeps the PowerShell snippet small; a true
+rem parallel race adds a lot of escaping for marginal speedup since OSS HEAD
+rem is sub-second when reachable. Caller decides what to do with "timeout"
+rem (currently: log it and fall back to github).
 set "QWEN_RACE_TIMEOUT=%~1"
 set "QWEN_RACE_GH_URL=%~2"
 set "QWEN_RACE_OSS_URL=%~3"
-set "QWEN_RACE_RESULT=github"
-for /f "delims=" %%r in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $t=[int]$env:QWEN_RACE_TIMEOUT; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; function Probe($url) { try { $r = [Net.WebRequest]::Create($url); $r.Method = 'HEAD'; $r.Timeout = $t * 1000; if ($r -is [Net.HttpWebRequest]) { $r.AllowAutoRedirect = $true }; $resp = $r.GetResponse(); $resp.Close(); return $true } catch { return $false } }; if (Probe $env:QWEN_RACE_OSS_URL) { Write-Output 'aliyun'; exit 0 } elseif (Probe $env:QWEN_RACE_GH_URL) { Write-Output 'github'; exit 0 } else { Write-Output 'github'; exit 0 }"') do set "QWEN_RACE_RESULT=%%r"
+set "QWEN_RACE_RESULT=timeout"
+for /f "delims=" %%r in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='SilentlyContinue'; $t=[int]$env:QWEN_RACE_TIMEOUT; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; function Probe($url) { try { $r = [Net.WebRequest]::Create($url); $r.Method = 'HEAD'; $r.Timeout = $t * 1000; if ($r -is [Net.HttpWebRequest]) { $r.AllowAutoRedirect = $true }; $resp = $r.GetResponse(); $resp.Close(); return $true } catch { return $false } }; if (Probe $env:QWEN_RACE_OSS_URL) { Write-Output 'aliyun'; exit 0 } elseif (Probe $env:QWEN_RACE_GH_URL) { Write-Output 'github'; exit 0 } else { Write-Output 'timeout'; exit 0 }"') do set "QWEN_RACE_RESULT=%%r"
 set "QWEN_RACE_TIMEOUT="
 set "QWEN_RACE_GH_URL="
 set "QWEN_RACE_OSS_URL="
@@ -490,8 +491,13 @@ if /i "!MIRROR!"=="auto" (
     call :GithubBaseUrlForVersion "!VERSION_PATH!"
     call :AliyunBaseUrlForVersion "!VERSION_PATH!"
     call :RaceMirrorHead 2 "!QWEN_GH_BASE_URL!/SHA256SUMS" "!QWEN_OSS_BASE_URL!/SHA256SUMS"
-    set "MIRROR=!QWEN_RACE_RESULT!"
-    echo INFO: Mirror auto-selected via HEAD probe: !MIRROR!
+    if /i "!QWEN_RACE_RESULT!"=="timeout" (
+        echo INFO: Mirror auto-selection timed out; defaulting to github.
+        set "MIRROR=github"
+    ) else (
+        set "MIRROR=!QWEN_RACE_RESULT!"
+        echo INFO: Mirror auto-selected via HEAD probe: !QWEN_RACE_RESULT!
+    )
     set "QWEN_GH_BASE_URL="
     set "QWEN_OSS_BASE_URL="
     set "QWEN_RACE_RESULT="
