@@ -287,17 +287,43 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
-  private stripOrphanedUserEntriesFromHistory() {
-    this.getChat().stripOrphanedUserEntriesFromHistory();
+  /**
+   * Pop orphaned trailing user entries from the in-memory chat history.
+   * Used by:
+   *   - The Retry submit path (sendMessageStream below), which drops a
+   *     prior failed attempt before re-sending.
+   *   - The auto-restore-on-cancel flow in AppContainer, which rewinds
+   *     a user prompt out of the UI transcript and the disk-backed
+   *     ↑-history; this is the third place the cancelled prompt lives.
+   *     Without calling this from auto-restore, the next request's wire
+   *     payload would carry two consecutive user turns — the cancelled
+   *     one and the new one — and the model would see context the user
+   *     thought had been undone.
+   */
+  stripOrphanedUserEntriesFromHistory() {
+    const chat = this.getChat();
+    const before = chat.getHistoryLength();
+    chat.stripOrphanedUserEntriesFromHistory();
+    const after = chat.getHistoryLength();
+    if (after >= before) {
+      // Nothing to strip — leave caches and IDE context alone.
+      return;
+    }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
     // FileReadCache would still record those reads, so the retry's
     // re-issued Read could hit the file_unchanged placeholder while
     // the model has nothing to fall back on. Clear to be safe.
     debugLogger.debug(
-      '[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory',
+      `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
+    // The stripped user turn may have carried the IDE context (open files,
+    // workspace state) that `lastSentIdeContext` advanced past. Without
+    // forcing a resend, the next request would either skip IDE context
+    // entirely or send only a diff against a now-removed baseline. Match
+    // the invalidation `setHistory()` / `truncateHistory()` already do.
+    this.forceFullIdeContext = true;
   }
 
   setHistory(history: Content[]) {

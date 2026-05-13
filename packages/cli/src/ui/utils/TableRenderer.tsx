@@ -11,6 +11,18 @@ import stripAnsi from 'strip-ansi';
 import { getCachedStringWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
+import {
+  MD_LINK_CAPTURE,
+  MD_LINK_PATTERN,
+  isSafeOscScheme,
+  labelMayDeceive,
+  osc8Close,
+  osc8Open,
+  sanitizeForOsc,
+  shouldWrapMarkdownLink,
+  supportsHyperlinks,
+  trimTrailingUrlPunctuation,
+} from './osc8.js';
 
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
@@ -31,10 +43,13 @@ const SAFETY_MARGIN = 4;
 const INLINE_MATH_MAX_CHARS = 1024;
 
 const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
-const INLINE_MARKDOWN_REGEX =
-  /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+const INLINE_MARKDOWN_REGEX = new RegExp(
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
+    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
+  'g',
+);
 const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
-  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|` +
+  String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
     String.raw`\`+.+?\`+|${INLINE_MATH_PATTERN}|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
@@ -225,6 +240,10 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     : INLINE_MARKDOWN_REGEX;
   inlineRegex.lastIndex = 0;
 
+  // Capability is stable for the duration of one cell render — read it once
+  // here instead of per matched token.
+  const canHyperlink = supportsHyperlinks();
+
   let result = '';
   let lastIndex = 0;
   let match;
@@ -274,9 +293,38 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
       fullMatch.includes('](') &&
       fullMatch.endsWith(')')
     ) {
-      const linkMatch = fullMatch.match(/\[(.*?)\]\((.*?)\)/);
+      const linkMatch = fullMatch.match(MD_LINK_CAPTURE);
       if (linkMatch) {
-        rendered = `${linkMatch[1]} ${applyColor(`(${linkMatch[2]})`, theme.text.link)}`;
+        const labelText = linkMatch[1] ?? '';
+        const url = linkMatch[2] ?? '';
+        // When OSC 8 wraps, show only the label — long URLs in narrow
+        // table cells were the worst offender for layout cluttering, so
+        // this matters especially here. Fall back to the legacy
+        // `label (url)` rendering when wrapping is off so the cell is
+        // byte-identical to today on unsupported terminals / unsafe
+        // schemes / whitespace URLs.
+        if (shouldWrapMarkdownLink(url, canHyperlink)) {
+          // Strip bidi / C0 / C1 from BOTH the visible label and any URL
+          // bytes that end up as visible text (empty-label fallback,
+          // deceptive-label `(url)` suffix). The OSC target inside
+          // `osc8Open` is already sanitized, but raw `url` reaching the
+          // visible region would let U+202E etc. spoof the rendered text.
+          const safeLabel = sanitizeForOsc(labelText);
+          const safeUrl = sanitizeForOsc(url);
+          const visibleLabel = applyColor(
+            safeLabel || safeUrl,
+            theme.text.link,
+          );
+          const envelope = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
+          // When the label looks like a (mismatched) URL, keep the `(url)`
+          // suffix so the user can see where the click actually goes — same
+          // mitigation as the React renderer.
+          rendered = labelMayDeceive(safeLabel, safeUrl)
+            ? `${envelope} ${applyColor(`(${safeUrl})`, theme.text.link)}`
+            : envelope;
+        } else {
+          rendered = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;
+        }
       }
     } else if (
       enableInlineMath &&
@@ -295,7 +343,15 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
     ) {
       rendered = ansiFmt.underline(fullMatch.slice(3, -4));
     } else if (/^https?:\/\//.test(fullMatch)) {
-      rendered = applyColor(fullMatch, theme.text.link);
+      const visible = applyColor(fullMatch, theme.text.link);
+      if (canHyperlink) {
+        const trimmedUrl = trimTrailingUrlPunctuation(fullMatch);
+        rendered = isSafeOscScheme(trimmedUrl)
+          ? `${osc8Open(trimmedUrl)}${visible}${osc8Close()}`
+          : visible;
+      } else {
+        rendered = visible;
+      }
     }
 
     result += rendered ?? fullMatch;
