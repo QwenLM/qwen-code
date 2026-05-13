@@ -4392,7 +4392,6 @@ describe('ShellTool', () => {
         vi.mocked(fs.createWriteStream).mockReturnValueOnce(
           writeStreamMock as unknown as fs.WriteStream,
         );
-        const registry = mockConfig.getBackgroundShellRegistry();
 
         let capturedPostPromote:
           | {
