@@ -223,15 +223,21 @@ export function useBackgroundTaskView(
               : undefined,
         };
       });
-      // Merge by startTime so the order matches launch order across all
-      // sources (matters when an agent, shell, monitor, and dream are
-      // launched alternately).
+      // Merge by startTime descending so the most recently launched task
+      // sits at the top of the dialog. The dialog opens with
+      // `selectedIndex = 0` (top row), so this puts the cursor on the
+      // newest entry by default — matching the user's expectation when
+      // they open the dialog right after launching a task. Older
+      // entries fall to the bottom and are eventually pruned by each
+      // registry's terminal-entry cap (see
+      // `MAX_RETAINED_TERMINAL_AGENTS` / `MAX_RETAINED_TERMINAL_SHELLS`
+      // / `MAX_RETAINED_TERMINAL_MONITORS`).
       const merged = [
         ...agentEntries,
         ...shellEntries,
         ...monitorEntries,
         ...dreamEntries,
-      ].sort((a, b) => a.startTime - b.startTime);
+      ].sort((a, b) => b.startTime - a.startTime);
       // Cache the dream signature derived from the freshly-built
       // entries — the memory listener uses this to skip redundant
       // setEntries calls when an extract notify fires (extract has no

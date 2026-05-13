@@ -175,8 +175,32 @@ describe('useBackgroundTaskView', () => {
     });
     const { result } = renderHook(() => useBackgroundTaskView(config));
     expect(result.current.entries).toHaveLength(3);
-    // Sort order is by startTime ascending — shell (50) → agent (100) → monitor (200).
-    expect(result.current.entries.map(entryId)).toEqual(['s1', 'a1', 'm1']);
+    // Sort order is by startTime descending — newest first: monitor
+    // (200) → agent (100) → shell (50). The dialog opens with the
+    // cursor on row 0, so the most recently launched task is the one
+    // immediately selected.
+    expect(result.current.entries.map(entryId)).toEqual(['m1', 'a1', 's1']);
+  });
+
+  it('orders entries newest-first across all kinds', () => {
+    // Pin the descending sort so a future refactor that flips the
+    // comparator silently re-introduces the "new task buried at the
+    // bottom of a long list" UX. Mix all four kinds at varying
+    // startTimes to exercise the merge path end-to-end.
+    const { config } = makeConfig({
+      agents: () => [agent('a-old', 10), agent('a-new', 400)],
+      shells: () => [shell('s-mid', 200)],
+      monitors: () => [monitor('m-second-newest', 300)],
+      dreams: () => [dream('d-oldest', 5)],
+    });
+    const { result } = renderHook(() => useBackgroundTaskView(config));
+    expect(result.current.entries.map(entryId)).toEqual([
+      'a-new',
+      'm-second-newest',
+      's-mid',
+      'a-old',
+      'd-oldest',
+    ]);
   });
 
   it('tags each merged entry with the right `kind` discriminator', () => {
@@ -226,8 +250,9 @@ describe('useBackgroundTaskView', () => {
 
     monitors.push(monitor('m1', 50));
     act(() => monitorReg.fire());
-    // monitor's startTime (50) sorts before agent's (100).
-    expect(result.current.entries.map(entryId)).toEqual(['m1', 'a1']);
+    // Sort is descending by startTime: agent (100) sits above monitor
+    // (50) because the user wants the newest entry on top.
+    expect(result.current.entries.map(entryId)).toEqual(['a1', 'm1']);
   });
 
   it('clears all three subscriptions on unmount', () => {
