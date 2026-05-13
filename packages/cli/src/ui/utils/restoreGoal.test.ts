@@ -9,6 +9,7 @@ import {
   __resetActiveGoalStoreForTests,
   getActiveGoal,
   getLastGoalTerminal,
+  notifyGoalTerminal,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem } from '../types.js';
@@ -65,6 +66,16 @@ describe('findGoalToRestore', () => {
         goalItem({ kind: 'achieved', condition: 'old goal' }),
         goalItem({ kind: 'set', condition: 'fresh goal' }),
         userItem(),
+      ]),
+    ).toBe('fresh goal');
+  });
+
+  it('returns the condition when last goal_status is checking', () => {
+    expect(
+      findGoalToRestore([
+        goalItem({ kind: 'set', condition: 'fresh goal' }),
+        userItem(),
+        goalItem({ kind: 'checking', condition: 'fresh goal' }),
       ]),
     ).toBe('fresh goal');
   });
@@ -164,6 +175,56 @@ describe('restoreGoalFromHistory', () => {
       iterations: 4,
       durationMs: 30_000,
       lastReason: 'evidence in transcript',
+    });
+  });
+
+  it('restores the terminal observer when an active goal is restored', () => {
+    const recordSlashCommand = vi.fn();
+    const cfg = makeConfig({
+      getChatRecordingService: vi.fn().mockReturnValue({ recordSlashCommand }),
+    } as unknown as Partial<Config>);
+    const addItem = vi.fn();
+
+    const result = restoreGoalFromHistory(
+      [goalItem({ kind: 'checking', condition: 'do x' })],
+      cfg,
+      addItem,
+    );
+
+    expect(result).toEqual({ restored: true, condition: 'do x' });
+
+    notifyGoalTerminal('sess-1', {
+      kind: 'achieved',
+      condition: 'do x',
+      iterations: 2,
+      durationMs: 12_000,
+      lastReason: 'done',
+    });
+
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'goal_status',
+        kind: 'achieved',
+        condition: 'do x',
+        iterations: 2,
+        durationMs: 12_000,
+        lastReason: 'done',
+      }),
+      expect.any(Number),
+    );
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/goal',
+      outputHistoryItems: [
+        expect.objectContaining({
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'do x',
+          iterations: 2,
+          durationMs: 12_000,
+          lastReason: 'done',
+        }),
+      ],
     });
   });
 });

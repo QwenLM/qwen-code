@@ -111,6 +111,7 @@ describe('createGoalStopHookCallback', () => {
       tokensAtStart: 0,
       hookId: 'h1',
     });
+    judgeMock.mockResolvedValue({ ok: false, reason: 'still not done' });
     const cb = createGoalStopHookCallback({
       config: {} as Config,
       sessionId: 'sess-1',
@@ -125,7 +126,7 @@ describe('createGoalStopHookCallback', () => {
       typeof out === 'object' && out !== null ? out.systemMessage : undefined,
     ).toMatch(/max iterations/i);
     expect(getActiveGoal('sess-1')).toBeUndefined();
-    expect(judgeMock).not.toHaveBeenCalled();
+    expect(judgeMock).toHaveBeenCalledTimes(1);
   });
 
   it('notifies terminal observer on goal achieved', async () => {
@@ -166,6 +167,7 @@ describe('createGoalStopHookCallback', () => {
       hookId: 'h1',
       lastReason: 'something stuck',
     });
+    judgeMock.mockResolvedValue({ ok: false, reason: 'still stuck now' });
     const events: GoalTerminalEvent[] = [];
     setGoalTerminalObserver('sess-1', (e) => events.push(e));
 
@@ -179,7 +181,7 @@ describe('createGoalStopHookCallback', () => {
     expect(events).toHaveLength(1);
     expect(events[0].kind).toBe('aborted');
     expect(events[0].systemMessage).toMatch(/max iterations/i);
-    expect(events[0].lastReason).toBe('something stuck');
+    expect(events[0].lastReason).toBe('still stuck now');
   });
 
   it('does NOT notify observer on a single not-met turn', async () => {

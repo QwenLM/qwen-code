@@ -31,6 +31,10 @@ describe('goalCommand', () => {
   beforeEach(() => __resetActiveGoalStoreForTests());
   afterEach(() => __resetActiveGoalStoreForTests());
 
+  it('is currently limited to interactive mode', () => {
+    expect(goalCommand.supportedModes).toEqual(['interactive']);
+  });
+
   it('rejects when config is missing', async () => {
     const ctx = createMockCommandContext();
     const result = await goalCommand.action!(ctx, 'do x');
@@ -177,6 +181,44 @@ describe('goalCommand', () => {
       iterations: 3,
       durationMs: 12_345,
       lastReason: 'quoted evidence from transcript',
+    });
+  });
+
+  it('records terminal events through the chat recording service', async () => {
+    const recordSlashCommand = vi.fn();
+    const ctx = createMockCommandContext({
+      services: {
+        config: makeConfig({
+          getChatRecordingService: vi.fn().mockReturnValue({
+            recordSlashCommand,
+          }),
+        } as unknown as Partial<Config>) as unknown as Config,
+      },
+    });
+
+    await goalCommand.action!(ctx, 'do x');
+
+    notifyGoalTerminal('sess-1', {
+      kind: 'achieved',
+      condition: 'do x',
+      iterations: 3,
+      durationMs: 12_345,
+      lastReason: 'quoted evidence from transcript',
+    });
+
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/goal',
+      outputHistoryItems: [
+        expect.objectContaining({
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'do x',
+          iterations: 3,
+          durationMs: 12_345,
+          lastReason: 'quoted evidence from transcript',
+        }),
+      ],
     });
   });
 

@@ -50,6 +50,36 @@ export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
 const GOAL_ABORTED_REASON =
   'Goal max iterations reached; cleared. Re-set with `/goal <condition>` if you still need it.';
 
+function removeGoalFunctionHook(
+  config: Config,
+  sessionId: string,
+  goal: ActiveGoal,
+): void {
+  const system = config.getHookSystem?.();
+  if (!system) return;
+  try {
+    system.removeFunctionHook(sessionId, HookEventName.Stop, goal.hookId);
+  } catch (err) {
+    debugLogger.debug(
+      `Failed to remove goal hook ${goal.hookId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+function finishGoal(
+  config: Config,
+  sessionId: string,
+  goal: ActiveGoal,
+  event: Parameters<typeof notifyGoalTerminal>[1],
+): void {
+  clearActiveGoal(sessionId);
+  removeGoalFunctionHook(config, sessionId, goal);
+  notifyGoalTerminal(sessionId, event);
+  clearGoalTerminalObserver(sessionId);
+}
+
 /**
  * Builds the Function hook callback that, on every Stop event, asks a fast
  * model whether the goal condition holds.
@@ -74,27 +104,6 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
-    if (current.iterations >= MAX_GOAL_ITERATIONS) {
-      debugLogger.debug(
-        `Goal exceeded MAX_GOAL_ITERATIONS=${MAX_GOAL_ITERATIONS}; clearing.`,
-      );
-      const aborted = current;
-      clearActiveGoal(sessionId);
-      notifyGoalTerminal(sessionId, {
-        kind: 'aborted',
-        condition: aborted.condition,
-        iterations: aborted.iterations,
-        durationMs: Date.now() - aborted.setAt,
-        lastReason: aborted.lastReason,
-        systemMessage: GOAL_ABORTED_REASON,
-      });
-      clearGoalTerminalObserver(sessionId);
-      return {
-        continue: true,
-        systemMessage: GOAL_ABORTED_REASON,
-      };
-    }
-
     const signal = context?.signal ?? new AbortController().signal;
     const verdict = await judgeGoal(config, {
       condition,
@@ -103,17 +112,36 @@ export function createGoalStopHookCallback(args: {
     });
 
     if (verdict.ok) {
-      const achieved = current;
-      clearActiveGoal(sessionId);
-      notifyGoalTerminal(sessionId, {
+      finishGoal(config, sessionId, current, {
         kind: 'achieved',
-        condition: achieved.condition,
-        iterations: achieved.iterations,
-        durationMs: Date.now() - achieved.setAt,
+        condition: current.condition,
+        iterations: current.iterations,
+        durationMs: Date.now() - current.setAt,
         lastReason: verdict.reason,
       });
-      clearGoalTerminalObserver(sessionId);
       return { continue: true };
+    }
+
+    // Give the latest assistant output one final evaluation before aborting.
+    // The iteration cap is a safety valve for still-not-met verdicts, not a
+    // pre-judge hard stop; otherwise the final generated turn could satisfy
+    // the goal but still be reported as aborted.
+    if (current.iterations >= MAX_GOAL_ITERATIONS) {
+      debugLogger.debug(
+        `Goal exceeded MAX_GOAL_ITERATIONS=${MAX_GOAL_ITERATIONS}; clearing.`,
+      );
+      finishGoal(config, sessionId, current, {
+        kind: 'aborted',
+        condition: current.condition,
+        iterations: current.iterations,
+        durationMs: Date.now() - current.setAt,
+        lastReason: verdict.reason || current.lastReason,
+        systemMessage: GOAL_ABORTED_REASON,
+      });
+      return {
+        continue: true,
+        systemMessage: GOAL_ABORTED_REASON,
+      };
     }
 
     recordGoalIteration(sessionId, verdict.reason);
@@ -140,18 +168,7 @@ export function unregisterGoalHook(
   const cleared = clearActiveGoal(sessionId);
   clearGoalTerminalObserver(sessionId);
   if (!cleared) return undefined;
-  const system = config.getHookSystem();
-  if (system) {
-    try {
-      system.removeFunctionHook(sessionId, HookEventName.Stop, cleared.hookId);
-    } catch (err) {
-      debugLogger.debug(
-        `Failed to remove goal hook ${cleared.hookId}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
+  removeGoalFunctionHook(config, sessionId, cleared);
   return cleared;
 }
 

@@ -493,7 +493,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
         // Re-arm any `/goal` that was active when the prior session ended.
         try {
-          restoreGoalFromHistory(historyItems, config);
+          restoreGoalFromHistory(historyItems, config, historyManager.addItem);
         } catch {
           // Restore is best-effort — never block resume on it.
         }

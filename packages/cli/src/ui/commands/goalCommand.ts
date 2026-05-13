@@ -16,11 +16,11 @@ import {
   getActiveGoal,
   getLastGoalTerminal,
   registerGoalHook,
-  setGoalTerminalObserver,
   unregisterGoalHook,
   type GoalTerminalEvent,
 } from '@qwen-code/qwen-code-core';
 import { MessageType, type HistoryItemGoalStatus } from '../types.js';
+import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { t } from '../../i18n/index.js';
 
 const CLEAR_KEYWORDS = new Set([
@@ -82,7 +82,7 @@ export const goalCommand: SlashCommand = {
   },
   argumentHint: '[<condition> | clear]',
   kind: CommandKind.BUILT_IN,
-  supportedModes: ['interactive', 'non_interactive'] as const,
+  supportedModes: ['interactive'] as const,
   action: async (
     context: CommandContext,
     args: string,
@@ -200,17 +200,10 @@ export const goalCommand: SlashCommand = {
     // it here is safe even though the observer fires from a later turn's
     // Stop hook callback. The core side clears the observer on terminal /
     // unregister so we don't accumulate stale closures across goals.
-    const { addItem } = context.ui;
-    setGoalTerminalObserver(sessionId, (event: GoalTerminalEvent) => {
-      const item: Omit<HistoryItemGoalStatus, 'id'> = {
-        type: MessageType.GOAL_STATUS,
-        kind: event.kind,
-        condition: event.condition,
-        iterations: event.iterations,
-        durationMs: event.durationMs,
-        lastReason: event.lastReason ?? event.systemMessage,
-      };
-      addItem(item, Date.now());
+    installGoalTerminalObserver({
+      sessionId,
+      config,
+      addItem: context.ui.addItem,
     });
 
     const result: SubmitPromptActionReturn = {

@@ -6,6 +6,7 @@
 
 import {
   registerGoalHook,
+  setGoalTerminalObserver,
   setLastGoalTerminal,
   unregisterGoalHook,
   type Config,
@@ -16,17 +17,19 @@ import type { HistoryItem, HistoryItemGoalStatus } from '../types.js';
 import { MessageType } from '../types.js';
 
 /**
- * Finds the most recent `goal_status` history item. Returns the condition
- * that still needs to be restored (i.e. `kind === 'set'`) or `null` if the
- * last goal_status was a terminal state (achieved / cleared / aborted) or
- * none exists.
+ * Finds the most recent `goal_status` history item. Returns the active
+ * condition when the latest goal event is non-terminal (`set` or `checking`),
+ * or `null` if the last goal_status was terminal/cancelled
+ * (achieved / cleared / aborted) or none exists.
  */
 export function findGoalToRestore(history: HistoryItem[]): string | null {
   for (let i = history.length - 1; i >= 0; i--) {
     const item = history[i];
     if (item?.type !== MessageType.GOAL_STATUS) continue;
     const goal = item as HistoryItemGoalStatus;
-    return goal.kind === 'set' ? goal.condition : null;
+    return goal.kind === 'set' || goal.kind === 'checking'
+      ? goal.condition
+      : null;
   }
   return null;
 }
@@ -58,6 +61,52 @@ export function findLastTerminalGoal(
   return null;
 }
 
+type GoalStatusItem = Omit<HistoryItemGoalStatus, 'id'>;
+type AddGoalStatusItem = (item: GoalStatusItem, timestamp: number) => void;
+
+export function goalTerminalEventToHistoryItem(
+  event: GoalTerminalEvent,
+): GoalStatusItem {
+  return {
+    type: MessageType.GOAL_STATUS,
+    kind: event.kind,
+    condition: event.condition,
+    iterations: event.iterations,
+    durationMs: event.durationMs,
+    lastReason: event.lastReason ?? event.systemMessage,
+  };
+}
+
+export function recordGoalStatusItem(
+  config: Config,
+  item: GoalStatusItem,
+  rawCommand = '/goal',
+): void {
+  try {
+    config.getChatRecordingService?.()?.recordSlashCommand({
+      phase: 'result',
+      rawCommand,
+      outputHistoryItems: [{ ...item } as Record<string, unknown>],
+    });
+  } catch {
+    // Recording is best-effort; the live goal loop must not fail because the
+    // session transcript could not be appended.
+  }
+}
+
+export function installGoalTerminalObserver(args: {
+  sessionId: string;
+  config: Config;
+  addItem: AddGoalStatusItem;
+}): void {
+  const { sessionId, config, addItem } = args;
+  setGoalTerminalObserver(sessionId, (event: GoalTerminalEvent) => {
+    const item = goalTerminalEventToHistoryItem(event);
+    addItem(item, Date.now());
+    recordGoalStatusItem(config, item);
+  });
+}
+
 /**
  * On session resume, restores the active /goal hook if the transcript ended
  * with an unsatisfied goal. Idempotent — safe to call on a fresh session.
@@ -69,6 +118,7 @@ export function findLastTerminalGoal(
 export function restoreGoalFromHistory(
   history: HistoryItem[],
   config: Config,
+  addItem?: AddGoalStatusItem,
 ): { restored: true; condition: string } | { restored: false } {
   const sessionId = config.getSessionId();
   // Always rehydrate the "last completed goal" cache from transcript so empty
@@ -97,5 +147,8 @@ export function restoreGoalFromHistory(
     condition,
     tokensAtStart: 0,
   });
+  if (addItem) {
+    installGoalTerminalObserver({ sessionId, config, addItem });
+  }
   return { restored: true, condition };
 }
