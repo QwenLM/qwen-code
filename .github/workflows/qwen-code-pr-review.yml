@@ -141,7 +141,7 @@ jobs:
           if [ -n "$additional_instructions" ]; then
             review_prompt="$review_prompt
 
-          Additional reviewer focus: $additional_instructions"
+            Additional reviewer focus: $additional_instructions"
           fi
 
           echo "number=$pr_number" >> "$GITHUB_OUTPUT"
