@@ -133,7 +133,7 @@ export interface AgentTask extends TaskBase {
    * question every read site asks.
    */
   isBackgrounded: boolean;
-  status: BackgroundTaskStatus;
+  status: TaskStatus;
   result?: string;
   error?: string;
   /**
@@ -171,10 +171,7 @@ export interface AgentTask extends TaskBase {
    * Explicit user cancellation uses `cancelled`; shutdown interruption keeps
    * `running` so `/resume` can recover the work later.
    */
-  persistedCancellationStatus?: Extract<
-    BackgroundTaskStatus,
-    'running' | 'cancelled'
-  >;
+  persistedCancellationStatus?: Extract<TaskStatus, 'running' | 'cancelled'>;
 }
 
 /**
@@ -194,7 +191,7 @@ export type AgentTaskRegistration = TaskRegistration<AgentTask>;
 
 export interface NotificationMeta {
   agentId: string;
-  status: BackgroundTaskStatus;
+  status: TaskStatus;
   stats?: AgentCompletionStats;
   toolUseId?: string;
 }
@@ -209,7 +206,7 @@ export type BackgroundRegisterCallback = (entry: AgentTask) => void;
 
 interface BackgroundTaskCancelOptions {
   notify?: boolean;
-  persistedStatus?: Extract<BackgroundTaskStatus, 'running' | 'cancelled'>;
+  persistedStatus?: Extract<TaskStatus, 'running' | 'cancelled'>;
 }
 
 /**
