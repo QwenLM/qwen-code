@@ -86,10 +86,17 @@ export class SkillManager {
   private activationRegistry: SkillActivationRegistry | null = null;
 
   constructor(private readonly config: Config) {
-    this.bundledSkillsDir = path.join(
-      path.dirname(fileURLToPath(import.meta.url)),
-      'bundled',
-    );
+    // When bundled with esbuild code-splitting, this module is hoisted into
+    // a shared chunk under `dist/chunks/`. The bundled skills directory is
+    // still copied to `dist/bundled/` by `copy_bundle_assets.js`, so strip
+    // the trailing `chunks` segment so the sibling lookup resolves under
+    // `dist/` rather than `dist/chunks/`. In source / transpiled modes the
+    // basename is never `chunks`, so this is a no-op.
+    let moduleDir = path.dirname(fileURLToPath(import.meta.url));
+    if (path.basename(moduleDir) === 'chunks') {
+      moduleDir = path.dirname(moduleDir);
+    }
+    this.bundledSkillsDir = path.join(moduleDir, 'bundled');
   }
 
   /**

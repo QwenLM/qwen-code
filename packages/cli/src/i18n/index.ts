@@ -44,7 +44,16 @@ type TranslationLoadResult =
 // Path helpers
 const getBuiltinLocalesDir = (): string => {
   const __filename = fileURLToPath(import.meta.url);
-  return path.join(path.dirname(__filename), 'locales');
+  // When bundled with esbuild code-splitting, this module is hoisted into a
+  // shared chunk under `dist/chunks/`. The locales directory is still copied
+  // to `dist/locales/` (a sibling of cli.js), so strip the trailing `chunks`
+  // segment so the lookup resolves under `dist/`. In source / transpiled
+  // modes the basename is never `chunks`, so this is a no-op.
+  let moduleDir = path.dirname(__filename);
+  if (path.basename(moduleDir) === 'chunks') {
+    moduleDir = path.dirname(moduleDir);
+  }
+  return path.join(moduleDir, 'locales');
 };
 
 const getUserLocalesDir = (): string =>

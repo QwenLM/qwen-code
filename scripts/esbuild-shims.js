@@ -27,5 +27,16 @@ if (typeof globalThis.require === 'undefined') {
 }
 
 export const require = _require;
+// IMPORTANT: __qwen_filename / __qwen_dirname always resolve to this shim's
+// chunk file — i.e. dist/chunks/ in a built bundle, NOT the directory of any
+// source file that uses bare __dirname / __filename. esbuild's `define`
+// rewrites all free references in source code to these symbols, so to get a
+// per-file path you MUST declare a local shadow at the top of your module:
+//   const __filename = fileURLToPath(import.meta.url);
+//   const __dirname = path.dirname(__filename);
+// Even with a local shadow, under code-splitting the path can still point to
+// dist/chunks/ rather than the source dir — sibling-asset lookups (vendor/,
+// bundled/, locales/) must strip a trailing `chunks` segment. See
+// skill-manager.ts / ripgrepUtils.ts / i18n/index.ts for the pattern.
 export const __qwen_filename = fileURLToPath(import.meta.url);
 export const __qwen_dirname = dirname(__qwen_filename);
