@@ -13,14 +13,36 @@ import { isInternalPromptId } from './internalPromptIds.js';
 
 const debugLogger = createDebugLogger('OPENAI_LOGGER');
 
-function sanitizePromptIdForFilename(
-  promptId: string | undefined,
+function sanitizeDiagnosticSuffix(
+  suffix: string | undefined,
 ): string | undefined {
-  if (!promptId || !isInternalPromptId(promptId)) return undefined;
-  const sanitized = promptId
+  if (!suffix) return undefined;
+  const sanitized = suffix
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '');
   return sanitized || undefined;
+}
+
+function extractSubagentSuffix(promptId: string): string | undefined {
+  const parts = promptId.split('#');
+  if (parts.length !== 3) return undefined;
+
+  const [, subagentId, turn] = parts;
+  if (!subagentId || !turn || !/^\d+$/.test(turn)) {
+    return undefined;
+  }
+
+  return `subagent-${subagentId}`;
+}
+
+function promptIdSuffixForFilename(
+  promptId: string | undefined,
+): string | undefined {
+  if (!promptId) return undefined;
+  if (isInternalPromptId(promptId)) {
+    return sanitizeDiagnosticSuffix(promptId);
+  }
+  return sanitizeDiagnosticSuffix(extractSubagentSuffix(promptId));
 }
 
 /**
@@ -75,8 +97,8 @@ export class OpenAILogger {
    * @param request The request sent to OpenAI
    * @param response The response received from OpenAI
    * @param error Optional error if the request failed
-   * @param promptId Optional prompt id; internal prompt ids are appended to
-   *                 the filename after timestamp and id.
+   * @param promptId Optional prompt id; internal and subagent prompt ids are
+   *                 appended to the filename after timestamp and id.
    * @returns The file path where the log was written
    */
   async logInteraction(
@@ -91,7 +113,7 @@ export class OpenAILogger {
 
     const timestamp = new Date().toISOString().replace(/:/g, '-');
     const id = uuidv4().slice(0, 8);
-    const promptIdSuffix = sanitizePromptIdForFilename(promptId);
+    const promptIdSuffix = promptIdSuffixForFilename(promptId);
     const filename = promptIdSuffix
       ? `openai-${timestamp}-${id}-${promptIdSuffix}.json`
       : `openai-${timestamp}-${id}.json`;
