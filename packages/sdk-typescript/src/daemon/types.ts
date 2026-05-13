@@ -25,6 +25,17 @@ export interface DaemonCapabilities {
    */
   features: string[];
   modelServices: string[];
+  /**
+   * Absolute canonical workspace path this daemon is bound to
+   * (per #3803 §02: 1 daemon = 1 workspace). Clients use this to
+   * (a) detect mismatch before posting `/session` (vs. waiting for
+   * a 400 `workspace_mismatch` response), and (b) omit `cwd` on
+   * `POST /session` — the route falls back to this path when the
+   * body has no `cwd` field. Multi-workspace deployments expose
+   * multiple daemons on different ports, each advertising its own
+   * `workspaceCwd`.
+   */
+  workspaceCwd: string;
 }
 
 /** Returned from `POST /session`. */
