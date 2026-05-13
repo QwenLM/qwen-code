@@ -879,6 +879,83 @@ describe('ShellExecutionService', () => {
       expect(settleCalls).toHaveLength(1);
     });
 
+    it('PR-2.5 wave-3 (T6): post-promote IDisposables and error listener are released on settle (no GC roots dangling)', async () => {
+      // Each promoted PTY child can sit dead for milliseconds while
+      // the caller's `cancelChild` finalizes. Node's EventEmitter
+      // holds refs to listener closures, which in turn hold refs to
+      // `onPostData` / `onPostSettle` / the caller's
+      // `promoteArtifacts`. Without disposal on settle, those refs
+      // dangle until the PTY itself is collected. The fix captures
+      // the IDisposables returned by `onData` / `onExit` AND the
+      // `'error'` listener function we registered on the EE, then
+      // releases them when `firePostSettle` fires (no matter which
+      // path triggers settle).
+      const removeListenerSpy = vi.spyOn(mockPtyProcess, 'removeListener');
+
+      const settleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'long-running-disposable',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_dispose',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onData: () => {},
+            onSettle: (info) => settleCalls.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // The mocked `mockReturnValue({ dispose: vi.fn() })` reuses the
+      // SAME disposable object across calls, so foreground +
+      // post-promote share the same dispose Mock. The foreground
+      // disposable was already disposed at promote handoff; clear
+      // the call history so we can assert ONLY on post-settle
+      // disposal.
+      const sharedDataDisposable = mockPtyProcess.onData.mock.results[0]
+        .value as { dispose: Mock };
+      const sharedExitDisposable = mockPtyProcess.onExit.mock.results[0]
+        .value as { dispose: Mock };
+      sharedDataDisposable.dispose.mockClear();
+      sharedExitDisposable.dispose.mockClear();
+      removeListenerSpy.mockClear();
+
+      // Drive onExit → firePostSettle runs disposePostPromoteListeners.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+
+      expect(settleCalls).toHaveLength(1);
+      // Post-settle: BOTH disposables released, error listener removed.
+      expect(sharedDataDisposable.dispose).toHaveBeenCalledTimes(1);
+      expect(sharedExitDisposable.dispose).toHaveBeenCalledTimes(1);
+      // The post-promote error listener was attached via
+      // `ptyProcess.on('error', listener)` and is released via
+      // `removeListener('error', listener)`. Verify removeListener
+      // was called on the 'error' channel.
+      const errorRemoves = removeListenerSpy.mock.calls.filter(
+        (args: unknown[]) => args[0] === 'error',
+      );
+      expect(errorRemoves.length).toBeGreaterThanOrEqual(1);
+
+      // Re-driving onExit must NOT re-fire settle (latched) AND
+      // dispose calls must NOT double-count (idempotent disposal —
+      // disposePostPromoteListeners nulls the slots after first
+      // disposal).
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      expect(settleCalls).toHaveLength(1);
+      expect(sharedDataDisposable.dispose).toHaveBeenCalledTimes(1);
+      expect(sharedExitDisposable.dispose).toHaveBeenCalledTimes(1);
+
+      removeListenerSpy.mockRestore();
+    });
+
     it('PR-2.5 backwards compat: without postPromote, listeners stay fully detached (no regression on PR-2 contract)', async () => {
       // Pin that omitting `postPromote` preserves the PR-2 detach-
       // everything contract. The pre-existing post-promote test at
