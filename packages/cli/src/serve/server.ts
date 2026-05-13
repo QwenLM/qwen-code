@@ -24,6 +24,7 @@ import {
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from './types.js';
+import { getDemoHtml } from './demo.js';
 
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
@@ -63,6 +64,36 @@ export function createServeApp(
   // only the `runQwenServe` path piped the option through.
   const bridge =
     deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
+
+  // --- Demo page: registered BEFORE CORS/auth so the browser can load
+  // the page and make same-origin API calls. The page is a self-contained
+  // HTML debug UI for exercising all daemon routes.
+  app.get('/demo', (_req, res) => {
+    res.type('html').send(getDemoHtml(getPort()));
+  });
+
+  // Allow same-origin requests from the demo page. Browsers send an
+  // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
+  // below would reject them. This middleware strips `Origin` when it
+  // matches the daemon's own address so the demo page's API calls pass
+  // through. Only loopback origins are matched — non-loopback deployments
+  // require the operator to front the daemon with a reverse proxy for
+  // browser access anyway (per the threat-model docs).
+  app.use((req: import('express').Request, _res, next) => {
+    const origin = req.headers.origin;
+    if (origin) {
+      const port = getPort();
+      const selfOrigins = new Set([
+        `http://127.0.0.1:${port}`,
+        `http://localhost:${port}`,
+        `http://[::1]:${port}`,
+      ]);
+      if (selfOrigins.has(origin)) {
+        delete req.headers.origin;
+      }
+    }
+    next();
+  });
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST

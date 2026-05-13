@@ -1,0 +1,519 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Inline HTML for the `/demo` debug page. Served as a single self-contained
+ * page with no external dependencies so it works without a build step or
+ * static-file serving.
+ */
+export function getDemoHtml(_port: number): string {
+  return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Qwen Serve Demo</title>
+<style>
+  :root { --bg: #1a1a2e; --surface: #16213e; --border: #0f3460; --accent: #e94560; --text: #eee; --text2: #aab; --ok: #4ade80; --warn: #fbbf24; --err: #f87171; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'SF Mono', 'Menlo', 'Consolas', monospace; font-size: 13px; background: var(--bg); color: var(--text); min-height: 100vh; }
+  .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; gap: 12px; }
+  .header h1 { font-size: 16px; font-weight: 600; }
+  .header .badge { font-size: 11px; background: var(--accent); color: #fff; padding: 2px 8px; border-radius: 10px; }
+  .header .status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); }
+  .header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
+  .header .dot.ok { background: var(--ok); }
+  .container { display: grid; grid-template-columns: 340px 1fr; height: calc(100vh - 49px); }
+  .sidebar { background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  .panel h3 { font-size: 12px; color: var(--accent); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .panel label { display: block; font-size: 11px; color: var(--text2); margin-bottom: 3px; }
+  .panel input, .panel textarea { width: 100%; background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 6px 8px; border-radius: 4px; font-family: inherit; font-size: 12px; margin-bottom: 8px; }
+  .panel input:focus, .panel textarea:focus { outline: none; border-color: var(--accent); }
+  .panel textarea { resize: vertical; min-height: 60px; }
+  .btn { display: inline-flex; align-items: center; gap: 4px; padding: 6px 14px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--text); font-family: inherit; font-size: 12px; cursor: pointer; transition: all 0.15s; }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { opacity: 0.85; }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+  .tabs { display: flex; background: var(--surface); border-bottom: 1px solid var(--border); }
+  .tab { padding: 8px 16px; font-size: 12px; color: var(--text2); cursor: pointer; border-bottom: 2px solid transparent; }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-content { flex: 1; overflow: hidden; display: none; flex-direction: column; }
+  .tab-content.active { display: flex; }
+  .log { flex: 1; overflow-y: auto; padding: 12px; font-size: 12px; line-height: 1.6; }
+  .log-entry { padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.03); word-break: break-all; }
+  .log-entry .ts { color: var(--text2); margin-right: 8px; font-size: 11px; }
+  .log-entry .tag { display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10px; margin-right: 6px; }
+  .tag-info { background: #1e40af; color: #93c5fd; }
+  .tag-event { background: #065f46; color: #6ee7b7; }
+  .tag-error { background: #7f1d1d; color: #fca5a5; }
+  .tag-response { background: #713f12; color: #fde68a; }
+  .tag-thought { background: #4c1d95; color: #c4b5fd; }
+  .tag-message { background: #164e63; color: #67e8f9; }
+  .chat { flex: 1; overflow-y: auto; padding: 16px; }
+  .chat-msg { margin-bottom: 12px; max-width: 85%; }
+  .chat-msg.user { margin-left: auto; }
+  .chat-msg .bubble { padding: 8px 12px; border-radius: 8px; line-height: 1.5; white-space: pre-wrap; }
+  .chat-msg.user .bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 2px; }
+  .chat-msg.assistant .bubble { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 2px; }
+  .chat-msg .meta { font-size: 10px; color: var(--text2); margin-top: 3px; }
+  .chat-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); background: var(--surface); }
+  .chat-input input { flex: 1; }
+  .session-info { font-size: 11px; color: var(--text2); padding: 4px 0; }
+  .session-info span { color: var(--ok); }
+  .empty-hint { color: var(--text2); text-align: center; padding: 40px 20px; font-size: 12px; }
+  .permission-card { background: var(--surface); border: 1px solid var(--warn); border-radius: 6px; padding: 10px 12px; margin: 8px 0; }
+  .permission-card h4 { color: var(--warn); font-size: 12px; margin-bottom: 6px; }
+  .permission-card .opt-btn { margin-right: 4px; margin-top: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Qwen Serve</h1>
+  <span class="badge">Demo</span>
+  <div class="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">Connecting...</span>
+  </div>
+</div>
+
+<div class="container">
+  <div class="sidebar">
+    <div class="panel">
+      <h3>Session</h3>
+      <label>Working Directory (cwd)</label>
+      <input type="text" id="cwdInput" placeholder="/path/to/project" />
+      <div class="btn-row">
+        <button class="btn primary" id="btnCreateSession">Create / Attach</button>
+        <button class="btn" id="btnListSessions">List</button>
+      </div>
+      <div class="session-info" id="sessionInfo" style="display:none">
+        Session: <span id="sessionIdDisplay"></span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Prompt</h3>
+      <textarea id="promptInput" placeholder="Type your prompt here..."></textarea>
+      <div class="btn-row">
+        <button class="btn primary" id="btnSendPrompt" disabled>Send</button>
+        <button class="btn" id="btnCancel" disabled>Cancel</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>Model</h3>
+      <input type="text" id="modelInput" placeholder="Model ID (e.g. qwen3-coder)" />
+      <button class="btn" id="btnSetModel" disabled>Switch Model</button>
+    </div>
+
+    <div class="panel">
+      <h3>Quick Actions</h3>
+      <div class="btn-row">
+        <button class="btn" id="btnHealth">Health</button>
+        <button class="btn" id="btnHealthDeep">Health (deep)</button>
+        <button class="btn" id="btnCaps">Capabilities</button>
+      </div>
+    </div>
+
+    <div class="panel" id="permissionPanel" style="display:none">
+      <h3>Pending Permissions</h3>
+      <div id="permissionList"></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="tabs">
+      <div class="tab active" data-tab="chat">Chat</div>
+      <div class="tab" data-tab="events">Events</div>
+      <div class="tab" data-tab="requests">API Log</div>
+    </div>
+
+    <div class="tab-content active" id="tab-chat">
+      <div class="chat" id="chatArea">
+        <div class="empty-hint">Create a session to start chatting</div>
+      </div>
+      <div class="chat-input">
+        <input type="text" id="chatInput" placeholder="Send a message..." disabled />
+        <button class="btn primary" id="btnChatSend" disabled>Send</button>
+      </div>
+    </div>
+
+    <div class="tab-content" id="tab-events">
+      <div class="log" id="eventLog"></div>
+    </div>
+
+    <div class="tab-content" id="tab-requests">
+      <div class="log" id="requestLog"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const BASE = '';
+  let sessionId = null;
+  let eventSource = null;
+  let currentAssistantBubble = null;
+  let currentThought = '';
+
+  // --- DOM refs ---
+  const $ = (s) => document.querySelector(s);
+  const statusDot = $('#statusDot');
+  const statusText = $('#statusText');
+  const cwdInput = $('#cwdInput');
+  const promptInput = $('#promptInput');
+  const modelInput = $('#modelInput');
+  const chatArea = $('#chatArea');
+  const chatInput = $('#chatInput');
+  const eventLog = $('#eventLog');
+  const requestLog = $('#requestLog');
+  const sessionInfo = $('#sessionInfo');
+  const sessionIdDisplay = $('#sessionIdDisplay');
+  const permissionPanel = $('#permissionPanel');
+  const permissionList = $('#permissionList');
+
+  // --- Tabs ---
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      $('#tab-' + tab.dataset.tab).classList.add('active');
+    });
+  });
+
+  // --- Logging ---
+  function ts() {
+    return new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  }
+  function addLog(container, tag, tagClass, msg) {
+    const el = document.createElement('div');
+    el.className = 'log-entry';
+    const text = typeof msg === 'object' ? JSON.stringify(msg, null, 2) : msg;
+    el.innerHTML = '<span class="ts">' + ts() + '</span><span class="tag ' + tagClass + '">' + tag + '</span>' + escHtml(text);
+    container.appendChild(el);
+    container.scrollTop = container.scrollHeight;
+  }
+  function logEvent(tag, msg) { addLog(eventLog, tag, 'tag-event', msg); }
+  function logRequest(tag, msg) { addLog(requestLog, tag, 'tag-info', msg); }
+  function logResponse(tag, msg) { addLog(requestLog, tag, 'tag-response', msg); }
+  function logError(tag, msg) { addLog(requestLog, tag, 'tag-error', msg); }
+
+  function escHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+  }
+
+  // --- API helpers ---
+  async function api(method, path, body) {
+    const opts = { method, headers: {} };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    logRequest(method, path + (body ? ' ' + JSON.stringify(body) : ''));
+    try {
+      const res = await fetch(BASE + path, opts);
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); } catch { data = text; }
+      if (!res.ok) {
+        logError(res.status, JSON.stringify(data));
+        return { ok: false, status: res.status, data };
+      }
+      logResponse(res.status, JSON.stringify(data));
+      return { ok: true, status: res.status, data };
+    } catch (err) {
+      logError('ERR', err.message);
+      return { ok: false, status: 0, data: { error: err.message } };
+    }
+  }
+
+  // --- Health check on load ---
+  async function checkHealth() {
+    const r = await api('GET', '/health');
+    if (r.ok) {
+      statusDot.classList.add('ok');
+      statusText.textContent = 'Connected';
+    } else {
+      statusDot.classList.remove('ok');
+      statusText.textContent = 'Disconnected';
+    }
+  }
+
+  // --- Session ---
+  async function createSession() {
+    const cwd = cwdInput.value.trim();
+    if (!cwd) { alert('Please enter a working directory'); return; }
+    const r = await api('POST', '/session', { cwd });
+    if (r.ok) {
+      sessionId = r.data.sessionId;
+      sessionInfo.style.display = 'block';
+      sessionIdDisplay.textContent = sessionId;
+      enablePrompt(true);
+      chatArea.innerHTML = '';
+      if (r.data.attached) {
+        addChatMeta('Attached to existing session');
+      } else {
+        addChatMeta('New session created');
+      }
+      connectSSE();
+    }
+  }
+
+  function enablePrompt(on) {
+    $('#btnSendPrompt').disabled = !on;
+    $('#btnCancel').disabled = !on;
+    $('#btnSetModel').disabled = !on;
+    chatInput.disabled = !on;
+    $('#btnChatSend').disabled = !on;
+  }
+
+  // --- SSE ---
+  function connectSSE() {
+    if (eventSource) { eventSource.close(); }
+    const url = BASE + '/session/' + sessionId + '/events';
+    logEvent('SSE', 'Connecting to ' + url);
+
+    // Use fetch-based SSE to avoid Origin header issues with EventSource
+    const abort = new AbortController();
+    eventSource = { close: () => abort.abort() };
+
+    (async function readSSE() {
+      try {
+        const res = await fetch(url, { signal: abort.signal });
+        if (!res.ok) {
+          logEvent('SSE-ERR', 'HTTP ' + res.status);
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split('\\n');
+          buffer = lines.pop();
+
+          let currentEvent = {};
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              currentEvent.data = line.slice(6);
+            } else if (line.startsWith('event: ')) {
+              currentEvent.event = line.slice(7);
+            } else if (line.startsWith('id: ')) {
+              currentEvent.id = line.slice(4);
+            } else if (line === '') {
+              if (currentEvent.data) {
+                handleSSEMessage(currentEvent);
+              }
+              currentEvent = {};
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          logEvent('SSE-ERR', err.message);
+        }
+      }
+    })();
+  }
+
+  function handleSSEMessage(msg) {
+    let data;
+    try { data = JSON.parse(msg.data); } catch { data = msg.data; }
+    const type = data.type || msg.event || 'unknown';
+
+    if (type === 'session_update' && data.data) {
+      const update = data.data.update || data.data;
+      const kind = update.sessionUpdate;
+
+      if (kind === 'agent_message_chunk') {
+        const text = update.content?.text || '';
+        if (text) appendAssistantChunk(text);
+        if (update._meta?.usage) {
+          const u = update._meta.usage;
+          addChatMeta('tokens: in=' + u.inputTokens + ' out=' + u.outputTokens + ' | ' + (update._meta.durationMs || 0) + 'ms');
+          currentAssistantBubble = null;
+        }
+        logEvent('MSG', text || '(usage meta)');
+      } else if (kind === 'agent_thought_chunk') {
+        const text = update.content?.text || '';
+        currentThought += text;
+        logEvent('THINK', text);
+      } else {
+        logEvent(kind || type, JSON.stringify(update));
+      }
+    } else if (type === 'permission_request') {
+      handlePermissionRequest(data);
+      logEvent('PERM', JSON.stringify(data.data));
+    } else if (type === 'permission_resolved') {
+      logEvent('PERM-OK', JSON.stringify(data.data));
+      removePermission(data.data?.requestId);
+    } else if (type === 'session_died') {
+      addChatMeta('Session died: ' + JSON.stringify(data.data));
+      logEvent('DIED', JSON.stringify(data.data));
+      enablePrompt(false);
+    } else if (type === 'model_switched') {
+      addChatMeta('Model switched: ' + JSON.stringify(data.data));
+      logEvent('MODEL', JSON.stringify(data.data));
+    } else {
+      logEvent(type, JSON.stringify(data));
+    }
+  }
+
+  // --- Chat UI ---
+  function addUserMessage(text) {
+    currentAssistantBubble = null;
+    currentThought = '';
+    const el = document.createElement('div');
+    el.className = 'chat-msg user';
+    el.innerHTML = '<div class="bubble">' + escHtml(text) + '</div>';
+    chatArea.appendChild(el);
+    chatArea.scrollTop = chatArea.scrollHeight;
+  }
+
+  function appendAssistantChunk(text) {
+    if (!currentAssistantBubble) {
+      if (currentThought) {
+        const te = document.createElement('div');
+        te.className = 'chat-msg assistant';
+        te.innerHTML = '<div class="bubble" style="color:var(--text2);font-style:italic;border-color:var(--border)">Thinking: ' + escHtml(currentThought) + '</div>';
+        chatArea.appendChild(te);
+        currentThought = '';
+      }
+      const el = document.createElement('div');
+      el.className = 'chat-msg assistant';
+      el.innerHTML = '<div class="bubble"></div>';
+      chatArea.appendChild(el);
+      currentAssistantBubble = el.querySelector('.bubble');
+    }
+    currentAssistantBubble.textContent += text;
+    chatArea.scrollTop = chatArea.scrollHeight;
+  }
+
+  function addChatMeta(text) {
+    const el = document.createElement('div');
+    el.className = 'chat-msg assistant';
+    el.innerHTML = '<div class="meta">' + escHtml(text) + '</div>';
+    chatArea.appendChild(el);
+    chatArea.scrollTop = chatArea.scrollHeight;
+  }
+
+  // --- Prompt ---
+  async function sendPrompt(text) {
+    if (!sessionId || !text.trim()) return;
+    addUserMessage(text.trim());
+    promptInput.value = '';
+    chatInput.value = '';
+    const r = await api('POST', '/session/' + sessionId + '/prompt', {
+      prompt: [{ type: 'text', text: text.trim() }]
+    });
+    if (r.ok) {
+      addChatMeta('stopReason: ' + (r.data.stopReason || 'unknown'));
+    }
+  }
+
+  // --- Permission handling ---
+  const pendingPerms = new Map();
+
+  function handlePermissionRequest(data) {
+    const req = data.data;
+    const requestId = req?.requestId;
+    if (!requestId) return;
+    pendingPerms.set(requestId, req);
+    renderPermissions();
+
+    addChatMeta('Permission requested: ' + requestId);
+  }
+
+  function removePermission(requestId) {
+    pendingPerms.delete(requestId);
+    renderPermissions();
+  }
+
+  function renderPermissions() {
+    if (pendingPerms.size === 0) {
+      permissionPanel.style.display = 'none';
+      return;
+    }
+    permissionPanel.style.display = 'block';
+    permissionList.innerHTML = '';
+    for (const [id, req] of pendingPerms) {
+      const card = document.createElement('div');
+      card.className = 'permission-card';
+      let html = '<h4>' + escHtml(req.tool?.name || 'Permission') + '</h4>';
+      html += '<div style="font-size:11px;color:var(--text2);margin-bottom:6px">' + escHtml(id) + '</div>';
+      if (req.options && Array.isArray(req.options)) {
+        for (const opt of req.options) {
+          html += '<button class="btn opt-btn" data-req="' + escHtml(id) + '" data-opt="' + escHtml(opt.optionId) + '">' + escHtml(opt.name || opt.optionId) + '</button>';
+        }
+      }
+      html += '<button class="btn opt-btn" data-req="' + escHtml(id) + '" data-cancel="1" style="border-color:var(--err);color:var(--err)">Cancel</button>';
+      card.innerHTML = html;
+      permissionList.appendChild(card);
+    }
+
+    permissionList.querySelectorAll('.opt-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const reqId = btn.dataset.req;
+        let outcome;
+        if (btn.dataset.cancel === '1') {
+          outcome = { outcome: 'cancelled' };
+        } else {
+          outcome = { outcome: 'selected', optionId: btn.dataset.opt };
+        }
+        await api('POST', '/permission/' + reqId, { outcome });
+        removePermission(reqId);
+      });
+    });
+  }
+
+  // --- Button bindings ---
+  $('#btnCreateSession').addEventListener('click', createSession);
+  $('#btnListSessions').addEventListener('click', async () => {
+    const cwd = cwdInput.value.trim();
+    if (!cwd) { alert('Enter a cwd first'); return; }
+    await api('GET', '/workspace/' + encodeURIComponent(cwd) + '/sessions');
+  });
+  $('#btnSendPrompt').addEventListener('click', () => sendPrompt(promptInput.value));
+  $('#btnChatSend').addEventListener('click', () => sendPrompt(chatInput.value));
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPrompt(chatInput.value); }
+  });
+  promptInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPrompt(promptInput.value); }
+  });
+  $('#btnCancel').addEventListener('click', async () => {
+    if (!sessionId) return;
+    await api('POST', '/session/' + sessionId + '/cancel', {});
+  });
+  $('#btnSetModel').addEventListener('click', async () => {
+    if (!sessionId) return;
+    const mid = modelInput.value.trim();
+    if (!mid) { alert('Enter a model ID'); return; }
+    await api('POST', '/session/' + sessionId + '/model', { modelId: mid });
+  });
+  $('#btnHealth').addEventListener('click', () => api('GET', '/health'));
+  $('#btnHealthDeep').addEventListener('click', () => api('GET', '/health?deep=1'));
+  $('#btnCaps').addEventListener('click', () => api('GET', '/capabilities'));
+
+  // --- Init ---
+  checkHealth();
+})();
+</script>
+</body>
+</html>`;
+}
