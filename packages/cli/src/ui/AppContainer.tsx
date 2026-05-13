@@ -2024,7 +2024,8 @@ export const AppContainer = (props: AppContainerProps) => {
         const promptId = (userItem as HistoryItemUser).promptId;
         if (promptId) {
           try {
-            const truncateHistory = option === 'both';
+            const truncateHistory =
+              option === 'both' && !!geminiClient && apiTruncateIndex >= 0;
             const filesChanged = await config
               .getFileHistoryService()
               .rewind(promptId, truncateHistory);
