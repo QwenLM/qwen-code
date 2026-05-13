@@ -87,6 +87,12 @@ const debugLog = createDebugLogger('STATUS_LINE');
 // Footer's bottom row (hint/mode indicator) occupies 1 line, so the status
 // line gets at most 2 to keep the total footer height at 3 rows max.
 export const MAX_STATUS_LINES = 2;
+const PULL_REQUEST_LOOKUP_COMMAND = 'gh pr view --json number --jq .number';
+
+function parsePullRequestNumber(stdout: string): string | undefined {
+  const prNumber = stdout.trim();
+  return /^\d+$/.test(prNumber) ? prNumber : undefined;
+}
 
 function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
@@ -166,13 +172,15 @@ export function useStatusLine(): {
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
 
-  const statusLineConfig = getStatusLineConfig(settings);
+  const statusLineConfig =
+    uiState.statusLineConfigOverride ?? getStatusLineConfig(settings);
   const statusLineCommand =
     statusLineConfig?.type === 'command' ? statusLineConfig.command : undefined;
   const statusLinePreset =
     statusLineConfig?.type === 'preset' ? statusLineConfig : undefined;
+  const statusLineSettingsVersion = uiState.statusLineSettingsVersion ?? 0;
   const statusLinePresetKey = statusLinePreset
-    ? `${statusLinePreset.useThemeColors ? 'color' : 'plain'}:${statusLinePreset.items.join(',')}`
+    ? `${statusLinePreset.useThemeColors ? 'color' : 'plain'}:${statusLinePreset.items.join(',')}:${statusLineSettingsVersion}`
     : undefined;
   const refreshInterval =
     statusLineConfig?.type === 'command'
@@ -180,6 +188,9 @@ export function useStatusLine(): {
       : undefined;
 
   const [output, setOutput] = useState<string[]>([]);
+  const [pullRequestNumber, setPullRequestNumber] = useState<
+    string | undefined
+  >(undefined);
 
   // Keep latest values in refs so the stable doUpdate callback can read them
   // without being recreated on every render.
@@ -195,6 +206,8 @@ export function useStatusLine(): {
   statusLineCommandRef.current = statusLineCommand;
   const statusLinePresetRef = useRef(statusLinePreset);
   statusLinePresetRef.current = statusLinePreset;
+  const pullRequestNumberRef = useRef<string | undefined>(pullRequestNumber);
+  pullRequestNumberRef.current = pullRequestNumber;
 
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
@@ -237,6 +250,82 @@ export function useStatusLine(): {
   // Track the active child process so we can kill it on new updates / unmount.
   const activeChildRef = useRef<ChildProcess | undefined>(undefined);
   const generationRef = useRef(0);
+  const pullRequestLookupChildRef = useRef<ChildProcess | undefined>(undefined);
+  const pullRequestLookupGenerationRef = useRef(0);
+  const pullRequestLookupKeyRef = useRef<string | undefined>(undefined);
+
+  const updatePullRequestNumber = useCallback(
+    (nextPullRequestNumber: string | undefined) => {
+      if (pullRequestNumberRef.current === nextPullRequestNumber) {
+        return;
+      }
+      pullRequestNumberRef.current = nextPullRequestNumber;
+      setPullRequestNumber(nextPullRequestNumber);
+    },
+    [],
+  );
+
+  const clearPullRequestLookup = useCallback(() => {
+    pullRequestLookupChildRef.current?.kill();
+    pullRequestLookupChildRef.current = undefined;
+    pullRequestLookupGenerationRef.current++;
+    pullRequestLookupKeyRef.current = undefined;
+    updatePullRequestNumber(undefined);
+  }, [updatePullRequestNumber]);
+
+  const ensurePullRequestNumber = useCallback(
+    (
+      preset: StatusLinePresetConfig,
+      currentDir: string,
+      branch: string | undefined,
+    ) => {
+      if (!preset.items.includes('pull-request-number') || !branch) {
+        clearPullRequestLookup();
+        return;
+      }
+
+      const lookupKey = `${currentDir}\0${branch}`;
+      if (pullRequestLookupKeyRef.current === lookupKey) {
+        return;
+      }
+
+      pullRequestLookupChildRef.current?.kill();
+      pullRequestLookupChildRef.current = undefined;
+      pullRequestLookupKeyRef.current = lookupKey;
+      updatePullRequestNumber(undefined);
+
+      const generation = ++pullRequestLookupGenerationRef.current;
+      let child: ChildProcess;
+      try {
+        child = exec(
+          PULL_REQUEST_LOOKUP_COMMAND,
+          { cwd: currentDir, timeout: 2000, maxBuffer: 1024 },
+          (error, stdout) => {
+            if (
+              generation !== pullRequestLookupGenerationRef.current ||
+              pullRequestLookupKeyRef.current !== lookupKey
+            ) {
+              return;
+            }
+            pullRequestLookupChildRef.current = undefined;
+            updatePullRequestNumber(
+              error ? undefined : parsePullRequestNumber(stdout),
+            );
+          },
+        );
+      } catch (err) {
+        debugLog.error(
+          'statusline pull request lookup error:',
+          (err as Error).message,
+        );
+        updatePullRequestNumber(undefined);
+        return;
+      }
+
+      pullRequestLookupChildRef.current = child;
+    },
+    [clearPullRequestLookup, updatePullRequestNumber],
+  );
 
   const doUpdate = useCallback(() => {
     const preset = statusLinePresetRef.current;
@@ -251,6 +340,8 @@ export function useStatusLine(): {
       const cfg = configRef.current;
       const stats = ui.sessionStats;
       const m = stats.metrics;
+      const currentDir = cfg.getTargetDir();
+      ensurePullRequestNumber(preset, currentDir, ui.branchName);
 
       let totalInputTokens = 0;
       let totalOutputTokens = 0;
@@ -265,8 +356,9 @@ export function useStatusLine(): {
         sessionId: stats.sessionId,
         version: cfg.getCliVersion(),
         modelDisplayName: ui.currentModel || cfg.getModel(),
-        currentDir: cfg.getTargetDir(),
+        currentDir,
         branch: ui.branchName,
+        pullRequestNumber: pullRequestNumberRef.current,
         contextWindowSize,
         currentUsage: stats.lastPromptTokenCount,
         totalInputTokens,
@@ -278,6 +370,8 @@ export function useStatusLine(): {
       setOutput(buildStatusLinePresetLines(preset, data));
       return;
     }
+
+    clearPullRequestLookup();
 
     const cmd = statusLineCommandRef.current;
     if (!cmd) {
@@ -404,7 +498,7 @@ export function useStatusLine(): {
       child.stdin.write(JSON.stringify(input));
       child.stdin.end();
     }
-  }, []); // No deps — reads everything from refs
+  }, [clearPullRequestLookup, ensurePullRequestNumber]);
 
   const scheduleUpdate = useCallback(() => {
     if (debounceTimerRef.current !== undefined) {
@@ -423,6 +517,11 @@ export function useStatusLine(): {
       activeChildRef.current?.kill();
       activeChildRef.current = undefined;
       generationRef.current++;
+      pullRequestLookupChildRef.current?.kill();
+      pullRequestLookupChildRef.current = undefined;
+      pullRequestLookupGenerationRef.current++;
+      pullRequestLookupKeyRef.current = undefined;
+      updatePullRequestNumber(undefined);
       if (debounceTimerRef.current !== undefined) {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = undefined;
@@ -464,6 +563,7 @@ export function useStatusLine(): {
     totalLinesRemoved,
     streamingState,
     scheduleUpdate,
+    updatePullRequestNumber,
   ]);
 
   // Re-execute immediately when the command itself changes (hot reload).
@@ -481,6 +581,12 @@ export function useStatusLine(): {
     // Cleanup when command is removed is handled by the state-change effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusLineCommand, statusLinePresetKey]);
+
+  // Re-render preset output once the async GitHub PR lookup returns.
+  useEffect(() => {
+    if (!hasMountedRef.current || !statusLinePresetKey) return;
+    scheduleUpdate();
+  }, [pullRequestNumber, statusLinePresetKey, scheduleUpdate]);
 
   // Periodic refresh — re-run the command every `refreshInterval` seconds.
   // The tick yields if a previous exec is still running: unlike state-change
@@ -506,12 +612,17 @@ export function useStatusLine(): {
     const genRef = generationRef;
     const debounceRef = debounceTimerRef;
     const childRef = activeChildRef;
+    const pullRequestChildRef = pullRequestLookupChildRef;
+    const pullRequestGenerationRef = pullRequestLookupGenerationRef;
     doUpdate();
     return () => {
       // Kill active child process and invalidate callbacks
       childRef.current?.kill();
       childRef.current = undefined;
       genRef.current++;
+      pullRequestChildRef.current?.kill();
+      pullRequestChildRef.current = undefined;
+      pullRequestGenerationRef.current++;
       if (debounceRef.current !== undefined) {
         clearTimeout(debounceRef.current);
         debounceRef.current = undefined;

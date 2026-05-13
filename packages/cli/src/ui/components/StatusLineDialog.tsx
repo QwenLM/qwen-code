@@ -36,6 +36,7 @@ interface StatusLineDialogProps {
   config: Config;
   uiState: UIState;
   addItem: UseHistoryManagerReturn['addItem'];
+  onSaved?: (config: StatusLinePresetConfig) => void;
   onClose: () => void;
   availableTerminalHeight?: number;
 }
@@ -111,6 +112,7 @@ export function StatusLineDialog({
   config,
   uiState,
   addItem,
+  onSaved,
   onClose,
   availableTerminalHeight,
 }: StatusLineDialogProps): React.JSX.Element {
@@ -163,6 +165,7 @@ export function StatusLineDialog({
 
   const handleConfirm = useCallback(() => {
     settings.setValue(SettingScope.User, 'ui.statusLine', presetConfig);
+    onSaved?.(presetConfig);
     addItem(
       {
         type: MessageType.INFO,
@@ -171,7 +174,7 @@ export function StatusLineDialog({
       Date.now(),
     );
     onClose();
-  }, [addItem, onClose, presetConfig, settings]);
+  }, [addItem, onClose, onSaved, presetConfig, settings]);
 
   useKeypress(
     (key) => {

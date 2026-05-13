@@ -92,6 +92,7 @@ describe('StatusLineDialog', () => {
     const settings = createSettings();
     const addItem = vi.fn();
     const onClose = vi.fn();
+    const onSaved = vi.fn();
     const { stdin } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <StatusLineDialog
@@ -99,6 +100,7 @@ describe('StatusLineDialog', () => {
           config={config}
           uiState={uiState}
           addItem={addItem}
+          onSaved={onSaved}
           onClose={onClose}
           availableTerminalHeight={18}
         />
@@ -131,6 +133,7 @@ describe('StatusLineDialog', () => {
       },
       expect.any(Number),
     );
+    expect(onSaved).toHaveBeenCalledWith(settings.merged.ui?.statusLine);
     expect(onClose).toHaveBeenCalled();
   });
 });

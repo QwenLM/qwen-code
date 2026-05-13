@@ -131,6 +131,7 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import type { StatusLinePresetConfig } from './statusLinePresets.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -682,6 +683,17 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const closeStatusLineDialog = useCallback(
     () => setStatusLineDialogOpen(false),
+    [],
+  );
+  const [statusLineSettingsVersion, setStatusLineSettingsVersion] = useState(0);
+  const [statusLineConfigOverride, setStatusLineConfigOverride] = useState<
+    StatusLinePresetConfig | undefined
+  >(undefined);
+  const notifyStatusLineSettingsChanged = useCallback(
+    (newConfig: StatusLinePresetConfig) => {
+      setStatusLineConfigOverride(newConfig);
+      setStatusLineSettingsVersion((version) => version + 1);
+    },
     [],
   );
   const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
@@ -2637,6 +2649,8 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -2756,6 +2770,8 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -2880,6 +2896,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
@@ -2955,6 +2972,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,

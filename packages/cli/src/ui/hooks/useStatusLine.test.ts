@@ -34,6 +34,10 @@ const mockUIState = {
   currentModel: 'test-model',
   branchName: 'main' as string | undefined,
   streamingState: StreamingState.Idle,
+  statusLineSettingsVersion: 0,
+  statusLineConfigOverride: undefined as
+    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
+    | undefined,
 };
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: () => mockUIState,
@@ -86,6 +90,7 @@ let mockKill: ReturnType<typeof vi.fn>;
 function setStatusLineConfig(
   config:
     | { type: string; command: string; refreshInterval?: number }
+    | { type: 'preset'; items: string[]; useThemeColors?: boolean }
     | undefined,
 ) {
   mockSettings.merged = config ? { ui: { statusLine: config } } : {};
@@ -134,6 +139,8 @@ describe('useStatusLine', () => {
     mockUIState.sessionStats.lastPromptTokenCount = 100;
     mockUIState.currentModel = 'test-model';
     mockUIState.branchName = 'main';
+    mockUIState.statusLineSettingsVersion = 0;
+    mockUIState.statusLineConfigOverride = undefined;
     mockUIState.sessionStats.metrics.tools.totalCalls = 0;
     mockUIState.sessionStats.metrics.files.totalLinesAdded = 0;
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
@@ -177,6 +184,76 @@ describe('useStatusLine', () => {
       const { result } = renderHook(() => useStatusLine());
       expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('preset status line', () => {
+    it('looks up the current branch pull request number with gh', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['pull-request-number'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
+      expect(result.current.lines).toEqual([]);
+
+      await act(async () => {
+        execCallback(null, '4118\n', '');
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(result.current.lines).toEqual(['#4118']);
+    });
+
+    it('does not run gh when pull request number is not selected', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['test-model']);
+    });
+
+    it('refreshes when status line settings are saved in the same process', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning'],
+      });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).not.toHaveBeenCalled();
+      expect(result.current.lines).toEqual(['test-model']);
+
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model-with-reasoning', 'pull-request-number'],
+      });
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model-with-reasoning', 'pull-request-number'],
+      };
+      mockUIState.statusLineSettingsVersion += 1;
+      rerender();
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
+
+      await act(async () => {
+        execCallback(null, '4118\n', '');
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(result.current.lines).toEqual(['test-model | #4118']);
     });
   });
 

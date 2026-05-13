@@ -262,6 +262,7 @@ export const DialogManager = ({
         config={config}
         uiState={uiState}
         addItem={addItem}
+        onSaved={uiActions.notifyStatusLineSettingsChanged}
         onClose={uiActions.closeStatusLineDialog}
         availableTerminalHeight={terminalHeight - staticExtraHeight}
       />

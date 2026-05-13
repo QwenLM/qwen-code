@@ -84,4 +84,32 @@ describe('statusLinePresets', () => {
       'qwen3-code-plus | Context 75% left | /repo/project | #4087 | +12 -3 | Ready',
     ]);
   });
+
+  it('renders an explicit pull request number before branch-name inference', () => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      currentDir: '/repo/project',
+      branch: 'feature/pr-1',
+      pullRequestNumber: '4087',
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 1200,
+      totalOutputTokens: 340,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+      streamingState: StreamingState.Idle,
+    });
+
+    expect(
+      buildStatusLinePresetLines(
+        {
+          type: 'preset',
+          items: ['pull-request-number'],
+        },
+        data,
+      ),
+    ).toEqual(['#4087']);
+  });
 });
