@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Reproduce Feature"
+  short_description: "Capture Codex behavior and port it into Qwen Code"
+  default_prompt: "Use $codex-reproduce-feature to reproduce Codex slash command behavior in Qwen Code."
