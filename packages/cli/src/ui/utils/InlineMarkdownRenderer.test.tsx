@@ -277,6 +277,24 @@ describe('<RenderInline />', () => {
       expect(out).not.toContain(`(${url})`);
     });
 
+    it('sanitizes bidi controls in the URL when used as visible text', () => {
+      // The OSC 8 target inside `osc8Open` is sanitized, but a model that
+      // emits `[](https://example.com/a‮evil)` (empty label) would
+      // otherwise render the raw URL — including the RLO — as visible text
+      // via the `safeLabel || url` fallback. Same risk for the deceptive
+      // `(url)` suffix. Both must render the sanitized URL.
+      enableHyperlinks();
+      const dirtyUrl = 'https://example.com/a\u202eevil';
+      const { lastFrame } = renderWithProviders(
+        <RenderInline text={`see [](${dirtyUrl})`} />,
+      );
+      const out = lastFrame() ?? '';
+      // The OSC target is sanitized (RLO byte stripped).
+      expect(out).toContain('\x1b]8;;https://example.com/aevil\x07');
+      // The visible URL fallback also has the RLO stripped.
+      expect(out).not.toContain('\u202e');
+    });
+
     it('sanitizes bidi controls in the visible label (anti-spoof)', () => {
       // U+202E (RLO) injected into a label would visually reverse the
       // trailing bytes, letting a "click [safe.com](https://evil.com)"

@@ -304,17 +304,23 @@ function renderMarkdownToAnsi(text: string, enableInlineMath = false): string {
         // byte-identical to today on unsupported terminals / unsafe
         // schemes / whitespace URLs.
         if (shouldWrapMarkdownLink(url, canHyperlink)) {
-          // Strip bidi / C0 / C1 from the visible label too, not just the
-          // OSC target — otherwise a model-emitted U+202E in the label
-          // would still spoof the rendered text inside the clickable region.
+          // Strip bidi / C0 / C1 from BOTH the visible label and any URL
+          // bytes that end up as visible text (empty-label fallback,
+          // deceptive-label `(url)` suffix). The OSC target inside
+          // `osc8Open` is already sanitized, but raw `url` reaching the
+          // visible region would let U+202E etc. spoof the rendered text.
           const safeLabel = sanitizeForOsc(labelText);
-          const visibleLabel = applyColor(safeLabel || url, theme.text.link);
+          const safeUrl = sanitizeForOsc(url);
+          const visibleLabel = applyColor(
+            safeLabel || safeUrl,
+            theme.text.link,
+          );
           const envelope = `${osc8Open(url)}${visibleLabel}${osc8Close()}`;
           // When the label looks like a (mismatched) URL, keep the `(url)`
           // suffix so the user can see where the click actually goes — same
           // mitigation as the React renderer.
-          rendered = labelMayDeceive(safeLabel, url)
-            ? `${envelope} ${applyColor(`(${url})`, theme.text.link)}`
+          rendered = labelMayDeceive(safeLabel, safeUrl)
+            ? `${envelope} ${applyColor(`(${safeUrl})`, theme.text.link)}`
             : envelope;
         } else {
           rendered = `${labelText} ${applyColor(`(${url})`, theme.text.link)}`;

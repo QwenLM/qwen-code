@@ -169,24 +169,27 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
           // The label is rendered inside the clickable region, so any bidi /
           // C0 / C1 byte the model embedded would still spoof the visible
           // text even though the OSC target is sanitized. Run the same
-          // sanitizer over the visible label when OSC 8 is active. The
-          // legacy `label (url)` branch leaves the label intact so today's
-          // unsupported-terminal output stays byte-identical.
+          // sanitizer over both the visible label AND any URL bytes that
+          // end up as visible text (empty-label fallback, anti-deception
+          // `(url)` suffix) when OSC 8 is active. The legacy `label (url)`
+          // branch leaves both intact so today's unsupported-terminal
+          // output stays byte-identical.
           const safeLabel = wrapOsc8 ? sanitizeForOsc(linkText) : linkText;
+          const safeUrl = wrapOsc8 ? sanitizeForOsc(url) : url;
           // Keep the `(url)` suffix visible when the label itself looks
           // like a (mismatched) URL — pre-OSC-8 rendering always showed the
           // target; eliding it now would let `[https://google.com](https://attacker.com)`
           // present a clickable "google.com" that resolves elsewhere.
-          const showUrlSuffix = wrapOsc8 && labelMayDeceive(safeLabel, url);
+          const showUrlSuffix = wrapOsc8 && labelMayDeceive(safeLabel, safeUrl);
           renderedNode = wrapOsc8 ? (
             <Text key={key}>
               <Text color={theme.text.link}>
                 {osc8Open(url)}
-                {safeLabel || url}
+                {safeLabel || safeUrl}
                 {osc8Close()}
               </Text>
               {showUrlSuffix ? (
-                <Text color={theme.text.link}> ({url})</Text>
+                <Text color={theme.text.link}> ({safeUrl})</Text>
               ) : null}
             </Text>
           ) : (
