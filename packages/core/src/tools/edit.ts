@@ -539,9 +539,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // edit.
       this.ensureParentDirectoriesExist(this.params.file_path);
 
-      await this.config
-        .getFileHistoryService()
-        .trackEdit(this.params.file_path);
+      try {
+        await this.config
+          .getFileHistoryService()
+          .trackEdit(this.params.file_path);
+      } catch {
+        // File history is best-effort; never block core tool operations.
+      }
 
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)

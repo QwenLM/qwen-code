@@ -303,9 +303,17 @@ export class FileHistoryService {
       return;
     }
 
+    let maxVersion = 0;
+    for (const snapshot of this.state.snapshots) {
+      const existing = snapshot.trackedFileBackups[trackingPath];
+      if (existing && existing.version > maxVersion) {
+        maxVersion = existing.version;
+      }
+    }
+
     let backup: FileHistoryBackup;
     try {
-      backup = await createBackup(filePath, 1, this.sessionId);
+      backup = await createBackup(filePath, maxVersion + 1, this.sessionId);
     } catch (error) {
       debugLogger.error(`FileHistory: trackEdit failed: ${error}`);
       return;
