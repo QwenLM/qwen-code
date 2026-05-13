@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
 import * as os from 'os';
 import { promises as fs } from 'node:fs';
-import { OpenAILogger } from './openaiLogger.js';
+import { OpenAILogger, resolveOpenAILogDir } from './openaiLogger.js';
 
 describe('OpenAILogger', () => {
   let originalCwd: string;
@@ -89,6 +89,20 @@ describe('OpenAILogger', () => {
       const customDir = '~';
       const logger = new OpenAILogger(customDir);
       expect(logger).toBeInstanceOf(OpenAILogger);
+    });
+
+    it('should resolve OpenAI log directories without constructing a logger', () => {
+      const customCwd = path.join(testTempDir, 'project-root');
+
+      expect(resolveOpenAILogDir(undefined, customCwd)).toBe(
+        path.join(customCwd, 'logs', 'openai'),
+      );
+      expect(resolveOpenAILogDir('relative-logs', customCwd)).toBe(
+        path.resolve(customCwd, 'relative-logs'),
+      );
+      expect(resolveOpenAILogDir('~/custom-logs', customCwd)).toBe(
+        path.join(os.homedir(), 'custom-logs'),
+      );
     });
   });
 
@@ -239,6 +253,12 @@ describe('OpenAILogger', () => {
       expect(path.basename(logPath)).toMatch(
         /openai-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z-[a-f0-9]{8}\.json/,
       );
+
+      const logContent = JSON.parse(await fs.readFile(logPath, 'utf-8'));
+      expect(logContent.context).toEqual({
+        promptId: 'e097d32b-82d6-422a-afa6-f6184565a8ab########0',
+        sessionId: 'e097d32b-82d6-422a-afa6-f6184565a8ab',
+      });
     });
 
     it('should write correct log data structure', async () => {
@@ -258,6 +278,7 @@ describe('OpenAILogger', () => {
       expect(logContent).toHaveProperty('request', request);
       expect(logContent).toHaveProperty('response', response);
       expect(logContent).toHaveProperty('error', null);
+      expect(logContent).toHaveProperty('context', null);
       expect(logContent).toHaveProperty('system');
       expect(logContent.system).toHaveProperty('hostname');
       expect(logContent.system).toHaveProperty('platform');

@@ -288,7 +288,11 @@ export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiscovery.js';
 export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
 export type { RuleFile } from './utils/rulesDiscovery.js';
-export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
+export {
+  OpenAILogger,
+  openaiLogger,
+  resolveOpenAILogDir,
+} from './utils/openaiLogger.js';
 export * from './utils/partUtils.js';
 export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';
