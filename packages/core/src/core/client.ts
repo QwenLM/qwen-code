@@ -1176,7 +1176,10 @@ export class GeminiClient {
       // Determine the model to use for this turn
       const model = options?.modelOverride ?? this.config.getModel();
 
-      // append system reminders to the request
+      // Assemble the outgoing request. IDE context is merged into the
+      // user prompt's first text part, then on UserQuery / Cron turns
+      // the system reminders block is prepended in front of everything
+      // so the final shape is: [systemReminders..., ideContext + user prompt].
       let requestToSend = await flatMapTextParts(request, async (text) => [
         text,
       ]);
@@ -1621,7 +1624,8 @@ export class GeminiClient {
       this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(info.newTokenCount);
       // Re-send a full IDE context blob on the next regular message —
-      // compression dropped the previous context turn from history.
+      // compression may have summarized away the merged IDE context
+      // that lived inside the previous user prompt.
       this.forceFullIdeContext = true;
     }
     return info;
