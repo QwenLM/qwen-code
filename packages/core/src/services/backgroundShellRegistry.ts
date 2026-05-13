@@ -165,11 +165,29 @@ export class BackgroundShellRegistry {
   cancel(shellId: string, endTime: number): void {
     const entry = this.entries.get(shellId);
     if (!entry || entry.status !== 'running') return;
+    this.settleAsCancelled(entry, endTime);
+    this.pruneTerminalEntries();
+    this.fireStatusChange(entry);
+  }
+
+  /**
+   * Mutates a running entry to its `cancelled` terminal state without
+   * touching the prune or status-change side channels. Internal helper
+   * shared by `cancel()` (single-shot, fires both side channels) and
+   * `abortAll()` (batch, fires both exactly once after the loop).
+   *
+   * Caller is responsible for verifying the entry is `running` before
+   * invoking this. The split keeps the running-status guard at the
+   * public-API boundary so a future caller can't accidentally settle
+   * an already-terminal entry without that check.
+   */
+  private settleAsCancelled(
+    entry: BackgroundShellEntry,
+    endTime: number,
+  ): void {
     entry.status = 'cancelled';
     entry.endTime = endTime;
     entry.abortController.abort();
-    this.pruneTerminalEntries();
-    this.fireStatusChange(entry);
   }
 
   /**
@@ -261,13 +279,28 @@ export class BackgroundShellRegistry {
    * background shells don't outlive the CLI process and leak orphaned
    * children. Symmetric with `BackgroundTaskRegistry.abortAll()` for the
    * subagent path.
+   *
+   * Settles each entry inline, then fires `pruneTerminalEntries` and the
+   * statusChange callback exactly once after the loop. The per-entry
+   * `cancel()` path would have triggered both side channels for every
+   * running shell — wasteful on shutdown / `/clear` where the only
+   * subscriber (`useBackgroundTaskView`) just re-pulls `getAll()`
+   * regardless of the entry argument.
    */
   abortAll(): void {
     const endTime = Date.now();
+    let lastCancelled: BackgroundShellEntry | undefined;
     for (const entry of Array.from(this.entries.values())) {
-      if (entry.status === 'running') {
-        this.cancel(entry.shellId, endTime);
-      }
+      if (entry.status !== 'running') continue;
+      this.settleAsCancelled(entry, endTime);
+      lastCancelled = entry;
     }
+    if (!lastCancelled) return;
+    this.pruneTerminalEntries();
+    // The single subscriber (`useBackgroundTaskView`) ignores the entry
+    // arg and re-pulls `getAll()`, so passing the last cancelled entry
+    // here is informational only — any of the just-cancelled entries
+    // would be equally valid as the "what changed" signal.
+    this.fireStatusChange(lastCancelled);
   }
 }

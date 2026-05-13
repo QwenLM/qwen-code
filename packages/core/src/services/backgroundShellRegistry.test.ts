@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_RETAINED_TERMINAL_SHELLS,
@@ -243,6 +243,49 @@ describe('BackgroundShellRegistry', () => {
     it('is a no-op when registry is empty', () => {
       const reg = new BackgroundShellRegistry();
       expect(() => reg.abortAll()).not.toThrow();
+    });
+
+    it('fires statusChange exactly once regardless of how many entries cancel', () => {
+      // The single subscriber (`useBackgroundTaskView`) re-pulls
+      // `getAll()` from inside the callback, so per-entry statusChange
+      // fires here just produce a flurry of redundant React re-renders
+      // on shutdown / `/clear`. Pin the batch behavior so a future
+      // refactor that loops `cancel()` again doesn't silently
+      // re-introduce the wakeup churn.
+      const reg = new BackgroundShellRegistry();
+      const transitions: Array<{ id: string; status: string }> = [];
+      for (let i = 0; i < 5; i++) {
+        reg.register(makeEntry({ shellId: `s-${i}` }));
+      }
+      reg.setStatusChangeCallback((entry) => {
+        if (entry) {
+          transitions.push({ id: entry.shellId, status: entry.status });
+        }
+      });
+
+      reg.abortAll();
+
+      // All five entries must end up cancelled, but the callback
+      // fires only once.
+      for (let i = 0; i < 5; i++) {
+        expect(reg.get(`s-${i}`)!.status).toBe('cancelled');
+      }
+      expect(transitions).toHaveLength(1);
+      expect(transitions[0].status).toBe('cancelled');
+    });
+
+    it('does not fire statusChange when no entry was cancelled', () => {
+      // Empty / all-already-terminal registries shouldn't wake the
+      // subscriber for a no-op transition.
+      const reg = new BackgroundShellRegistry();
+      reg.register(makeEntry({ shellId: 'a' }));
+      reg.complete('a', 0, 1500);
+      const cb = vi.fn();
+      reg.setStatusChangeCallback(cb);
+
+      reg.abortAll();
+
+      expect(cb).not.toHaveBeenCalled();
     });
   });
 
