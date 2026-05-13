@@ -37,6 +37,12 @@ describe('CrawlCache', () => {
       expect(key2).not.toBe(key3);
       expect(key3).toBe(key4);
     });
+
+    it('should generate a different hash for different gitignore modes', () => {
+      const key1 = getCacheKey('/foo', 'bar', undefined, undefined, true);
+      const key2 = getCacheKey('/foo', 'bar', undefined, undefined, false);
+      expect(key1).not.toBe(key2);
+    });
   });
 
   describe('in-memory cache operations', () => {

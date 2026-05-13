@@ -216,7 +216,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       async (span) => {
         const startTime = Date.now();
         const isInternal = isInternalPromptId(userPromptId);
-        const session = this.startCaptureSession(isInternal);
+        const session = this.startCaptureSession();
         try {
           if (!isInternal) {
             this.logApiRequest(
@@ -240,18 +240,15 @@ export class LoggingContentGenerator implements ContentGenerator {
             response.usageMetadata,
             responseText,
           );
-          if (!isInternal) {
-            try {
-              await this.safelyLogOpenAIInteraction(
-                await session.resolve(req),
-                response,
-              );
-            } catch (loggingError) {
-              debugLogger.warn(
-                'Failed to log OpenAI interaction:',
-                loggingError,
-              );
-            }
+          try {
+            await this.safelyLogOpenAIInteraction(
+              await session.resolve(req),
+              response,
+              undefined,
+              userPromptId,
+            );
+          } catch (loggingError) {
+            debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
           }
           return response;
         } catch (error) {
@@ -263,19 +260,15 @@ export class LoggingContentGenerator implements ContentGenerator {
             req.model,
             userPromptId,
           );
-          if (!isInternal) {
-            try {
-              await this.safelyLogOpenAIInteraction(
-                await session.resolve(req),
-                undefined,
-                error,
-              );
-            } catch (loggingError) {
-              debugLogger.warn(
-                'Failed to log OpenAI interaction:',
-                loggingError,
-              );
-            }
+          try {
+            await this.safelyLogOpenAIInteraction(
+              await session.resolve(req),
+              undefined,
+              error,
+              userPromptId,
+            );
+          } catch (loggingError) {
+            debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
           }
           safeSetStatus(span, {
             code: SpanStatusCode.ERROR,
@@ -302,7 +295,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
-    const session = this.startCaptureSession(isInternal);
+    const session = this.startCaptureSession();
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
@@ -332,22 +325,21 @@ export class LoggingContentGenerator implements ContentGenerator {
       } catch {
         // OTel errors must not mask the original API error
       }
-      if (!isInternal) {
-        try {
-          await this.safelyLogOpenAIInteraction(
-            await session.resolve(req),
-            undefined,
-            error,
-          );
-        } catch (loggingError) {
-          debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
-        }
+      try {
+        await this.safelyLogOpenAIInteraction(
+          await session.resolve(req),
+          undefined,
+          error,
+          userPromptId,
+        );
+      } catch (loggingError) {
+        debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
       }
       throw error;
     }
 
     let resolvedRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
-    if (!isInternal) {
+    if (this.openaiLogger) {
       try {
         resolvedRequest = await session.resolve(req);
       } catch (loggingError) {
@@ -368,14 +360,14 @@ export class LoggingContentGenerator implements ContentGenerator {
     );
   }
 
-  private startCaptureSession(isInternal: boolean): {
+  private startCaptureSession(): {
     wrap: <T>(fn: () => Promise<T>) => Promise<T>;
     resolve: (
       req: GenerateContentParameters,
     ) => Promise<OpenAI.Chat.ChatCompletionCreateParams | undefined>;
   } {
     let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
-    const skipCapture = isInternal || !this.openaiLogger;
+    const skipCapture = !this.openaiLogger;
     return {
       wrap: <T>(fn: () => Promise<T>): Promise<T> =>
         skipCapture
@@ -384,7 +376,9 @@ export class LoggingContentGenerator implements ContentGenerator {
               captured = built;
             }, fn),
       resolve: async (req) =>
-        captured ?? (await this.buildOpenAIRequestForLogging(req)),
+        this.openaiLogger
+          ? (captured ?? (await this.buildOpenAIRequestForLogging(req)))
+          : undefined,
     };
   }
 
@@ -398,8 +392,9 @@ export class LoggingContentGenerator implements ContentGenerator {
     spanContext?: Context,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
-    // For internal prompts we only need the last usage metadata (for /stats);
-    // skip collecting full responses to avoid unnecessary memory overhead.
+    // Skip collecting full responses for internal prompts to avoid memory
+    // overhead, unless OpenAI file logging needs them.
+    const shouldCollectResponses = !isInternal || !!this.openaiLogger;
     const responses: GenerateContentResponse[] = [];
 
     // Track first-seen IDs so _logApiResponse/_logApiError have accurate
@@ -423,7 +418,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (!firstModelVersion && response.modelVersion) {
           firstModelVersion = response.modelVersion;
         }
-        if (!isInternal) {
+        if (shouldCollectResponses) {
           responses.push(response);
         }
         if (response.usageMetadata) {
@@ -433,9 +428,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
-      const consolidatedResponse = isInternal
-        ? undefined
-        : this.consolidateGeminiResponsesForLogging(responses);
+      const consolidatedResponse = shouldCollectResponses
+        ? this.consolidateGeminiResponsesForLogging(responses)
+        : undefined;
       runInSpan(() =>
         this.safelyLogApiResponse(
           firstResponseId,
@@ -443,14 +438,19 @@ export class LoggingContentGenerator implements ContentGenerator {
           firstModelVersion || model,
           userPromptId,
           lastUsageMetadata,
-          this.extractResponseText(consolidatedResponse),
+          isInternal
+            ? undefined
+            : this.extractResponseText(consolidatedResponse),
         ),
       );
-      if (!isInternal) {
-        await runInSpan(() =>
-          this.safelyLogOpenAIInteraction(openaiRequest, consolidatedResponse),
-        );
-      }
+      await runInSpan(() =>
+        this.safelyLogOpenAIInteraction(
+          openaiRequest,
+          consolidatedResponse,
+          undefined,
+          userPromptId,
+        ),
+      );
       terminalStatusAttempted = true;
       if (span) {
         safeSetStatus(span, { code: SpanStatusCode.OK });
@@ -466,11 +466,14 @@ export class LoggingContentGenerator implements ContentGenerator {
           userPromptId,
         ),
       );
-      if (!isInternal) {
-        await runInSpan(() =>
-          this.safelyLogOpenAIInteraction(openaiRequest, undefined, error),
-        );
-      }
+      await runInSpan(() =>
+        this.safelyLogOpenAIInteraction(
+          openaiRequest,
+          undefined,
+          error,
+          userPromptId,
+        ),
+      );
       terminalStatusAttempted = true;
       if (span) {
         safeSetStatus(span, {
@@ -553,6 +556,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined,
     response?: GenerateContentResponse,
     error?: unknown,
+    promptId?: string,
   ): Promise<void> {
     if (!this.openaiLogger || !openaiRequest) {
       return;
@@ -570,6 +574,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         : error
           ? new Error(String(error))
           : undefined,
+      promptId,
     );
   }
 
@@ -577,9 +582,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined,
     response?: GenerateContentResponse,
     error?: unknown,
+    promptId?: string,
   ): Promise<void> {
     try {
-      await this.logOpenAIInteraction(openaiRequest, response, error);
+      await this.logOpenAIInteraction(openaiRequest, response, error, promptId);
     } catch (loggingError) {
       debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
     }
