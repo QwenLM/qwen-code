@@ -8,8 +8,8 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { fileURLToPath } from 'url';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
+import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import * as yaml from 'yaml';
 import type {
@@ -86,17 +86,15 @@ export class SkillManager {
   private activationRegistry: SkillActivationRegistry | null = null;
 
   constructor(private readonly config: Config) {
-    // When bundled with esbuild code-splitting, this module is hoisted into
-    // a shared chunk under `dist/chunks/`. The bundled skills directory is
-    // still copied to `dist/bundled/` by `copy_bundle_assets.js`, so strip
-    // the trailing `chunks` segment so the sibling lookup resolves under
-    // `dist/` rather than `dist/chunks/`. In source / transpiled modes the
-    // basename is never `chunks`, so this is a no-op.
-    let moduleDir = path.dirname(fileURLToPath(import.meta.url));
-    if (path.basename(moduleDir) === 'chunks') {
-      moduleDir = path.dirname(moduleDir);
-    }
-    this.bundledSkillsDir = path.join(moduleDir, 'bundled');
+    // Anchor the bundled skills directory at the on-disk sibling of
+    // `cli.js` (i.e. `dist/bundled/`, populated by `copy_bundle_assets.js`).
+    // See `resolveBundleDir` for the rationale behind stripping a trailing
+    // `chunks/` segment when this module is hoisted into a shared esbuild
+    // chunk.
+    this.bundledSkillsDir = path.join(
+      resolveBundleDir(import.meta.url),
+      'bundled',
+    );
   }
 
   /**

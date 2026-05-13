@@ -5,8 +5,8 @@
  */
 
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
+import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
 import { createDebugLogger } from './debugLogger.js';
@@ -57,18 +57,11 @@ function wslTimeout(): number {
     : RIPGREP_RUN_TIMEOUT_MS;
 }
 
-// Get the directory of the current module. When bundled with esbuild
-// code-splitting, this file is hoisted into `dist/chunks/`, but the vendored
-// ripgrep binary is still copied to `dist/vendor/` (a sibling of cli.js).
-// Strip the trailing `chunks` segment so the lookup below resolves under
-// `dist/`. In source / transpiled modes the basename is never `chunks`, so
-// the fallback is a no-op.
-const __filename = fileURLToPath(import.meta.url);
-const __dirnameRaw = path.dirname(__filename);
-const __dirname =
-  path.basename(__dirnameRaw) === 'chunks'
-    ? path.dirname(__dirnameRaw)
-    : __dirnameRaw;
+// Resolved at module load to the directory that should anchor sibling-asset
+// lookups (here: the vendored ripgrep binary copied to `dist/vendor/`). See
+// `resolveBundleDir` for the rationale behind stripping a trailing `chunks/`
+// segment when this module is hoisted into a shared esbuild chunk.
+const __dirname = resolveBundleDir(import.meta.url);
 
 type Platform = 'darwin' | 'linux' | 'win32';
 type Architecture = 'x64' | 'arm64';
