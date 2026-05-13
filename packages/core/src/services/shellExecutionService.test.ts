@@ -19,7 +19,9 @@ import { type ChildProcess } from 'node:child_process';
 import pkg from '@xterm/headless';
 import type {
   ShellAbortReason,
+  ShellExecuteOptions,
   ShellOutputEvent,
+  ShellPostPromoteSettleInfo,
 } from './shellExecutionService.js';
 import {
   getShellAbortReasonKind,
@@ -266,6 +268,7 @@ describe('ShellExecutionService', () => {
       ac: AbortController,
     ) => void,
     config = shellExecutionConfig,
+    options: ShellExecuteOptions = {},
   ) => {
     const abortController = new AbortController();
     const handle = await ShellExecutionService.execute(
@@ -275,6 +278,7 @@ describe('ShellExecutionService', () => {
       abortController.signal,
       true,
       config,
+      options,
     );
 
     await new Promise((resolve) => process.nextTick(resolve));
@@ -743,6 +747,115 @@ describe('ShellExecutionService', () => {
       const exitDisposableStub = mockPtyProcess.onExit.mock.results[0]
         .value as { dispose: Mock };
       expect(exitDisposableStub.dispose).toHaveBeenCalled();
+    });
+
+    it('PR-2.5: post-promote bytes route to postPromote.onData when callback provided', async () => {
+      // Pin the new opt-in contract: when `postPromote.onData` is set,
+      // bytes the still-running PTY emits after promote go to the
+      // caller's handler instead of being lost. PR-2 fully detached
+      // listeners; PR-2.5 re-attaches a minimal forwarder when the
+      // caller opts in.
+      const onDataCalls: ShellOutputEvent[] = [];
+      const { result } = await simulateExecution(
+        'tail -f /tmp/never.log',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_data',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onData: (event) => onDataCalls.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // After promote, drive a fresh post-promote chunk through the
+      // PTY's onData. The service should have attached a NEW listener
+      // (the foreground one is disposed); look at the latest
+      // mock.calls entry — index 1 since PR-2.5 adds a second.
+      const onDataRegistrations = mockPtyProcess.onData.mock.calls;
+      expect(onDataRegistrations.length).toBeGreaterThanOrEqual(2);
+      const postPromoteHandler =
+        onDataRegistrations[onDataRegistrations.length - 1][0];
+      postPromoteHandler('post-promote-byte-stream');
+      expect(onDataCalls).toEqual([
+        { type: 'data', chunk: 'post-promote-byte-stream' },
+      ]);
+    });
+
+    it('PR-2.5: postPromote.onSettle fires on natural child exit after promote', async () => {
+      // Pin the natural-exit settle: when the child terminates AFTER
+      // promote, the caller's onSettle handler is invoked exactly
+      // once with the exit code (or signal / error). PR-2 detached
+      // the exit listener entirely; PR-2.5 re-attaches a forwarder
+      // when the caller opts in.
+      const settleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'long-running-command',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_settle',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onSettle: (info) => settleCalls.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // After promote, drive the PTY's onExit to simulate natural
+      // completion. The service attaches a new exit listener for
+      // post-promote settle — find the most-recently-registered.
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+      postPromoteExitHandler({ exitCode: 0, signal: undefined });
+      expect(settleCalls).toHaveLength(1);
+      expect(settleCalls[0].exitCode).toBe(0);
+      expect(settleCalls[0].signal).toBeNull();
+      expect(settleCalls[0].error).toBeUndefined();
+      expect(typeof settleCalls[0].endTime).toBe('number');
+    });
+
+    it('PR-2.5 backwards compat: without postPromote, listeners stay fully detached (no regression on PR-2 contract)', async () => {
+      // Pin that omitting `postPromote` preserves the PR-2 detach-
+      // everything contract. The pre-existing post-promote test at
+      // line ~680 already covers this for the data path; this one
+      // adds the symmetric guarantee for the exit path — natural
+      // post-promote exit must NOT invoke any callback the caller
+      // didn't provide.
+      const onDataCalls: ShellOutputEvent[] = [];
+      const onSettleCalls: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'no-post-promote-handlers',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pr25_compat',
+          } satisfies ShellAbortReason);
+        },
+        // No options arg → postPromote unset → PR-2 contract.
+      );
+      expect(result.promoted).toBe(true);
+      // Drive both PTY events post-promote.
+      const onDataRegistrations = mockPtyProcess.onData.mock.calls;
+      // PR-2 contract: only ONE onData registration (the foreground
+      // one, now disposed). PR-2.5's re-attach is gated on
+      // `postPromote.onData` being set, so without it the
+      // registration count stays at 1.
+      expect(onDataRegistrations.length).toBe(1);
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBe(1);
+      // Caller-provided handlers were never invoked.
+      expect(onDataCalls).toHaveLength(0);
+      expect(onSettleCalls).toHaveLength(0);
     });
 
     it('post-exit race: PTY background-promote refuses if process.kill(pid, 0) reports the pid is gone', async () => {

@@ -178,6 +178,63 @@ export interface ShellExecutionConfig {
 }
 
 /**
+ * Optional caller-side handlers for the *post-promote* lifetime of a
+ * background-promoted child process. PR-2 (#3894) detached every
+ * service-side listener at promote time and froze `result.output` at
+ * the snapshot; without these hooks the still-running child's bytes
+ * are lost and the registry entry stays `'running'` until `task_stop`
+ * / session-end cleanup. PR-2.5 (#3831 follow-up) wires shell.ts to
+ * pass these so promoted shells behave like regular background shells:
+ * bytes append to `bg_xxx.output` and the entry transitions to
+ * `'completed'` / `'failed'` on natural child exit.
+ *
+ * Backwards compat: if `postPromote` is unset on the options bag the
+ * service falls back to the PR-2 detach-everything contract — no
+ * regressions for callers that don't opt in.
+ */
+export interface ShellPostPromoteHandlers {
+  /**
+   * Fired for each output chunk the still-running child produces
+   * AFTER `result.promoted` resolves. Same `ShellOutputEvent` shape
+   * the foreground stream uses so callers can reuse rendering logic;
+   * `binary_detected` / `binary_progress` are NOT re-emitted (those
+   * decisions were made pre-promote against the same byte stream).
+   */
+  onData?: (event: ShellOutputEvent) => void;
+  /**
+   * Fired exactly once when the post-promote child settles — natural
+   * exit (`exitCode` set, `signal: null`), signal kill (`exitCode:
+   * null`, `signal` set), or spawn-side error (`error` set). NOT
+   * fired for the promote-time resolve itself (that's the
+   * `result.promoted` Promise resolution). Callers wire this to the
+   * registry's `complete` / `fail` transitions.
+   */
+  onSettle?: (info: ShellPostPromoteSettleInfo) => void;
+}
+
+export interface ShellPostPromoteSettleInfo {
+  exitCode: number | null;
+  signal: number | NodeJS.Signals | null;
+  error?: Error;
+  /** `Date.now()` at the moment the service observed the exit/error. */
+  endTime: number;
+}
+
+/**
+ * Options bag for `ShellExecutionService.execute()`. Kept as an
+ * interface (rather than the prior inline shape) so future additions
+ * land without breaking signatures.
+ */
+export interface ShellExecuteOptions {
+  streamStdout?: boolean;
+  /**
+   * Post-promote callback hooks. See {@link ShellPostPromoteHandlers}.
+   * Optional; omit to preserve the PR-2 detach-everything contract.
+   */
+  postPromote?: ShellPostPromoteHandlers;
+}
+
+/**
  * Describes a structured event emitted during shell command execution.
  */
 export type ShellOutputEvent =
@@ -430,7 +487,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shouldUseNodePty: boolean,
     shellExecutionConfig: ShellExecutionConfig,
-    options: { streamStdout?: boolean } = {},
+    options: ShellExecuteOptions = {},
   ): Promise<ShellExecutionHandle> {
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
@@ -443,6 +500,7 @@ export class ShellExecutionService {
             abortSignal,
             shellExecutionConfig,
             ptyInfo,
+            options.postPromote,
           );
         } catch (_e) {
           // Fallback to child_process
@@ -456,6 +514,7 @@ export class ShellExecutionService {
       onOutputEvent,
       abortSignal,
       options.streamStdout ?? false,
+      options.postPromote,
     );
   }
 
@@ -465,6 +524,7 @@ export class ShellExecutionService {
     onOutputEvent: (event: ShellOutputEvent) => void,
     abortSignal: AbortSignal,
     streamStdout: boolean,
+    postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
@@ -702,6 +762,91 @@ export class ShellExecutionService {
           const combined =
             snapStdout +
             (snapStderr ? (snapStdout ? separator : '') + snapStderr : '');
+          // PR-2.5: re-attach post-promote listeners that forward to the
+          // caller's handlers. Attach AFTER `detachServiceListeners()`
+          // so we don't double-up on stdout/stderr 'data' events with
+          // the foreground listeners that just got removed; attach
+          // BEFORE `resolve()` so a sub-millisecond data burst right
+          // after promote still lands on the caller. The new listeners
+          // are direct stdout/stderr listeners (not service-managed) —
+          // ownership is the caller's from this point. We also attach
+          // a fresh exit listener (the foreground exitHandler is also
+          // detached by detachServiceListeners) so the caller can
+          // settle the registry entry on natural child exit. When
+          // postPromote is undefined we fall back to the PR-2 detach-
+          // everything contract: no listeners re-attach.
+          if (postPromote?.onData) {
+            const onPostData = postPromote.onData;
+            const decoder = new TextDecoder('utf-8', { fatal: false });
+            const safeData = (chunk: Buffer) => {
+              try {
+                onPostData({
+                  type: 'data',
+                  chunk: decoder.decode(chunk, { stream: true }),
+                });
+              } catch (cbErr) {
+                debugLogger.warn(
+                  `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                );
+              }
+            };
+            try {
+              child.stdout?.on('data', safeData);
+              child.stderr?.on('data', safeData);
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote data listeners threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+          if (postPromote?.onSettle) {
+            const onPostSettle = postPromote.onSettle;
+            try {
+              child.once(
+                'exit',
+                (
+                  exitCode: number | null,
+                  signalCode: NodeJS.Signals | null,
+                ) => {
+                  try {
+                    onPostSettle({
+                      exitCode,
+                      signal: signalCode,
+                      endTime: Date.now(),
+                    });
+                  } catch (cbErr) {
+                    debugLogger.warn(
+                      `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                    );
+                  }
+                },
+              );
+              // Plus an 'error' listener: spawn-side errors after the
+              // foreground errorHandler was detached would otherwise
+              // crash Node via the default unhandled 'error' event.
+              // Route them through onSettle with `error` populated so
+              // the caller can transition the registry entry to
+              // `'failed'` instead of leaving it stuck on `'running'`.
+              child.once('error', (err: Error) => {
+                try {
+                  onPostSettle({
+                    exitCode: null,
+                    signal: null,
+                    error: err,
+                    endTime: Date.now(),
+                  });
+                } catch (cbErr) {
+                  debugLogger.warn(
+                    `postPromote.onSettle (error path) threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                  );
+                }
+              });
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote exit/error listeners threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
           resolve({
             rawOutput: finalBuffer,
             output: stripAnsi(combined).trim(),
@@ -831,6 +976,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shellExecutionConfig: ShellExecutionConfig,
     ptyInfo: PtyImplementation,
+    postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     if (!ptyInfo) {
       // This should not happen, but as a safeguard...
@@ -1176,11 +1322,11 @@ export class ShellExecutionService {
             );
             return;
           }
-          // Skip kill, dispose all our listeners on the live PTY (so
-          // post-promote data/exit/error don't leak into our foreground
-          // onOutputEvent or crash via the error handler's `throw err`),
-          // set the listenersDetached guard so any already-enqueued
-          // processingChain callback's onOutputEvent emits are
+          // Skip kill, dispose all our foreground listeners on the live
+          // PTY (so post-promote data/exit/error don't leak into our
+          // foreground onOutputEvent or crash via the error handler's
+          // `throw err`), set the listenersDetached guard so any already-
+          // enqueued processingChain callback's onOutputEvent emits are
           // suppressed (in-flight writes still LAND in headlessTerminal
           // so the snapshot below reflects them), drain pending chain
           // work, drop the PTY from the active set (so cleanup() won't
@@ -1188,6 +1334,15 @@ export class ShellExecutionService {
           // resolve immediately with `promoted: true` so the awaiting
           // caller unblocks. The caller has attached its own listeners
           // by this point and owns the PTY's lifecycle.
+          //
+          // PR-2.5: if `postPromote.onData` / `postPromote.onSettle` were
+          // provided, ATTACH NEW listeners after disposing the
+          // foreground ones — bytes from the still-running child route
+          // to the caller (typically shell.ts's append-to-bg_xxx.output
+          // path), and the eventual natural-exit transitions the
+          // registry entry to `'completed'` / `'failed'` instead of
+          // leaving it stuck on `'running'`. When postPromote is
+          // undefined the PR-2 detach-everything contract is preserved.
           exited = true;
           listenersDetached = true;
           abortSignal.removeEventListener('abort', abortHandler);
@@ -1227,6 +1382,66 @@ export class ShellExecutionService {
             renderTimeout = null;
           }
           this.activePtys.delete(ptyProcess.pid);
+
+          // PR-2.5: re-attach minimal listeners that forward to the
+          // caller's post-promote handlers. Attach BEFORE the drain so
+          // late bytes the PTY emits during the drain window flow to
+          // the caller instead of falling on the floor — strictly an
+          // improvement; without this they'd be dropped on the way to
+          // the snapshot anyway. The new disposables aren't tracked
+          // here (we hand ownership to the caller); when the caller's
+          // own `cancelChild` path fires, the PTY dies and these
+          // listeners fire `onSettle` then unregister with the PTY.
+          if (postPromote?.onData) {
+            const onPostData = postPromote.onData;
+            try {
+              ptyProcess.onData((data: string) => {
+                try {
+                  onPostData({ type: 'data', chunk: data });
+                } catch (cbErr) {
+                  // Caller's handler threw — don't let it crash the
+                  // child's data loop. Log + drop.
+                  debugLogger.warn(
+                    `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                  );
+                }
+              });
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote data listener threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
+          if (postPromote?.onSettle) {
+            const onPostSettle = postPromote.onSettle;
+            try {
+              ptyProcess.onExit(
+                ({
+                  exitCode,
+                  signal,
+                }: {
+                  exitCode: number;
+                  signal?: number;
+                }) => {
+                  try {
+                    onPostSettle({
+                      exitCode,
+                      signal: signal ?? null,
+                      endTime: Date.now(),
+                    });
+                  } catch (cbErr) {
+                    debugLogger.warn(
+                      `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                    );
+                  }
+                },
+              );
+            } catch (e) {
+              debugLogger.warn(
+                `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
+          }
 
           // Drain in-flight chain work (already-enqueued
           // headlessTerminal.write callbacks) so the snapshot reflects
