@@ -1493,6 +1493,17 @@ export const AppContainer = (props: AppContainerProps) => {
         'auto-restore: rewinding cancelled turn and restoring prompt',
       );
       historyManager.truncateToItem(lastUserItem.id);
+      // Repaint the terminal so the cancelled `> prompt` and trailing
+      // INFO disappear from the static-rendered transcript. Ink's
+      // `<Static>` region is append-only — once a line has been printed,
+      // shrinking the underlying array doesn't unprint it. `refreshStatic`
+      // writes the ANSI clear-terminal escape AND bumps the static
+      // remount key so the next render reprints only the truncated
+      // history. Matches what `/clear` and `handleClearScreen` do for
+      // the same reason. Skipping this leaves the user seeing the
+      // cancelled prompt twice — once in scrollback and once pre-filled
+      // in the input buffer.
+      refreshStatic();
       buffer.setText(lastUserItem.text);
       // Third cleanup leg: the in-memory chat history. `GeminiChat`
       // appends the user content before the stream generator runs, and
@@ -1521,6 +1532,7 @@ export const AppContainer = (props: AppContainerProps) => {
       historyManager,
       logger,
       geminiClient,
+      refreshStatic,
       pendingSlashCommandHistoryItems,
       pendingGeminiHistoryItems,
     ],

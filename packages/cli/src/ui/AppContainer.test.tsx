@@ -969,6 +969,12 @@ describe('AppContainer State Management', () => {
       // cancelled prompt doesn't ride along on the next request as an
       // orphan user turn.
       expect(mockStripOrphans).toHaveBeenCalled();
+      // Fourth cleanup leg: Ink's static-rendered transcript region
+      // is append-only — shrinking the underlying array doesn't unprint
+      // already-flushed lines. `refreshStatic` writes the clear-terminal
+      // escape so the cancelled `> prompt` actually disappears from
+      // scrollback rather than appearing twice (transcript + input box).
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
     });
 
     it('does not auto-restore when the cancelled turn did not add a user item (e.g. Cron / slash submit_prompt)', async () => {
