@@ -27,7 +27,6 @@ describe('ExitWorktreeTool', () => {
   describe('validateToolParams', () => {
     it('requires a non-empty name', () => {
       const tool = new ExitWorktreeTool(makeMockConfig());
-      // @ts-expect-error: deliberately invalid input
       expect(tool.validateToolParams({ name: '', action: 'keep' })).toMatch(
         /non-empty/i,
       );
