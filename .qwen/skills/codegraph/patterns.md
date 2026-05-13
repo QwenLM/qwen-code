@@ -5,6 +5,7 @@ Run these via `cs.conn.execute(query)`. All queries return lists of tuples.
 ## Structural Queries
 
 **Who calls a function?**
+
 ```cypher
 MATCH (caller:Function)-[:CALLS]->(f:Function {name: 'free_irq'})
 RETURN caller.name, caller.file_path
@@ -12,18 +13,21 @@ ORDER BY caller.name LIMIT 30
 ```
 
 **What does a function call?**
+
 ```cypher
 MATCH (f:Function {name: 'sched_fork'})-[:CALLS]->(callee:Function)
 RETURN callee.name, callee.file_path
 ```
 
 **Transitive callers (up to 3 hops):**
+
 ```cypher
 MATCH (caller:Function)-[:CALLS*1..3]->(f:Function {name: 'kfree'})
 RETURN DISTINCT caller.name, caller.file_path LIMIT 50
 ```
 
 **Functions in a module:**
+
 ```cypher
 MATCH (f:Function)<-[:DEFINES_FUNC]-(file:File)-[:BELONGS_TO]->(m:Module)
 WHERE m.path_prefix = 'net/core'
@@ -31,6 +35,7 @@ RETURN f.name, file.path LIMIT 30
 ```
 
 **Cross-module calls (e.g. fs → mm):**
+
 ```cypher
 MATCH (f1:Function)-[:CALLS]->(f2:Function),
       (file1:File)-[:DEFINES_FUNC]->(f1),
@@ -42,6 +47,7 @@ ORDER BY calls DESC LIMIT 20
 ```
 
 **Fan-in and fan-out:**
+
 ```cypher
 MATCH (caller:Function)-[:CALLS]->(f:Function)-[:CALLS]->(callee:Function)
 WHERE f.is_historical = 0
@@ -51,6 +57,7 @@ ORDER BY risk DESC LIMIT 20
 ```
 
 **Module sizes:**
+
 ```cypher
 MATCH (f:Function)<-[:DEFINES_FUNC]-(file:File)-[:BELONGS_TO]->(m:Module)
 WHERE f.is_historical = 0
@@ -59,6 +66,7 @@ ORDER BY func_count DESC LIMIT 30
 ```
 
 **Functions by name pattern:**
+
 ```cypher
 MATCH (f:Function) WHERE f.name STARTS WITH 'irq_'
 RETURN f.name, f.file_path LIMIT 20
@@ -72,6 +80,7 @@ RETURN f.name, f.file_path LIMIT 30
 ## Evolution Queries
 
 **Functions modified by a commit:**
+
 ```cypher
 MATCH (c:Commit)-[:MODIFIES]->(f:Function)
 WHERE c.hash STARTS WITH 'abc123'
@@ -79,12 +88,14 @@ RETURN f.name, f.file_path
 ```
 
 **Commits touching a file:**
+
 ```cypher
 MATCH (c:Commit)-[:TOUCHES]->(file:File {path: 'kernel/sched/core.c'})
 RETURN c.hash, c.message, c.author
 ```
 
 **Co-changed functions (modified together frequently):**
+
 ```cypher
 MATCH (c:Commit)-[:MODIFIES]->(f1:Function),
       (c)-[:MODIFIES]->(f2:Function)
@@ -94,6 +105,7 @@ ORDER BY co_changes DESC LIMIT 20
 ```
 
 **Largest commits (most functions changed):**
+
 ```cypher
 MATCH (c:Commit)-[:MODIFIES]->(f:Function)
 RETURN c.hash, c.message, count(f) AS funcs_changed
@@ -101,18 +113,21 @@ ORDER BY funcs_changed DESC LIMIT 10
 ```
 
 **Historical (deleted/renamed) functions:**
+
 ```cypher
 MATCH (f:Function) WHERE f.is_historical = 1
 RETURN f.name, f.file_path LIMIT 30
 ```
 
 **Backfill progress:**
+
 ```cypher
 MATCH (c:Commit) WHERE c.version_tag = 'bf'
 RETURN count(c) AS backfilled
 ```
 
 **Most frequently modified files:**
+
 ```cypher
 MATCH (c:Commit)-[:TOUCHES]->(f:File)
 RETURN f.path, count(c) AS commits

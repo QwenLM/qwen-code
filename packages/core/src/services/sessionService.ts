@@ -100,6 +100,15 @@ export interface ListSessionsResult {
 }
 
 /**
+ * Result of removing multiple sessions.
+ */
+export interface RemoveSessionsResult {
+  removed: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+/**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
  */
@@ -738,6 +747,48 @@ export class SessionService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Removes multiple sessions in one call.
+   *
+   * Each session is processed independently — a failure on one does not
+   * abort the rest. Sessions that don't exist (or belong to a different
+   * project) are reported in {@link notFound}; thrown filesystem
+   * errors are surfaced per-id in {@link errors} so callers can decide
+   * whether to retry.
+   *
+   * @param sessionIds IDs to remove. Duplicates are de-duplicated.
+   * @returns Per-id outcomes: which were removed, which were not found,
+   *   and which threw an error.
+   */
+  async removeSessions(sessionIds: string[]): Promise<RemoveSessionsResult> {
+    const removed: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    const results = await Promise.allSettled(
+      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+    );
+
+    for (let i = 0; i < results.length; i++) {
+      const sessionId = uniqueSessionIds[i];
+      if (sessionId === undefined) continue;
+
+      const result = results[i];
+      if (result.status === 'fulfilled') {
+        if (result.value) {
+          removed.push(sessionId);
+        } else {
+          notFound.push(sessionId);
+        }
+      } else {
+        errors.push({ sessionId, error: result.reason as Error });
+      }
+    }
+
+    return { removed, notFound, errors };
   }
 
   /**
