@@ -2078,7 +2078,7 @@ export class CoreToolScheduler {
               // PLUS one for skill activation — a multi-path tool could
               // produce N+1 envelopes, diluting the model's attention. One
               // wrapper / one append also lets us share the breakout-prevention
-              // sanitization step (closing-tag scrub) in one place.
+              // sanitization step (escapeSystemReminderTags) in one place.
               const reminderBlocks: string[] = [];
 
               for (const candidatePath of candidatePaths) {
