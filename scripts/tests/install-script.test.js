@@ -182,7 +182,8 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'installer options contain unsafe command characters',
     );
-    expect(script).toContain('[char[]](10,13,33,34');
+    expect(script).toContain('-EncodedCommand');
+    expect(script).toContain('QWEN_VALIDATE_OPTIONS_COMMAND');
     expect(script).toContain('if "!INSTALL_BASE:~1,2!"==":/"');
     expect(script).toContain('if "!INSTALL_DIR:~1,2!"==":/"');
     expect(script).toContain('if "!INSTALL_BIN_DIR:~1,2!"==":/"');
@@ -1409,7 +1410,7 @@ describe('Windows installer end-to-end', () => {
             QWEN_INSTALL_ROOT: path.join(tmpDir, 'install'),
             QWEN_FAKE_NPM_LOG: npmLog,
             QWEN_FAKE_NPM_PREFIX: path.join(tmpDir, 'npm-prefix'),
-            PATH: `${fakeBin};${process.env.PATH}`,
+            ...prependWindowsPath(fakeBin),
             PROCESSOR_ARCHITECTURE: 'ARM64',
             PROCESSOR_ARCHITEW6432: '',
           },
@@ -1449,7 +1450,7 @@ describe('Windows installer end-to-end', () => {
           {
             USERPROFILE: path.join(tmpDir, 'home'),
             QWEN_INSTALL_ROOT: path.join(tmpDir, 'install'),
-            PATH: `${fakeBin};${process.env.PATH}`,
+            ...prependWindowsPath(fakeBin),
             PROCESSOR_ARCHITECTURE: 'ARM64',
             PROCESSOR_ARCHITEW6432: '',
           },
@@ -1600,6 +1601,15 @@ function createFakeWindowsNpmTools(fakeBin) {
     path.join(fakeBin, 'qwen.cmd'),
     ['@echo off', 'echo 0.0.0-npm', ''].join('\r\n'),
   );
+}
+
+function prependWindowsPath(directory) {
+  const pathKey =
+    Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ||
+    'Path';
+  return {
+    [pathKey]: `${directory};${process.env[pathKey] || ''}`,
+  };
 }
 
 function createZipForTest(archive, cwd, entry) {
