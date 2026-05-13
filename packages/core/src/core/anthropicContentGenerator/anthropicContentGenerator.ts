@@ -111,8 +111,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
   ) {
     const defaultHeaders = this.buildHeaders();
     const baseURL = contentGeneratorConfig.baseUrl;
-    // Configure fetch options for proxy support and timeout handling
-    // When proxy is set, timeouts are disabled to let SDK control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'anthropic',
       this.cliConfig.getProxy(),

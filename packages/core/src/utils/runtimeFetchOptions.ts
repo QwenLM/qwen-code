@@ -123,9 +123,9 @@ export function buildRuntimeFetchOptions(
     }
 
     case 'node': {
-      // Node.js: Use undici dispatcher for both SDKs.
-      // This enables proxy support and disables undici timeouts so SDK timeout
-      // controls the total request time.
+      // Node.js: Use a custom undici dispatcher only when a proxy is configured.
+      // Proxy dispatchers disable undici timeouts so SDK timeout controls the
+      // total request time; no-proxy calls use the runtime's built-in fetch.
       return buildFetchOptionsWithDispatcher(sdkType, proxyUrl);
     }
 
