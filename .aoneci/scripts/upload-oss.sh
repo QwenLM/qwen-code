@@ -25,6 +25,7 @@
 #   SKIP_METADATA           - 非空时跳过 metadata 上传和 latest 更新
 #   SKIP_LATEST_POINTER     - 非空时只跳过 latest metadata 指针更新
 #   SKIP_ROOT_SCRIPTS       - 非空时不覆盖项目根目录下的 deploy/upgrade 脚本
+#   OSS_RELEASE_CHANNELS    - 可选，逗号/空格分隔的 metadata 指针，如 beta,dataworks
 # ──────────────────────────────────────────────────────────
 set -eu
 
@@ -41,6 +42,7 @@ OSS_ACCESS_KEY_SECRET="${OSS_ACCESS_KEY_SECRET:?OSS_ACCESS_KEY_SECRET is require
 SKIP_METADATA="${SKIP_METADATA:-}"
 SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER:-}"
 SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS:-}"
+OSS_RELEASE_CHANNELS="${OSS_RELEASE_CHANNELS:-}"
 
 case "${ARCH}" in
   amd64) TARGET_PLATFORM="linux" ;;
@@ -123,6 +125,23 @@ if [ -z "${SKIP_METADATA}" ] && [ -z "${SKIP_LATEST_POINTER}" ] && [ -f "${ARTIF
   echo ">>> latest pointer updated"
 else
   echo ">>> Skipping latest pointer update"
+fi
+
+# ── 更新 channel 指向 ──
+if [ -z "${SKIP_METADATA}" ] && [ -n "${OSS_RELEASE_CHANNELS}" ] && [ -f "${ARTIFACT_DIR}/metadata.json" ]; then
+  CHANNELS=$(printf '%s' "${OSS_RELEASE_CHANNELS}" | tr ',[:space:]' '\n' | sed '/^$/d')
+  for CHANNEL in ${CHANNELS}; do
+    case "${CHANNEL}" in
+      *[!A-Za-z0-9._-]*|.|..|"")
+        echo "Invalid OSS release channel: ${CHANNEL}" >&2
+        exit 1
+        ;;
+    esac
+    ${OSSUTIL} cp -f "${ARTIFACT_DIR}/metadata.json" "oss://${OSS_BUCKET}/${OSS_PROJECT_ROOT}/${CHANNEL}/metadata.json"
+    echo ">>> ${CHANNEL} pointer updated"
+  done
+else
+  echo ">>> Skipping channel pointer update"
 fi
 
 # ── 打印下载链接 ──

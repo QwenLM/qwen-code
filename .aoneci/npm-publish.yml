@@ -16,8 +16,8 @@
 #      c. re-bundle    → 重新 esbuild 打包（使用新版本号，嵌入 CLI_VERSION）
 #      d. npm publish --workspaces → 发布所有非 private 包
 #   5. 打包 bundle tarball 并上传 OSS
-#      - main/release 分支更新 latest 指针
-#      - 其他分支仅上传版本化产物
+#      - latest 发布更新 latest/dataworks 指针
+#      - beta 发布更新 beta 指针
 
 name: 'NPM Publish'
 
@@ -138,6 +138,18 @@ jobs:
           mkdir -p /workspace
           echo "${VERSION}" > /workspace/.resolved_version
           date -u +%Y-%m-%dT%H:%M:%SZ > /workspace/.build_time
+          if [ "${{git.branch}}" = "main" ] || [ "${{ params.release_mode }}" = "true" ]; then
+            OSS_RELEASE_CHANNELS="dataworks"
+            OSS_LATEST_POINTER="update"
+          else
+            OSS_RELEASE_CHANNELS="beta"
+            OSS_LATEST_POINTER="skip"
+          fi
+          {
+            printf 'OSS_RELEASE_CHANNELS=%s\n' "${OSS_RELEASE_CHANNELS}"
+            printf 'OSS_LATEST_POINTER=%s\n' "${OSS_LATEST_POINTER}"
+          } > /workspace/.oss_channel.env
+          cat /workspace/.oss_channel.env
 
       - name: 'Build bundle tarball'
         run: |
@@ -171,6 +183,14 @@ jobs:
           SKIP_METADATA="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_METADATA)"
           SKIP_LATEST_POINTER="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_LATEST_POINTER)"
           SKIP_ROOT_SCRIPTS="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_ROOT_SCRIPTS)"
+          CHANNEL_FILE="/workspace/.oss_channel.env"
+          OSS_RELEASE_CHANNELS="$(bash .aoneci/scripts/read-policy-value.sh "${CHANNEL_FILE}" OSS_RELEASE_CHANNELS)"
+          OSS_LATEST_POINTER="$(bash .aoneci/scripts/read-policy-value.sh "${CHANNEL_FILE}" OSS_LATEST_POINTER)"
+          if [ "${OSS_LATEST_POINTER}" = "update" ]; then
+            SKIP_LATEST_POINTER=""
+          elif [ "${OSS_LATEST_POINTER}" = "skip" ]; then
+            SKIP_LATEST_POINTER="1"
+          fi
           ARTIFACT_DIR="/workspace/artifact" \
           ARCH="amd64" \
           SOURCE_DIR="." \
@@ -182,6 +202,7 @@ jobs:
           SKIP_METADATA="${SKIP_METADATA}" \
           SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER}" \
           SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS}" \
+          OSS_RELEASE_CHANNELS="${OSS_RELEASE_CHANNELS}" \
           OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
           OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}" \
           bash .aoneci/scripts/upload-oss.sh
