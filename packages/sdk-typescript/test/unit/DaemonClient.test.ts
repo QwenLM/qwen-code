@@ -153,11 +153,10 @@ describe('DaemonClient', () => {
 
     it('omits cwd when workspaceCwd is not provided (#3803 §02)', async () => {
       // Per #3803 §02 the daemon route falls back to its bound
-      // workspace when `cwd` is absent. The SDK must therefore NOT
-      // send `cwd: undefined` (or any other placeholder) when the
-      // caller omits `workspaceCwd` — otherwise the wire body
-      // carries an explicit empty field that wouldn't ever match
-      // the fallback semantics on a future stricter daemon.
+      // workspace when `cwd` is absent. The SDK relies on
+      // JSON.stringify stripping `undefined` values, so an
+      // omitted `workspaceCwd` ends up as "no `cwd` key" on the
+      // wire — exactly the fallback shape the server expects.
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
           sessionId: 's-1',
@@ -168,6 +167,22 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await client.createOrAttachSession({});
       expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('forwards empty-string workspaceCwd verbatim so the server can 400 it', async () => {
+      // `workspaceCwd: ""` is a likely client-side bug shape. A
+      // truthy-guard SDK would silently drop the field and let the
+      // server's fallback bind the session — masking the bug. We
+      // forward it verbatim so the server's
+      // `cwd must be an absolute path when provided` 400 surfaces.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(400, { error: 'bad cwd' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.createOrAttachSession({ workspaceCwd: '' }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '' });
     });
 
     it('forwards modelServiceId when supplied', async () => {

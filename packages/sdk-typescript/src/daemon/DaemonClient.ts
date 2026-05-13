@@ -260,17 +260,24 @@ export class DaemonClient {
     req: CreateSessionRequest,
   ): Promise<DaemonSession> {
     // Per #3803 §02: omitting `cwd` lets the daemon fall back to its
-    // bound workspace. Send `cwd` ONLY when the caller passed
-    // `workspaceCwd` — sending `cwd: undefined` would JSON.stringify
-    // it out anyway, but conditional spread keeps the on-wire body
-    // shape obvious to anyone tracing the request.
+    // bound workspace. JSON.stringify strips `undefined` values, so
+    // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
+    // server then takes the documented fallback path.
+    //
+    // Send EVERY defined `workspaceCwd` value through as-is, including
+    // the empty string. A truthy guard would silently swallow
+    // `workspaceCwd: ""` (a likely client-side bug) and let the server
+    // fall back instead of returning a clear 400 for the malformed
+    // input. The SDK should be a transparent layer here: passing the
+    // caller's value verbatim lets the server's validation surface
+    // bugs that would otherwise hide as "wrong workspace bound".
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
-          ...(req.workspaceCwd ? { cwd: req.workspaceCwd } : {}),
+          cwd: req.workspaceCwd,
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
         }),
       },

@@ -174,13 +174,29 @@ export function createServeApp(
 
   app.post('/session', async (req, res) => {
     const body = safeBody(req);
-    // #3803 §02: 1 daemon = 1 workspace. `cwd` may be omitted — the
-    // route falls back to the daemon's bound workspace. A non-empty
-    // `cwd` that doesn't match the bound path is rejected downstream
-    // by the bridge with WorkspaceMismatchError (translated to 400
-    // `workspace_mismatch` in `sendBridgeError`).
-    let cwd = typeof body['cwd'] === 'string' ? (body['cwd'] as string) : '';
-    if (!cwd) cwd = boundWorkspace;
+    // #3803 §02: 1 daemon = 1 workspace. Three input shapes:
+    //   - `cwd` ABSENT from body → fall back to the daemon's bound
+    //     workspace (the §02 documented shape — clients pre-flight
+    //     `caps.workspaceCwd` and may then omit `cwd`).
+    //   - `cwd` PRESENT but not a string → 400 malformed. A
+    //     client/orchestrator serialization bug (`cwd: null`,
+    //     `cwd: 123`, `cwd: {}`) must not silently bind a session
+    //     to the daemon's workspace; surface the bug instead.
+    //   - `cwd` PRESENT as a string → fall through to the
+    //     `path.isAbsolute` check (empty string and relative both
+    //     fail there with "must be an absolute path when provided").
+    //
+    // `safeBody` returns an `Object.create(null)` map, so
+    // `'cwd' in body` reflects exactly "did the client send the
+    // key?" without prototype-chain confusion.
+    const hasCwd = 'cwd' in body;
+    if (hasCwd && typeof body['cwd'] !== 'string') {
+      res
+        .status(400)
+        .json({ error: '`cwd` must be a string absolute path when provided' });
+      return;
+    }
+    let cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
     if (!path.isAbsolute(cwd)) {
       res
         .status(400)

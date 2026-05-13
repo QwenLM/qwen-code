@@ -105,8 +105,16 @@ export interface CapabilitiesEnvelope {
    *     400 workspace_mismatch from the bridge).
    *   - Omit `cwd` on `POST /session` — the route falls back to this
    *     path when the body has no `cwd` field.
+   *
+   * Optional at the type level (matches the SDK's `DaemonCapabilities`
+   * type) because the field is an additive extension of the v=1
+   * envelope introduced by #3803 §02. Daemons predating §02 still
+   * announce `v: 1` and omit this field; the protocol's "bump v only
+   * on incompatible frame changes" stance (see `qwen-serve-protocol.md`
+   * "Additive to v=1" note) makes additive optionality the correct
+   * shape. The post-§02 server code here always populates it.
    */
-  workspaceCwd: string;
+  workspaceCwd?: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;

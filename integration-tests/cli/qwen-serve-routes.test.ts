@@ -20,6 +20,7 @@
  * in `qwen-serve-streaming.test.ts` and skip when no auth is set.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -273,7 +274,12 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     };
     expect(body.code).toBe('workspace_mismatch');
     expect(body.boundWorkspace).toBe(REPO_ROOT);
-    expect(body.requestedWorkspace).toBe('/tmp');
+    // The bridge canonicalizes the requested cwd via `realpathSync.native`
+    // so the response carries the on-disk canonical form, NOT the literal
+    // we POSTed. On macOS `/tmp` is a symlink to `/private/tmp`, so the
+    // hardcoded `/tmp` literal would diverge there. Resolve the same way
+    // the bridge does to keep the assertion portable.
+    expect(body.requestedWorkspace).toBe(realpathSync.native('/tmp'));
   });
 
   it('omits cwd → falls back to bound workspace (#3803 §02)', async () => {

@@ -348,6 +348,58 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
+    it('400 when cwd is present but not a string (#3803 §02 — distinguishes omitted vs malformed)', async () => {
+      // Three non-string shapes a buggy client / orchestrator could
+      // serialize for the `cwd` field: `null`, a number, an object.
+      // Pre-fix the route treated all three the same as "omitted" and
+      // fell back to `boundWorkspace`, silently masking client bugs.
+      // Now the route distinguishes "absent" (legitimate §02 fallback)
+      // from "present but malformed" (client-side bug → 400 + actionable
+      // error message). Empty string still falls through to the
+      // `path.isAbsolute` check (and 400s there with the
+      // "absolute path when provided" message).
+      const malformed: unknown[] = [null, 123, { foo: 'bar' }, []];
+      for (const cwd of malformed) {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/must be a string absolute path/);
+        // Bridge must NOT be touched — silent fallback regressions
+        // would otherwise let the malformed input hit `spawnOrAttach`.
+        expect(bridge.calls).toHaveLength(0);
+      }
+    });
+
+    it('400 when cwd is the empty string', async () => {
+      // Empty string is technically a string so the type-check above
+      // lets it through; `path.isAbsolute('')` is false so the
+      // "must be an absolute path when provided" branch catches it.
+      // Important: the `'cwd' in body` presence test means an empty
+      // string is NOT treated as omitted (which would fall back to
+      // boundWorkspace) — empty-string is the strongest "client
+      // explicitly passed nothing useful" signal we have.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '' });
+      expect(res.status).toBe(400);
+      expect(bridge.calls).toHaveLength(0);
+    });
+
     it('400 workspace_mismatch when bridge rejects cross-workspace cwd (#3803 §02)', async () => {
       // Single-workspace mode: bridge throws WorkspaceMismatchError
       // when the route forwards a non-bound cwd. Route translates
