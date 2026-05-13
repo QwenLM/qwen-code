@@ -11,9 +11,11 @@ import {
   parseAndFormatApiError,
   FatalTurnLimitedError,
   FatalCancellationError,
+  FatalBudgetExceededError,
   ToolErrorType,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
+import type { BudgetExceeded } from './runBudget.js';
 import { runExitCleanup } from './cleanup.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -277,4 +279,25 @@ export async function handleMaxTurnsExceededError(
     writeStderrLine(maxTurnsError.message);
   }
   return exitAfterCleanup(maxTurnsError.exitCode);
+}
+
+/**
+ * Emits the structured "run aborted by budget" error and exits. Used by
+ * the non-interactive run loop when `--max-wall-time`, `--max-tool-calls`,
+ * or `--max-api-calls` fires (see RunBudgetEnforcer). The output shape
+ * mirrors handleMaxTurnsExceededError so JSON / stream-json consumers get
+ * a consistent envelope.
+ */
+export async function handleBudgetExceededError(
+  config: Config,
+  exceeded: BudgetExceeded,
+): Promise<never> {
+  const fatal = new FatalBudgetExceededError(exceeded.message);
+  if (config.getOutputFormat() === OutputFormat.JSON) {
+    const formatter = new JsonFormatter();
+    writeStderrLine(formatter.formatError(fatal, fatal.exitCode));
+  } else {
+    writeStderrLine(fatal.message);
+  }
+  return exitAfterCleanup(fatal.exitCode);
 }

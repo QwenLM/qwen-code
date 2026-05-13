@@ -238,6 +238,10 @@ Key command-line options for headless usage:
 | `--approval-mode`            | Set approval mode                                                        | `qwen -p "query" --approval-mode auto_edit`                              |
 | `--continue`                 | Resume the most recent session for this project                          | `qwen --continue -p "Pick up where we left off"`                         |
 | `--resume [sessionId]`       | Resume a specific session (or choose interactively)                      | `qwen --resume 123e... -p "Finish the refactor"`                         |
+| `--max-session-turns`        | Cap the number of user/model/tool turns in the run                       | `qwen -p "..." --max-session-turns 30`                                   |
+| `--max-wall-time`            | Wall-clock budget; accepts `90` (s), `30s`, `5m`, `1h`                   | `qwen -p "..." --max-wall-time 10m`                                      |
+| `--max-tool-calls`           | Cumulative tool-call budget for the run                                  | `qwen -p "..." --max-tool-calls 50`                                      |
+| `--max-api-calls`            | Cumulative model-stream-request budget                                   | `qwen -p "..." --max-api-calls 20`                                       |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
 
@@ -245,11 +249,25 @@ For complete details on all available configuration options, settings files, and
 
 Headless / CI runs combined with `--yolo` (or `--approval-mode=yolo`) auto-approve every tool call, including `shell`, `write`, and `edit`. **`--yolo` does not enable a sandbox** — those tools run at the host process's privilege level. When Qwen Code detects this combination with no sandbox configured, it prints a one-line warning to stderr at startup. Suppress the warning with `QWEN_CODE_SUPPRESS_YOLO_WARNING=1` once you've reviewed the trade-off.
 
-Recommended combinations for unattended use:
+### Run-level budgets
 
-- **Trusted, isolated environment (ephemeral CI runner, container):** `qwen -p "..." --yolo --max-session-turns N --output-format json`. Pin a turn budget so a stuck agent can't burn through your CI minutes, and capture `output-format json` for post-run usage / tool-call auditing.
+Qwen Code can abort an unattended run when it crosses any of the following thresholds. Each is `-1` (unlimited) by default; setting any one of them is enough to bound runaway behavior. They are enforced cooperatively against the same `AbortController` that already carries SIGINT, so a budget abort emits a structured `FatalBudgetExceededError` (exit code **55**) — distinct from the turn-cap exit code 53 and the SIGINT exit code 130, so CI scripts can branch on the reason.
+
+| Flag                  | Settings key               | What it bounds                                                                                                |
+| --------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `--max-wall-time`     | `model.maxWallTimeSeconds` | Wall-clock duration of the whole run. Flag accepts `90` (s), `30s`, `5m`, `1h`, `500ms`. Settings is seconds. |
+| `--max-tool-calls`    | `model.maxToolCalls`       | Cumulative tool calls executed (counts successes _and_ failures — the model still consumes tokens on errors). |
+| `--max-api-calls`     | `model.maxApiCalls`        | Cumulative model-stream-request calls. Unlike `--max-session-turns`, every retry / drain-turn request counts. |
+| `--max-session-turns` | `model.maxSessionTurns`    | Number of user/model/tool turns; pre-existing.                                                                |
+
+### Recommended combinations
+
+- **Trusted, isolated environment (ephemeral CI runner, container):** `qwen -p "..." --yolo --max-session-turns N --max-wall-time 10m --output-format json`. Pin a turn budget and a wall-clock budget so a stuck agent can't burn through your CI minutes, and capture `output-format json` for post-run usage / tool-call auditing.
 - **Local machine or shared infra:** also pass `--sandbox` (or set `QWEN_SANDBOX=1`) so shell / write / edit tools run inside the sandbox image.
-- **Long-running CI with retry-on-rate-limit:** combine `QWEN_CODE_UNATTENDED_RETRY=1` with `--max-session-turns` so 429 / 529 retries can't extend a run past its turn budget. Wall-clock, token, and tool-call budgets are planned as phase 2 of [QwenLM/qwen-code#4103](https://github.com/QwenLM/qwen-code/issues/4103).
+- **Long-running CI with retry-on-rate-limit:** combine `QWEN_CODE_UNATTENDED_RETRY=1` with `--max-wall-time` and `--max-api-calls`. The retry env keeps the run alive past transient 429 / 529 responses; the budgets ensure a persistently-failing provider can't extend the job indefinitely.
+- **Bounded auditing / exploration:** for read-only tasks, `--max-tool-calls 25` caps how aggressively the model can grep / read. Combine with `--exclude-tools shell,write,edit` to make the bound meaningful.
+
+> Cumulative token and dollar-cost budgets (`--max-tokens`, `--max-budget-usd`) are tracked separately and require provider-specific price tables; see [QwenLM/qwen-code#4103](https://github.com/QwenLM/qwen-code/issues/4103) for the follow-up.
 
 ## Examples
 

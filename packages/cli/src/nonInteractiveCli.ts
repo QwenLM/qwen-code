@@ -42,7 +42,9 @@ import {
   handleToolError,
   handleCancellationError,
   handleMaxTurnsExceededError,
+  handleBudgetExceededError,
 } from './utils/errors.js';
+import { RunBudgetEnforcer } from './utils/runBudget.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -218,6 +220,37 @@ export async function runNonInteractive(
 
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
+
+    // Run-level budget enforcement for headless / unattended runs
+    // (issue #4103). Tied to the same abortController as user-initiated
+    // SIGINT so the existing cancellation plumbing carries the abort —
+    // we route the *reason* via `routeAbort` below so the user sees
+    // "budget exceeded" instead of a generic "cancelled" envelope.
+    const budgetEnforcer = new RunBudgetEnforcer(
+      {
+        maxWallTimeSeconds: config.getMaxWallTimeSeconds(),
+        maxToolCalls: config.getMaxToolCalls(),
+        maxApiCalls: config.getMaxApiCalls(),
+      },
+      abortController,
+    );
+    budgetEnforcer.start();
+    /**
+     * Called at every abort-detection site instead of `handleCancellationError`
+     * directly. If a budget tripped, we surface the structured budget error;
+     * otherwise we fall through to the SIGINT / user-cancel path so existing
+     * behavior is preserved.
+     */
+    const routeAbort = async (): Promise<never> => {
+      const exceeded = budgetEnforcer.getExceeded();
+      if (exceeded) {
+        await handleBudgetExceededError(config, exceeded);
+      }
+      await handleCancellationError(config);
+      // handleCancellationError returns `never`; this throw is purely for
+      // the type-checker because it can't see across the await boundary.
+      throw new Error('unreachable');
+    };
 
     interface LocalQueueItem {
       displayText: string;
@@ -591,6 +624,8 @@ export async function runNonInteractive(
               }),
             },
           );
+          budgetEnforcer.tickToolCall();
+          if (abortController.signal.aborted) await routeAbort();
 
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
@@ -694,6 +729,8 @@ export async function runNonInteractive(
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
+        budgetEnforcer.tickApiCall();
+        if (abortController.signal.aborted) await routeAbort();
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
@@ -716,7 +753,7 @@ export async function runNonInteractive(
 
         for await (const event of responseStream) {
           if (abortController.signal.aborted) {
-            await handleCancellationError(config);
+            await routeAbort();
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
@@ -810,6 +847,8 @@ export async function runNonInteractive(
             while (true) {
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
+              budgetEnforcer.tickApiCall();
+              if (abortController.signal.aborted) await routeAbort();
               const itemStream = geminiClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
@@ -985,12 +1024,12 @@ export async function runNonInteractive(
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
-              // Flush queued terminal notifications before handleCancellationError
+              // Flush queued terminal notifications before routeAbort
               // exits so stream-json consumers always see a task_notification paired
               // with every task_started.
               flushQueuedNotificationsToSdk(localQueue);
               finalizeOneShotMonitors();
-              await handleCancellationError(config);
+              await routeAbort();
             }
             // Once we enter the final holdback loop, monitor events should no
             // longer extend one-shot runtime. Already-queued events still drain
@@ -1097,6 +1136,16 @@ export async function runNonInteractive(
       flushQueuedNotificationsToSdk(localQueue);
       finalizeOneShotMonitors();
 
+      // If a run-level budget tripped during an awaited stream / tool call,
+      // the fetch's AbortError lands here before our explicit `routeAbort`
+      // sites can fire. Re-route it through the budget handler so the user
+      // sees the friendly "Run aborted: …" envelope instead of a raw
+      // "AbortError" line.
+      const budgetExceeded = budgetEnforcer.getExceeded();
+      if (budgetExceeded) {
+        await handleBudgetExceededError(config, budgetExceeded);
+      }
+
       // For JSON and STREAM_JSON modes, compute usage from metrics
       const message = error instanceof Error ? error.message : String(error);
       const metrics = uiTelemetryService.getMetrics();
@@ -1131,6 +1180,10 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      // Cancel the wall-clock timer so it doesn't fire after a successful
+      // run completes — especially important when the caller (e.g. the
+      // qwen-serve daemon) reuses a single process across many runs.
+      budgetEnforcer.stop();
       const reg = config.getBackgroundTaskRegistry();
       reg.setNotificationCallback(undefined);
       reg.setRegisterCallback(undefined);

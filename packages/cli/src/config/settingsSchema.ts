@@ -1017,6 +1017,36 @@ const SETTINGS_SCHEMA = {
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
         showInDialog: false,
       },
+      maxWallTimeSeconds: {
+        type: 'number',
+        label: 'Max Wall-Clock Time (seconds)',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited. Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1h).',
+        showInDialog: false,
+      },
+      maxToolCalls: {
+        type: 'number',
+        label: 'Max Tool Calls',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Cumulative tool-call budget for a run (counts every executed tool, success or failure). -1 means unlimited. Overridable via --max-tool-calls.',
+        showInDialog: false,
+      },
+      maxApiCalls: {
+        type: 'number',
+        label: 'Max API Calls',
+        category: 'Model',
+        requiresRestart: false,
+        default: -1,
+        description:
+          'Cumulative model-stream-request budget for a run. -1 means unlimited. Overridable via --max-api-calls. Use alongside QWEN_CODE_UNATTENDED_RETRY to bound retry storms.',
+        showInDialog: false,
+      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',
