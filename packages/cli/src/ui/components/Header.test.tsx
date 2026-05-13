@@ -105,6 +105,7 @@ describe('<Header />', () => {
   it('renders plain text when NO_COLOR disables gradient colors', () => {
     process.env['NO_COLOR'] = '1';
 
+    useTerminalSizeMock.mockReturnValue({ columns: 150, rows: 24 });
     const { lastFrame } = render(<Header {...defaultProps} />);
 
     expect(lastFrame()).toContain('██████╗');

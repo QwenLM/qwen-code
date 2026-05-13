@@ -105,7 +105,7 @@ describe('<AppHeader />', () => {
 
   it('shows the header with all info when banner is visible', () => {
     const { lastFrame } = renderWithProviders(createMockUIState());
-    expect(lastFrame()).toContain('> DataWorks DataAgent');
+    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
     expect(lastFrame()).toContain('gemini-pro');
     expect(lastFrame()).toContain('/projects/qwen-code');
   });
@@ -115,7 +115,7 @@ describe('<AppHeader />', () => {
       createMockUIState(),
       createSettings({ hideTips: false, hideBanner: true }),
     );
-    expect(lastFrame()).not.toContain('> DataWorks DataAgent');
+    expect(lastFrame()).not.toContain('>_ DataWorks DataAgent');
     expect(lastFrame()).not.toContain('██████╗');
   });
 
