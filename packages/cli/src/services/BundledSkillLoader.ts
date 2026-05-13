@@ -15,6 +15,7 @@ import type {
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
 
@@ -62,9 +63,11 @@ export class BundledSkillLoader implements ICommandLoader {
       return skills.map((skill) => ({
         name: skill.name,
         description: skill.description,
+        modelDescription: skill.description,
+        localizeDescription: true,
         kind: CommandKind.SKILL,
         source: 'bundled-skill' as const,
-        sourceLabel: 'Skill',
+        sourceLabel: t('Skill'),
         modelInvocable: !skill.disableModelInvocation,
         argumentHint: skill.argumentHint,
         whenToUse: skill.whenToUse,

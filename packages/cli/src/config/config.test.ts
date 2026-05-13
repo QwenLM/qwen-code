@@ -254,6 +254,123 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('rejects --json-schema combined with --acp', async () => {
+    // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
+    // the synthetic structured_output terminal contract. The yargs check
+    // must reject the combination at parse time so users get an actionable
+    // error instead of silently watching the run never terminate.
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --experimental-acp (deprecated alias)', async () => {
+    // --experimental-acp is the deprecated alias; the same mutual-
+    // exclusion logic must apply or users get the silent-no-terminate
+    // behaviour the --acp check was added to prevent.
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --prompt-interactive (-i)', async () => {
+    // The interactive flow doesn't honour the synthetic-tool terminal
+    // contract — `structured_output` would just print "accepted" and
+    // leave the chat alive. The yargs check must reject this at parse
+    // time so users get an actionable message instead of a silently
+    // misbehaving run.
+    process.argv = [
+      'node',
+      'script.js',
+      '-i',
+      'do work then submit',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'structured output only terminates the non-interactive flow',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --input-format stream-json', async () => {
+    // The "first valid structured_output call ends the session"
+    // contract is incompatible with the long-lived stream-json input
+    // protocol. Also load-bearing: gemini.tsx's
+    // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
+    // branch explicitly relies on this rejection holding. Pair with
+    // --output-format stream-json because input/output formats must
+    // match (a separate yargs check fires first otherwise).
+    process.argv = [
+      'node',
+      'script.js',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('first structured_output call ends the session'),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should parse --system-prompt', async () => {
     process.argv = [
       'node',
@@ -497,6 +614,80 @@ describe('parseArguments', () => {
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
       expect.stringContaining(
         '--include-partial-messages requires --output-format stream-json',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
+    // True interactive invocation with no prompt anywhere → fail fast.
+    process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '--json-schema only applies to non-interactive mode',
+        ),
+      );
+    } finally {
+      mockExit.mockRestore();
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it('should accept --json-schema with no -p / positional when stdin is piped', async () => {
+    // `echo "..." | qwen --json-schema ...` — input arrives via the
+    // pipe, so the prompt-presence check must not block the run.
+    process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    try {
+      const argv = await parseArguments();
+      expect(argv.jsonSchema).toBe('{"type":"object"}');
+      expect(argv.prompt).toBeUndefined();
+    } finally {
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it('should throw when --json-schema is combined with --input-format stream-json', async () => {
+    // stream-json input runs through runNonInteractiveStreamJson which
+    // doesn't honor the structured-output single-shot termination
+    // contract — reject the combination at parse time so the user sees
+    // the mismatch immediately.
+    process.argv = [
+      'node',
+      'script.js',
+      '-p',
+      'hi',
+      '--output-format',
+      'stream-json',
+      '--input-format',
+      'stream-json',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--json-schema cannot be used with --input-format stream-json',
       ),
     );
 
@@ -1118,6 +1309,63 @@ describe('mergeExcludeTools', () => {
       expect.arrayContaining(['tool1', 'tool2']),
     );
     expect(config.getPermissionsDeny()).toHaveLength(2);
+  });
+
+  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: false } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--model',
+      'openrouter/deepseek/deepseek-chat',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should not auto-disable tool_search for non-deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'qwen-max'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+  });
+
+  it('should respect explicit enabled:true override for deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
   });
 });
 
@@ -2700,15 +2948,6 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryOutfile()).toBe('/gemini/env/telemetry.log');
-  });
-
-  it('should prioritize QWEN_TELEMETRY_USE_COLLECTOR over settings', async () => {
-    vi.stubEnv('QWEN_TELEMETRY_USE_COLLECTOR', 'true');
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const settings: Settings = { telemetry: { useCollector: false } };
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getTelemetryUseCollector()).toBe(true);
   });
 
   it('should use settings value when QWEN_TELEMETRY_ENABLED is not set', async () => {

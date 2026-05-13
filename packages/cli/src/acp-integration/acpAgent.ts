@@ -29,6 +29,7 @@ import {
   ndJsonStream,
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
+import type { Content } from '@google/genai';
 import type {
   Agent,
   AuthenticateRequest,
@@ -83,6 +84,27 @@ export async function runAcpAgent(
   // Initialize config to set up hookSystem (required for SessionStart/SessionEnd hooks)
   // This is needed because gemini.tsx calls runAcpAgent without calling config.initialize()
   await config.initialize();
+  // ACP forwards session messages straight to the model; under progressive
+  // MCP availability `initialize()` returns before MCP servers settle, so
+  // we wait here to keep the first session's tool surface consistent with
+  // the legacy synchronous behavior.
+  await config.waitForMcpReady();
+  // Surface MCP failures to stderr. ACP's stdout is the protocol channel
+  // so info/log writes are already redirected to stderr below, but we
+  // emit this BEFORE that redirection takes effect to keep the message
+  // visible regardless of how the host process is wired.
+  // Defensive against tests that pass a stubbed Config without
+  // `getFailedMcpServerNames`.
+  const failedMcpServers =
+    typeof config.getFailedMcpServerNames === 'function'
+      ? config.getFailedMcpServerNames()
+      : [];
+  if (failedMcpServers.length > 0) {
+    process.stderr.write(
+      `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+        `Continuing with built-in tools and any servers that did connect.\n`,
+    );
+  }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -486,6 +508,23 @@ class QwenAgent implements Agent {
             `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
           );
         }
+        // When the target session is currently live in this process, route
+        // through its ChatRecordingService so the in-memory `currentCustomTitle`
+        // stays in sync. Writing directly to disk via SessionService here
+        // would leave the live recording's cache stale; the next title
+        // re-anchor (every 32KB of writes) or finalize() would re-emit the
+        // old title and silently revert the rename. The disk-only path
+        // remains for the dead-session case (e.g., another client renaming
+        // a session that isn't active in this process).
+        const liveRecording = this.sessions
+          .get(sessionId)
+          ?.getConfig()
+          .getChatRecordingService();
+        if (liveRecording) {
+          const ok = liveRecording.recordCustomTitle(title, 'manual');
+          await liveRecording.flush();
+          return { success: ok };
+        }
         const success = await runWithAcpRuntimeOutputDir(
           this.settings,
           cwd,
@@ -495,6 +534,65 @@ class QwenAgent implements Agent {
           },
         );
         return { success };
+      }
+      case 'rewindSession': {
+        const sessionId = params['sessionId'] as string;
+        const targetTurnIndex = params['targetTurnIndex'];
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          !Number.isInteger(targetTurnIndex) ||
+          (targetTurnIndex as number) < 0
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing targetTurnIndex',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+
+        const historyBeforeRewind = session.captureHistorySnapshot();
+        return {
+          success: true,
+          historyBeforeRewind,
+          ...session.rewindToTurn(targetTurnIndex as number),
+        };
+      }
+      case 'restoreSessionHistory': {
+        const sessionId = params['sessionId'] as string;
+        const history = params['history'];
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (!Array.isArray(history)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing history',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+
+        session.restoreHistory(history as Content[]);
+        return { success: true };
       }
       case 'getAccountInfo': {
         const sessionId = params['sessionId'] as string | undefined;
@@ -596,6 +694,26 @@ class QwenAgent implements Agent {
       },
     );
     await config.initialize();
+    // Same reasoning as the top-level runAcpAgent path: ACP feeds session
+    // messages to the model immediately, so we cannot return a Config whose
+    // MCP discovery is still in flight.
+    await config.waitForMcpReady();
+    // Surface MCP failures to stderr — mirrors `runAcpAgent` (lines 95-107)
+    // and the other non-interactive entry points (`gemini.tsx`,
+    // `session.ts`). Without this, per-session ACP configs that lose MCP
+    // servers fall back to built-in-tools-only with no user-visible
+    // indication. Defensive against tests that pass a stubbed Config
+    // without `getFailedMcpServerNames`.
+    const failedMcpServers =
+      typeof config.getFailedMcpServerNames === 'function'
+        ? config.getFailedMcpServerNames()
+        : [];
+    if (failedMcpServers.length > 0) {
+      process.stderr.write(
+        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+          `Continuing with built-in tools and any servers that did connect.\n`,
+      );
+    }
     return config;
   }
 

@@ -1,3 +1,4 @@
+export { getGlobalQwenDir, resolvePath } from './paths.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
   AcpBridgeOptions,

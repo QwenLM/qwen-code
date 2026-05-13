@@ -214,7 +214,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
       let invalidReason: string | undefined;
       if (!isValid) {
         const reasons = getToolInvalidReasons(tool.name, tool.description);
-        invalidReason = reasons.map((r) => t(r)).join(', ');
+        invalidReason = reasons.join(', ');
       }
 
       return {
@@ -522,16 +522,16 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
                 {selectedTool?.name || t('Tool Detail')}
               </Text>
               {selectedTool?.annotations?.destructiveHint && (
-                <Text color={theme.status.error}>{'[destructive]'}</Text>
+                <Text color={theme.status.error}>[{t('destructive')}]</Text>
               )}
               {selectedTool?.annotations?.idempotentHint && (
-                <Text color={theme.status.warning}>{'[idempotent]'}</Text>
+                <Text color={theme.status.warning}>[{t('idempotent')}]</Text>
               )}
               {selectedTool?.annotations?.readOnlyHint && (
-                <Text color={theme.status.success}>{'[read-only]'}</Text>
+                <Text color={theme.status.success}>[{t('read-only')}]</Text>
               )}
               {selectedTool?.annotations?.openWorldHint && (
-                <Text color={theme.text.primary}>{'[open-world]'}</Text>
+                <Text color={theme.text.primary}>[{t('open-world')}]</Text>
               )}
             </Box>
             <Text color={theme.text.secondary}>

@@ -28,7 +28,10 @@ type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
-import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
+import {
+  buildRuntimeFetchOptions,
+  redactProxyError,
+} from '../../utils/runtimeFetchOptions.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
@@ -82,6 +85,53 @@ function isDeepSeekAnthropicProvider(
   return model.includes('deepseek');
 }
 
+/**
+ * Resolve the baseURL the Anthropic SDK will actually use, mirroring the
+ * SDK's own destructuring-default order: explicit config first, then
+ * `ANTHROPIC_BASE_URL` env, then the SDK default. Returns the SDK default
+ * literal when nothing is configured so callers can do hostname matching
+ * without a special case for the empty path.
+ *
+ * Both inputs get the SDK's `readEnv`-style normalization
+ * (whitespace-trim + empty-as-missing). Trimming the config side too
+ * prevents a copy-pasted baseURL with stray whitespace from tripping
+ * `new URL(...)` in `isAnthropicNativeBaseUrl`, which would otherwise
+ * fall through the catch branch to proxy identity and ship Bearer auth
+ * against the real Anthropic API.
+ */
+function resolveEffectiveBaseUrl(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): string {
+  const fromConfig = contentGeneratorConfig.baseUrl?.trim();
+  if (fromConfig) return fromConfig;
+  const fromEnv = process.env['ANTHROPIC_BASE_URL']?.trim();
+  if (fromEnv) return fromEnv;
+  return 'https://api.anthropic.com';
+}
+
+/**
+ * Whether the resolved baseURL is Anthropic's native API (or the SDK default
+ * when no baseURL is set). Used to gate IdeaLab-style proxy workarounds —
+ * `Authorization: Bearer` auth and the `claude-cli` User-Agent — so that
+ * users hitting `api.anthropic.com` directly keep the SDK-default
+ * `x-api-key` auth and a truthful `QwenCode` User-Agent (avoids identity
+ * misattribution in Anthropic-side logs/quotas).
+ */
+function isAnthropicNativeBaseUrl(
+  contentGeneratorConfig: ContentGeneratorConfig,
+): boolean {
+  try {
+    const hostname = new URL(
+      resolveEffectiveBaseUrl(contentGeneratorConfig),
+    ).hostname.toLowerCase();
+    return (
+      hostname === 'api.anthropic.com' || hostname.endsWith('.anthropic.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
 type StreamingBlockState = {
   type: string;
   id?: string;
@@ -90,8 +140,16 @@ type StreamingBlockState = {
   signature: string;
 };
 
+// Two thinking shapes — the budget-tokens shape for pre-4.6 Claude families
+// and the adaptive shape for 4.6+. Centralized so the message-params type,
+// the streaming-request override, and `buildThinkingConfig`'s return type
+// stay in lockstep when a third shape (e.g. `extended`) eventually lands.
+type AnthropicThinkingParam =
+  | { type: 'enabled'; budget_tokens: number }
+  | { type: 'adaptive' };
+
 type MessageCreateParamsWithThinking = MessageCreateParamsNonStreaming & {
-  thinking?: { type: 'enabled'; budget_tokens: number };
+  thinking?: AnthropicThinkingParam;
   // Anthropic beta feature: output_config.effort (requires beta header effort-2025-11-24)
   // This is not yet represented in the official SDK types we depend on. The
   // 'max' tier is a DeepSeek extension (see contentGenerator.ts comment).
@@ -109,17 +167,44 @@ export class AnthropicContentGenerator implements ContentGenerator {
     private contentGeneratorConfig: ContentGeneratorConfig,
     private readonly cliConfig: Config,
   ) {
-    const defaultHeaders = this.buildHeaders();
+    // One predicate drives the whole IdeaLab-style proxy compatibility
+    // bundle: `Authorization: Bearer` auth, `claude-cli` User-Agent, and
+    // `x-app: cli`. Two locally-named booleans for the same thing would
+    // obscure that coupling and tempt a future contributor to split one
+    // half of the bundle without the other.
+    const useProxyIdentity = !isAnthropicNativeBaseUrl(contentGeneratorConfig);
+    const defaultHeaders = this.buildHeaders(useProxyIdentity);
     const baseURL = contentGeneratorConfig.baseUrl;
-    // Configure runtime options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let Anthropic SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'anthropic',
       this.cliConfig.getProxy(),
     );
 
+    // IdeaLab-style Anthropic proxies expect `Authorization: Bearer <token>`
+    // instead of the SDK-default `x-api-key` header. Use the SDK's
+    // `authToken` parameter (sends `Authorization: Bearer` natively) only
+    // when targeting a non-Anthropic-native baseURL — direct
+    // `api.anthropic.com` users keep the SDK-default `apiKey` (`x-api-key`)
+    // path so they don't break against the Anthropic API itself.
+    //
+    // Pass `null` on the unused side rather than omitting it: the SDK
+    // destructures with defaults (`apiKey = readEnv('ANTHROPIC_API_KEY') ?? null`,
+    // same for `authToken`), and destructuring defaults fire ONLY for
+    // `undefined`. Omitting the field would let `ANTHROPIC_API_KEY` /
+    // `ANTHROPIC_AUTH_TOKEN` env back-fill it; the SDK's auth resolver
+    // then prefers `apiKey` over `authToken`, so a user with
+    // `ANTHROPIC_API_KEY=sk-ant-…` exported (common for anyone who also
+    // runs Claude Code in the same shell) would ship their real Anthropic
+    // key as `X-Api-Key` to the IdeaLab proxy — leaking the credential to
+    // a third-party endpoint. Explicit `null` suppresses the back-fill
+    // and forces the intended auth path.
     this.client = new Anthropic({
-      apiKey: contentGeneratorConfig.apiKey,
+      ...(useProxyIdentity
+        ? { authToken: contentGeneratorConfig.apiKey, apiKey: null }
+        : { apiKey: contentGeneratorConfig.apiKey, authToken: null }),
       baseURL,
       timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
       maxRetries: contentGeneratorConfig.maxRetries,
@@ -137,12 +222,17 @@ export class AnthropicContentGenerator implements ContentGenerator {
   async generateContent(
     request: GenerateContentParameters,
   ): Promise<GenerateContentResponse> {
-    const anthropicRequest = await this.buildRequest(request);
-    const headers = this.buildPerRequestHeaders(anthropicRequest);
-    const response = (await this.client.messages.create(anthropicRequest, {
-      signal: request.config?.abortSignal,
-      ...(headers ? { headers } : {}),
-    })) as Message;
+    let response: Message;
+    try {
+      const anthropicRequest = await this.buildRequest(request);
+      const headers = this.buildPerRequestHeaders(anthropicRequest);
+      response = (await this.client.messages.create(anthropicRequest, {
+        signal: request.config?.abortSignal,
+        ...(headers ? { headers } : {}),
+      })) as Message;
+    } catch (error) {
+      throw redactProxyError(error);
+    }
 
     return this.converter.convertAnthropicResponseToGemini(response);
   }
@@ -153,21 +243,26 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const anthropicRequest = await this.buildRequest(request);
     const headers = this.buildPerRequestHeaders(anthropicRequest);
     const streamingRequest: MessageCreateParamsStreaming & {
-      thinking?: { type: 'enabled'; budget_tokens: number };
+      thinking?: AnthropicThinkingParam;
     } = {
       ...anthropicRequest,
       stream: true,
     };
 
-    const stream = (await this.client.messages.create(
-      streamingRequest as MessageCreateParamsStreaming,
-      {
-        signal: request.config?.abortSignal,
-        ...(headers ? { headers } : {}),
-      },
-    )) as AsyncIterable<RawMessageStreamEvent>;
+    let stream: AsyncIterable<RawMessageStreamEvent>;
+    try {
+      stream = (await this.client.messages.create(
+        streamingRequest as MessageCreateParamsStreaming,
+        {
+          signal: request.config?.abortSignal,
+          ...(headers ? { headers } : {}),
+        },
+      )) as AsyncIterable<RawMessageStreamEvent>;
+    } catch (error) {
+      throw redactProxyError(error);
+    }
 
-    return this.processStream(stream);
+    return this.processStream(this.redactStreamErrors(stream));
   }
 
   async countTokens(
@@ -205,19 +300,34 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return false;
   }
 
-  private buildHeaders(): Record<string, string> {
+  private buildHeaders(useProxyIdentity: boolean): Record<string, string> {
     // Beta headers are computed per-request in buildPerRequestHeaders so they
     // stay in sync with what the request body actually carries — see #3788
-    // review feedback. Constructor headers carry only User-Agent and any
-    // user-supplied custom headers EXCEPT anthropic-beta (any casing): the
-    // per-request path owns that header, and copying it into defaultHeaders
-    // would cause two physical headers on the wire (one mixed-case, one
-    // lowercase) when the per-request override fires.
+    // review feedback. Constructor headers carry User-Agent, the
+    // proxy-only `x-app: cli` (when useProxyIdentity is true), and any
+    // user-supplied custom headers EXCEPT anthropic-beta (any casing):
+    // the per-request path owns that header, and copying it into
+    // defaultHeaders would cause two physical headers on the wire (one
+    // mixed-case, one lowercase) when the per-request override fires.
     const version = this.cliConfig.getCliVersion() || 'unknown';
-    const userAgent = `QwenCode/${version} (${process.platform}; ${process.arch})`;
+    // For non-Anthropic-native baseURLs (IdeaLab-style proxies), present as
+    // `claude-cli` + `x-app: cli` to satisfy proxy Team rules that restrict
+    // usage by client identity. For api.anthropic.com itself we keep the
+    // truthful QwenCode User-Agent so usage isn't misattributed to Claude
+    // CLI in Anthropic's logs/quotas, and we don't ship the proxy-specific
+    // `x-app` header. Predicate is computed once at construction and shared
+    // with the auth-mode decision so the bundle stays internally consistent.
+    const userAgent = useProxyIdentity
+      ? `claude-cli/${version} (external, cli)`
+      : `QwenCode/${version} (${process.platform}; ${process.arch})`;
     const { customHeaders } = this.contentGeneratorConfig;
 
-    const headers: Record<string, string> = { 'User-Agent': userAgent };
+    const headers: Record<string, string> = {
+      'User-Agent': userAgent,
+    };
+    if (useProxyIdentity) {
+      headers['x-app'] = 'cli';
+    }
     if (customHeaders) {
       for (const [key, value] of Object.entries(customHeaders)) {
         if (key.toLowerCase() === 'anthropic-beta') continue;
@@ -255,9 +365,86 @@ export class AnthropicContentGenerator implements ContentGenerator {
       betas.push('effort-2025-11-24');
     }
 
+    // The `prompt-caching-scope-2026-01-05` beta is meaningful only when
+    // the body actually carries a `cache_control: { …, scope: 'global' }`
+    // entry. The converter emits those entries on the system text block
+    // and the last tool entry when `useGlobalCacheScope` is true (gated
+    // on `enableCacheControl !== false` AND Anthropic-native baseURL).
+    // Scan the assembled request body for that field rather than
+    // re-deriving the gate here, so:
+    //   1. The beta and the body-side field share a single source of
+    //      truth — there's no window between sampling the predicate and
+    //      emitting the body where the two could diverge.
+    //   2. The degenerate empty-system + no-tools case (predicate true,
+    //      body has nothing to attach scope to) doesn't ship the beta as
+    //      dead weight.
+    //   3. Anthropic-compatible proxies that disable cache stay clean —
+    //      no body-side scope field means no beta either.
+    if (this.hasGlobalCacheScopeOnWire(anthropicRequest)) {
+      betas.push('prompt-caching-scope-2026-01-05');
+    }
+
     if (betas.length === 0) return undefined;
     const unique = Array.from(new Set(betas));
     return { 'anthropic-beta': unique.join(',') };
+  }
+
+  /**
+   * Whether to ATTACH the body-side `scope: 'global'` field on
+   * `cache_control` entries this request. Requires both
+   * `enableCacheControl !== false` AND an Anthropic-native baseURL.
+   * Computed per request: `Config.handleModelChange()` hot-updates
+   * `enableCacheControl` in-place on the qwen-oauth path (without
+   * recreating the ContentGenerator); non-qwen-oauth providers refresh
+   * via generator recreation, which captures `baseUrl` fresh at
+   * construct time (not mutated). Reading both fields each request is
+   * the right defense — cheap and avoids stale-cache surprises if the
+   * hot-update list ever expands.
+   *
+   * The matching `prompt-caching-scope-2026-01-05` beta header is NOT
+   * gated on this predicate directly; instead `buildPerRequestHeaders`
+   * scans the assembled body via `hasGlobalCacheScopeOnWire` so the beta
+   * and the body field always agree even in degenerate cases (e.g.
+   * empty-system + no-tools request — predicate true, body has nothing
+   * to attach scope to, beta correctly suppressed).
+   */
+  private useGlobalCacheScope(): boolean {
+    return (
+      this.contentGeneratorConfig.enableCacheControl !== false &&
+      isAnthropicNativeBaseUrl(this.contentGeneratorConfig)
+    );
+  }
+
+  /**
+   * Whether the assembled request body carries any
+   * `cache_control: { …, scope: 'global' }` entry. Scans the system
+   * block (when present as TextBlockParam[]) and the tools array — these
+   * are the only two places the converter attaches scoped cache control.
+   * Used to gate the `prompt-caching-scope-2026-01-05` beta header so it
+   * never ships without a matching body field, and conversely so the
+   * field never ships without the beta declaring it.
+   */
+  private hasGlobalCacheScopeOnWire(
+    req: MessageCreateParamsWithThinking,
+  ): boolean {
+    const isGlobalScope = (block: unknown): boolean => {
+      if (!block || typeof block !== 'object') return false;
+      const cc = (block as { cache_control?: unknown }).cache_control;
+      if (!cc || typeof cc !== 'object') return false;
+      return (cc as { scope?: string }).scope === 'global';
+    };
+
+    if (Array.isArray(req.system)) {
+      for (const block of req.system) {
+        if (isGlobalScope(block)) return true;
+      }
+    }
+    if (Array.isArray(req.tools)) {
+      for (const tool of req.tools) {
+        if (isGlobalScope(tool)) return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -313,6 +500,26 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
 
+    // Sample the live cache-control flags once per request and forward
+    // them to the converter (body-side `cache_control`). The converter's
+    // constructor-time value would otherwise diverge from the live value
+    // on the qwen-oauth path, where `Config.handleModelChange()`
+    // hot-updates `enableCacheControl` in place without recreating the
+    // ContentGenerator. (Non-qwen-oauth providers refresh via generator
+    // recreation, so `baseUrl` is captured fresh at construct time, not
+    // mutated mid-session — defensive per-request reads on both fields
+    // cover both paths.) `useGlobalCacheScope` is a strict subset of
+    // `enableCacheControl` (true only when caching is on AND the resolved
+    // baseURL is Anthropic-native) and governs whether the body's
+    // `cache_control` entries carry `scope: 'global'`. The matching
+    // `prompt-caching-scope-2026-01-05` beta isn't passed through this
+    // sample — `buildPerRequestHeaders` instead scans the assembled body
+    // via `hasGlobalCacheScopeOnWire` so beta and body field share a
+    // single source of truth.
+    const enableCacheControl =
+      this.contentGeneratorConfig.enableCacheControl !== false;
+    const useGlobalCacheScope = this.useGlobalCacheScope();
+
     const { system, messages } = this.converter.convertGeminiRequestToAnthropic(
       request,
       {
@@ -322,11 +529,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         stripAssistantThinking,
+        enableCacheControl,
+        useGlobalCacheScope,
       },
     );
 
     const tools = request.config?.tools
-      ? await this.converter.convertGeminiToolsToAnthropic(request.config.tools)
+      ? await this.converter.convertGeminiToolsToAnthropic(
+          request.config.tools,
+          { enableCacheControl, useGlobalCacheScope },
+        )
       : undefined;
 
     return {
@@ -438,10 +650,34 @@ export class AnthropicContentGenerator implements ContentGenerator {
     return effort;
   }
 
+  /**
+   * Check if the current model supports adaptive thinking (type: 'adaptive').
+   * Claude 4.6+ models require adaptive thinking; older models use the
+   * budget-based config. Uses numeric major/minor comparison rather than a
+   * single-digit character class so that future families (haiku, opus-4-10,
+   * opus-5-1, …) are recognized instead of silently falling back to the
+   * budget path and tripping HTTP 400 with `budget_tokens` they don't
+   * accept.
+   *
+   * The regex is intentionally unanchored so reseller-prefixed model names
+   * also match (`bedrock/claude-opus-4-7`, `vertex_ai/claude-sonnet-4-6@…`,
+   * `idealab:claude-opus-4-6`, etc.) — those route to the same Anthropic
+   * models on the wire and need the same thinking shape. Do not tighten to
+   * `^claude-` without also covering those naming conventions.
+   */
+  private modelSupportsAdaptiveThinking(): boolean {
+    const model = (this.contentGeneratorConfig.model || '').toLowerCase();
+    const match = model.match(/claude-(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
+    if (!match) return false;
+    const major = Number.parseInt(match[1], 10);
+    const minor = Number.parseInt(match[2], 10);
+    return major > 4 || (major === 4 && minor >= 6);
+  }
+
   private buildThinkingConfig(
     request: GenerateContentParameters,
     effectiveEffort: 'low' | 'medium' | 'high' | 'max' | undefined,
-  ): { type: 'enabled'; budget_tokens: number } | undefined {
+  ): AnthropicThinkingParam | undefined {
     if (request.config?.thinkingConfig?.includeThoughts === false) {
       return undefined;
     }
@@ -463,11 +699,22 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // just an integer the server accepts within its context window, so
     // an explicit override stays explicit. The default ladder below is
     // what stays consistent with the clamped effort.
+    //
+    // Checked before the adaptive-thinking branch so an explicit budget
+    // isn't silently dropped on Claude 4.6+ models — adaptive omits
+    // `budget_tokens` entirely, which would discard the user override.
     if (reasoning?.budget_tokens !== undefined) {
       return {
         type: 'enabled',
         budget_tokens: reasoning.budget_tokens,
       };
+    }
+
+    // Models that support adaptive thinking use { type: 'adaptive' } without
+    // a budget_tokens field. The server controls the thinking budget via
+    // output_config.effort instead.
+    if (this.modelSupportsAdaptiveThinking()) {
+      return { type: 'adaptive' };
     }
 
     // When using interleaved thinking with tools, this budget token limit is the entire context window(200k tokens).
@@ -503,6 +750,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // backends. Just consume the value here.
     if (effectiveEffort === undefined) return undefined;
     return { effort: effectiveEffort };
+  }
+
+  private async *redactStreamErrors(
+    stream: AsyncIterable<RawMessageStreamEvent>,
+  ): AsyncGenerator<RawMessageStreamEvent> {
+    try {
+      for await (const event of stream) {
+        yield event;
+      }
+    } catch (error) {
+      throw redactProxyError(error);
+    }
   }
 
   private async *processStream(

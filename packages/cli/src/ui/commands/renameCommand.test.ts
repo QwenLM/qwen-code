@@ -183,10 +183,11 @@ describe('renameCommand', () => {
     // before the model selection ran, leaving this regression-prone.
     function mockConfigForKebab(opts: { fastModel?: string; model?: string }): {
       config: unknown;
-      generateContent: ReturnType<typeof vi.fn>;
+      generateText: ReturnType<typeof vi.fn>;
     } {
-      const generateContent = vi.fn().mockResolvedValue({
-        candidates: [{ content: { parts: [{ text: 'fix-login-bug' }] } }],
+      const generateText = vi.fn().mockResolvedValue({
+        text: 'fix-login-bug',
+        usage: undefined,
       });
       const config = {
         getChatRecordingService: vi.fn().mockReturnValue({
@@ -203,13 +204,13 @@ describe('renameCommand', () => {
             },
           ]),
         }),
-        getContentGenerator: vi.fn().mockReturnValue({ generateContent }),
+        getBaseLlmClient: vi.fn().mockReturnValue({ generateText }),
       };
-      return { config, generateContent };
+      return { config, generateText };
     }
 
     it('uses fastModel when configured', async () => {
-      const { config, generateContent } = mockConfigForKebab({
+      const { config, generateText } = mockConfigForKebab({
         fastModel: 'qwen-turbo',
         model: 'main-model',
       });
@@ -219,12 +220,12 @@ describe('renameCommand', () => {
 
       await renameCommand.action!(mockContext, '');
 
-      expect(generateContent).toHaveBeenCalledOnce();
-      expect(generateContent.mock.calls[0][0].model).toBe('qwen-turbo');
+      expect(generateText).toHaveBeenCalledOnce();
+      expect(generateText.mock.calls[0][0].model).toBe('qwen-turbo');
     });
 
     it('falls back to main model when fastModel is unset', async () => {
-      const { config, generateContent } = mockConfigForKebab({
+      const { config, generateText } = mockConfigForKebab({
         fastModel: undefined,
         model: 'main-model',
       });
@@ -234,8 +235,8 @@ describe('renameCommand', () => {
 
       await renameCommand.action!(mockContext, '');
 
-      expect(generateContent).toHaveBeenCalledOnce();
-      expect(generateContent.mock.calls[0][0].model).toBe('main-model');
+      expect(generateText).toHaveBeenCalledOnce();
+      expect(generateText.mock.calls[0][0].model).toBe('main-model');
     });
   });
 

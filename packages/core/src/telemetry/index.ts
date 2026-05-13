@@ -7,7 +7,6 @@
 export enum TelemetryTarget {
   GCP = 'gcp',
   LOCAL = 'local',
-  QWEN = 'qwen',
 }
 
 const DEFAULT_TELEMETRY_TARGET = TelemetryTarget.LOCAL;
@@ -17,6 +16,7 @@ export { DEFAULT_TELEMETRY_TARGET, DEFAULT_OTLP_ENDPOINT };
 export {
   initializeTelemetry,
   shutdownTelemetry,
+  refreshSessionContext,
   isTelemetrySdkInitialized,
 } from './sdk.js';
 export {
@@ -136,3 +136,20 @@ export {
 } from './metrics.js';
 export { QwenLogger } from './qwen-logger/qwen-logger.js';
 export { sanitizeHookName } from './sanitize.js';
+export {
+  startInteractionSpan,
+  endInteractionSpan,
+  startLLMRequestSpan,
+  endLLMRequestSpan,
+  startToolSpan,
+  endToolSpan,
+  startToolExecutionSpan,
+  endToolExecutionSpan,
+  clearSessionTracingForTesting,
+} from './session-tracing.js';
+export type {
+  StartInteractionOptions,
+  EndInteractionOptions,
+  LLMRequestMetadata,
+  ToolSpanMetadata,
+} from './session-tracing.js';

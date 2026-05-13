@@ -11,6 +11,7 @@
 
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { t } from '../i18n/index.js';
 import type {
   CommandContext,
   CommandSource,
@@ -113,12 +114,17 @@ export function createSlashCommandFromDefinition(
   return {
     name: baseCommandName,
     description,
+    modelDescription: description,
+    localizeDescription: true,
     kind: CommandKind.FILE,
     extensionName,
     source: (extensionName
       ? 'plugin-command'
       : 'skill-dir-command') as CommandSource,
-    sourceLabel: extensionName ? `Plugin: ${extensionName}` : 'Custom',
+    sourceLabel: extensionName
+      ? `${t('Extension:')} ${extensionName}`
+      : t('Custom'),
+    sourceDetail: extensionName ? 'extension' : 'custom',
     modelInvocable: definition.disableModelInvocation
       ? false
       : !extensionName || !!(definition.description || definition.whenToUse),

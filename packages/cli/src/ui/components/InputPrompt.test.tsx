@@ -245,14 +245,45 @@ describe('InputPrompt', () => {
     };
   });
 
-  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
+  // Ink 7 throttles render at 30fps (~33ms/frame). 50ms only covers 1.5
+  // frames, which races on slow CI runners (notably macOS 22.x). 150ms
+  // gives ~4-5 frames headroom for stdin.write → reconcile → render →
+  // assert sequences without measurably slowing the suite.
+  const wait = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
 
   describe('prompt suggestions', () => {
+    // createFollowupController.setSuggestion debounces the visibility
+    // transition by SUGGESTION_DELAY_MS (300ms) before flipping
+    // followup.state.isVisible to true. The Enter handler reads that flag
+    // synchronously, so we must wait for the timer to fire before pressing
+    // Enter — otherwise the suggestion path is skipped and onSubmit never
+    // runs. 350ms left only ~50ms margin and was eaten by ink 7 / React 19.2
+    // mount overhead on slow Windows CI runners. Keep this wait > 300ms +
+    // generous buffer (renderWithProviders cold start can be 100-200ms).
+    const SUGGESTION_VISIBLE_WAIT_MS = 700;
+
+    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(SUGGESTION_VISIBLE_WAIT_MS);
+
+      stdin.write('\r');
+      await wait();
+
+      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+      // Enter path must NOT call buffer.insert — it passes text directly to
+      // handleSubmitAndClear. Calling insert would re-fill the buffer after
+      // it was already cleared (the microtask race bug).
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('does not accept the prompt suggestion on shift+tab', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(350);
+      await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
       stdin.write('\x1b[Z'); // shift+tab
       await wait();
@@ -274,7 +305,7 @@ describe('InputPrompt', () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(350);
+      await wait(SUGGESTION_VISIBLE_WAIT_MS);
 
       stdin.write('\t');
       await wait();
@@ -1625,6 +1656,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1653,6 +1685,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1681,6 +1714,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1709,6 +1743,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1737,6 +1772,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1766,6 +1802,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1794,6 +1831,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1823,6 +1861,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1852,6 +1891,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1881,6 +1921,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1910,6 +1951,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1941,6 +1983,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -1970,6 +2013,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();
@@ -2001,6 +2045,7 @@ describe('InputPrompt', () => {
         expect.any(Object),
         // active parameter: completion enabled when not just navigated history
         true,
+        undefined,
       );
 
       unmount();

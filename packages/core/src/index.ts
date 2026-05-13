@@ -100,6 +100,10 @@ export type {
   ExitPlanModeTool,
   ExitPlanModeParams,
 } from './tools/exitPlanMode.js';
+export type {
+  SyntheticOutputTool,
+  StructuredOutputParams,
+} from './tools/syntheticOutput.js';
 export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
 export type { GrepTool, GrepToolParams } from './tools/grep.js';
 export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';
@@ -121,6 +125,7 @@ export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
 export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 
 // ============================================================================
 // Services
@@ -275,6 +280,7 @@ export * from './utils/filesearch/fileSearch.js';
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';
+export * from './utils/gitDiff.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
@@ -300,7 +306,9 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
+  redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
+export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
@@ -363,3 +371,14 @@ export {
   type PostToolUseFailureHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+
+// ============================================================================
+// Startup profiler — cross-package event sink (first-screen perf observability)
+// ============================================================================
+
+export {
+  setStartupEventSink,
+  recordStartupEvent,
+  type StartupEventSink,
+  type StartupEventAttrs,
+} from './utils/startupEventSink.js';

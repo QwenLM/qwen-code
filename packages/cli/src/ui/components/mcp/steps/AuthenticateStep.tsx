@@ -18,56 +18,16 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { OAuthDisplayPayload } from '@qwen-code/qwen-code-core';
 import { appEvents, AppEvent } from '../../../../utils/events.js';
+import {
+  osc8Hyperlink,
+  supportsHyperlinks,
+  wrapForMultiplexer,
+} from '../../../utils/osc8.js';
 
 type AuthState = 'idle' | 'authenticating' | 'success' | 'error';
 
 const AUTO_BACK_DELAY_MS = 2000;
 const COPY_FEEDBACK_MS = 2000;
-
-/**
- * Wrap an OSC sequence for terminal multiplexers so the host terminal
- * receives it. tmux requires a DCS passthrough with inner ESCs doubled;
- * GNU screen uses a plain DCS envelope. Note: tmux 3.3+ defaults
- * `allow-passthrough` to off — users on default configs will not see
- * the hyperlink until they set `set -g allow-passthrough on`.
- */
-function wrapForMultiplexer(osc: string): string {
-  if (process.env['TMUX']) {
-    return `\x1bPtmux;${osc.split('\x1b').join('\x1b\x1b')}\x1b\\`;
-  }
-  if (process.env['STY']) {
-    return `\x1bP${osc}\x1b\\`;
-  }
-  return osc;
-}
-
-/**
- * Strip C0 control characters and DEL so an untrusted string can be safely
- * embedded inside an OSC escape. Without this a `\x07` (BEL) or `\x1b` (ESC)
- * in the input would prematurely terminate the OSC sequence and leak the
- * tail bytes to the terminal as interpretable escape codes.
- */
-function sanitizeForOsc(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/[\x00-\x1f\x7f]/g, '');
-}
-
-/**
- * Wrap a URL in an OSC 8 hyperlink escape sequence. Supported terminals
- * (iTerm2, WezTerm, Kitty, Windows Terminal, VS Code, GNOME Terminal, …)
- * render it as a clickable link; terminals without OSC 8 support ignore
- * the escapes and print the raw text. BEL (\x07) terminates the OSC
- * sequence — more broadly supported than ST (ESC \\).
- *
- * Inside tmux / screen the OSC sequence is wrapped in a DCS passthrough
- * envelope (see `wrapForMultiplexer`) so the multiplexer forwards it to
- * the host terminal instead of eating it.
- */
-function osc8Hyperlink(url: string, label = url): string {
-  const safeUrl = sanitizeForOsc(url);
-  const safeLabel = sanitizeForOsc(label);
-  return wrapForMultiplexer(`\x1b]8;;${safeUrl}\x07${safeLabel}\x1b]8;;\x07`);
-}
 
 /**
  * Copy a string to the user's clipboard using the OSC 52 terminal escape
@@ -292,7 +252,9 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
 
       {authUrl && (
         <Box>
-          <Text color={theme.text.accent}>{osc8Hyperlink(authUrl)}</Text>
+          <Text color={theme.text.accent}>
+            {supportsHyperlinks() ? osc8Hyperlink(authUrl) : authUrl}
+          </Text>
         </Box>
       )}
 
