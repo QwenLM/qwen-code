@@ -85,16 +85,13 @@ Options:
   -s, --source SOURCE      Record the installation source.
   --method METHOD          Install method: detect, standalone, or npm.
                            Defaults to QWEN_INSTALL_METHOD or detect.
-  --mirror MIRROR          Standalone archive mirror: auto, github, or aliyun.
-                           Defaults to QWEN_INSTALL_MIRROR or auto, which picks
-                           whichever responds first via a HEAD probe.
+  --mirror MIRROR          Standalone archive mirror: github or aliyun.
+                           Defaults to QWEN_INSTALL_MIRROR or github.
   --base-url URL           Override standalone archive base URL.
   --archive PATH           Install from a local standalone archive.
   --version VERSION        Standalone release version. Defaults to latest.
   --registry REGISTRY      npm registry to use for npm fallback.
                            Defaults to QWEN_NPM_REGISTRY or https://registry.npmmirror.com
-  --no-modify-path         Do not append PATH to the user's shell rc file even
-                           when a shadowing 'qwen' is detected.
   -h, --help               Show this help message.
 
 Examples:
@@ -107,11 +104,10 @@ EOF
 
 SOURCE="unknown"
 METHOD="${QWEN_INSTALL_METHOD:-}"
-MIRROR="${QWEN_INSTALL_MIRROR:-auto}"
+MIRROR="${QWEN_INSTALL_MIRROR:-github}"
 BASE_URL="${QWEN_INSTALL_BASE_URL:-}"
 ARCHIVE_PATH="${QWEN_INSTALL_ARCHIVE:-}"
 VERSION="${QWEN_INSTALL_VERSION:-latest}"
-NO_MODIFY_PATH="${QWEN_NO_MODIFY_PATH:-0}"
 NPM_REGISTRY="${QWEN_NPM_REGISTRY:-https://registry.npmmirror.com}"
 INSTALL_ROOT="${QWEN_INSTALL_ROOT:-${HOME:-}/.local}"
 if [[ -n "${QWEN_INSTALL_LIB_DIR:-}" ]]; then
@@ -200,10 +196,10 @@ validate_options() {
     esac
 
     case "${MIRROR}" in
-        auto|github|aliyun)
+        github|aliyun)
             ;;
         *)
-            log_error "--mirror must be auto, github, or aliyun."
+            log_error "--mirror must be github or aliyun."
             exit 1
             ;;
     esac
@@ -277,10 +273,6 @@ while [[ $# -gt 0 ]]; do
             NPM_REGISTRY="$2"
             shift 2
             ;;
-        --no-modify-path)
-            NO_MODIFY_PATH=1
-            shift
-            ;;
         -h|--help)
             print_usage
             exit 0
@@ -326,7 +318,7 @@ print_header() {
 
 print_node_help() {
     echo ""
-    echo "Node.js 22 or newer is required before installing Qwen Code with npm."
+    echo "Node.js 20 or newer is required before installing Qwen Code with npm."
     echo ""
     echo "Install Node.js, then rerun this installer:"
     case "$(uname -s 2>/dev/null || echo unknown)" in
@@ -343,7 +335,7 @@ print_node_help() {
             ;;
     esac
     echo ""
-    echo "If you already use a Node version manager, activate Node.js 22+"
+    echo "If you already use a Node version manager, activate Node.js 20+"
     echo "in this shell before rerunning the installer."
 }
 
@@ -365,8 +357,8 @@ require_node() {
         return 1
     fi
 
-    if [[ "${node_major}" -lt 22 ]]; then
-        log_error "Node.js ${node_version:-unknown} is installed, but Node.js 22 or newer is required."
+    if [[ "${node_major}" -lt 20 ]]; then
+        log_error "Node.js ${node_version:-unknown} is installed, but Node.js 20 or newer is required."
         print_node_help
         return 1
     fi
@@ -486,110 +478,6 @@ release_version_path() {
     esac
 }
 
-# When a shadowing 'qwen' is detected, append a PATH prepend to the user's
-# shell rc file at the very end. Putting it at the END means our prepend runs
-# AFTER any earlier PATH munging in the rc file (e.g., other tools' shell
-# init), so our installed_bin wins. Idempotent via a marker comment.
-maybe_update_shell_path() {
-    local install_bin_dir="$1"
-
-    [[ "${NO_MODIFY_PATH:-0}" == "1" ]] && return 0
-    [[ -z "${install_bin_dir}" ]] && return 0
-    [[ -z "${HOME:-}" ]] && return 0
-
-    local rc_file=""
-    case "${SHELL:-}" in
-        */zsh)  rc_file="${HOME}/.zshrc" ;;
-        */bash)
-            if [[ -f "${HOME}/.bashrc" ]]; then
-                rc_file="${HOME}/.bashrc"
-            elif [[ -f "${HOME}/.bash_profile" ]]; then
-                rc_file="${HOME}/.bash_profile"
-            else
-                rc_file="${HOME}/.bashrc"
-            fi
-            ;;
-        */fish) rc_file="${HOME}/.config/fish/config.fish" ;;
-        *)      rc_file="${HOME}/.profile" ;;
-    esac
-
-    [[ -z "${rc_file}" ]] && return 0
-
-    local marker="# Added by qwen-code installer (multi-qwen shadow fix)"
-    local export_line
-    if [[ "${rc_file}" == *config.fish ]]; then
-        export_line="set -gx PATH ${install_bin_dir} \$PATH"
-    else
-        export_line="export PATH=\"${install_bin_dir}:\$PATH\""
-    fi
-
-    if [[ -f "${rc_file}" ]] && grep -qF "${marker}" "${rc_file}" 2>/dev/null; then
-        log_info "PATH update already present in ${rc_file} (skipping)."
-        return 0
-    fi
-
-    mkdir -p "$(dirname "${rc_file}")" 2>/dev/null || true
-    {
-        echo ""
-        echo "${marker}"
-        echo "${export_line}"
-    } >> "${rc_file}" || {
-        log_warning "Could not write PATH update to ${rc_file}."
-        return 0
-    }
-
-    log_success "Appended PATH prepend to ${rc_file}"
-    log_info "Open a new terminal, or run: source ${rc_file}"
-}
-
-github_base_url_for_version() {
-    local version_path="$1"
-    local github_repo="${QWEN_INSTALL_GITHUB_REPO:-QwenLM/qwen-code}"
-    if [[ "${version_path}" == "latest" ]]; then
-        echo "https://github.com/${github_repo}/releases/latest/download"
-    else
-        echo "https://github.com/${github_repo}/releases/download/${version_path}"
-    fi
-}
-
-aliyun_base_url_for_version() {
-    local version_path="$1"
-    echo "https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/${version_path}"
-}
-
-# Race two HEAD probes; print "aliyun" or "github" based on which mirror's
-# SHA256SUMS responds first. Default to github if both time out.
-race_mirror_head() {
-    local timeout="${1:-2}"
-    local gh_url="$2"
-    local oss_url="$3"
-    local tmpdir
-    tmpdir=$(mktemp -d -t qwen-mirror.XXXXXX 2>/dev/null) || tmpdir="/tmp/qwen-mirror.$$"
-    mkdir -p "${tmpdir}" 2>/dev/null || true
-
-    (curl -fsI -m "${timeout}" -o /dev/null "${oss_url}" >/dev/null 2>&1 && : > "${tmpdir}/aliyun") &
-    local oss_pid=$!
-    (curl -fsI -m "${timeout}" -o /dev/null "${gh_url}"  >/dev/null 2>&1 && : > "${tmpdir}/github") &
-    local gh_pid=$!
-
-    local winner=""
-    local elapsed=0
-    local max=$((timeout * 10 + 5))
-    while [[ -z "${winner}" && "${elapsed}" -lt "${max}" ]]; do
-        # Probe OSS first to break ties in favor of the closer mirror for CN users.
-        [[ -e "${tmpdir}/aliyun" ]] && winner="aliyun" && break
-        [[ -e "${tmpdir}/github" ]] && winner="github" && break
-        sleep 0.1
-        elapsed=$((elapsed + 1))
-    done
-
-    kill "${oss_pid}" "${gh_pid}" 2>/dev/null || true
-    wait "${oss_pid}" "${gh_pid}" 2>/dev/null || true
-    rm -rf "${tmpdir}" 2>/dev/null || true
-
-    echo "${winner:-github}"
-}
-
 standalone_base_url() {
     if [[ -n "${BASE_URL}" ]]; then
         echo "${BASE_URL%/}"
@@ -599,50 +487,30 @@ standalone_base_url() {
     local version_path
     version_path=$(release_version_path)
 
-    if [[ "${MIRROR}" == "auto" ]]; then
-        local gh_head oss_head selected
-        gh_head="$(github_base_url_for_version "${version_path}")/SHA256SUMS"
-        oss_head="$(aliyun_base_url_for_version "${version_path}")/SHA256SUMS"
-        selected=$(race_mirror_head 2 "${gh_head}" "${oss_head}")
-        log_info "Mirror auto-selected via HEAD probe: ${selected}" >&2
-        MIRROR="${selected}"
-    fi
-
     if [[ "${MIRROR}" == "aliyun" ]]; then
-        aliyun_base_url_for_version "${version_path}"
+        echo "https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/${version_path}"
         return 0
     fi
 
-    github_base_url_for_version "${version_path}"
+    if [[ "${version_path}" == "latest" ]]; then
+        echo "https://github.com/QwenLM/qwen-code/releases/latest/download"
+        return 0
+    fi
+
+    echo "https://github.com/QwenLM/qwen-code/releases/download/${version_path}"
 }
 
 download_file() {
     local url="$1"
     local destination="$2"
 
-    # Show progress only when stderr is a terminal (so CI / non-tty stays clean).
-    # `curl ... | bash` keeps stderr connected to the user's terminal even though
-    # stdin is a pipe, so progress shows correctly during normal usage.
-    local show_progress=0
-    if [ -t 2 ] && [ "${QWEN_INSTALL_QUIET:-0}" != "1" ]; then
-        show_progress=1
-    fi
-
     if command_exists curl; then
-        if [ "${show_progress}" = "1" ]; then
-            curl -fL --progress-bar --retry 2 "${url}" -o "${destination}"
-        else
-            curl -fsSL --retry 2 "${url}" -o "${destination}"
-        fi
+        curl -fsSL --retry 2 "${url}" -o "${destination}"
         return $?
     fi
 
     if command_exists wget; then
-        if [ "${show_progress}" = "1" ]; then
-            wget --show-progress --tries=3 "${url}" -O "${destination}" || return 1
-        else
-            wget -q --tries=3 "${url}" -O "${destination}" || return 1
-        fi
+        wget -q --tries=3 "${url}" -O "${destination}" || return 1
         return $?
     fi
 
@@ -748,15 +616,6 @@ validate_archive_entry_path() {
         entry="${entry#./}"
     done
 
-    # Reject entries containing CR/LF so a `..\r` or `..\n` entry cannot
-    # bypass the literal `..` glob below.
-    case "${entry}" in
-        *$'\r'*|*$'\n'*)
-            log_error "Archive contains unsafe path with control character: ${entry}"
-            return 1
-            ;;
-    esac
-
     case "${entry}" in
         ""|/*|..|../*|*/..|*/../*|*\\*)
             log_error "Archive contains unsafe path: ${entry:-<empty>}"
@@ -840,26 +699,13 @@ ensure_managed_install_dir() {
         return 0
     fi
 
-    if is_qwen_standalone_install_dir "${install_dir}"; then
+    if [[ -f "${install_dir}/manifest.json" ]]; then
         return 0
     fi
 
     log_error "${install_dir} exists but is not a Qwen Code standalone install."
     log_error "Refusing to overwrite it. Move or remove it manually, then rerun the installer."
     return 1
-}
-
-is_qwen_standalone_install_dir() {
-    local install_dir="$1"
-    local manifest_path="${install_dir}/manifest.json"
-
-    [[ -f "${manifest_path}" ]] || return 1
-    # Manifest format is produced by writeManifest in create-standalone-package.js.
-    # Keep these grep checks in sync if that JSON layout changes.
-    grep -Eq '"name"[[:space:]]*:[[:space:]]*"@qwen-code/qwen-code"' "${manifest_path}" 2>/dev/null || return 1
-    grep -Eq '"target"[[:space:]]*:[[:space:]]*"(darwin|linux)-(arm64|x64)"' "${manifest_path}" 2>/dev/null || return 1
-    [[ -f "${install_dir}/bin/qwen" && ! -L "${install_dir}/bin/qwen" && -x "${install_dir}/bin/qwen" ]] || return 1
-    [[ -f "${install_dir}/node/bin/node" && ! -L "${install_dir}/node/bin/node" && -x "${install_dir}/node/bin/node" ]] || return 1
 }
 
 write_unix_wrapper() {
@@ -1050,31 +896,6 @@ install_npm() {
 
 print_final_instructions() {
     local install_bin_dir="${1:-}"
-    local installed_bin=""
-    if [[ -n "${install_bin_dir}" ]]; then
-        installed_bin="${install_bin_dir}/qwen"
-    fi
-
-    # PRE_INSTALL_QWENS was captured by main() BEFORE the install ran
-    # (newline-separated list of every qwen binary found on disk). Filter out
-    # the one we just installed; whatever remains may shadow this install.
-    local other_qwens=""
-    if [[ -n "${PRE_INSTALL_QWENS:-}" ]]; then
-        local saved_ifs="${IFS}"
-        IFS=$'\n'
-        local path
-        for path in ${PRE_INSTALL_QWENS}; do
-            [[ -z "${path}" ]] && continue
-            [[ -n "${installed_bin}" && "${path}" == "${installed_bin}" ]] && continue
-            if [[ -z "${other_qwens}" ]]; then
-                other_qwens="${path}"
-            else
-                other_qwens="${other_qwens}"$'\n'"${path}"
-            fi
-        done
-        IFS="${saved_ifs}"
-    fi
-
     if [[ -n "${install_bin_dir}" ]]; then
         export PATH="${install_bin_dir}:${PATH}"
     fi
@@ -1085,64 +906,26 @@ print_final_instructions() {
     echo "=========================================="
     echo ""
 
-    local installed_version="unknown"
-    if [[ -n "${installed_bin}" && -x "${installed_bin}" ]]; then
-        installed_version=$("${installed_bin}" --version 2>/dev/null || echo "unknown")
-    elif command_exists qwen; then
-        installed_version=$(qwen --version 2>/dev/null || echo "unknown")
-    fi
-
-    if [[ -n "${installed_bin}" ]]; then
-        log_success "Installed at ${installed_bin}: ${installed_version}"
-    else
-        log_success "Qwen Code installed: ${installed_version}"
-    fi
-
-    if [[ -n "${other_qwens}" ]]; then
+    if command_exists qwen; then
+        local qwen_version
+        qwen_version=$(qwen --version 2>/dev/null || echo "unknown")
+        log_success "Qwen Code is ready to use: ${qwen_version}"
         echo ""
-        log_warning "Other 'qwen' executables exist on this system. Depending on your"
-        log_warning "shell PATH order, one of these may run instead of the install above:"
-        local saved_ifs="${IFS}"
-        IFS=$'\n'
-        local path
-        for path in ${other_qwens}; do
-            [[ -z "${path}" ]] && continue
-            log_warning "  ${path}"
-        done
-        IFS="${saved_ifs}"
+        echo "You can now run: qwen"
         echo ""
-        if [[ "${NO_MODIFY_PATH:-0}" == "1" ]]; then
-            echo "Skipped shell rc update because --no-modify-path is set."
-            echo "To make this install win, manually add to your shell rc:"
-            echo "  export PATH=\"${install_bin_dir}:\$PATH\""
-        else
-            maybe_update_shell_path "${install_bin_dir}"
-            echo ""
-            echo "If you prefer not to modify the shell rc, rerun with --no-modify-path"
-            echo "and pick one of:"
-            echo "  - npm uninstall -g @qwen-code/qwen-code   # if the shadow is an npm install"
-            echo "  - invoke directly: ${installed_bin}"
-        fi
+        log_info "Run qwen in your project directory to start an interactive session."
         return 0
     fi
 
-    if ! command_exists qwen; then
-        log_warning "Qwen Code was installed, but qwen is not on PATH in this shell."
+    log_warning "Qwen Code was installed, but qwen is not on PATH in this shell."
+    echo ""
+    echo "Restart your terminal, then run: qwen"
+    if [[ -n "${install_bin_dir}" ]]; then
         echo ""
-        echo "Restart your terminal, then run: qwen"
-        if [[ -n "${install_bin_dir}" ]]; then
-            echo ""
-            echo "Or run this in the current shell:"
-            echo "  export PATH=\"${install_bin_dir}:\$PATH\""
-            echo "  qwen"
-        fi
-        return 0
+        echo "Or run this in the current shell:"
+        echo "  export PATH=\"${install_bin_dir}:\$PATH\""
+        echo "  qwen"
     fi
-
-    echo ""
-    echo "You can now run: qwen"
-    echo ""
-    log_info "Run qwen in your project directory to start an interactive session."
 }
 
 main() {
@@ -1150,42 +933,6 @@ main() {
         log_error "HOME is not set; cannot determine where to install Qwen Code."
         exit 1
     fi
-
-    # Discover all qwen executables on disk BEFORE we install, so the
-    # just-installed binary doesn't pollute the search. We can't reliably
-    # simulate the user's interactive shell PATH (some tools inject their
-    # bin only under a tty), so we enumerate well-known per-tool bin
-    # directories plus whatever bash inherited on PATH.
-    PRE_INSTALL_QWENS=$(
-        {
-            IFS=:
-            for dir in $PATH; do
-                [[ -z "${dir}" ]] && continue
-                [[ -x "${dir}/qwen" ]] && echo "${dir}/qwen"
-            done
-            for candidate in \
-                "${HOME}/.opencode/bin/qwen" \
-                "${HOME}/.bun/bin/qwen" \
-                "${HOME}/.cargo/bin/qwen" \
-                "${HOME}/.deno/bin/qwen" \
-                "${HOME}/.volta/bin/qwen" \
-                "${HOME}/.fnm/bin/qwen" \
-                "${HOME}/.local/bin/qwen" \
-                "${HOME}/Library/pnpm/qwen" \
-                "/usr/local/bin/qwen" \
-                "/opt/homebrew/bin/qwen"; do
-                [[ -x "${candidate}" ]] && echo "${candidate}"
-            done
-            if command_exists npm; then
-                local npm_prefix
-                npm_prefix=$(npm prefix -g 2>/dev/null || true)
-                if [[ -n "${npm_prefix}" && -x "${npm_prefix}/bin/qwen" ]]; then
-                    echo "${npm_prefix}/bin/qwen"
-                fi
-            fi
-        } 2>/dev/null | sort -u
-    )
-    export PRE_INSTALL_QWENS
 
     print_header
 
@@ -1210,7 +957,7 @@ main() {
                         print_final_instructions "$(get_npm_global_bin)"
                     else
                         log_warning "Standalone archive was unavailable before npm fallback; npm fallback also failed."
-                        log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 22+ and rerun --method npm."
+                        log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 20+ and rerun --method npm."
                         exit 1
                     fi
                 else

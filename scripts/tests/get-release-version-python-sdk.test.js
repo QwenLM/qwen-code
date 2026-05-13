@@ -52,7 +52,7 @@ function makeExecError(message, { stderr = '', stdout = '', status } = {}) {
 
 function makeTimeoutError(command) {
   const error = new Error(`Command failed: ${command}\nSIGTERM`);
-  // Real Node.js execSync timeout shape (verified on Node 22+):
+  // Real Node.js execSync timeout shape (verified on Node 20+):
   // killed=undefined, signal='SIGTERM', code='ETIMEDOUT'
   error.code = 'ETIMEDOUT';
   error.signal = 'SIGTERM';
