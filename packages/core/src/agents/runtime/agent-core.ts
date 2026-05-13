@@ -1637,11 +1637,9 @@ Important Rules:
     const thoughtTok = Number(usage.thoughtsTokenCount || 0);
     const cachedTok = Number(usage.cachedContentTokenCount || 0);
     const totalTok = Number(usage.totalTokenCount || 0);
-    // Prefer totalTokenCount (prompt + output) for context usage — the
-    // output from this round becomes history for the next, matching
-    // the approach in geminiChat.ts.
-    const contextTok = isFinite(totalTok) && totalTok > 0 ? totalTok : inTok;
-    if (isFinite(contextTok) && contextTok > 0) {
+    // Context usage tracks prompt size; output isn't in history yet.
+    const contextTok = inTok || totalTok;
+    if (contextTok) {
       this.lastPromptTokenCount = contextTok;
     }
     if (

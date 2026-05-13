@@ -944,9 +944,12 @@ describe('GeminiChat', async () => {
         'prompt-id-1',
       );
 
-      // Verify that token counting is called when usageMetadata is present
+      // Verify that token counting is called when usageMetadata is present.
+      // The Footer-driving counter must reflect *prompt* size only — output
+      // tokens for the in-flight round are not yet in history. The mock
+      // returns promptTokenCount=42, so that's what should be reported.
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledWith(
-        57,
+        42,
       );
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,
