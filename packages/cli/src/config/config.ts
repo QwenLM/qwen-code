@@ -57,6 +57,7 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
+import { serveCommand } from '../commands/serve.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -965,7 +966,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand);
+    .command(reviewCommand)
+    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
+    .command(serveCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -991,6 +994,9 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review')
   ) {
+    // Note: `serve` is intentionally NOT in this list. Its handler blocks
+    // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
+    // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
     // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
