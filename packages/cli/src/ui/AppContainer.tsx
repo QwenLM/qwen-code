@@ -2162,12 +2162,21 @@ export const AppContainer = (props: AppContainerProps) => {
   // --- Rewind selector callbacks ---
   const openRewindSelector = useCallback(() => {
     if (streamingState !== StreamingState.Idle) return;
-    if (config.getIdeMode()) return;
+    if (config.getIdeMode()) {
+      historyManager.addItem(
+        {
+          type: 'info',
+          text: 'Rewind is disabled in IDE mode.',
+        },
+        Date.now(),
+      );
+      return;
+    }
     if (dialogsVisibleRef.current) return;
     const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
     if (!hasUserTurns) return;
     setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager.history]);
+  }, [streamingState, config, historyManager]);
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
@@ -2559,7 +2568,8 @@ export const AppContainer = (props: AppContainerProps) => {
         // Input is empty and idle — double-ESC opens rewind selector
         if (
           streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current
+          !dialogsVisibleRef.current &&
+          !config.getIdeMode()
         ) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
