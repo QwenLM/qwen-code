@@ -127,10 +127,13 @@ jobs:
               ;;
           esac
 
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] && printf '%s' "$comment_body" | grep -q '@qwen /review'; then
+          # Use grep -qE with end-boundary so '@qwen /review' does not match
+          # '@qwen /reviewer' or similar variants.
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && printf '%s' "$comment_body" | grep -qE '@qwen /review($|[[:space:]])'; then
             additional_instructions="$(
               printf '%s' "$comment_body" |
-                sed 's/.*@qwen \/review//' |
+                sed -n '/@qwen \/review/,$ p' |
+                sed '1s/.*@qwen \/review//' |
                 sed 's/^[[:space:]]*//'
             )"
           fi
