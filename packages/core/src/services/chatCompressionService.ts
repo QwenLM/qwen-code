@@ -130,6 +130,13 @@ export function findCompressSplitPoint(
   // would otherwise dominate the split. The caller can pre-compute and
   // pass `precomputedCharCounts` to avoid a redundant walk when the
   // surrounding compress() loop also needs the values.
+  //
+  // NOTE on the fallback: when `precomputedCharCounts` is omitted, we
+  // use `DEFAULT_IMAGE_TOKEN_ESTIMATE` rather than the user's resolved
+  // setting / env override. The only production caller is `compress()`,
+  // which always passes precomputed counts, so the fallback is a
+  // test-friendly default — not a behavior path users can influence.
+  // Production callers MUST pass `precomputedCharCounts`.
   const charCounts =
     precomputedCharCounts ??
     contents.map((content) =>

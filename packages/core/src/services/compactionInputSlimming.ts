@@ -24,12 +24,29 @@ const TOKEN_TO_CHAR_RATIO = 4;
 const DEFAULT_MIME = 'application/octet-stream';
 
 /**
+ * Strip characters that could break out of the placeholder envelope or
+ * inject prompt-shaped content into the summary side-query. MCP tools
+ * surface `mimeType` from arbitrary servers; an adversarial server
+ * could craft something like `image/png]\n\n[SYSTEM: …` and have it
+ * appear verbatim in the slimmed prompt.
+ */
+export function sanitizeMimeForPlaceholder(mime: string): string {
+  return mime
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[[\]]/g, '')
+    .trim()
+    .slice(0, 128);
+}
+
+/**
  * Placeholder templates. Centralized so the slimming module, the
  * char-counter, and any future consumer agree on the exact wire format
  * the summary model will see.
  */
-const imagePlaceholder = (mime: string): string => `[image: ${mime}]`;
-const documentPlaceholder = (mime: string): string => `[document: ${mime}]`;
+const imagePlaceholder = (mime: string): string =>
+  `[image: ${sanitizeMimeForPlaceholder(mime)}]`;
+const documentPlaceholder = (mime: string): string =>
+  `[document: ${sanitizeMimeForPlaceholder(mime)}]`;
 
 export interface ResolvedSlimmingConfig {
   imageTokenEstimate: number;

@@ -95,17 +95,28 @@ optional 4th argument); the same array is reused for the
 
 ### Layer 3: microcompact image cleanup (`microcompaction/microcompact.ts`)
 
-Extend `collectCompactablePartRefs` to also collect refs to
-`inlineData` parts inside `user` messages (typically from MCP
-screenshot tools). The existing time-based trigger then clears stale
-inline images by replacing the part with `[Old inline media cleared:
-image/png]` once they fall outside the "keep recent" window. Errors
-(un-clearable parts) remain untouched.
+`collectCompactablePartRefs` now returns three groups:
 
-When clearing an old tool result, also drop `functionResponse.parts`
-explicitly — without this, the spread of `...part.functionResponse`
-preserves the nested media even though the textual output has been
-replaced with `MICROCOMPACT_CLEARED_MESSAGE`.
+- `tool` — `functionResponse` parts from compactable built-in tools.
+  Cleared as a unit: response output replaced with the sentinel,
+  `functionResponse.parts` dropped along with it.
+- `media` — top-level `inlineData` / `fileData` parts under user-role
+  messages (e.g. images pasted via `@reference`). Replaced with
+  `[Old inline media cleared: <mime>]`.
+- `nested-media` — `functionResponse` parts from **non-compactable**
+  tools (e.g. MCP screenshot tools whose names are not in
+  `COMPACTABLE_TOOLS`) that carry images / documents on the
+  `functionResponse.parts` extension field. Only the nested media is
+  dropped; the tool's text output is preserved.
+
+Each kind has its own `keepRecent` budget. Setting
+`toolResultsNumToKeep: 1` keeps the most recent of each category
+(1 tool + 1 media + 1 nested-media), not 1 entry total across the
+combined list.
+
+mimeType values surfaced from MCP tool servers are passed through
+`sanitizeMimeForPlaceholder` before being embedded in any placeholder
+string. The slimmer and microcompact share this helper.
 
 ### Layer 4: configuration (`config/config.ts`)
 
@@ -198,3 +209,14 @@ prompt caching, not externalize.
    for Claude (where images can be up to ~5K tokens) but harmless: it
    only affects the split-point heuristic, never the actual prompt
    the user-facing model sees.
+3. **`MIN_COMPRESSION_FRACTION` gate is computed on pre-slim char
+   counts.** An image-heavy slice can pass the 5% threshold (because
+   images count as ~6,400 chars each in the estimator) and then
+   shrink to `[image: …]` placeholders post-slim. The summary model
+   then receives almost no textual context. This is intentional for
+   now: the summary's job is to record "user shared an image of X"
+   even when most of the slice was visual, and the gate's purpose is
+   "is there enough to be worth summarizing" — which images
+   reasonably satisfy. If quality regresses we can revisit by either
+   re-checking post-slim or biasing the gate on
+   `imagesStripped` proportion.

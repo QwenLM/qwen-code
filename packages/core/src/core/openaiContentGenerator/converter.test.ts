@@ -1738,6 +1738,63 @@ describe('OpenAIContentConverter', () => {
       const userMessages = messages.filter((m) => m.role === 'user');
       expect(userMessages).toHaveLength(0);
     });
+
+    it('passes text-only nested parts (e.g. compaction slimmer placeholders) through to the tool message', () => {
+      // The compaction slimming module replaces inlineData inside
+      // functionResponse.parts with `{ text: '[image: image/png]' }`
+      // before the side-query. createToolMessage must surface those
+      // text placeholders, otherwise the summary model receives an
+      // empty tool response with no signal that an image existed.
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_strip',
+                  name: 'read_file',
+                  args: { path: '/x.png' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_strip',
+                  name: 'read_file',
+                  response: { output: '' },
+                  // After slimming: nested part is a text placeholder.
+                  parts: [{ text: '[image: image/png]' }] as unknown as Part[],
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+
+      const toolMessage = messages.find((m) => m.role === 'tool');
+      expect(toolMessage).toBeDefined();
+      const toolContent = toolMessage?.content;
+      // Either string or array, depending on how OpenAI shapes single-part
+      // content. Either way the placeholder must be visible verbatim.
+      const flattened =
+        typeof toolContent === 'string'
+          ? toolContent
+          : JSON.stringify(toolContent);
+      expect(flattened).toContain('[image: image/png]');
+      // Crucially, NO base64 image bytes leaked through.
+      expect(flattened).not.toContain('data:image/');
+    });
   });
 
   describe('convertOpenAIResponseToGemini', () => {

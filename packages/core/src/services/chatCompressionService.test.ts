@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ChatCompressionService,
   findCompressSplitPoint,
+  TOOL_ROUND_RETAIN_COUNT,
 } from './chatCompressionService.js';
 import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
@@ -270,6 +271,30 @@ describe('findCompressSplitPoint', () => {
     // so the pair walk stops with 0 pairs found → retain only the trailing
     // fc, compress everything else. Pre-refactor returned lastSplitPoint=7.
     expect(findCompressSplitPoint(history, 0.99)).toBe(history.length - 1);
+  });
+
+  it('honors precomputedCharCounts when provided', () => {
+    // Three messages of equal real length. If precomputedCharCounts
+    // claims the middle message is the heaviest, the split point should
+    // move past it.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'a' }] },
+      { role: 'model', parts: [{ text: 'b' }] },
+      { role: 'user', parts: [{ text: 'c' }] },
+      { role: 'model', parts: [{ text: 'd' }] },
+      { role: 'user', parts: [{ text: 'e' }] },
+    ];
+    // Force the first three messages to dominate the budget so the
+    // splitter returns the index of the next user message (4).
+    const inflated = [1000, 1000, 1000, 1, 1];
+    expect(
+      findCompressSplitPoint(history, 0.7, TOOL_ROUND_RETAIN_COUNT, inflated),
+    ).toBe(4);
+    // Same history with even weights yields the standard split.
+    const even = [1, 1, 1, 1, 1];
+    expect(
+      findCompressSplitPoint(history, 0.7, TOOL_ROUND_RETAIN_COUNT, even),
+    ).toBe(4);
   });
 });
 
