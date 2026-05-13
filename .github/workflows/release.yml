@@ -494,7 +494,7 @@ jobs:
           upload_asset() {
             local source="$1"
             local key="$2"
-            ossutil cp "${source}" "oss://${ALIYUN_OSS_BUCKET}/${key}" -c "${RUNNER_TEMP}/.ossutilconfig" -f
+            ossutil cp "${source}" "oss://${ALIYUN_OSS_BUCKET}/${key}" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
           }
 
           upload_release_assets() {

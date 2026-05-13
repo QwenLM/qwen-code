@@ -1074,6 +1074,7 @@ describe('standalone release packaging', () => {
     expect(workflow).toContain('installation/install-qwen-standalone.sh');
     expect(workflow).toContain('installation/install-qwen-standalone.bat');
     expect(workflow).toContain('installation/install-qwen-standalone.ps1');
+    expect(workflow).toContain('--acl public-read');
     expect(workflow).toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
     );
@@ -1093,6 +1094,7 @@ describe('standalone release packaging', () => {
     expect(workflow).toContain('vars.ALIYUN_OSS_BUCKET');
     expect(workflow).toContain('qwen-code-oss-ak-check');
     expect(workflow).toContain('ossutil cp');
+    expect(workflow).toContain('--acl public-read');
     expect(workflow).toContain('ossutil rm');
     expect(workflow).toContain('actions/checkout');
     expect(workflow).toContain('actions/setup-node');

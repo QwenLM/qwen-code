@@ -152,8 +152,8 @@ jobs:
             --out-dir dist/oss-smoke \
             --version "0.0.0-oss-smoke.${GITHUB_RUN_ID}"
 
-          ossutil cp "dist/oss-smoke/qwen-code-linux-x64.tar.gz" "oss://${ALIYUN_OSS_BUCKET}/${release_prefix}/qwen-code-linux-x64.tar.gz" -c "${RUNNER_TEMP}/.ossutilconfig" -f
-          ossutil cp "dist/oss-smoke/SHA256SUMS" "oss://${ALIYUN_OSS_BUCKET}/${release_prefix}/SHA256SUMS" -c "${RUNNER_TEMP}/.ossutilconfig" -f
+          ossutil cp "dist/oss-smoke/qwen-code-linux-x64.tar.gz" "oss://${ALIYUN_OSS_BUCKET}/${release_prefix}/qwen-code-linux-x64.tar.gz" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
+          ossutil cp "dist/oss-smoke/SHA256SUMS" "oss://${ALIYUN_OSS_BUCKET}/${release_prefix}/SHA256SUMS" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
 
           public_release_base="${ALIYUN_OSS_PUBLIC_BASE_URL%/}/${release_prefix}"
           curl -fsSIL "${public_release_base}/SHA256SUMS" >/dev/null || curl -fsSL --range 0-0 "${public_release_base}/SHA256SUMS" >/dev/null
