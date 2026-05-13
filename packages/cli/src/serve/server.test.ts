@@ -1157,6 +1157,79 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/Invalid --hostname/);
   });
 
+  it('--workspace flows end-to-end and surfaces on /capabilities (#3803 §02)', async () => {
+    // Use process.cwd() so the boot-time existence check passes — any
+    // real absolute directory works. The bridge canonicalizes this
+    // once at boot; `/capabilities.workspaceCwd` returns the canonical
+    // form, NOT the raw input. Tests inject a fake bridge here so we
+    // verify the route layer's canonicalization (not the bridge's),
+    // making this a true E2E that doesn't require a real `qwen --acp`
+    // child.
+    const bridge = fakeBridge();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: process.cwd(),
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const caps = await (
+      await fetch(`http://127.0.0.1:${port}/capabilities`)
+    ).json();
+    // Canonical form per `canonicalizeWorkspace` — realpath of cwd
+    // (handles symlinks like `/var` → `/private/var` on macOS).
+    const expected = await import('node:fs').then((m) =>
+      m.realpathSync.native(process.cwd()),
+    );
+    expect(caps.workspaceCwd).toBe(expected);
+  });
+
+  it('rejects --workspace pointing at a non-existent directory (BkUyD followup — boot-loud over opaque ENOENT)', async () => {
+    // Without the boot-time stat check, `canonicalizeWorkspace`'s
+    // ENOENT fallback to `path.resolve` would let the daemon boot
+    // pointed at a non-existent directory; every `POST /session`
+    // would then spawn a `qwen --acp` child with that cwd and the
+    // agent would fail with an opaque ENOENT.
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: `/tmp/qwen-serve-no-such-path-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      }),
+    ).rejects.toThrow(/directory does not exist/);
+  });
+
+  it('rejects --workspace pointing at a regular file', async () => {
+    // Pointing the daemon at a file (vs. a directory) is operator error
+    // — the agent would fail at child-spawn time with ENOTDIR. Catch
+    // it at boot for a clearer error message.
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        // `import.meta.url` resolves to this test file's URL on Node;
+        // strip `file://` to get an absolute path that's known to exist.
+        workspace: new URL(import.meta.url).pathname,
+      }),
+    ).rejects.toThrow(/exists but is not a directory/);
+  });
+
+  it('rejects relative --workspace at boot', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: 'relative/path',
+      }),
+    ).rejects.toThrow(/must be an absolute path/);
+  });
+
   it('drains the bridge before closing the listener', async () => {
     const bridge = fakeBridge();
     handle = await runQwenServe(

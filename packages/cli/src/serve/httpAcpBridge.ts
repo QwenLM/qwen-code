@@ -417,6 +417,19 @@ interface ChannelInfo {
    * is cleared.
    */
   sessionIds: Set<string>;
+  /**
+   * Set synchronously by `killSession` / `doSpawn`-newSession-failure
+   * BEFORE awaiting `channel.kill()`. `ensureChannel` treats a dying
+   * channel as absent and spawns a fresh one. Without this flag a
+   * concurrent `spawnOrAttach` arriving during the SIGTERM grace
+   * window (up to 10s) would attach to a transport about to close,
+   * landing the caller with a sessionId that 404s on every follow-up
+   * request. We don't clear `channelInfo` eagerly because the
+   * tanzhenxin BkUyD invariant requires `killAllSync` to still find
+   * the channel mid-grace for force-kill — `isDying` is the
+   * "available-for-new-spawns" half of the two-bit state.
+   */
+  isDying: boolean;
 }
 
 interface SessionEntry {
@@ -1079,7 +1092,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
    * sessions.
    */
   async function ensureChannel(): Promise<ChannelInfo> {
-    if (channelInfo) return channelInfo;
+    // Skip a channel that's marked dying — its underlying transport is
+    // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
+    // would either hang or land the caller with a sessionId that
+    // immediately 404s on every follow-up.
+    if (channelInfo && !channelInfo.isDying) return channelInfo;
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
@@ -1142,6 +1159,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         client,
         workspaceCwd: boundWorkspace,
         sessionIds: new Set(),
+        isDying: false,
       };
       channelInfo = info;
 
@@ -1232,7 +1250,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // attempt — a populated channel keeps running for its other
       // live sessions.
       if (ci.sessionIds.size === 0) {
-        if (channelInfo === ci) channelInfo = undefined;
+        // Mark dying SYNCHRONOUSLY so a concurrent `spawnOrAttach`
+        // calling `ensureChannel()` between this point and the
+        // `channel.exited` cleanup spawns a fresh channel instead of
+        // attaching to the one we're about to tear down. `channelInfo`
+        // stays set until OS reap so `killAllSync` mid-SIGTERM still
+        // finds a target (tanzhenxin BkUyD invariant).
+        ci.isDying = true;
         await ci.channel.kill().catch(() => {
           /* best-effort — channel.exited handler still runs */
         });
@@ -1916,6 +1940,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `channel.exited` handler once the OS reaps the child —
       // tanzhenxin BkUyD invariant.)
       if (ci && ci.sessionIds.size === 0) {
+        // Mark dying SYNCHRONOUSLY before the await so a concurrent
+        // `spawnOrAttach` arriving during the SIGTERM grace window
+        // doesn't attach to a transport we're tearing down — without
+        // this it would land the caller with a sessionId that 404s on
+        // every follow-up once `channel.exited` fires (the equivalent
+        // of the pre-PR eager `byWorkspaceChannel.delete()` from the
+        // Stage 1 routing era). `channelInfo` stays set until OS reap
+        // so `killAllSync` still finds a target (BkUyD).
+        ci.isDying = true;
         await ci.channel.kill().catch(() => {
           // Best-effort kill — channel may already be dead.
         });
@@ -1987,8 +2020,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // intentionally NOT cleared here; the `channel.exited` handler
       // clears it once the OS has reaped the child. That preserves
       // the BkUyD invariant: a double-Ctrl+C arriving mid-SIGTERM-
-      // grace can still find the channel via `killAllSync`.
+      // grace can still find the channel via `killAllSync`. Setting
+      // `isDying` makes the dying channel invisible to any racing
+      // `ensureChannel` call — but `shuttingDown` already blocks new
+      // `spawnOrAttach` upstream, so this is mostly belt-and-suspenders
+      // (a direct internal `ensureChannel` past the gate would still
+      // see the dying state and not attach).
       const ci = channelInfo;
+      if (ci) ci.isDying = true;
       // Resolve every still-pending permission as cancelled before clearing
       // the maps so callers awaiting `requestPermission` unwind cleanly.
       for (const e of entries) {
@@ -2141,7 +2180,7 @@ function sliceLineRange(
  * call sites to converge. Until then, *any* change to how those
  * modules resolve workspace paths needs a matching change here.
  */
-function canonicalizeWorkspace(p: string): string {
+export function canonicalizeWorkspace(p: string): string {
   const resolved = path.resolve(p);
   try {
     // FIXME(stage-2): switch to `fs.promises.realpath` once the

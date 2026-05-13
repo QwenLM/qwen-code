@@ -4,10 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import { type Server } from 'node:http';
 import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { createHttpAcpBridge, type HttpAcpBridge } from './httpAcpBridge.js';
+import {
+  canonicalizeWorkspace,
+  createHttpAcpBridge,
+  type HttpAcpBridge,
+} from './httpAcpBridge.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
@@ -106,12 +111,45 @@ export async function runQwenServe(
   // `POST /session` with a mismatched `cwd` is rejected by the bridge
   // with `WorkspaceMismatchError`. Multi-workspace deployments use
   // multiple daemon processes, not intra-daemon routing.
-  const boundWorkspace = opts.workspace ?? process.cwd();
-  if (!path.isAbsolute(boundWorkspace)) {
+  //
+  // Boot-loud validation: absolute path, exists, is a directory.
+  // Without the stat() check, `canonicalizeWorkspace`'s ENOENT fallback
+  // to `path.resolve` would let the daemon boot pointed at a
+  // non-existent directory; every `POST /session` would then spawn a
+  // `qwen --acp` child with that cwd and the agent would fail with an
+  // opaque ENOENT — operator pain we can avoid by failing at boot.
+  const rawWorkspace = opts.workspace ?? process.cwd();
+  if (!path.isAbsolute(rawWorkspace)) {
     throw new Error(
-      `Invalid --workspace "${boundWorkspace}": must be an absolute path.`,
+      `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
     );
   }
+  try {
+    const stats = fs.statSync(rawWorkspace);
+    if (!stats.isDirectory()) {
+      throw new Error(
+        `Invalid --workspace "${rawWorkspace}": exists but is not a directory.`,
+      );
+    }
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err) {
+      const code = (err as { code?: unknown }).code;
+      if (code === 'ENOENT') {
+        throw new Error(
+          `Invalid --workspace "${rawWorkspace}": directory does not exist.`,
+        );
+      }
+    }
+    throw err;
+  }
+  // Canonicalize ONCE here so `/capabilities` and the POST /session
+  // fallback (both via server.ts) AND the bridge agree on the same
+  // path. Without this, server.ts and the bridge each compute
+  // `boundWorkspace` independently; on symlinks or case-insensitive
+  // filesystems the bridge's `realpathSync.native` form diverges from
+  // server.ts's raw `opts.workspace` and clients see one path on
+  // `/capabilities` but another on `POST /session` responses.
+  const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({

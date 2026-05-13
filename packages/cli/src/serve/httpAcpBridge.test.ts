@@ -474,6 +474,54 @@ describe('createHttpAcpBridge', () => {
     void shutdownPromise;
   });
 
+  it('killSession marks the channel dying so concurrent spawnOrAttach gets a fresh channel', async () => {
+    // After the last session is killed, `channel.kill()` runs through
+    // its SIGTERM grace window before SIGKILL — up to 10s in the real
+    // factory. During that window a concurrent `spawnOrAttach` MUST
+    // get a FRESH channel, never the dying one. Pre-fix: `channelInfo`
+    // stayed set with no `isDying` flag, so `ensureChannel` returned
+    // the dying channel and `newSession()` either succeeded onto a
+    // transport about to close (landing a sessionId that 404s on the
+    // next request when `channel.exited` fires) or hung until the
+    // newSession timeout. Fix: `killSession` sets `isDying = true`
+    // synchronously before `await ci.channel.kill()`; `ensureChannel`
+    // skips dying channels and spawns a fresh one.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+      // Make kill() hang forever so the SIGTERM grace window stays
+      // open for the test (simulates a slow-to-exit child).
+      h.channel = { ...h.channel, kill: () => new Promise(() => {}) };
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(handles).toHaveLength(1);
+
+    // Kick off killSession (the only session leaving triggers the
+    // channel teardown). The kill() Promise never resolves, so the
+    // method's await hangs — we fire-and-forget.
+    const killPromise = bridge.killSession(first.sessionId);
+    // Yield once so killSession's sync prefix runs (it marks
+    // `isDying = true` synchronously before `await ci.channel.kill()`).
+    await new Promise((r) => setImmediate(r));
+
+    // A new spawn MUST get a FRESH channel, not reuse the dying one.
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(handles).toHaveLength(2);
+    expect(second.sessionId).not.toBe(first.sessionId);
+    // The second session is on the fresh channel (handles[1]), not
+    // multiplexed onto the dying one (handles[0]).
+    expect(handles[1]?.agent.newSessionCalls).toHaveLength(1);
+
+    // Cleanup: both channels' kill() never resolves (factory above
+    // overrides it). Don't await killSession or shutdown — same
+    // pattern as the BkUyD test above. The test runner GCs the
+    // dangling promises when this `it` returns.
+    void killPromise;
+  });
+
   describe('sendPrompt', () => {
     it('forwards a prompt and returns the agent response', async () => {
       const handles: ChannelHandle[] = [];
@@ -1207,7 +1255,7 @@ describe('createHttpAcpBridge', () => {
       });
 
       // Simulate a child crash (channel.exited resolves but we never called
-      // kill() — entry is still in byId/byWorkspace at the moment of crash).
+      // kill() — entry is still in byId / defaultEntry at the moment of crash).
       handles[0]?.crash();
 
       // Drain the bus — first frame is `session_died`.

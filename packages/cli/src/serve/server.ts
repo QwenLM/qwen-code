@@ -11,6 +11,7 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
+  canonicalizeWorkspace,
   createHttpAcpBridge,
   InvalidPermissionOptionError,
   SessionLimitExceededError,
@@ -62,11 +63,23 @@ export function createServeApp(
   // cap they configured via `ServeOptions`. Previously the default
   // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
   // only the `runQwenServe` path piped the option through.
+  //
   // Workspace binding mirrors `runQwenServe`: per #3803 §02 the
   // daemon is bound to exactly one workspace (`opts.workspace` or
   // `process.cwd()`). `POST /session` with a mismatched cwd is
   // rejected with 400 `workspace_mismatch`.
-  const boundWorkspace = opts.workspace ?? process.cwd();
+  //
+  // Canonicalize here so the value advertised on `/capabilities`,
+  // used for the `POST /session` cwd fallback, AND passed into the
+  // bridge are all the SAME canonical form. Without this step the
+  // bridge re-canonicalizes via `realpathSync.native` and on symlinks
+  // / case-insensitive filesystems the bridge's stored form diverges
+  // from the value `/capabilities` advertises — clients echoing the
+  // advertised path back end up with a response whose `workspaceCwd`
+  // differs from what they sent. `canonicalizeWorkspace` is
+  // idempotent so `runQwenServe`'s pre-canonicalization here is a
+  // no-op when the caller already did the work.
+  const boundWorkspace = canonicalizeWorkspace(opts.workspace ?? process.cwd());
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -185,7 +198,7 @@ export function createServeApp(
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
-      // orphaned (in `byId` / `byWorkspace` with no client knowing the
+      // orphaned (in `byId` / `defaultEntry` with no client knowing the
       // id), and under churn this leaks one child per aborted request.
       //
       // Detect "can we still write the response?" via `res.writable`,

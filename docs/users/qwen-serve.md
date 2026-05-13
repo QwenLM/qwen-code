@@ -99,7 +99,7 @@ Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request. `
 
 ```bash
 curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" http://your-host:4170/capabilities
-# → {"v":1,"mode":"http-bridge","features":[...],"modelServices":[]}
+# → {"v":1,"mode":"http-bridge","features":[...],"modelServices":[],"workspaceCwd":"/path/to/your-project"}
 # Wrong token → 401
 ```
 

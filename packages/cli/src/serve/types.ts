@@ -7,14 +7,15 @@
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): one `qwen --acp` child PER WORKSPACE, with
- *   multiple sessions multiplexed onto that child via the agent's native
- *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`).
- *   Sessions on the same workspace share the child's process / OAuth /
- *   file-cache / hierarchy-memory parse. The daemon pipes ACP NDJSON over
- *   HTTP/SSE. Same-session multi-client requests serialize through the
- *   bridge's per-session FIFO; cross-session requests on the same channel
- *   can run concurrently (the ACP layer demultiplexes by sessionId).
+ * `http-bridge` (Stage 1): per #3803 §02, one `qwen --acp` child per
+ *   daemon (the daemon binds to ONE workspace at boot). Multiple
+ *   sessions multiplex onto that child via the agent's native
+ *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
+ *   sharing the child's process / OAuth / file-cache / hierarchy-memory
+ *   parse. The daemon pipes ACP NDJSON over HTTP/SSE. Same-session
+ *   multi-client requests serialize through the bridge's per-session
+ *   FIFO; cross-session requests on the same channel can run
+ *   concurrently (the ACP layer demultiplexes by sessionId).
  * `native` (Stage 2+): in-process multi-session, AsyncLocalStorage; not yet
  *   implemented.
  */
