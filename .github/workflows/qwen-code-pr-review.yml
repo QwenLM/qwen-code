@@ -16,12 +16,11 @@ on:
         required: true
         type: 'number'
       review_mode:
-        description: 'Run a smoke review, run without posting comments, or publish review comments'
+        description: 'Run without posting comments, or publish review comments'
         required: true
         default: 'dry-run'
         type: 'choice'
         options:
-          - 'smoke'
           - 'dry-run'
           - 'comment'
       additional_instructions:
@@ -64,21 +63,10 @@ jobs:
       pull-requests: 'write'
       issues: 'write'
     env:
-      # Job-level env is intentionally minimal. Review provider secrets are
-      # scoped to the preflight/review steps only, so dependency-install
-      # postinstall scripts and the bundle build cannot read them. GITHUB_TOKEN
-      # stays job-level because gh-based size/comment steps need it.
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
-      QWEN_SANDBOX: 'false'
     steps:
-      - name: 'Checkout base branch'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          token: '${{ secrets.GITHUB_TOKEN }}'
-          fetch-depth: 0
-
       - name: 'Resolve PR context'
         id: 'pr'
         env:
@@ -119,7 +107,7 @@ jobs:
           fi
 
           case "$review_mode" in
-            smoke|dry-run|comment)
+            dry-run|comment)
               ;;
             *)
               echo "::error::Unsupported review mode: $review_mode"
@@ -141,21 +129,37 @@ jobs:
           # Reviewers should keep instructions short.
           additional_instructions="$(printf '%s' "$additional_instructions" | head -c 2048)"
 
+          # Build the review prompt for qwen-code-action.
+          if [ "$review_mode" = "comment" ]; then
+            review_prompt="/review $pr_number --comment"
+            should_comment="true"
+          else
+            review_prompt="/review $pr_number"
+            should_comment="false"
+          fi
+
+          if [ -n "$additional_instructions" ]; then
+            review_prompt="$review_prompt
+
+          Additional reviewer focus: $additional_instructions"
+          fi
+
           echo "number=$pr_number" >> "$GITHUB_OUTPUT"
           echo "review_mode=$review_mode" >> "$GITHUB_OUTPUT"
-          if [ "$review_mode" = "comment" ]; then
-            echo "should_comment=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_comment=false" >> "$GITHUB_OUTPUT"
-          fi
-          output_delimiter="QWEN_REVIEW_INSTRUCTIONS_$(date +%s%N)"
+          echo "should_comment=$should_comment" >> "$GITHUB_OUTPUT"
+          output_delimiter="QWEN_REVIEW_PROMPT_$(date +%s%N)"
           {
-            echo "additional_instructions<<$output_delimiter"
-            printf '%s\n' "$additional_instructions"
+            echo "review_prompt<<$output_delimiter"
+            printf '%s\n' "$review_prompt"
             echo "$output_delimiter"
           } >> "$GITHUB_OUTPUT"
 
-      - name: 'Check review configuration'
+      - name: 'Check PR size'
+        id: 'size'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
         run: |-
           set -euo pipefail
 
@@ -169,23 +173,10 @@ jobs:
             exit 1
           fi
 
-          # Reject 0 (would block every PR) and absurdly large values (would defeat the size gate).
           if [ "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" -lt 100 ] || [ "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" -gt 50000 ]; then
             echo "::error::QWEN_PR_REVIEW_MAX_CHANGED_LINES must be between 100 and 50000 (got $QWEN_PR_REVIEW_MAX_CHANGED_LINES)."
             exit 1
           fi
-
-          echo "Using Qwen PR review model: $OPENAI_MODEL"
-          echo "Max changed lines before split recommendation: $QWEN_PR_REVIEW_MAX_CHANGED_LINES"
-
-      - name: 'Check PR size'
-        id: 'size'
-        env:
-          PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
-          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
-        run: |-
-          set -euo pipefail
 
           pr_json="$(gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
@@ -229,162 +220,29 @@ jobs:
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 'Setup Node.js'
-        if: |-
-          steps.size.outputs.should_review == 'true'
-        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-
-      - name: 'Build local Qwen Code CLI'
-        if: |-
-          steps.size.outputs.should_review == 'true'
-        run: |-
-          set -euo pipefail
-          npm ci
-          npm run build
-          npm run bundle
-          # Expose `qwen` on PATH so child processes spawned by the review agent
-          # (e.g. `qwen review fetch-pr`, `qwen review pr-context`) can invoke
-          # the CLI by name. The workflow itself starts the agent via
-          # `node dist/cli.js`, so the symlink is only consumed downstream.
-          mkdir -p .qwen/bin
-          ln -sf "$PWD/dist/cli.js" .qwen/bin/qwen
-          echo "$PWD/.qwen/bin" >> "$GITHUB_PATH"
-
-      - name: 'Preflight review model'
-        if: |-
-          steps.size.outputs.should_review == 'true'
-        env:
-          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-        run: |-
-          set -euo pipefail
-
-          if [ -z "${REVIEW_OPENAI_API_KEY:-}" ]; then
-            echo "::error::Repository secret REVIEW_OPENAI_API_KEY is required for Qwen PR review."
-            exit 1
-          fi
-          if [ -z "${REVIEW_OPENAI_BASE_URL:-}" ]; then
-            echo "::error::Repository secret REVIEW_OPENAI_BASE_URL is required for Qwen PR review."
-            exit 1
-          fi
-
-          export PATH="$PWD/.qwen/bin:$PATH"
-          echo "Running Qwen review model preflight with model: $OPENAI_MODEL"
-          OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
-            OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
-            timeout 180s node dist/cli.js \
-              --auth-type openai \
-              --model "$OPENAI_MODEL" \
-              --output-format json \
-              --max-session-turns 1 \
-              --prompt "Reply with OK only."
-
-      - name: 'Smoke review PR diff'
-        if: |-
-          steps.size.outputs.should_review == 'true' &&
-          steps.pr.outputs.review_mode == 'smoke'
-        env:
-          PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-        run: |-
-          set -euo pipefail
-
-          export PATH="$PWD/.qwen/bin:$PATH"
-          mkdir -p .qwen/tmp
-          diff_file=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-smoke.diff"
-          prompt_file=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-smoke-prompt.md"
-          output_file=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-smoke-output.json"
-
-          gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --patch > "$diff_file"
-          diff_lines="$(wc -l < "$diff_file" | tr -d ' ')"
-          diff_bytes="$(wc -c < "$diff_file" | tr -d ' ')"
-
-          echo "Smoke review target: PR #$PR_NUMBER"
-          echo "Smoke review scope: $diff_lines patch lines, $diff_bytes bytes"
-
-          {
-            printf 'You are smoke-testing the Qwen PR review GitHub Action.\n'
-            printf 'Review only the pull request patch below. Do not infer unrelated repository-wide changes.\n\n'
-            printf 'Return concise Markdown with exactly these headings:\n'
-            printf '1. Target\n'
-            printf '2. Changed files\n'
-            printf '3. Scope check\n'
-            printf '4. Obvious review findings\n\n'
-            printf 'Target PR: #%s\n\n' "$PR_NUMBER"
-            printf 'Patch follows. It may be truncated after 20000 bytes for smoke testing.\n\n'
-            head -c 20000 "$diff_file"
-          } > "$prompt_file"
-
-          OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
-            OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
-            timeout 180s node dist/cli.js \
-              --auth-type openai \
-              --model "$OPENAI_MODEL" \
-              --output-format json \
-              --max-session-turns 1 \
-              --prompt "$(cat "$prompt_file")" | tee "$output_file"
-
-          smoke_result="$(
-            jq -r '
-              if type == "array" then
-                ([.[] | select(.type == "result")] | last | .result // "")
-              else
-                .result // ""
-              end
-            ' "$output_file"
-          )"
-
-          {
-            printf '### Qwen PR review smoke test\n\n'
-            printf '%s\n' "- Target PR: #$PR_NUMBER"
-            printf '%s\n\n' "- Patch size: $diff_lines lines, $diff_bytes bytes"
-            printf '%s\n' "$smoke_result"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: 'Run bundled Qwen PR review'
+      - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
-          steps.size.outputs.should_review == 'true' &&
-          steps.pr.outputs.review_mode != 'smoke'
+          steps.size.outputs.should_review == 'true'
+        uses: QwenLM/qwen-code-action@main
+        with:
+          openai_api_key: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          openai_base_url: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          openai_model: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          prompt: '${{ steps.pr.outputs.review_prompt }}'
+
+      - name: 'Post dry-run summary'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.pr.outputs.should_comment != 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
-          REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
-          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
-          QWEN_REVIEW_ADDITIONAL_INSTRUCTIONS: '${{ steps.pr.outputs.additional_instructions }}'
-          # Review credentials are step-scoped and mapped to OPENAI_* only for
-          # the Qwen process below.
-          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
-          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
         run: |-
-          set -euo pipefail
-
-          export PATH="$PWD/.qwen/bin:$PATH"
-          review_prompt="/review $PR_NUMBER --ci"
-          if [ "$SHOULD_COMMENT" = "true" ]; then
-            review_prompt="/review $PR_NUMBER --comment --ci"
-          fi
-
-          echo "Running Qwen PR review in $REVIEW_MODE mode."
-          OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
-            OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
-            node dist/cli.js \
-              --auth-type openai \
-              --model "$OPENAI_MODEL" \
-              --approval-mode yolo \
-              --core-tools "task,run_shell_command,grep_search,read_file,write_file,glob" \
-              --prompt "$review_prompt"
-
-          if [ "$SHOULD_COMMENT" != "true" ]; then
-            {
-              printf '### Qwen PR review dry run\n\n'
-              printf 'Completed review for PR #%s without posting PR comments.\n' "$PR_NUMBER"
-              printf '\nReview logs are available in this workflow run.\n'
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          {
+            printf '### Qwen PR review dry run\n\n'
+            printf 'Completed review for PR #%s without posting PR comments.\n' "$PR_NUMBER"
+            printf '\nReview logs are available in this workflow run.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Post fallback comment on review failure'
         if: |-
