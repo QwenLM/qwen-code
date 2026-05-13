@@ -38,10 +38,12 @@ const createAgentHookConfig = (
 
 function createMockHeadless(
   terminateMode: AgentTerminateMode = AgentTerminateMode.GOAL,
+  finalText: string = '',
 ) {
   return {
     execute: vi.fn().mockResolvedValue(undefined),
     getTerminateMode: vi.fn().mockReturnValue(terminateMode),
+    getFinalText: vi.fn().mockReturnValue(finalText),
   };
 }
 
@@ -205,7 +207,7 @@ describe('AgentHookRunner', () => {
 
   describe('execute — no verdict', () => {
     it('should return cancelled when no verdict is reported', async () => {
-      const headless = createMockHeadless();
+      const headless = createMockHeadless(AgentTerminateMode.CANCELLED);
       const subagentManager = createMockSubagentManager(headless);
       const config = createMockConfig(subagentManager);
       runner = new AgentHookRunner(config);
