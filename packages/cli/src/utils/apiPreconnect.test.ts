@@ -19,34 +19,22 @@ const { mockGetOrCreateSharedDispatcher, mockDebugLogger } = vi.hoisted(() => {
 
 // Mock fetch
 const mockFetch = vi.fn().mockResolvedValue(undefined);
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  AuthType: {
-    USE_OPENAI: 'openai',
-    USE_ANTHROPIC: 'anthropic',
-    USE_GEMINI: 'gemini',
-  },
-  createDebugLogger: () => mockDebugLogger,
-  detectRuntime: () => 'node',
-  getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
-  redactProxyCredentials: (msg: string) => {
-    let result = msg.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
-    result = result.replace(
-      /(^|[\s([=:])([^\s/@()[\]=]+@[^@\s/()[\]=]+)/g,
-      (match, prefix: string, candidate: string) => {
-        const atIndex = candidate.indexOf('@');
-        const userInfo = candidate.slice(0, atIndex);
-        const host = candidate.slice(atIndex + 1);
-
-        if (!userInfo.includes(':') && !/:\d+$/.test(host)) {
-          return match;
-        }
-
-        return `${prefix}<redacted>@${host}`;
-      },
-    );
-    return result;
-  },
-}));
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return {
+    ...actual,
+    AuthType: {
+      USE_OPENAI: 'openai',
+      USE_ANTHROPIC: 'anthropic',
+      USE_GEMINI: 'gemini',
+    },
+    createDebugLogger: () => mockDebugLogger,
+    detectRuntime: () => 'node',
+    getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
+    redactProxyCredentials: actual.redactProxyCredentials,
+  };
+});
 
 describe('apiPreconnect', () => {
   beforeEach(() => {
@@ -269,15 +257,17 @@ describe('apiPreconnect', () => {
       );
     });
 
-    it('should permanently skip preconnect when no proxy is set', () => {
-      // First call: no proxy → sets preconnectFired = true
+    it('should allow a later proxy preconnect after a no-proxy skip', () => {
+      // First call: no proxy, no useful undici pool to warm.
       preconnectApi('qwen-oauth');
       expect(mockFetch).not.toHaveBeenCalled();
 
-      // Second call: with proxy → still skipped because preconnectFired is true
+      // Second call: proxy is now available, so preconnect should still fire.
       preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
-      expect(mockFetch).not.toHaveBeenCalled();
-      expect(mockGetOrCreateSharedDispatcher).not.toHaveBeenCalled();
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockGetOrCreateSharedDispatcher).toHaveBeenCalledWith(
+        'http://proxy.example.com:8080',
+      );
     });
 
     it('should handle fetch errors gracefully', async () => {

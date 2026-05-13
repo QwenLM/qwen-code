@@ -209,12 +209,6 @@ describe('getOrCreateSharedDispatcher', () => {
     mockConsoleError.mockClear();
   });
 
-  it('returns the same instance for repeated calls without proxy', () => {
-    const d1 = getOrCreateSharedDispatcher();
-    const d2 = getOrCreateSharedDispatcher();
-    expect(d1).toBe(d2);
-  });
-
   it('returns the same instance for repeated calls with the same proxy', () => {
     const d1 = getOrCreateSharedDispatcher('http://proxy.local');
     const d2 = getOrCreateSharedDispatcher('http://proxy.local');
@@ -222,10 +216,11 @@ describe('getOrCreateSharedDispatcher', () => {
   });
 
   it('returns different instances for different proxy URLs', () => {
-    const d1 = getOrCreateSharedDispatcher();
-    const d2 = getOrCreateSharedDispatcher('http://proxy.local');
+    const d1 = getOrCreateSharedDispatcher('http://proxy.local');
+    const d2 = getOrCreateSharedDispatcher('http://proxy.other');
     expect(d1).not.toBe(d2);
   });
+
   it('shares the same ProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
     const shared = getOrCreateSharedDispatcher('http://proxy.local');
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
@@ -279,6 +274,59 @@ describe('redactProxyCredentials', () => {
     const msg = 'connect ECONNREFUSED token@proxy.local:8080';
     expect(redactProxyCredentials(msg)).toBe(
       'connect ECONNREFUSED <redacted>@proxy.local:8080',
+    );
+  });
+
+  it('redacts token-only credentials for localhost proxy endpoints', () => {
+    const msg = 'connect ECONNREFUSED token@localhost:8080';
+    expect(redactProxyCredentials(msg)).toBe(
+      'connect ECONNREFUSED <redacted>@localhost:8080',
+    );
+  });
+
+  it('redacts token-only credentials for IP proxy endpoints', () => {
+    const msg = 'connect ECONNREFUSED token@10.0.0.5:8080';
+    expect(redactProxyCredentials(msg)).toBe(
+      'connect ECONNREFUSED <redacted>@10.0.0.5:8080',
+    );
+  });
+
+  it('redacts token-only credentials for corporate proxy endpoints', () => {
+    const msg = 'connect ECONNREFUSED token@gateway.corp.local:8080';
+    expect(redactProxyCredentials(msg)).toBe(
+      'connect ECONNREFUSED <redacted>@gateway.corp.local:8080',
+    );
+  });
+
+  it('does not redact SSH-style host and port strings', () => {
+    const msg = 'ssh failed for git@github.com:22';
+    expect(redactProxyCredentials(msg)).toBe(msg);
+  });
+
+  it('does not redact email-like strings followed by numeric suffixes', () => {
+    const msg = 'see user@example.com:42 for line reference';
+    expect(redactProxyCredentials(msg)).toBe(msg);
+  });
+
+  it('does not redact email-like strings followed by larger line numbers', () => {
+    const msg = 'see user@example.com:123 for line reference';
+    expect(redactProxyCredentials(msg)).toBe(msg);
+  });
+
+  it('does not redact email-like strings near ordinary request prose', () => {
+    const msg = 'request mentions user@example.com:123 in prose';
+    expect(redactProxyCredentials(msg)).toBe(msg);
+  });
+
+  it('does not redact email-like strings near ordinary fetch prose', () => {
+    const msg = 'fetch the owner from user@example.local:123';
+    expect(redactProxyCredentials(msg)).toBe(msg);
+  });
+
+  it('redacts token-only credentials for public hosts in network error context', () => {
+    const msg = 'connect ECONNREFUSED token@public.example.com:8080';
+    expect(redactProxyCredentials(msg)).toBe(
+      'connect ECONNREFUSED <redacted>@public.example.com:8080',
     );
   });
 

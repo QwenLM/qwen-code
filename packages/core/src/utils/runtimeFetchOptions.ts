@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Agent, ProxyAgent, type Dispatcher } from 'undici';
+import { ProxyAgent, type Dispatcher } from 'undici';
 
 import { createDebugLogger } from './debugLogger.js';
 
@@ -137,10 +137,10 @@ export function buildRuntimeFetchOptions(
 }
 
 /**
- * Cache of shared dispatcher instances keyed by proxy URL (undefined = no proxy).
+ * Cache of shared dispatcher instances keyed by proxy URL.
  * Ensures preconnect and SDK clients share the same connection pool.
  */
-const dispatcherCache = new Map<string | undefined, Dispatcher>();
+const dispatcherCache = new Map<string, Dispatcher>();
 
 /**
  * Proxy dispatcher creation failure counts keyed by sanitized host.
@@ -161,31 +161,22 @@ const NO_DISPATCHER_FALLBACK = {
  * Get or create a shared undici dispatcher for the given proxy configuration.
  * The dispatcher is cached so that preconnect and subsequent SDK requests
  * share the same connection pool, enabling TCP+TLS connection reuse.
- * The no-proxy Agent branch is intentionally retained for external consumers
- * that call this exported helper directly; internal SDK setup skips it when no
- * proxy is configured.
  *
- * @param proxyUrl - Optional proxy URL; undefined for direct connections
- * @returns A cached undici Dispatcher (Agent or ProxyAgent)
+ * @param proxyUrl - Proxy URL used to create a cached ProxyAgent
+ * @returns A cached undici ProxyAgent dispatcher
  */
-export function getOrCreateSharedDispatcher(proxyUrl?: string): Dispatcher {
+export function getOrCreateSharedDispatcher(proxyUrl: string): Dispatcher {
   const cached = dispatcherCache.get(proxyUrl);
   if (cached) {
     return cached;
   }
 
-  const dispatcher = proxyUrl
-    ? new ProxyAgent({
-        uri: proxyUrl,
-        headersTimeout: 0,
-        bodyTimeout: 0,
-        keepAliveTimeout: 60_000,
-      })
-    : new Agent({
-        headersTimeout: 0,
-        bodyTimeout: 0,
-        keepAliveTimeout: 60_000,
-      });
+  const dispatcher = new ProxyAgent({
+    uri: proxyUrl,
+    headersTimeout: 0,
+    bodyTimeout: 0,
+    keepAliveTimeout: 60_000,
+  });
 
   dispatcherCache.set(proxyUrl, dispatcher);
   return dispatcher;
@@ -229,6 +220,47 @@ export function extractHostnameFromProxyUrl(proxyUrl: string): string {
   return match ? match[1] + (match[2] ?? '') : redactProxyCredentials(proxyUrl);
 }
 
+function hasPlausibleProxyPort(host: string): boolean {
+  const portMatch = host.match(/:(\d{1,5})$/);
+  if (!portMatch) {
+    return false;
+  }
+
+  const port = Number(portMatch[1]);
+  return port >= 80 && port <= 65535;
+}
+
+function hasLocalOrProxyLikeHost(host: string): boolean {
+  const hostWithoutPort = host.replace(/:\d{1,5}$/, '').toLowerCase();
+  if (hostWithoutPort === 'localhost') {
+    return true;
+  }
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostWithoutPort)) {
+    return true;
+  }
+  return hostWithoutPort
+    .split(/[.-]/)
+    .some((label) => /^(proxy|gateway|gw|squid)\d*$/.test(label));
+}
+
+function hasNetworkErrorContext(message: string, offset: number): boolean {
+  const context = message.slice(Math.max(0, offset - 80), offset).toLowerCase();
+  return /\b(connect|dispatcher|econnrefused|econnreset|enotfound|etimedout|proxy|tunnel)\b/.test(
+    context,
+  );
+}
+
+function shouldRedactTokenOnlyCredential(
+  host: string,
+  message: string,
+  offset: number,
+): boolean {
+  return (
+    hasPlausibleProxyPort(host) &&
+    (hasLocalOrProxyLikeHost(host) || hasNetworkErrorContext(message, offset))
+  );
+}
+
 /**
  * Redact proxy credentials from error messages to prevent credential leakage.
  *
@@ -240,24 +272,38 @@ export function extractHostnameFromProxyUrl(proxyUrl: string): string {
  * - With scheme: `http://user:pass@proxy.local` → `http://<redacted>@proxy.local`
  * - Without scheme (Node.js native errors): `token@proxy.local:8080` → `<redacted>@proxy.local:8080`
  *
+ * Scheme-less token-only credentials are only redacted when the host has a
+ * plausible proxy port and either local/proxy-like host structure or nearby
+ * network-error context. This avoids mangling email or SSH-like strings such
+ * as `git@github.com:22` and `user@example.com:123`.
+ *
  * @param message - Error message that may contain proxy URLs with credentials
  * @returns Message with all proxy credentials replaced by '<redacted>'
  */
 export function redactProxyCredentials(message: string): string {
   // Primary: match URLs with scheme (http://user:pass@host or https://user:pass@host)
   let result = message.replace(/\/\/[^/\s]*@/g, '//<redacted>@');
-  // Fallback: match bare credential patterns without scheme (e.g., Node.js native errors)
-  // Redact only candidates that look like proxy credentials: either userinfo
-  // contains ':' or the host has an explicit port. This avoids over-redacting
-  // ordinary email-like text such as `support@example.com`.
+  // Fallback: match bare credential patterns without scheme (e.g., Node.js
+  // native errors). Redact password-bearing userinfo, or token-only userinfo
+  // when the host has an explicit non-low port that looks like a proxy endpoint
+  // rather than an SSH port or email line reference.
   result = result.replace(
     /(^|[\s([=:])([^\s/@()[\]=]+@[^@\s/()[\]=]+)/g,
-    (match, prefix: string, candidate: string) => {
+    (
+      match,
+      prefix: string,
+      candidate: string,
+      offset: number,
+      message: string,
+    ) => {
       const atIndex = candidate.indexOf('@');
       const userInfo = candidate.slice(0, atIndex);
       const host = candidate.slice(atIndex + 1);
 
-      if (!userInfo.includes(':') && !/:\d+$/.test(host)) {
+      if (
+        !userInfo.includes(':') &&
+        !shouldRedactTokenOnlyCredential(host, message, offset)
+      ) {
         return match;
       }
 

@@ -173,11 +173,9 @@ export function preconnectApi(
   // custom dispatcher creation when no proxy is set, ensuring consistent behavior.
   if (!options.proxy) {
     debugLogger.debug('Skipping preconnect dispatcher: no proxy configured');
-    // Set preconnectFired = true because no-proxy state is permanent for the process
-    // lifetime (unlike the transient unknown-authType case below which allows retry).
-    preconnectFired = true;
     return;
   }
+  const proxy = options.proxy;
 
   const targetUrl = getPreconnectTargetUrl(authType, options.resolvedBaseUrl);
 
@@ -194,7 +192,7 @@ export function preconnectApi(
   try {
     // Use the same shared undici dispatcher that SDK clients will use,
     // so the warmed TCP+TLS connection is reused by subsequent API calls.
-    const dispatcher = getOrCreateSharedDispatcher(options.proxy);
+    const dispatcher = getOrCreateSharedDispatcher(proxy);
 
     // Fire HEAD request to warm connection (fire-and-forget)
     fetch(targetUrl, {
