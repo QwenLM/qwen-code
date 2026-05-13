@@ -230,7 +230,7 @@ exit /b 1
 :PrintUsage
 echo Qwen Code Installer
 echo.
-echo Usage: install-qwen.bat [OPTIONS]
+echo Usage: install-qwen-standalone.bat [OPTIONS]
 echo.
 echo Options:
 echo   -s, --source SOURCE      Record the installation source.

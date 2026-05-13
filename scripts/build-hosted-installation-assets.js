@@ -18,18 +18,18 @@ const rootDir = path.resolve(__dirname, '..');
 
 const HOSTED_INSTALLATION_ASSETS = [
   {
-    sourcePath: ['scripts', 'installation', 'install-qwen.sh'],
-    output: 'install-qwen.sh',
+    sourcePath: ['scripts', 'installation', 'install-qwen-standalone.sh'],
+    output: 'install-qwen-standalone.sh',
     mode: 0o755,
   },
   {
-    sourcePath: ['scripts', 'installation', 'install-qwen.bat'],
-    output: 'install-qwen.bat',
+    sourcePath: ['scripts', 'installation', 'install-qwen-standalone.bat'],
+    output: 'install-qwen-standalone.bat',
     lineEndings: 'crlf',
   },
   {
-    sourcePath: ['scripts', 'installation', 'install-qwen.ps1'],
-    output: 'install-qwen.ps1',
+    sourcePath: ['scripts', 'installation', 'install-qwen-standalone.ps1'],
+    output: 'install-qwen-standalone.ps1',
   },
 ];
 const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
@@ -44,8 +44,9 @@ const HOSTED_INSTALLER_REQUIRED_FRAGMENTS = [
 // or help text even when the actual default has been changed. The patterns
 // allow whitespace flexibility but require the literal default value.
 const HOSTED_INSTALLER_DEFAULT_VERSION_PATTERNS = {
-  'install-qwen.sh': /VERSION\s*=\s*"\$\{QWEN_INSTALL_VERSION:-latest\}"/,
-  'install-qwen.bat': /set\s+"VERSION=latest"/,
+  'install-qwen-standalone.sh':
+    /VERSION\s*=\s*"\$\{QWEN_INSTALL_VERSION:-latest\}"/,
+  'install-qwen-standalone.bat': /set\s+"VERSION=latest"/,
 };
 // SHA256SUMS is allowed in an existing output directory because every staging
 // run rewrites it from scratch after copying the hosted installer assets.

@@ -22,8 +22,8 @@ are only required when the installer falls back to npm or when
 
 ## Installation Scripts
 
-- Linux/macOS: `install-qwen.sh`
-- Windows: `install-qwen.ps1`
+- Linux/macOS: `install-qwen-standalone.sh`
+- Windows: `install-qwen-standalone.ps1`
 
 ## Release Artifacts
 
@@ -36,37 +36,38 @@ GitHub releases publish these standalone archives:
 - `qwen-code-win-x64.zip`
 - `SHA256SUMS`
 
-The installer scripts (`install-qwen.sh`,
-`install-qwen.ps1`) are not republished per release. They are
-served from a hosted installation endpoint and accept `--version` to pin a
-specific standalone release. This keeps the public install command on a stable
-hosted entrypoint while still allowing version pinning, rather than using
-per-release installer URLs.
+The new standalone-first installer scripts (`install-qwen-standalone.sh`,
+`install-qwen-standalone.ps1`) are not republished per release. They are served
+from a hosted installation endpoint and accept `--version` to pin a specific
+standalone release. The `standalone` suffix intentionally avoids overwriting the
+existing production `install-qwen.sh` / `install-qwen.bat` OSS objects during
+the staged rollout.
 
 > **Hosted endpoint status**: Until the hosted endpoint is re-synced after the
 > next release, the URL below still serves the legacy NVM-based installer,
 > which does not honor `--version` or `QWEN_INSTALL_VERSION` in the way
 > documented here. To get the standalone-archive-first behavior immediately,
-> run `install-qwen.sh` from a local checkout of this repository.
+> run `install-qwen-standalone.sh` from a local checkout of this repository, or
+> upload the staged standalone-suffixed files to separate OSS keys for testing.
 > The `--version` examples below describe the post-sync behavior.
 
-Latest hosted entrypoints used today:
+Standalone hosted entrypoints for staged rollout:
 
 ```bash
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
-curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --version vX.Y.Z
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash -s -- --version vX.Y.Z
 ```
 
 ```cmd
-powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex"
 ```
 
 To pin a release with the hosted Windows entrypoint, set
-`QWEN_INSTALL_VERSION` before invoking `install-qwen.ps1`:
+`QWEN_INSTALL_VERSION` before invoking `install-qwen-standalone.ps1`:
 
 ```powershell
 $env:QWEN_INSTALL_VERSION = 'vX.Y.Z'
-irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex
+irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
 ```
 
 `QWEN_INSTALL_VERSION` is the equivalent environment variable when arguments
@@ -74,10 +75,10 @@ cannot be passed through.
 
 Hosted installer assets are staged separately from GitHub Release archives:
 
-- `install-qwen.sh` is the Linux/macOS hosted entrypoint.
-- `install-qwen.ps1` is the Windows hosted entrypoint for `irm | iex`.
-- `install-qwen.bat` is the Windows installer implementation used by
-  `install-qwen.ps1` and can also be downloaded and run directly.
+- `install-qwen-standalone.sh` is the Linux/macOS hosted entrypoint.
+- `install-qwen-standalone.ps1` is the Windows hosted entrypoint for `irm | iex`.
+- `install-qwen-standalone.bat` is the Windows installer implementation used by
+  `install-qwen-standalone.ps1` and can also be downloaded and run directly.
 
 Build them with:
 
@@ -85,14 +86,15 @@ Build them with:
 npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-The staged `install-qwen.sh`, `install-qwen.ps1`, and `install-qwen.bat` files
-map to the fixed
-hosted URLs shown above. Upload their contents byte-for-byte to
-`installation/install-qwen.sh`, `installation/install-qwen.ps1`, and
-`installation/install-qwen.bat`; the staging
-command also writes `SHA256SUMS` for upload verification. The hosted installers
-intentionally default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to
-pin a standalone release. OSS/CDN upload automation is still a follow-up release
+The staged `install-qwen-standalone.sh`, `install-qwen-standalone.ps1`, and
+`install-qwen-standalone.bat` files map to the standalone-suffixed hosted URLs
+shown above. Upload their contents byte-for-byte to
+`installation/install-qwen-standalone.sh`,
+`installation/install-qwen-standalone.ps1`, and
+`installation/install-qwen-standalone.bat`; the staging command also writes
+`SHA256SUMS` for upload verification. The hosted installers intentionally
+default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a
+standalone release. OSS/CDN upload automation is still a follow-up release
 operation; until then, release operators must sync these staged files manually.
 
 Archive layout:
@@ -121,13 +123,13 @@ The default method is `detect`:
 You can force a method:
 
 ```bash
-bash install-qwen.sh --method standalone
-bash install-qwen.sh --method npm
+bash install-qwen-standalone.sh --method standalone
+bash install-qwen-standalone.sh --method npm
 ```
 
 ```bat
-install-qwen.bat --method standalone
-install-qwen.bat --method npm
+install-qwen-standalone.bat --method standalone
+install-qwen-standalone.bat --method npm
 ```
 
 ## Optional Native Modules
@@ -145,20 +147,20 @@ modules for the current machine.
 
 ```bash
 # Default: standalone archive with npm fallback
-bash install-qwen.sh
+bash install-qwen-standalone.sh
 
 # Record a source value
-bash install-qwen.sh --source github
+bash install-qwen-standalone.sh --source github
 
 # Use npm explicitly
-bash install-qwen.sh --method npm --registry https://registry.npmjs.org
+bash install-qwen-standalone.sh --method npm --registry https://registry.npmjs.org
 
 # Use the Aliyun standalone mirror
-bash install-qwen.sh --mirror aliyun
+bash install-qwen-standalone.sh --mirror aliyun
 
 # Install an offline archive
 # SHA256SUMS must be in the same directory.
-bash install-qwen.sh --archive ./qwen-code-linux-x64.tar.gz
+bash install-qwen-standalone.sh --archive ./qwen-code-linux-x64.tar.gz
 ```
 
 Standalone installs to:
@@ -173,20 +175,20 @@ Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_PARENT`,
 
 ```bat
 REM Default: standalone archive with npm fallback
-install-qwen.bat
+install-qwen-standalone.bat
 
 REM Record a source value
-install-qwen.bat --source github
+install-qwen-standalone.bat --source github
 
 REM Use npm explicitly
-install-qwen.bat --method npm --registry https://registry.npmjs.org
+install-qwen-standalone.bat --method npm --registry https://registry.npmjs.org
 
 REM Use the Aliyun standalone mirror
-install-qwen.bat --mirror aliyun
+install-qwen-standalone.bat --mirror aliyun
 
 REM Install an offline archive
 REM SHA256SUMS must be in the same directory.
-install-qwen.bat --archive qwen-code-win-x64.zip
+install-qwen-standalone.bat --archive qwen-code-win-x64.zip
 ```
 
 Standalone installs to:

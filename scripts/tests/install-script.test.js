@@ -40,7 +40,9 @@ const itOnWindows = process.platform === 'win32' ? it : it.skip;
 
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
-    const script = readScript('scripts/installation/install-qwen.sh');
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.sh',
+    );
 
     expect(script).not.toContain('install_nvm');
     expect(script).not.toContain('install_nvm.sh');
@@ -65,7 +67,9 @@ describe('installation scripts', () => {
   });
 
   it('supports code-server-style standalone install on Linux/macOS', () => {
-    const script = readScript('scripts/installation/install-qwen.sh');
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.sh',
+    );
 
     expect(script).toContain('--method METHOD');
     expect(script).toContain('--mirror MIRROR');
@@ -117,7 +121,9 @@ describe('installation scripts', () => {
   });
 
   it('keeps the Windows installer lightweight', () => {
-    const script = readScript('scripts/installation/install-qwen.bat');
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.bat',
+    );
 
     expect(script).not.toContain('InstallNodeJSDirectly');
     expect(script).not.toContain('node-v!NODE_VERSION!');
@@ -141,7 +147,9 @@ describe('installation scripts', () => {
   });
 
   it('supports code-server-style standalone install on Windows', () => {
-    const script = readScript('scripts/installation/install-qwen.bat');
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.bat',
+    );
 
     expect(script).toContain('--method METHOD');
     expect(script).toContain('--mirror MIRROR');
@@ -262,9 +270,15 @@ describe('standalone release packaging', () => {
     expect(hostedInstallScript).toContain('Copyright 2025 Qwen Team');
     expect(hostedInstallScript).toContain('buildHostedInstallationAssets');
     expect(hostedInstallScript).toContain('HOSTED_INSTALLATION_ASSETS');
-    expect(hostedInstallScript).toContain("output: 'install-qwen.sh'");
-    expect(hostedInstallScript).toContain("output: 'install-qwen.bat'");
-    expect(hostedInstallScript).toContain("output: 'install-qwen.ps1'");
+    expect(hostedInstallScript).toContain(
+      "output: 'install-qwen-standalone.sh'",
+    );
+    expect(hostedInstallScript).toContain(
+      "output: 'install-qwen-standalone.bat'",
+    );
+    expect(hostedInstallScript).toContain(
+      "output: 'install-qwen-standalone.ps1'",
+    );
     expect(hostedInstallScript).not.toContain("output: 'install'");
 
     const releaseVerifyScript = readScript(
@@ -393,7 +407,7 @@ describe('standalone release packaging', () => {
 
   it('installer scripts honor --version for hosted entrypoints', () => {
     const installShellSource = readScript(
-      'scripts/installation/install-qwen.sh',
+      'scripts/installation/install-qwen-standalone.sh',
     );
     expect(installShellSource).toContain(
       'VERSION="${QWEN_INSTALL_VERSION:-latest}"',
@@ -402,7 +416,7 @@ describe('standalone release packaging', () => {
     expect(installShellSource).toContain('--version requires a value');
 
     const installBatchSource = readScript(
-      'scripts/installation/install-qwen.bat',
+      'scripts/installation/install-qwen-standalone.bat',
     );
     expect(installBatchSource).toContain('set "VERSION=latest"');
     expect(installBatchSource).toContain(
@@ -412,9 +426,9 @@ describe('standalone release packaging', () => {
     expect(installBatchSource).toContain('--version requires a value');
 
     const installPowerShellSource = readScript(
-      'scripts/installation/install-qwen.ps1',
+      'scripts/installation/install-qwen-standalone.ps1',
     );
-    expect(installPowerShellSource).toContain('install-qwen.bat');
+    expect(installPowerShellSource).toContain('install-qwen-standalone.bat');
     expect(installPowerShellSource).toContain('Invoke-WebRequest');
     expect(installPowerShellSource).toContain('QWEN_INSTALL_VERSION');
     expect(installPowerShellSource).toContain('--version vX.Y.Z');
@@ -433,41 +447,47 @@ describe('standalone release packaging', () => {
     try {
       await buildHostedInstallationAssets(tmpDir);
 
-      const installSh = path.join(tmpDir, 'install-qwen.sh');
-      const installBat = path.join(tmpDir, 'install-qwen.bat');
-      const installPs1 = path.join(tmpDir, 'install-qwen.ps1');
+      const installSh = path.join(tmpDir, 'install-qwen-standalone.sh');
+      const installBat = path.join(tmpDir, 'install-qwen-standalone.bat');
+      const installPs1 = path.join(tmpDir, 'install-qwen-standalone.ps1');
       const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
       const checksumLines = checksums.trim().split('\n');
 
       expect(HOSTED_INSTALLATION_ASSET_NAMES).toEqual([
-        'install-qwen.sh',
-        'install-qwen.bat',
-        'install-qwen.ps1',
+        'install-qwen-standalone.sh',
+        'install-qwen-standalone.bat',
+        'install-qwen-standalone.ps1',
       ]);
       expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual(
         HOSTED_INSTALLATION_ASSET_NAMES,
       );
       expect(readScript(installSh)).toBe(
-        readScript('scripts/installation/install-qwen.sh'),
+        readScript('scripts/installation/install-qwen-standalone.sh'),
       );
       expect(readScript(installBat)).toBe(
-        readScript('scripts/installation/install-qwen.bat').replace(
+        readScript('scripts/installation/install-qwen-standalone.bat').replace(
           /\r?\n/g,
           '\r\n',
         ),
       );
       expect(readScript(installPs1)).toBe(
-        readScript('scripts/installation/install-qwen.ps1'),
+        readScript('scripts/installation/install-qwen-standalone.ps1'),
       );
       expect(existsSync(path.join(tmpDir, 'install'))).toBe(false);
       expect(checksumLines.map((line) => line.split('  ')[1])).toEqual([
-        'install-qwen.bat',
-        'install-qwen.ps1',
-        'install-qwen.sh',
+        'install-qwen-standalone.bat',
+        'install-qwen-standalone.ps1',
+        'install-qwen-standalone.sh',
       ]);
-      expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.sh$/m);
-      expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.bat$/m);
-      expect(checksums).toMatch(/^[0-9a-f]{64} {2}install-qwen\.ps1$/m);
+      expect(checksums).toMatch(
+        /^[0-9a-f]{64} {2}install-qwen-standalone\.sh$/m,
+      );
+      expect(checksums).toMatch(
+        /^[0-9a-f]{64} {2}install-qwen-standalone\.bat$/m,
+      );
+      expect(checksums).toMatch(
+        /^[0-9a-f]{64} {2}install-qwen-standalone\.ps1$/m,
+      );
       if (process.platform !== 'win32') {
         expect(lstatSync(installSh).mode & 0o111).not.toBe(0);
       }
@@ -475,7 +495,9 @@ describe('standalone release packaging', () => {
       writeFileSync(installSh, 'tampered');
       await expect(
         assertHostedInstallationAssetChecksums(tmpDir),
-      ).rejects.toThrow(/Checksum verification failed for install-qwen\.sh/);
+      ).rejects.toThrow(
+        /Checksum verification failed for install-qwen-standalone\.sh/,
+      );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -492,24 +514,24 @@ describe('standalone release packaging', () => {
     try {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(
-        path.join(sourceDir, 'install-qwen.sh'),
+        path.join(sourceDir, 'install-qwen-standalone.sh'),
         '#!/usr/bin/env bash\n' +
           'VERSION="${QWEN_INSTALL_VERSION:-stable}"\n' +
           'case "$1" in --version) shift; VERSION="$1" ;; esac\n',
       );
       writeFileSync(
-        path.join(sourceDir, 'install-qwen.bat'),
+        path.join(sourceDir, 'install-qwen-standalone.bat'),
         '@echo off\r\nset "VERSION=latest"\r\n',
       );
       writeFileSync(
-        path.join(sourceDir, 'install-qwen.ps1'),
+        path.join(sourceDir, 'install-qwen-standalone.ps1'),
         "# --version vX.Y.Z\n$env:QWEN_INSTALL_VERSION = 'latest'\n",
       );
 
       await expect(
         buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
       ).rejects.toThrow(
-        /install-qwen\.sh default install version must be 'latest'/,
+        /install-qwen-standalone\.sh default install version must be 'latest'/,
       );
     } finally {
       rmSync(tmpRoot, { recursive: true, force: true });
@@ -849,9 +871,9 @@ describe('standalone release packaging', () => {
 
     expect(workflow).toContain('npm run package:standalone:release --');
     expect(workflow).not.toContain('package:installation-assets');
-    expect(workflow).not.toContain('install-qwen.sh');
-    expect(workflow).not.toContain('install-qwen.bat');
-    expect(workflow).not.toContain('install-qwen.ps1');
+    expect(workflow).not.toContain('install-qwen-standalone.sh');
+    expect(workflow).not.toContain('install-qwen-standalone.bat');
+    expect(workflow).not.toContain('install-qwen-standalone.ps1');
     expect(workflow).not.toContain('verify_node_checksum()');
     expect(workflow).not.toContain('download_node()');
     expect(workflow).toContain('dist/standalone/qwen-code-*.tar.gz');
@@ -874,9 +896,9 @@ describe('standalone release packaging', () => {
 
     expect(guide).toContain('Optional Native Modules');
     expect(guide).toContain('package:hosted-installation');
-    expect(guide).toContain('installation/install-qwen.sh');
-    expect(guide).toContain('installation/install-qwen.bat');
-    expect(guide).toContain('installation/install-qwen.ps1');
+    expect(guide).toContain('installation/install-qwen-standalone.sh');
+    expect(guide).toContain('installation/install-qwen-standalone.bat');
+    expect(guide).toContain('installation/install-qwen-standalone.ps1');
     expect(guide).toContain('irm https://qwen-code-assets');
     expect(guide).toContain('release operators must sync these staged files');
     expect(guide).toContain('Hosted endpoint status');
@@ -1157,7 +1179,7 @@ describe('Linux/macOS installer end-to-end', () => {
         const output = execFileSync(
           'bash',
           [
-            'scripts/installation/install-qwen.sh',
+            'scripts/installation/install-qwen-standalone.sh',
             '--method',
             'detect',
             '--base-url',
@@ -1201,7 +1223,7 @@ describe('Linux/macOS installer end-to-end', () => {
         execFileSync(
           'bash',
           [
-            'scripts/installation/install-qwen.sh',
+            'scripts/installation/install-qwen-standalone.sh',
             '--method',
             'detect',
             '--base-url',
@@ -1513,7 +1535,7 @@ function runUnixInstaller(
     return execFileSync(
       'bash',
       [
-        'scripts/installation/install-qwen.sh',
+        'scripts/installation/install-qwen-standalone.sh',
         '--method',
         method,
         '--archive',
@@ -1554,7 +1576,7 @@ function runWindowsInstaller(
   try {
     return runWindowsCommand(
       [
-        `call "${path.resolve('scripts/installation/install-qwen.bat')}"`,
+        `call "${path.resolve('scripts/installation/install-qwen-standalone.bat')}"`,
         '--method',
         method,
         '--archive',

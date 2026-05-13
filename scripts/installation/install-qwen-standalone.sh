@@ -5,8 +5,8 @@
 # This script intentionally does not install Node.js or change npm config.
 #
 # Usage:
-#   install-qwen.sh --source [github|npm|internal|local-build]
-#   install-qwen.sh --method [detect|standalone|npm]
+#   install-qwen-standalone.sh --source [github|npm|internal|local-build]
+#   install-qwen-standalone.sh --method [detect|standalone|npm]
 
 if [ -z "${BASH_VERSION}" ] && [ -z "${__QWEN_INSTALL_REEXEC:-}" ]; then
     if command -v bash >/dev/null 2>&1; then
@@ -98,10 +98,10 @@ Options:
   -h, --help               Show this help message.
 
 Examples:
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --source github
-  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash -s -- --method standalone
-  ./install-qwen.sh --archive ./qwen-code-linux-x64.tar.gz
+  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash
+  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash -s -- --source github
+  curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash -s -- --method standalone
+  ./install-qwen-standalone.sh --archive ./qwen-code-linux-x64.tar.gz
 EOF
 }
 
