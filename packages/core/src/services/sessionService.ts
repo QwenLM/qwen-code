@@ -767,20 +767,24 @@ export class SessionService {
     const notFound: string[] = [];
     const errors: Array<{ sessionId: string; error: Error }> = [];
 
-    const seen = new Set<string>();
-    for (const sessionId of sessionIds) {
-      if (seen.has(sessionId)) continue;
-      seen.add(sessionId);
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    const results = await Promise.allSettled(
+      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+    );
 
-      try {
-        const ok = await this.removeSession(sessionId);
-        if (ok) {
+    for (let i = 0; i < results.length; i++) {
+      const sessionId = uniqueSessionIds[i];
+      if (sessionId === undefined) continue;
+
+      const result = results[i];
+      if (result.status === 'fulfilled') {
+        if (result.value) {
           removed.push(sessionId);
         } else {
           notFound.push(sessionId);
         }
-      } catch (error) {
-        errors.push({ sessionId, error: error as Error });
+      } else {
+        errors.push({ sessionId, error: result.reason as Error });
       }
     }
 

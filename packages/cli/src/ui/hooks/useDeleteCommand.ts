@@ -121,10 +121,9 @@ export function useDeleteCommand(
         );
         return;
       }
-      isDeletingManyRef.current = true;
-
       try {
         closeDeleteDialog();
+        isDeletingManyRef.current = true;
 
         const currentId = config.getSessionId();
         const filtered = sessionIds.filter((id) => id !== currentId);

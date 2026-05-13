@@ -492,5 +492,29 @@ describe('useDeleteCommand', () => {
       expect(removeSessions).toHaveBeenCalledTimes(2);
       expect(removeSessions).toHaveBeenLastCalledWith(['b']);
     });
+
+    it('reports non-Error thrown values from batch deletion', async () => {
+      const removeSessions = vi.fn().mockRejectedValueOnce('raw failure');
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['a']);
+        await flushAsync();
+      });
+
+      const [item] = addItem.mock.calls.at(-1) as [
+        { type: string; text: string },
+        number,
+      ];
+      expect(item.type).toBe('error');
+      expect(item.text).toContain('raw failure');
+    });
   });
 });
