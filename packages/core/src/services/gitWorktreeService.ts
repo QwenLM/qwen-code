@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomInt } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { simpleGit, CheckRepoActions } from 'simple-git';
 import type { SimpleGit } from 'simple-git';
@@ -875,11 +875,13 @@ export class GitWorktreeService {
   /**
    * Generates an auto-slug `{adj}-{noun}-{6hex}` for an unnamed worktree.
    *
-   * Uses `randomBytes` (the same source as agent slugs) so the two
-   * RNG paths in this file stay consistent and so the suffix is genuinely
-   * unpredictable rather than `Math.random()`-derived. The 6-hex suffix
-   * yields ~16M combinations × 8 adj × 8 noun ≈ 1B distinct slugs,
-   * eliminating the practical collision concern called out in review.
+   * Uses `randomInt` for the word-list indices (uniform by construction
+   * via rejection sampling — `randomBytes[i] % len` would be biased
+   * whenever `len` doesn't divide `2^8`, and CodeQL's
+   * `js/biased-cryptographic-random` rule flags it even when it
+   * happens to be exact). Uses `randomBytes` for the suffix because
+   * hex encoding of raw bytes is unbiased. ~16M combinations × 8 adj
+   * × 8 noun ≈ 1B distinct slugs.
    */
   static generateAutoSlug(): string {
     const ADJECTIVES = [
@@ -893,10 +895,9 @@ export class GitWorktreeService {
       'quick',
     ];
     const NOUNS = ['fox', 'owl', 'elm', 'oak', 'ray', 'sky', 'leaf', 'pine'];
-    const bytes = randomBytes(4);
-    const adj = ADJECTIVES[bytes[0] % ADJECTIVES.length];
-    const noun = NOUNS[bytes[1] % NOUNS.length];
-    const suffix = bytes.toString('hex').slice(0, 6);
+    const adj = ADJECTIVES[randomInt(0, ADJECTIVES.length)];
+    const noun = NOUNS[randomInt(0, NOUNS.length)];
+    const suffix = randomBytes(3).toString('hex');
     return `${adj}-${noun}-${suffix}`;
   }
 
