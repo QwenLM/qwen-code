@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import {
   buildRuntimeFetchOptions,
   getOrCreateSharedDispatcher,
@@ -12,6 +12,35 @@ import {
 } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
+const originalUndiciVersionDescriptor = Object.getOwnPropertyDescriptor(
+  process.versions,
+  'undici',
+);
+
+function stubNativeUndiciVersion(version: string | undefined): void {
+  if (version === undefined) {
+    delete (process.versions as Record<string, string | undefined>)['undici'];
+    return;
+  }
+
+  Object.defineProperty(process.versions, 'undici', {
+    value: version,
+    configurable: true,
+  });
+}
+
+function restoreNativeUndiciVersion(): void {
+  if (originalUndiciVersionDescriptor) {
+    Object.defineProperty(
+      process.versions,
+      'undici',
+      originalUndiciVersionDescriptor,
+    );
+    return;
+  }
+
+  delete (process.versions as Record<string, string | undefined>)['undici'];
+}
 
 vi.mock('undici', () => {
   class MockAgent {
@@ -37,7 +66,13 @@ vi.mock('undici', () => {
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
     resetDispatcherCache();
+    stubNativeUndiciVersion('7.24.4');
   });
+
+  afterAll(() => {
+    restoreNativeUndiciVersion();
+  });
+
   it('disables undici timeouts for Agent in OpenAI options', () => {
     const result = buildRuntimeFetchOptions('openai');
 
@@ -69,6 +104,41 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     });
   });
 
+  it('uses native fetch for OpenAI without proxy when Node ships undici v8', () => {
+    stubNativeUndiciVersion('8.0.2');
+
+    const result = buildRuntimeFetchOptions('openai');
+
+    expect(result).toBeUndefined();
+  });
+
+  it('returns dispatcher for OpenAI when undici version is absent', () => {
+    stubNativeUndiciVersion(undefined);
+
+    const result = buildRuntimeFetchOptions('openai');
+
+    expect(result).toBeDefined();
+    expect(result && 'fetchOptions' in result).toBe(true);
+  });
+
+  it('keeps proxy dispatcher for OpenAI when Node ships undici v8 and proxy is set', () => {
+    stubNativeUndiciVersion('8.0.2');
+
+    const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
+
+    expect(result).toBeDefined();
+    expect(result && 'fetchOptions' in result).toBe(true);
+
+    const dispatcher = (
+      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
+    ).fetchOptions?.dispatcher;
+    expect(dispatcher?.options).toMatchObject({
+      uri: 'http://proxy.local',
+      headersTimeout: 0,
+      bodyTimeout: 0,
+    });
+  });
+
   it('returns fetchOptions with dispatcher for Anthropic without proxy', () => {
     const result = buildRuntimeFetchOptions('anthropic');
 
@@ -82,6 +152,15 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       headersTimeout: 0,
       bodyTimeout: 0,
     });
+  });
+
+  it('returns dispatcher for Anthropic when Node ships undici v8', () => {
+    stubNativeUndiciVersion('8.0.2');
+
+    const result = buildRuntimeFetchOptions('anthropic');
+
+    expect(result).toBeDefined();
+    expect(result && 'fetchOptions' in result).toBe(true);
   });
 
   it('returns fetchOptions with ProxyAgent for Anthropic with proxy', () => {

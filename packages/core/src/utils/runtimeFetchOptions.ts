@@ -5,6 +5,9 @@
  */
 
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('RUNTIME_FETCH_OPTIONS');
 
 /**
  * JavaScript runtime type
@@ -180,10 +183,33 @@ function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
+  // Node 26 native fetch uses undici v8, which is incompatible with dispatchers
+  // created by the bundled undici v6 package when passed through the OpenAI SDK.
+  if (sdkType === 'openai' && !proxyUrl && hasNativeUndiciV8OrNewer()) {
+    debugLogger.debug(
+      `buildFetchOptionsWithDispatcher: using native fetch for undici v${process.versions?.['undici']}`,
+    );
+    return undefined;
+  }
+
   try {
     const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
     return { fetchOptions: { dispatcher } };
   } catch {
     return sdkType === 'openai' ? undefined : {};
   }
+}
+
+function hasNativeUndiciV8OrNewer(): boolean {
+  if (typeof process === 'undefined') {
+    return false;
+  }
+
+  const undiciVersion = process.versions?.['undici'];
+  if (!undiciVersion) {
+    return false;
+  }
+
+  const major = Number.parseInt(undiciVersion.split('.')[0] ?? '', 10);
+  return !Number.isNaN(major) && major >= 8;
 }
