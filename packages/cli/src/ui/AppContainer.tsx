@@ -595,6 +595,31 @@ export const AppContainer = (props: AppContainerProps) => {
       }, MCP_BATCH_FLUSH_MS);
     };
 
+    // Match the non-interactive entry points (`gemini.tsx`, `session.ts`,
+    // `acpAgent.ts`) which warn to stderr when MCP discovery completes with
+    // failed servers. The interactive path can't use stderr (it would
+    // collide with Ink's rendered output), so we route through
+    // `debugLogger.warn` so it shows up under `QWEN_CODE_DEBUG=1` and in
+    // the debug log file — matching the channel `setTools()` errors above
+    // use. The MCP status footer pill already surfaces failures
+    // continuously in the UI; this log is the actionable-on-debug record
+    // wenshao asked for in round 7.
+    let failureSurfaced = false;
+    const surfaceFailuresOnce = () => {
+      if (failureSurfaced) return;
+      failureSurfaced = true;
+      const failedNames =
+        typeof config.getFailedMcpServerNames === 'function'
+          ? config.getFailedMcpServerNames()
+          : [];
+      if (failedNames.length > 0) {
+        debugLogger.warn(
+          `MCP server(s) failed to start: ${failedNames.join(', ')}. ` +
+            `Continuing with built-in tools and any servers that did connect.`,
+        );
+      }
+    };
+
     const onMcpUpdate = () => {
       if (manager.getDiscoveryState() === MCPDiscoveryState.COMPLETED) {
         // Discovery has settled. Flush the pending setTools() NOW (rather
@@ -604,6 +629,7 @@ export const AppContainer = (props: AppContainerProps) => {
         // the module-level `finalized` guard suppresses every subsequent
         // record. That dropped event is what `gemini_tools_lag` is
         // derived from in the profile summary.
+        surfaceFailuresOnce();
         void flushNow().finally(finalizeOnce);
       } else {
         scheduleFlush();
@@ -615,6 +641,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // the flush listener around for late refreshes (e.g. SkillTool's
     // post-construction refreshSkills triggering setTools).
     if (manager.getDiscoveryState() === MCPDiscoveryState.COMPLETED) {
+      surfaceFailuresOnce();
       finalizeOnce();
     }
 

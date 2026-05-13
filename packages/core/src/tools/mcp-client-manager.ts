@@ -321,6 +321,16 @@ export class McpClientManager {
       return;
     }
 
+    // Don't arm a health-check timer for a server that no longer has a
+    // tracked client. The discovery-timeout handler deletes the client
+    // before the discovery `finally` block runs `startHealthCheck`, and
+    // without this guard we'd create a timer that fires every
+    // checkIntervalMs and ultimately reconnects an intentionally
+    // timed-out server (bypassing `runWithDiscoveryTimeout`).
+    if (!this.clients.has(serverName)) {
+      return;
+    }
+
     // Clear existing timer if any
     this.stopHealthCheck(serverName);
 
@@ -632,6 +642,18 @@ export class McpClientManager {
         // if the server hadn't reached `discover()` yet, so it's safe to
         // always call.
         this.toolRegistry.removeMcpToolsByServer(serverName);
+        // Prevent the discovery `finally` block's `startHealthCheck` from
+        // resurrecting this server: without removing the client entry,
+        // `performHealthCheck` would observe `status !== CONNECTED` for
+        // ~maxConsecutiveFailures intervals and then call
+        // `reconnectServer()` → `discoverMcpToolsForServer()` directly,
+        // bypassing `runWithDiscoveryTimeout` entirely. The intentionally
+        // timed-out server would silently come back. Removing the client
+        // entry + stopping any pending health-check timer closes that
+        // loop; `startHealthCheck` early-returns when the client is
+        // absent, so the trailing `finally`-block call becomes a no-op.
+        this.stopHealthCheck(serverName);
+        this.clients.delete(serverName);
         reject(
           new Error(
             `MCP server '${serverName}' discovery timed out after ${timeoutMs}ms`,

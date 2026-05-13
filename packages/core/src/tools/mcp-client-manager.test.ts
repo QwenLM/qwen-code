@@ -816,6 +816,67 @@ describe('McpClientManager', () => {
     resolveConnect();
   });
 
+  it('runWithDiscoveryTimeout drops the client + stops health-check so the auto-reconnect loop cannot resurrect an intentionally timed-out server', async () => {
+    // Round-7 regression: before this fix, the timeout handler removed
+    // tools but left the client in `this.clients` and didn't stop its
+    // health-check timer. `discoverMcpToolsForServerInternal`'s `finally`
+    // block would then `startHealthCheck`, which (with `autoReconnect`)
+    // detects `status !== CONNECTED`, increments the failure counter for
+    // ~maxConsecutiveFailures intervals, and calls `reconnectServer()` →
+    // `discoverMcpToolsForServer()` directly — bypassing
+    // `runWithDiscoveryTimeout` entirely. The intentionally slow server
+    // would silently come back.
+    let resolveConnect!: () => void;
+    const hungConnect = new Promise<void>((res) => {
+      resolveConnect = res;
+    });
+    const mockedMcpClient = {
+      connect: vi.fn().mockReturnValue(hungConnect),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(),
+    };
+    vi.mocked(McpClient).mockReturnValue(
+      mockedMcpClient as unknown as McpClient,
+    );
+
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({
+        slow: { command: 'node', args: [], discoveryTimeoutMs: 100 },
+      }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(mockConfig, {
+      removeMcpToolsByServer: vi.fn(),
+    } as unknown as ToolRegistry);
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    // The client entry must be gone — otherwise `performHealthCheck`
+    // would observe it (and the disconnected status) every checkInterval.
+    expect(
+      (manager as unknown as { clients: Map<string, unknown> }).clients.has(
+        'slow',
+      ),
+    ).toBe(false);
+    // And no health-check timer must remain for this server.
+    expect(
+      (
+        manager as unknown as {
+          healthCheckTimers: Map<string, NodeJS.Timeout>;
+        }
+      ).healthCheckTimers.has('slow'),
+    ).toBe(false);
+
+    // Cleanup the hung promise to avoid leaking it across tests.
+    resolveConnect();
+  });
+
   it('discoverAllMcpToolsIncremental emits the trailing mcp-client-update after COMPLETED', async () => {
     // Without the trailing emit, the cli's deferred-finalize subscriber
     // (which polls discoveryState on each `mcp-client-update`) would never

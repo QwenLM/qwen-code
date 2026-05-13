@@ -698,6 +698,22 @@ class QwenAgent implements Agent {
     // messages to the model immediately, so we cannot return a Config whose
     // MCP discovery is still in flight.
     await config.waitForMcpReady();
+    // Surface MCP failures to stderr — mirrors `runAcpAgent` (lines 95-107)
+    // and the other non-interactive entry points (`gemini.tsx`,
+    // `session.ts`). Without this, per-session ACP configs that lose MCP
+    // servers fall back to built-in-tools-only with no user-visible
+    // indication. Defensive against tests that pass a stubbed Config
+    // without `getFailedMcpServerNames`.
+    const failedMcpServers =
+      typeof config.getFailedMcpServerNames === 'function'
+        ? config.getFailedMcpServerNames()
+        : [];
+    if (failedMcpServers.length > 0) {
+      process.stderr.write(
+        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+          `Continuing with built-in tools and any servers that did connect.\n`,
+      );
+    }
     return config;
   }
 

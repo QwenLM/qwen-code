@@ -18,6 +18,10 @@
  * with O(1) overhead.
  */
 
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('STARTUP_EVENT_SINK');
+
 export type StartupEventAttrs = Record<string, string | number | boolean>;
 
 export type StartupEventSink = (
@@ -45,8 +49,17 @@ export function recordStartupEvent(
   if (sink) {
     try {
       sink(name, attrs);
-    } catch {
-      // Profiler sinks must never throw into hot paths.
+    } catch (err) {
+      // Profiler sinks must never throw into hot paths (this is called
+      // from startup-critical code: config init, MCP discovery, setTools),
+      // but route the failure through `debugLogger` so a corrupted sink
+      // doesn't silently drop every subsequent event. `debugLogger` is
+      // quiet by default and visible under `QWEN_CODE_DEBUG=1` and in the
+      // debug log file — matching how other "must never throw" sites in
+      // this PR (e.g. AppContainer's `setTools` flush) surface errors.
+      debugLogger.error(
+        `startup event sink threw for '${name}': ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 }
