@@ -24,6 +24,20 @@ import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 
+const { mockDebugInfo, mockDebugWarn } = vi.hoisted(() => ({
+  mockDebugInfo: vi.fn(),
+  mockDebugWarn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: mockDebugInfo,
+    warn: mockDebugWarn,
+  }),
+}));
+
 vi.mock('../utils/errorReporting.js');
 vi.mock('../utils/errors.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/errors.js')>();
@@ -111,6 +125,42 @@ const createMockResponseWithoutFunctionCall = (): GenerateContentResponse =>
         content: {
           role: 'model',
           parts: [{ text: 'some text' }],
+        },
+        index: 0,
+      },
+    ],
+  }) as GenerateContentResponse;
+
+const createMockResponseWithText = (
+  text: string,
+  options?: { includeThought?: boolean },
+): GenerateContentResponse =>
+  ({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [
+            ...(options?.includeThought
+              ? [{ text: 'thinking through the answer', thought: true }]
+              : []),
+            { text },
+          ],
+        },
+        index: 0,
+      },
+    ],
+  }) as GenerateContentResponse;
+
+const createMockResponseWithParts = (
+  parts: Array<{ text?: string; thought?: boolean }>,
+): GenerateContentResponse =>
+  ({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts,
         },
         index: 0,
       },
@@ -321,6 +371,158 @@ describe('BaseLlmClient', () => {
       const result = await client.generateJson(defaultOptions);
 
       expect(result).toEqual({});
+    });
+
+    it('should parse a JSON object from text when no function call is returned', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"title":"Debug rename auto session title generation"}',
+        { includeThought: true },
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({
+        title: 'Debug rename auto session title generation',
+      });
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('generateJson used text-channel fallback'),
+      );
+    });
+
+    it('should parse a fenced JSON object from text when no function call is returned', async () => {
+      const mockResponse = createMockResponseWithText(
+        '```json\n{"color":"violet"}\n```',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([]);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'violet' });
+    });
+
+    it('should parse a JSON object with braces inside string values', async () => {
+      const mockResponse = createMockResponseWithText(
+        '{"message":"a } b","color":"green"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ message: 'a } b', color: 'green' });
+    });
+
+    it('should parse the first valid JSON object candidate from text', async () => {
+      const mockResponse = createMockResponseWithText(
+        'I considered {option A}. The answer is {"color":"cyan"}',
+      );
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'cyan' });
+    });
+
+    it('should repair near-valid JSON from text fallback', async () => {
+      const mockResponse = createMockResponseWithText('{color:"blue",}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'blue' });
+    });
+
+    it('should log when function calls do not match respond_in_schema', async () => {
+      const mockResponse = createMockResponseWithText('{"color":"amber"}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'unexpected_tool', args: { color: 'amber' } },
+      ]);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'amber' });
+      expect(mockDebugInfo).toHaveBeenCalledWith(
+        expect.stringContaining('none matched respond_in_schema'),
+      );
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('generateJson used text-channel fallback'),
+      );
+    });
+
+    it('should return empty object when text contains braces but invalid JSON', async () => {
+      const mockResponse = createMockResponseWithText('{broken json!!!}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      const warnMessages = mockDebugWarn.mock.calls
+        .map(([message]) => String(message))
+        .join('\n');
+      expect(warnMessages).toContain('could not parse JSON');
+      expect(warnMessages).toContain('Response length:');
+      expect(warnMessages).toContain('Model: test-model');
+      expect(warnMessages).toContain('promptId: test-prompt-id');
+      expect(warnMessages).not.toContain('broken json');
+    });
+
+    it('should return empty object when text has no valid JSON', async () => {
+      const mockResponse = createMockResponseWithText('Not a JSON response');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should return empty object when text is whitespace only', async () => {
+      const mockResponse = createMockResponseWithText('   ');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('found empty response text'),
+      );
+    });
+
+    it('should return empty object when text contains a JSON array', async () => {
+      const mockResponse = createMockResponseWithText('[1,2,3]');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('could not parse JSON'),
+      );
+    });
+
+    it('should return empty object when the response has no text parts', async () => {
+      const mockResponse = createMockResponseWithParts([]);
+      mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+      expect(mockDebugWarn).toHaveBeenCalledWith(
+        expect.stringContaining('found no response text'),
+      );
     });
   });
 

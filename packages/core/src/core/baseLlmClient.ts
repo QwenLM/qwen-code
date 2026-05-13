@@ -25,6 +25,7 @@ import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { safeJsonParse } from '../utils/safeJsonParse.js';
 
 const DEFAULT_MAX_ATTEMPTS = 7;
 
@@ -210,7 +211,25 @@ export class BaseLlmClient {
         if (functionCall && functionCall.args) {
           return functionCall.args as Record<string, unknown>;
         }
+        debugLogger.info(
+          `generateJson: function calls present but none matched respond_in_schema. ` +
+            `Model: ${model}, promptId: ${promptId ?? 'unknown'}, ` +
+            `found: ${functionCalls.map((call) => call.name).join(', ')}.`,
+        );
       }
+      // Some OpenAI-compatible models follow the JSON prompt in the text
+      // channel instead of invoking the function declaration.
+      const responseText = getResponseText(result);
+      const parsed = parseJsonObjectFromText(responseText);
+      if (parsed) {
+        debugLogger.warn(
+          `generateJson used text-channel fallback. ` +
+            `Model: ${model}, promptId: ${promptId ?? 'unknown'}, ` +
+            `Response length: ${responseText?.length ?? 0}.`,
+        );
+        return parsed;
+      }
+      logGenerateJsonTextFallbackFailure(responseText, model, promptId);
       return {};
     } catch (error) {
       if (abortSignal.aborted) {
@@ -467,4 +486,112 @@ export class BaseLlmClient {
     this.perModelGeneratorCache.set(model, generatorPromise);
     return generatorPromise;
   }
+}
+
+function parseJsonObjectFromText(
+  text: string | null | undefined,
+): Record<string, unknown> | undefined {
+  if (!text) return undefined;
+
+  const trimmed = text.trim();
+  let withoutFence = trimmed;
+  if (withoutFence.startsWith('```')) {
+    withoutFence = withoutFence.replace(/^```(?:json)?\s*/i, '');
+  }
+  if (withoutFence.endsWith('```')) {
+    withoutFence = withoutFence.replace(/\s*```$/i, '');
+  }
+
+  for (const jsonSlice of findJsonObjectSlices(withoutFence)) {
+    const parseFailed = Symbol('parseFailed');
+    const parsed = safeJsonParse<unknown>(jsonSlice, parseFailed);
+    if (parsed === parseFailed) {
+      continue;
+    }
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+    ) {
+      return parsed as Record<string, unknown>;
+    }
+  }
+
+  return undefined;
+}
+
+function findJsonObjectSlices(text: string): string[] {
+  if (!text.includes('{')) return [];
+
+  const slices: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (start === -1) {
+      if (char === '{') {
+        start = i;
+        depth = 1;
+      }
+      continue;
+    }
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+    } else if (char === '{') {
+      depth++;
+    } else if (char === '}') {
+      depth--;
+      if (depth === 0) {
+        slices.push(text.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return slices;
+}
+
+function logGenerateJsonTextFallbackFailure(
+  responseText: string | null,
+  model: string,
+  promptId: string | undefined,
+): void {
+  const context = `Model: ${model}, promptId: ${promptId ?? 'unknown'}`;
+  if (responseText === null) {
+    debugLogger.warn(
+      `generateJson: text-channel fallback found no response text. ${context}.`,
+    );
+    return;
+  }
+
+  const trimmed = responseText.trim();
+  if (!trimmed) {
+    debugLogger.warn(
+      `generateJson: text-channel fallback found empty response text. ` +
+        `${context}, Response length: ${responseText.length}.`,
+    );
+    return;
+  }
+
+  debugLogger.warn(
+    `generateJson: text-channel fallback could not parse JSON. ` +
+      `${context}, Response length: ${responseText.length}, ` +
+      `first char: ${JSON.stringify(trimmed[0])}, ` +
+      `last char: ${JSON.stringify(trimmed.at(-1))}.`,
+  );
 }
