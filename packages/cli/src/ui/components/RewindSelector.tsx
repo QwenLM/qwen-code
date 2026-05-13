@@ -222,7 +222,7 @@ export function RewindSelector({
   const handleConfirmSelect = useCallback(
     (confirmed: boolean) => {
       if (confirmed && confirmItem) {
-        onRewind(confirmItem, 'conversation');
+        Promise.resolve(onRewind(confirmItem, 'conversation')).catch(() => {});
       } else {
         setConfirmItem(null);
       }
@@ -286,7 +286,7 @@ export function RewindSelector({
             setRestoreItem(null);
             setDiffStats(undefined);
           } else {
-            onRewind(restoreItem!, option.key);
+            Promise.resolve(onRewind(restoreItem!, option.key)).catch(() => {});
           }
         }
         return;
