@@ -196,7 +196,7 @@ export function createServeApp(
         .json({ error: '`cwd` must be a string absolute path when provided' });
       return;
     }
-    let cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
+    const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
     if (!path.isAbsolute(cwd)) {
       res
         .status(400)
