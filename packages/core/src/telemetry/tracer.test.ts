@@ -425,6 +425,34 @@ describe('createSessionRootContext', () => {
     }
   });
 
+  it('uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=always_on', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'always_on';
+    try {
+      const ctx = createSessionRootContext('session-ao') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
+  it('uses TraceFlags.NONE when OTEL_TRACES_SAMPLER=always_off', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'always_off';
+    try {
+      const ctx = createSessionRootContext('session-aoff') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.NONE);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
   it('uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=parentbased_always_on', () => {
     const original = process.env['OTEL_TRACES_SAMPLER'];
     process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_always_on';

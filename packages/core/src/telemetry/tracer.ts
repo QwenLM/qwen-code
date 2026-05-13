@@ -214,10 +214,20 @@ export function startSpanWithContext(
 /**
  * Determine whether the synthetic session root should force the SAMPLED flag.
  *
+ * This function reads `OTEL_TRACES_SAMPLER` to infer the sampler type.
+ * If a sampler is configured programmatically (e.g. via NodeSDK constructor)
+ * without setting the env var, this heuristic will not detect it.
+ *
  * parentbased_* samplers delegate to localParentNotSampled (default AlwaysOff)
  * when the parent carries TraceFlags.NONE. Since our synthetic root is the
  * parent of all session spans, it MUST carry SAMPLED for most parentbased_*
  * samplers — otherwise zero traces are exported.
+ *
+ * Note: `parentbased_traceidratio` users expect probabilistic sampling, but
+ * because our synthetic root is always present with SAMPLED, the ratio sampler
+ * (only consulted for parentless root spans) is never invoked — they
+ * effectively get 100% sampling. This is intentional: the alternative
+ * (TraceFlags.NONE) would produce zero traces.
  *
  * Exception: `parentbased_always_off` explicitly wants no sampling. Forcing
  * SAMPLED would cause ParentBasedSampler to delegate to localParentSampled

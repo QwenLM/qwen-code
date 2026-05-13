@@ -428,6 +428,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
           spanEndTimeout = setTimeout(() => {
             try {
+              span.setAttribute('stream.timed_out', true);
               safeSetStatus(span, {
                 code: SpanStatusCode.ERROR,
                 message: 'Stream span timed out (idle)',
@@ -445,22 +446,18 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     try {
       for await (const response of stream) {
-        // Run chunk processing inside the span context so any debug logs
-        // emitted during iteration see the stream span as active.
-        runInSpan(() => {
-          if (!firstResponseId && response.responseId) {
-            firstResponseId = response.responseId;
-          }
-          if (!firstModelVersion && response.modelVersion) {
-            firstModelVersion = response.modelVersion;
-          }
-          if (!isInternal) {
-            responses.push(response);
-          }
-          if (response.usageMetadata) {
-            lastUsageMetadata = response.usageMetadata;
-          }
-        });
+        if (!firstResponseId && response.responseId) {
+          firstResponseId = response.responseId;
+        }
+        if (!firstModelVersion && response.modelVersion) {
+          firstModelVersion = response.modelVersion;
+        }
+        if (!isInternal) {
+          responses.push(response);
+        }
+        if (response.usageMetadata) {
+          lastUsageMetadata = response.usageMetadata;
+        }
         resetSpanTimeout?.();
         yield response;
       }

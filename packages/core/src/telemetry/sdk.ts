@@ -289,10 +289,8 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
-    setSessionContext(
-      createSessionRootContext(config.getSessionId()),
-      config.getSessionId(),
-    );
+    const sessionId = config.getSessionId();
+    setSessionContext(createSessionRootContext(sessionId), sessionId);
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
