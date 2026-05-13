@@ -2056,6 +2056,7 @@ export const AppContainer = (props: AppContainerProps) => {
             });
           }
         } else {
+          hasRestoreFailure = true;
           fileRestoreError = t(
             'Cannot restore files: this turn was created before file checkpointing was enabled.',
           );
