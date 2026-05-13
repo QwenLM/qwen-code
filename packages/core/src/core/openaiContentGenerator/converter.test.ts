@@ -1950,7 +1950,12 @@ describe('OpenAIContentConverter', () => {
 
     it('should ignore repeated cumulative chunks with no new suffix', () => {
       const ctx = withStreamParser();
-      const content = 'The following section starts with enough text.';
+      // Must be ≥ CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH (64 chars) so the
+      // exact-repeat branch enters cumulative mode rather than treating this
+      // as a short legitimate repeat. Realistic cumulative providers replay
+      // buffers of hundreds of bytes, so this length is representative.
+      const content =
+        'The following section starts with more than enough text for cumulative-mode detection.';
       const emitted = [content, content].map((chunkContent, index) => {
         const chunk = converter.convertOpenAIChunkToGemini(
           {
@@ -2211,8 +2216,9 @@ describe('OpenAIContentConverter', () => {
       // with no new suffix` test: the reasoning channel uses a separate state
       // object, so the exact-repeat entry path is exercised independently.
       const ctx = withStreamParser();
+      // Must be ≥ CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH (64 chars).
       const reasoning =
-        'The reasoning section also starts with enough text to pass.';
+        'The reasoning section also starts with more than enough text to pass detection.';
       const emitted = [reasoning, reasoning].map((reasoning_content, index) => {
         const part = converter.convertOpenAIChunkToGemini(
           {
@@ -2387,18 +2393,21 @@ describe('OpenAIContentConverter', () => {
       expect(emitted[3]).toEqual([{ text: ' is the answer.' }]);
     });
 
-    it('should enter cumulative mode on exact 20-char repeat (at threshold)', () => {
+    it('should enter cumulative mode on exact 64-char repeat (at threshold)', () => {
       const ctx = withStreamParser();
-      // Exactly 20 chars — meets CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
-      const twentyChars = 'abcdefghij0123456789';
-      const chunks = [twentyChars, twentyChars, twentyChars + ' and more'];
+      // Exactly 64 chars — meets CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH.
+      // The threshold sits well above realistic legit-repeat lengths (e.g. a
+      // duplicate `import { foo } from './module';` is ~31 chars) so that
+      // legitimate repeats are never silently suppressed.
+      const atThreshold = 'A'.repeat(64);
+      const chunks = [atThreshold, atThreshold, atThreshold + ' and more'];
 
       const emitted = chunks.map(
         (content, index) =>
           converter.convertOpenAIChunkToGemini(
             {
               object: 'chat.completion.chunk',
-              id: `chunk-threshold20-${index}`,
+              id: `chunk-threshold64-${index}`,
               created: 456 + index,
               choices: [
                 {
@@ -2415,25 +2424,29 @@ describe('OpenAIContentConverter', () => {
       );
 
       // Chunk 1: initial passthrough
-      expect(emitted[0]).toBe(twentyChars);
-      // Chunk 2: exact 20-char repeat — enters cumulative mode, suppressed
+      expect(emitted[0]).toBe(atThreshold);
+      // Chunk 2: exact 64-char repeat — enters cumulative mode, suppressed
       expect(emitted[1]).toBe('');
       // Chunk 3: cumulative extension — emits suffix only
       expect(emitted[2]).toBe(' and more');
     });
 
-    it('should pass through 19-char exact repeat without entering cumulative mode (below threshold)', () => {
+    it('should pass through 63-char exact repeat without entering cumulative mode (below threshold)', () => {
       const ctx = withStreamParser();
-      // 19 chars — one short of CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
-      const nineteenChars = 'abcdefghij012345678';
-      const chunks = [nineteenChars, nineteenChars, nineteenChars + ' extra'];
+      // 63 chars — one short of CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH
+      const belowThreshold = 'A'.repeat(63);
+      const chunks = [
+        belowThreshold,
+        belowThreshold,
+        belowThreshold + ' extra',
+      ];
 
       const emitted = chunks.map(
         (content, index) =>
           converter.convertOpenAIChunkToGemini(
             {
               object: 'chat.completion.chunk',
-              id: `chunk-threshold19-${index}`,
+              id: `chunk-threshold63-${index}`,
               created: 456 + index,
               choices: [
                 {
@@ -2450,11 +2463,51 @@ describe('OpenAIContentConverter', () => {
       );
 
       // Chunk 1: initial passthrough
-      expect(emitted[0]).toBe(nineteenChars);
-      // Chunk 2: 19-char repeat — below threshold, passes through unchanged
-      expect(emitted[1]).toBe(nineteenChars);
+      expect(emitted[0]).toBe(belowThreshold);
+      // Chunk 2: 63-char repeat — below threshold, passes through unchanged
+      expect(emitted[1]).toBe(belowThreshold);
       // Chunk 3: prefix-extends prior — enters cumulative, emits suffix only
       expect(emitted[2]).toBe(' extra');
+    });
+
+    it('should preserve legitimate duplicate import-line chunks (regression: silent data loss)', () => {
+      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review
+      // (wenshao, 2026-05-13 CHANGES_REQUESTED, finding #1). Realistic
+      // incremental streams emit duplicate import/boilerplate lines and the
+      // exact-repeat threshold must be high enough that those legitimate
+      // repeats are NOT silently suppressed. A duplicate ~31-char import is
+      // the canonical motivating case.
+      const ctx = withStreamParser();
+      const importLine = "import { foo } from './module';"; // 31 chars
+      const chunks = [importLine, importLine, '\nconst x = 1;'];
+
+      const emitted = chunks.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-import-${index}`,
+              created: 456 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      // All three chunks must reach the user — no suppression.
+      expect(emitted[0]).toBe(importLine);
+      expect(emitted[1]).toBe(importLine);
+      expect(emitted[2]).toBe('\nconst x = 1;');
+      // Sanity: the reassembled stream equals the user-visible total.
+      expect(emitted.join('')).toBe(importLine + importLine + '\nconst x = 1;');
     });
 
     it('should pass incremental chunks through verbatim past the detection window cap (none of them overlap)', () => {
@@ -2543,6 +2596,79 @@ describe('OpenAIContentConverter', () => {
       expect(emitted[1]).toBe('B'.repeat(200));
       // Chunk 3: continues in cumulative mode, emits only the new 50-char suffix.
       expect(emitted[2]).toBe('C'.repeat(50));
+    });
+
+    it('should not duplicate emitted bytes when an incremental stream transitions into cumulative mode past the window cap', () => {
+      // Regression for https://github.com/QwenLM/qwen-code/pull/3896 review
+      // (wenshao, 2026-05-13 CHANGES_REQUESTED, finding #2). Hybrid scenario:
+      // upstream emits 200 distinct incremental chunks of 8 bytes each (1600
+      // bytes of user-visible content, well past the 1024-byte detection-
+      // window cap), then sends a single cumulative chunk that replays the
+      // full 1600 bytes and appends new content. The internal baseline froze
+      // at 1024 bytes; without tracking the true emitted length, the suffix
+      // would be sliced from byte 1024 of the cumulative chunk and the user
+      // would see bytes 1024..1600 a second time. The fix tracks emittedLength
+      // separately so the slice starts from the real user-visible boundary
+      // (1600). The chunks must be DISTINCT (otherwise the short-exact-repeat
+      // branch keeps emittedText pinned and the cap is never reached).
+      const ctx = withStreamParser();
+      const incremental = Array.from(
+        { length: 200 },
+        (_, i) => `c${String(i).padStart(3, '0')}=AB_`, // 8 bytes, distinct per chunk
+      );
+      const accumulated = incremental.join(''); // 1600 bytes
+      const tail = '|CONTINUATION|'; // 14 bytes
+      const cumulativeChunk = accumulated + tail; // 1614 bytes
+
+      const incrementalEmitted = incremental.map(
+        (content, index) =>
+          converter.convertOpenAIChunkToGemini(
+            {
+              object: 'chat.completion.chunk',
+              id: `chunk-hybrid-incr-${index}`,
+              created: 1000 + index,
+              choices: [
+                {
+                  index: 0,
+                  delta: { content },
+                  finish_reason: null,
+                  logprobs: null,
+                },
+              ],
+              model: 'gpt-test',
+            } as unknown as OpenAI.Chat.ChatCompletionChunk,
+            ctx,
+          ).candidates?.[0]?.content?.parts?.[0]?.text ?? '',
+      );
+
+      const cumulativeEmitted =
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-hybrid-cum',
+            created: 2000,
+            choices: [
+              {
+                index: 0,
+                delta: { content: cumulativeChunk },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+            model: 'gpt-test',
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          ctx,
+        ).candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+
+      // Incremental phase: every chunk passes through verbatim.
+      expect(incrementalEmitted).toEqual(incremental);
+      // Cumulative chunk: only the new 14-byte tail must be emitted — not the
+      // ~576 bytes between the cap (1024) and the true emitted total (1600).
+      expect(cumulativeEmitted).toBe(tail);
+      // Sanity: reassembled stream equals the original accumulated text.
+      const userVisible = incrementalEmitted.join('') + cumulativeEmitted;
+      expect(userVisible).toBe(cumulativeChunk);
+      expect(userVisible.length).toBe(1614);
     });
 
     it('should suppress cumulative rewind (provider re-sends shorter accumulated string)', () => {
