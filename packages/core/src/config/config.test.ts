@@ -2486,7 +2486,10 @@ describe('Model Switching and Config Updates', () => {
       config['hookSystem'] = mockHookSystem;
 
       expect(config.hasHooksForEvent('UserPromptSubmit')).toBe(true);
-      expect(mockHasHooksForEvent).toHaveBeenCalledWith('UserPromptSubmit');
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptSubmit',
+        expect.any(String),
+      );
     });
 
     it('should return false when hookSystem has no hooks for the event', () => {
@@ -2499,7 +2502,10 @@ describe('Model Switching and Config Updates', () => {
       config['hookSystem'] = mockHookSystem;
 
       expect(config.hasHooksForEvent('Stop')).toBe(false);
-      expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith(
+        'Stop',
+        expect.any(String),
+      );
     });
   });
 

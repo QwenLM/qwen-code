@@ -359,6 +359,12 @@ export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export { type StopFailureErrorType } from './hooks/types.js';
 
+// ============================================================================
+// Goals (/goal command runtime)
+// ============================================================================
+
+export * from './goals/index.js';
+
 // Export hook triggers for all hook events
 export {
   fireNotificationHook,

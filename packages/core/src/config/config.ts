@@ -2637,8 +2637,13 @@ export class Config {
    * registered hooks for the given event name.  Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    return (
+      this.hookSystem?.hasHooksForEvent(
+        eventName,
+        sessionId ?? this.getSessionId(),
+      ) ?? false
+    );
   }
 
   /**

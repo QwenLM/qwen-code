@@ -1418,6 +1418,8 @@ export default {
     '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看詳細工具調用結果',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
+  'Set a goal — keep working until the condition is met':
+    '設定目標 — 持續工作直到條件滿足',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
