@@ -34,6 +34,8 @@ import type {
   ShellExecutionConfig,
   ShellExecutionResult,
   ShellOutputEvent,
+  ShellPostPromoteHandlers,
+  ShellPostPromoteSettleInfo,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
@@ -903,6 +905,41 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  */
 const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
+/**
+ * PR-2.5 slots shared between the foreground `execute()` postPromote
+ * handlers and the post-resolve `handlePromotedForeground` finalizer.
+ * The handlers fire on the service side as soon as promote happens;
+ * the finalizer runs after `await resultPromise` returns. They race —
+ * the buffer + settle-queue absorb the race so neither chunks nor the
+ * eventual exit info are lost. See `executeForeground` for the wiring
+ * and `handlePromotedForeground` for the drain logic.
+ */
+interface PromoteArtifacts {
+  /**
+   * Chunks observed by `postPromote.onData` BEFORE the stream is
+   * open. Drained into the stream once `handlePromotedForeground`
+   * opens it. After drain this stays empty for the rest of the run.
+   */
+  buffer: string[];
+  /**
+   * Append-mode write stream to `bg_xxx.output`. Null until
+   * `handlePromotedForeground` opens it. Closed by `onSettleWired`.
+   */
+  stream: fs.WriteStream | null;
+  /**
+   * Settle handler installed by `handlePromotedForeground` once the
+   * registry entry exists. Null until then; `onSettle` calls below
+   * queue into `settleQueued` if this isn't yet set.
+   */
+  onSettleWired: ((info: ShellPostPromoteSettleInfo) => void) | null;
+  /**
+   * Settle info captured by `postPromote.onSettle` before the wired
+   * handler was installed. `handlePromotedForeground` checks this and
+   * fires the wired handler synchronously after registering.
+   */
+  settleQueued: ShellPostPromoteSettleInfo | null;
+}
+
 // Long-run advisory threshold: half the EFFECTIVE foreground timeout
 // (not the default), computed per-invocation by `longRunThresholdFor`.
 // Couples to whichever timeout actually governs THIS command — so a
@@ -1617,6 +1654,56 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     };
 
+    // Pre-allocate the promote artifacts (PR-2.5). Lazily created — no
+    // disk I/O unless the user actually fires Ctrl+B / promote signal.
+    // The handlers below close over these slots; once promote happens,
+    // `handlePromotedForeground` populates them (opens the stream, sets
+    // the shellId / onSettle wiring), and any onData chunks that the
+    // service forwarded BEFORE handlePromotedForeground caught up land
+    // in `postPromoteBuffer` and drain to the stream once it opens.
+    const promoteArtifacts: PromoteArtifacts = {
+      buffer: [],
+      stream: null,
+      onSettleWired: null,
+      settleQueued: null,
+    };
+    const postPromote: ShellPostPromoteHandlers = {
+      onData: (event) => {
+        if (event.type !== 'data') return;
+        // ANSI structured chunks have no append semantics — coerce to
+        // string. The output file is plain text; live ANSI updates are
+        // owned by the foreground stream, which by promote-time has
+        // already terminated.
+        const chunk =
+          typeof event.chunk === 'string'
+            ? event.chunk
+            : event.chunk
+                .map((line) => line.map((tok) => tok.text).join(''))
+                .join('\n');
+        if (promoteArtifacts.stream) {
+          try {
+            promoteArtifacts.stream.write(chunk);
+          } catch (err) {
+            debugLogger.warn(
+              `promote: postPromote stream.write failed: ${getErrorMessage(err)}`,
+            );
+          }
+        } else {
+          promoteArtifacts.buffer.push(chunk);
+        }
+      },
+      onSettle: (info) => {
+        if (promoteArtifacts.onSettleWired) {
+          promoteArtifacts.onSettleWired(info);
+        } else {
+          // Service observed the child exit before handlePromotedForeground
+          // finished registering. Queue the settle info — handlePromotedForeground
+          // applies it as soon as the registry entry exists.
+          promoteArtifacts.settleQueued = info;
+        }
+      },
+    };
+
     let executionHandle;
     try {
       executionHandle = await ShellExecutionService.execute(
@@ -1626,6 +1713,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         combinedSignal,
         this.config.getShouldUseNodePtyShell(),
         shellExecutionConfig ?? {},
+        { postPromote },
       );
     } catch (err) {
       // ShellExecutionService.execute() can throw before resolving (e.g.
@@ -1723,6 +1811,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         cwd,
         commandToExecute,
         promoteAbortController,
+        promoteArtifacts,
       );
       return promotedToolResult;
     }
@@ -2031,27 +2120,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
   /**
    * Foreground → background promote handler. Called when the foreground
    * execute path observes `result.promoted: true` (the user pressed
-   * Ctrl+B mid-flight). Snapshots captured output to a `bg_xxx.output`
-   * file, registers a `BackgroundShellEntry` in the same registry the
-   * `is_background: true` path uses, and returns a model-facing
-   * `ToolResult` pointing at `/tasks` / the dialog / `task_stop` for
-   * follow-up.
+   * Ctrl+B mid-flight). Writes the initial snapshot + open the
+   * post-promote append stream so subsequent child bytes land in
+   * `bg_xxx.output`, registers a `BackgroundShellEntry` in the same
+   * registry the `is_background: true` path uses, wires settle so
+   * natural child exit transitions the entry to `'completed'` /
+   * `'failed'`, and returns a model-facing `ToolResult` pointing at
+   * `/tasks` / the dialog / `task_stop` for follow-up.
    *
-   * Limitations (PR-2.5 follow-up):
-   *   - The registry entry stays `'running'` until `task_stop bg_xxx`
-   *     or session-end `abortAll` clears it; natural child exit does
-   *     NOT auto-settle the entry today (no settle hook from the
-   *     service after promote — the listener was detached as part of
-   *     PR-1's ownership-transfer contract).
-   *   - The `outputPath` content is FROZEN at the promote moment; the
-   *     service no longer streams post-promote bytes to the file.
-   *     Caller-side stream redirect lands in PR-2.5.
+   * PR-2.5: post-promote stream redirect + natural-exit registry
+   * settle are now live via the `postPromote` callbacks wired in
+   * `executeForeground`. The `promoteArtifacts` parameter carries the
+   * pre-allocated buffer/stream slots that absorb the race between
+   * service-side promote-time data flush and this finalizer running.
    */
   private async handlePromotedForeground(
     result: ShellExecutionResult,
     cwd: string,
     commandToExecute: string,
     abortController: AbortController,
+    promoteArtifacts: PromoteArtifacts,
   ): Promise<ToolResult> {
     // Mirror executeBackground's outputPath layout so /tasks-on-disk and
     // ReadFileTool's auto-allow rules treat foreground-promoted shells
@@ -2108,15 +2196,51 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
-    // Best-effort initial snapshot write — if disk is full or
-    // permission flips, log + continue (the registry entry is still
-    // valuable on its own; the file is only the inspection surface).
+    // PR-2.5: open an append-mode write stream so the initial snapshot
+    // AND post-promote bytes from the still-running child both land in
+    // the same file. Synchronous open via `createWriteStream` with
+    // `flags: 'w'` (overwrite) — if a stale file is somehow there from
+    // a prior session with the same shellId (vanishingly unlikely
+    // given the randomBytes), start fresh. Stream errors (ENOSPC mid-
+    // stream, permission flip) are logged via 'error' listener; we
+    // never let them crash the daemon.
+    let outputStream: fs.WriteStream | null = null;
     try {
-      fs.writeFileSync(outputPath, result.output);
+      outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
+      outputStream.on('error', (err) => {
+        debugLogger.warn(
+          `promote: output write stream error for ${outputPath}: ${getErrorMessage(err)}`,
+        );
+      });
+      // Initial snapshot first, so it always precedes post-promote
+      // bytes in the file (write ordering is FIFO on a single stream).
+      outputStream.write(result.output);
+      // Drain any bytes the service already forwarded via
+      // `postPromote.onData` before this finalizer caught up.
+      while (promoteArtifacts.buffer.length > 0) {
+        const chunk = promoteArtifacts.buffer.shift()!;
+        outputStream.write(chunk);
+      }
+      promoteArtifacts.stream = outputStream;
     } catch (err) {
       debugLogger.warn(
-        `promote: failed to write initial output snapshot to ${outputPath}: ${getErrorMessage(err)}`,
+        `promote: failed to open output stream for ${outputPath}: ${getErrorMessage(err)}`,
       );
+      // Stream failure is recoverable — the registry entry is still
+      // valuable on its own; the file is the inspection surface only.
+      // Continue without a stream; future onData chunks are dropped
+      // (their warns will accumulate in the log, which is enough
+      // observability for a rare disk failure case).
+      promoteArtifacts.stream = null;
+      // Last-ditch: try a sync snapshot write so /tasks still has
+      // SOMETHING readable; the buffer chunks are lost in this branch.
+      try {
+        fs.writeFileSync(outputPath, result.output);
+      } catch (err2) {
+        debugLogger.warn(
+          `promote: snapshot fallback writeFileSync also failed for ${outputPath}: ${getErrorMessage(err2)}`,
+        );
+      }
     }
 
     const startTime = Date.now();
@@ -2235,7 +2359,72 @@ export class ShellToolInvocation extends BaseToolInvocation<
       } catch {
         /* swallow — we're already in an error path */
       }
+      // PR-2.5: close the output stream so the FD doesn't leak past
+      // the throw. Best-effort — if .end() itself throws we're
+      // already in an error path with the orphan-child kill already
+      // in flight.
+      try {
+        promoteArtifacts.stream?.end();
+      } catch {
+        /* swallow */
+      }
+      promoteArtifacts.stream = null;
       throw e;
+    }
+
+    // PR-2.5: wire the post-promote settle so a natural child exit
+    // (or spawn-side error) transitions the registry entry from
+    // `'running'` to `'completed'` / `'failed'`. Without this the
+    // entry stays `'running'` until `task_stop` / session-end. The
+    // service's `postPromote.onSettle` fires AT MOST ONCE per
+    // promote, and `registry.complete` / `registry.fail` are
+    // idempotent (no-op when status !== 'running'), so a race with
+    // `entryAc.abort() → registry.cancel` (task_stop fired during the
+    // exit window) is safe: whichever lands first wins, the other
+    // becomes a no-op.
+    promoteArtifacts.onSettleWired = (info) => {
+      // Close the stream first so any pending writes flush before the
+      // file is consumable by a /tasks Read.
+      try {
+        promoteArtifacts.stream?.end();
+      } catch (closeErr) {
+        debugLogger.warn(
+          `promote: closing output stream on settle threw: ${getErrorMessage(closeErr)}`,
+        );
+      }
+      promoteArtifacts.stream = null;
+      // Map service settle info to the registry transition. Decision
+      // table: `error` → fail (spawn-side failure); `exitCode === 0`
+      // → complete; non-zero exitCode → fail (non-zero is treated as
+      // failure consistent with shell convention); signal-killed (no
+      // exitCode, signal set) → fail with descriptive message; the
+      // rare-everything-null case → fail with a generic message.
+      if (info.error) {
+        registry.fail(shellId, info.error.message, info.endTime);
+      } else if (info.exitCode === 0) {
+        registry.complete(shellId, info.exitCode, info.endTime);
+      } else if (info.exitCode !== null) {
+        registry.fail(
+          shellId,
+          `Exited with code ${info.exitCode}`,
+          info.endTime,
+        );
+      } else if (info.signal !== null) {
+        registry.fail(
+          shellId,
+          `Terminated by signal ${info.signal}`,
+          info.endTime,
+        );
+      } else {
+        registry.fail(shellId, 'Exited with unknown status', info.endTime);
+      }
+    };
+    // Drain a settle that landed BEFORE the wire installed (fast
+    // commands can exit between `result.promoted` and this line).
+    if (promoteArtifacts.settleQueued) {
+      const queued = promoteArtifacts.settleQueued;
+      promoteArtifacts.settleQueued = null;
+      promoteArtifacts.onSettleWired(queued);
     }
 
     const llmContent = [

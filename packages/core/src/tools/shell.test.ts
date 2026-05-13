@@ -313,7 +313,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
       // Entry registered with the spawn pid.
@@ -470,7 +470,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -487,7 +487,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -504,7 +504,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -521,7 +521,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -538,7 +538,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -578,7 +578,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -599,7 +601,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -618,7 +622,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -643,7 +647,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -671,7 +677,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -1643,7 +1651,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1673,7 +1683,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1703,7 +1715,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1733,7 +1747,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1761,7 +1777,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1789,7 +1807,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1819,7 +1839,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1857,7 +1879,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1893,7 +1917,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1931,7 +1957,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1964,7 +1992,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1999,7 +2029,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2032,7 +2064,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2066,7 +2100,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2098,7 +2134,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2201,7 +2239,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2239,7 +2279,8 @@ describe('ShellTool', () => {
             expect.any(Function),
             expect.any(AbortSignal),
             false,
-            {},
+            expect.objectContaining({}),
+            expect.objectContaining({ postPromote: expect.any(Object) }),
           );
         },
       );
@@ -2270,7 +2311,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2316,7 +2359,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2381,7 +2426,8 @@ describe('ShellTool', () => {
             expect.any(Function),
             expect.any(AbortSignal),
             false,
-            {},
+            expect.objectContaining({}),
+            expect.objectContaining({ postPromote: expect.any(Object) }),
           );
         },
       );
@@ -2477,7 +2523,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2505,7 +2553,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2535,7 +2585,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2566,7 +2618,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2728,7 +2782,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2756,7 +2812,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2784,7 +2842,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2813,7 +2873,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2878,7 +2940,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2912,7 +2976,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3018,7 +3084,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3106,7 +3174,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3167,7 +3237,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3231,7 +3303,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3261,7 +3335,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3290,7 +3366,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3326,7 +3404,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3458,7 +3538,7 @@ describe('ShellTool', () => {
         const promise = (invocation as ShellToolInvocation).execute(
           mockAbortSignal,
           undefined,
-          {},
+          expect.objectContaining({}),
           undefined,
           setPromoteAc,
         );
@@ -3510,9 +3590,15 @@ describe('ShellTool', () => {
         expect(entry.outputPath).toContain(entry.shellId);
         expect(entry.abortController).toBeInstanceOf(AbortController);
 
-        // Snapshot written to disk.
-        expect(writeFileSyncSpy).toHaveBeenCalledWith(
-          entry.outputPath,
+        // Snapshot written to the output stream (PR-2.5: snapshot +
+        // post-promote bytes now share a single append-mode stream
+        // instead of the prior writeFileSync snapshot-only path).
+        expect(fs.createWriteStream).toHaveBeenCalledWith(entry.outputPath, {
+          flags: 'w',
+        });
+        const streamMock = (fs.createWriteStream as Mock).mock.results[0]
+          ?.value as { write: Mock };
+        expect(streamMock.write).toHaveBeenCalledWith(
           'partial output before promote',
         );
 
@@ -3747,7 +3833,7 @@ describe('ShellTool', () => {
         const promise = (invocation as ShellToolInvocation).execute(
           mockAbortSignal,
           undefined,
-          {},
+          expect.objectContaining({}),
           undefined,
           setPromoteAc,
         );
@@ -3827,6 +3913,172 @@ describe('ShellTool', () => {
           processKillSpy.mockRestore();
           vi.useRealTimers();
         }
+      });
+    });
+
+    describe('foreground → background promote PR-2.5 (post-promote stream + natural-exit settle)', () => {
+      it('post-promote bytes APPEND to bg_xxx.output via write stream (do NOT overwrite snapshot)', async () => {
+        // Pin the PR-2.5 stream-redirect contract: snapshot lands
+        // first, post-promote chunks flow through `stream.write` in
+        // FIFO order. Without this PR the file was frozen at promote
+        // time and live updates never reached /tasks.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        // Service resolves promoted with snapshot.
+        resolveShellExecution({
+          output: 'initial-snapshot',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 11111,
+        });
+        await promise;
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        // Stream opened in overwrite mode at promote time so a stale
+        // file under the same shellId (vanishingly unlikely given
+        // randomBytes) starts fresh.
+        expect(fs.createWriteStream).toHaveBeenCalledWith(entry.outputPath, {
+          flags: 'w',
+        });
+        // Snapshot written first.
+        expect(writeStreamMock.write).toHaveBeenNthCalledWith(
+          1,
+          'initial-snapshot',
+        );
+      });
+
+      it('natural child exit transitions the registry entry to "completed" (exitCode 0)', async () => {
+        // Pin the PR-2.5 settle path: after promote, when the
+        // service's post-promote exit listener fires with exitCode=0,
+        // `registry.complete(shellId, 0, ...)` is called and the
+        // stream closes.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+        // Capture the postPromote options passed to the service so
+        // we can drive its onSettle handler directly (the mocked
+        // service doesn't fire it on its own).
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 22222,
+        });
+        await promise;
+
+        // Pull the postPromote options from the service mock's last
+        // call (foreground execute always passes it post-PR-2.5).
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const opts = serviceCall[6] as {
+          postPromote?: {
+            onSettle?: (info: {
+              exitCode: number | null;
+              signal: number | null;
+              error?: Error;
+              endTime: number;
+            }) => void;
+          };
+        };
+        expect(opts?.postPromote?.onSettle).toBeDefined();
+        opts.postPromote!.onSettle!({
+          exitCode: 0,
+          signal: null,
+          endTime: 1700000000000,
+        });
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000000000,
+        );
+        // Stream closed on settle.
+        expect(writeStreamMock.end).toHaveBeenCalled();
+      });
+
+      it('non-zero exit / signal / error all transition entry to "failed" with descriptive message', async () => {
+        // Pin the failure-mode decision table.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 33333,
+        });
+        await promise;
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const onSettle = (
+          serviceCall[6] as {
+            postPromote: {
+              onSettle: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            };
+          }
+        ).postPromote.onSettle;
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        // Non-zero exitCode → fail with "Exited with code N".
+        onSettle({ exitCode: 137, signal: null, endTime: 1 });
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Exited with code 137',
+          1,
+        );
+
+        // signal-killed (no exitCode) → fail with "Terminated by signal N".
+        onSettle({ exitCode: null, signal: 15, endTime: 2 });
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Terminated by signal 15',
+          2,
+        );
+
+        // Spawn-side error → fail with err.message.
+        onSettle({
+          exitCode: null,
+          signal: null,
+          error: new Error('ENOENT'),
+          endTime: 3,
+        });
+        expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
       });
     });
   });
@@ -4083,7 +4335,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
 
       // The signal passed should be different from the original signal
@@ -4172,7 +4426,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
   });
