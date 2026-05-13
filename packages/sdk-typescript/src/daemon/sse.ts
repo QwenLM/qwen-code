@@ -105,7 +105,24 @@ export async function* parseSseStream(
       if (signal?.aborted) {
         return;
       }
-      const { value, done } = await reader.read();
+      // BlqF_: wrap `reader.read()` so an abort-driven body-stream
+      // error doesn't bubble. `reader.cancel()` (fired by the abort
+      // listener above) settles the reader cleanly on most paths,
+      // but undici-on-abort can also reject the in-flight `read()`
+      // with an AbortError / "BodyStreamBuffer was aborted". The
+      // public contract says "abort cancels cleanly" — so if we
+      // catch a rejection AFTER the signal already aborted, treat
+      // it as clean completion. Re-throw for any other failure so
+      // consumers still see real upstream errors (network drop,
+      // unexpected close, etc.) on streams they didn't abort.
+      let value: Uint8Array | undefined;
+      let done: boolean;
+      try {
+        ({ value, done } = await reader.read());
+      } catch (err) {
+        if (signal?.aborted) return;
+        throw err;
+      }
       if (done) {
         // Flush any bytes the decoder is still holding for an incomplete
         // multi-byte UTF-8 sequence at the tail. Without this, the last

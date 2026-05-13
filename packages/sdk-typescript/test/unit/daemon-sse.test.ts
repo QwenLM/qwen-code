@@ -233,6 +233,68 @@ describe('parseSseStream', () => {
     expect(cancelled).toBe(true);
   });
 
+  it('abort during read() returns cleanly instead of rethrowing (BlqF_)', async () => {
+    // Some fetch impls (undici on abort) settle the in-flight
+    // `reader.read()` with a rejection AFTER `reader.cancel()`
+    // fires. `parseSseStream`'s public contract is "abort cancels
+    // cleanly" — that rejection must NOT bubble to the consumer's
+    // `for await`.
+    const controller = new AbortController();
+    const body = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        // Enqueue one valid frame then go idle. Abort fires later;
+        // on abort, error the controller (mimicking undici's
+        // body-stream-aborted-mid-read behavior).
+        streamController.enqueue(
+          new TextEncoder().encode(
+            'id: 1\nevent: x\ndata: {"id":1,"v":1,"type":"x","data":1}\n\n',
+          ),
+        );
+        controller.signal.addEventListener('abort', () => {
+          streamController.error(
+            new DOMException('BodyStreamBuffer was aborted', 'AbortError'),
+          );
+        });
+      },
+    });
+    const events: number[] = [];
+    const iter = parseSseStream(body, controller.signal);
+    const firstFrame = await iter.next();
+    if (!firstFrame.done) events.push(firstFrame.value.id ?? -1);
+    controller.abort();
+    // The for-await loop's next `read()` will reject due to the
+    // streamController.error above. Pre-fix this rejection bubbled
+    // to the consumer; the BlqF_ guard treats abort-while-aborted
+    // as clean completion and `for await` exits cleanly.
+    await expect(
+      (async () => {
+        for await (const ev of iter) {
+          events.push(ev.id ?? -1);
+        }
+      })(),
+    ).resolves.toBeUndefined();
+    expect(events).toEqual([1]);
+  });
+
+  it('non-abort stream errors still bubble (BlqF_ guard scope)', async () => {
+    // The clean-shutdown path is ONLY for signal-driven aborts.
+    // Real upstream errors (network drop, malformed close) must
+    // still reach the consumer so they can distinguish "user
+    // cancelled" from "the daemon hung up on us".
+    const body = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        streamController.error(new Error('upstream network drop'));
+      },
+    });
+    await expect(
+      (async () => {
+        for await (const _ev of parseSseStream(body)) {
+          /* drain */
+        }
+      })(),
+    ).rejects.toThrow(/upstream network drop/);
+  });
+
   it('flushes the TextDecoder on stream close so the last UTF-8 char is preserved', async () => {
     // "中" is 3 bytes in UTF-8 (0xE4 0xB8 0xAD). Split the byte stream
     // mid-character to simulate a chunk boundary that lands inside the
