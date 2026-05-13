@@ -146,6 +146,7 @@ import {
   type AvailableModel,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 // Re-export types
@@ -1579,18 +1580,55 @@ export class Config {
   }
 
   /**
-   * Returns the fast model if one is configured and valid for the current auth type,
-   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
-   * use this as a cheaper alternative to the main session model.
+   * Returns the fast model if one is configured and valid for the current auth
+   * type, otherwise returns undefined. Direct runtime paths use this as a
+   * cheaper alternative to the main session model, so it intentionally stays
+   * current-auth-only.
    */
   getFastModel(): string | undefined {
-    if (!this.fastModel) return undefined;
-    const authType = this.contentGeneratorConfig?.authType;
+    const authType =
+      this.contentGeneratorConfig?.authType ??
+      this.modelsConfig.getCurrentAuthType();
     if (!authType) return undefined;
-    const available = this.getAvailableModelsForAuthType(authType);
-    return available.some((m) => m.id === this.fastModel)
-      ? this.fastModel
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+    if (selector.authType && selector.authType !== authType) return undefined;
+
+    const available = this.getAllConfiguredModels([authType]);
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
       : undefined;
+  }
+
+  /**
+   * Returns the fast model for side-query paths. Unlike {@link getFastModel},
+   * this can return an authType-qualified selector because BaseLlmClient can
+   * route a single request through a provider different from the main session.
+   */
+  getFastModelForSideQuery(): string | undefined {
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+
+    if (selector.authType) {
+      const available = this.getAllConfiguredModels([selector.authType]);
+      return available.some((m) => m.id === selector.modelId)
+        ? `${selector.authType}:${selector.modelId}`
+        : undefined;
+    }
+
+    const available = this.getAllConfiguredModels();
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
+      : undefined;
+  }
+
+  private resolveFastModelSelector() {
+    if (!this.fastModel) return undefined;
+    try {
+      return resolveModelId(this.fastModel);
+    } catch {
+      return undefined;
+    }
   }
 
   /**

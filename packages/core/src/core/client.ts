@@ -1491,16 +1491,18 @@ export class GeminiClient {
           // main model's config. The retry authType is resolved alongside so that
           // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
           // the target model's provider.
-          const { contentGenerator, retryAuthType } = await this.config
-            .getBaseLlmClient()
-            .resolveForModel(model);
+          const {
+            contentGenerator,
+            retryAuthType,
+            model: requestModel,
+          } = await this.config.getBaseLlmClient().resolveForModel(model);
 
           const apiCall = () => {
-            currentAttemptModel = model;
+            currentAttemptModel = requestModel;
 
             return contentGenerator.generateContent(
               {
-                model,
+                model: requestModel,
                 config: requestConfig,
                 contents,
               },
