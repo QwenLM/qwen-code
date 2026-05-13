@@ -389,6 +389,19 @@ export class GeminiChat {
   private sendPromise: Promise<void> = Promise.resolve();
 
   /**
+   * Heap memory threshold (2 GB). When `heapUsed` exceeds this, chat
+   * compression is forced regardless of `hasFailedCompressionAttempt`.
+   * This is a memory safety net independent of the 70% token compaction
+   * threshold — catching the actual root cause (heap pressure) rather than
+   * a proxy (entry count). Protects against both many small entries AND
+   * few huge entries (large file reads, shell outputs).
+   *
+   * Note: set below Node's default 4 GB heap limit so there is headroom
+   * for one more GC cycle before the process is killed.
+   */
+  private static readonly HEAP_MEMORY_THRESHOLD = 2 * 1024 * 1024 * 1024; // 2 GB
+
+  /**
    * Per-chat last-prompt-token-count, populated from `usageMetadata` on each
    * model response. Used by the compaction threshold check so that subagents
    * (which intentionally don't write to the global telemetry singleton) can
@@ -464,6 +477,18 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    // Force compression when heapUsed exceeds the memory threshold,
+    // regardless of `hasFailedCompressionAttempt`. This is a memory
+    // safety net — catches the actual root cause (heap pressure) rather
+    // than a proxy (entry count). Protects against both many small entries
+    // AND few huge entries (large file reads, shell outputs).
+    if (
+      !force &&
+      process.memoryUsage().heapUsed > GeminiChat.HEAP_MEMORY_THRESHOLD
+    ) {
+      force = true;
+    }
+
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,

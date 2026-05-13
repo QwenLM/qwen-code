@@ -1350,6 +1350,28 @@ export class AgentCore {
   }
 
   /**
+   * Prune oldest messages from the message history when `heapUsed` exceeds
+   * 1.5 GB. Returns the number of messages pruned (0 if no pruning was
+   * needed). Call this after each reasoning round to prevent unbounded
+   * memory growth in long-lived interactive sessions.
+   *
+   * Messages are pruned in chunks — removing ~20% of the oldest messages
+   * each time, which naturally scales with memory pressure rather than
+   * a hard count cap. This catches the actual root cause (heap usage)
+   * regardless of how the memory ballooned (many small entries vs few huge).
+   */
+  pruneMessages(): number {
+    const threshold = 1.5 * 1024 * 1024 * 1024; // 1.5 GB
+    if (process.memoryUsage().heapUsed < threshold) {
+      return 0;
+    }
+    // Remove ~20% of the oldest messages to relieve heap pressure.
+    const toPrune = Math.max(1, Math.ceil(this.messages.length * 0.2));
+    this.messages.splice(0, toPrune);
+    return toPrune;
+  }
+
+  /**
    * Tool calls currently awaiting user approval. Mutated by
    * AgentInteractive's TOOL_WAITING_APPROVAL handler; headless agents
    * never populate this because they run with

@@ -123,6 +123,10 @@ export class AgentInteractive {
       while (message !== null && !this.masterAbortController.signal.aborted) {
         this.addMessage('user', message);
         await this.runOneRound(message);
+        // Prune old messages to prevent unbounded memory growth in
+        // long-lived interactive sessions (81+ minute sessions with
+        // hundreds of rounds can hit 4 GB without pruning).
+        this.core.pruneMessages();
         message = this.queue.dequeue();
       }
 
