@@ -527,11 +527,13 @@ maybe_update_shell_path() {
     [[ -z "${rc_file}" ]] && return 0
 
     local marker="# Added by qwen-code installer (multi-qwen shadow fix)"
+    local quoted_install_bin_dir
+    quoted_install_bin_dir=$(shell_quote "${install_bin_dir}")
     local export_line
     if [[ "${rc_file}" == *config.fish ]]; then
-        export_line="set -gx PATH ${install_bin_dir} \$PATH"
+        export_line="set -gx PATH ${quoted_install_bin_dir} \$PATH"
     else
-        export_line="export PATH=\"${install_bin_dir}:\$PATH\""
+        export_line="export PATH=${quoted_install_bin_dir}:\$PATH"
     fi
 
     if [[ -f "${rc_file}" ]] && grep -qF "${marker}" "${rc_file}" 2>/dev/null; then
@@ -1069,8 +1071,10 @@ install_npm() {
 print_final_instructions() {
     local install_bin_dir="${1:-}"
     local installed_bin=""
+    local quoted_install_bin_dir=""
     if [[ -n "${install_bin_dir}" ]]; then
         installed_bin="${install_bin_dir}/qwen"
+        quoted_install_bin_dir=$(shell_quote "${install_bin_dir}")
     fi
 
     # PRE_INSTALL_QWENS was captured by main() BEFORE the install ran
@@ -1132,7 +1136,7 @@ print_final_instructions() {
         if [[ "${NO_MODIFY_PATH:-0}" == "1" ]]; then
             echo "Skipped shell rc update because --no-modify-path is set."
             echo "To make this install win, manually add to your shell rc:"
-            echo "  export PATH=\"${install_bin_dir}:\$PATH\""
+            echo "  export PATH=${quoted_install_bin_dir}:\$PATH"
         else
             maybe_update_shell_path "${install_bin_dir}"
             echo ""
@@ -1151,7 +1155,7 @@ print_final_instructions() {
         if [[ -n "${install_bin_dir}" ]]; then
             echo ""
             echo "Or run this in the current shell:"
-            echo "  export PATH=\"${install_bin_dir}:\$PATH\""
+            echo "  export PATH=${quoted_install_bin_dir}:\$PATH"
             echo "  qwen"
         fi
         return 0

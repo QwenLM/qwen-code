@@ -121,6 +121,8 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'QWEN_INSTALL_GITHUB_REPO must be in owner/repo format',
     );
+    expect(script).toContain('set -gx PATH ${quoted_install_bin_dir} \\$PATH');
+    expect(script).toContain('export PATH=${quoted_install_bin_dir}:\\$PATH');
     expect(script).toContain('curl -fsIL -m "${timeout}"');
     expect(script).not.toContain('-print -quit');
   });
@@ -207,6 +209,8 @@ describe('installation scripts', () => {
     expect(script).toContain('set "STANDALONE_STATUS=!ERRORLEVEL!"');
     expect(script).toContain('if !STANDALONE_STATUS! EQU 2');
     expect(script).toContain('set "ARG_KEY=%~1"');
+    expect(script).toContain('set "ARG_HAS_INLINE_VALUE=0"');
+    expect(script).toContain('if "!ARG_HAS_INLINE_VALUE!"=="1"');
     expect(script).toContain('if /i "!ARG_KEY!"=="--version"');
     expect(script).toContain('$value -match');
     expect(script).toContain('QWEN_INSTALL_GITHUB_REPO');
@@ -222,6 +226,8 @@ describe('installation scripts', () => {
     expect(script).toContain('Failed to update user PATH');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
+    expect(script).toContain(':CreateTempFile');
+    expect(script).not.toContain('%RANDOM%');
   });
 });
 
@@ -451,6 +457,9 @@ describe('standalone release packaging', () => {
     expect(installPowerShellSource).toContain('Invoke-WebRequest');
     expect(installPowerShellSource).toContain('QWEN_INSTALL_VERSION');
     expect(installPowerShellSource).toContain('--version vX.Y.Z');
+    expect(installPowerShellSource).toContain('SHA256SUMS');
+    expect(installPowerShellSource).toContain('Get-FileHash');
+    expect(installPowerShellSource).toContain('Checksum verification failed');
     expect(installPowerShellSource).toContain('@args');
   });
 
@@ -1179,6 +1188,52 @@ describe('Linux/macOS installer end-to-end', () => {
       }
     }
   });
+
+  itOnUnix(
+    'shell-quotes PATH updates written to shell rc files',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const fakeBin = path.join(tmpDir, 'shadow-bin');
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        const marker = path.join(tmpDir, 'qwen-pwned');
+        const unsafeBinDir = path.join(
+          installRoot,
+          'bin path $(touch qwen-pwned)',
+        );
+
+        mkdirSync(fakeBin, { recursive: true });
+        writeFileSync(path.join(fakeBin, 'qwen'), '#!/usr/bin/env sh\n');
+        chmodSync(path.join(fakeBin, 'qwen'), 0o755);
+
+        runUnixInstaller(archive, installRoot, home, 'standalone', {
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          SHELL: '/bin/bash',
+          QWEN_INSTALL_BIN_DIR: unsafeBinDir,
+        });
+
+        const bashrc = path.join(home, '.bashrc');
+        expect(readScript(bashrc)).toContain(
+          `export PATH='${unsafeBinDir}':$PATH`,
+        );
+        execFileSync('bash', ['-c', `source "${bashrc}"`], {
+          cwd: tmpDir,
+          stdio: 'pipe',
+        });
+        expect(existsSync(marker)).toBe(false);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        if (createdDist) {
+          rmSync('dist', { recursive: true, force: true });
+        }
+      }
+    },
+    15000,
+  );
 
   itOnUnix('rejects a tampered local archive', () => {
     const createdDist = ensureMinimalDist();

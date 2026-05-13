@@ -62,6 +62,14 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
       pattern: /& \$qwenInstallerPath @args/,
     },
     {
+      name: 'SHA256SUMS verification',
+      pattern: /SHA256SUMS/,
+    },
+    {
+      name: 'bat checksum verification',
+      pattern: /Get-FileHash/,
+    },
+    {
       name: 'QWEN_INSTALL_VERSION documentation',
       pattern: /QWEN_INSTALL_VERSION/,
     },

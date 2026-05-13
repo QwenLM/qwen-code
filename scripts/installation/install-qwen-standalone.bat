@@ -34,14 +34,21 @@ if defined QWEN_INSTALL_BIN_DIR set "INSTALL_BIN_DIR=!QWEN_INSTALL_BIN_DIR!"
 REM Parse flags before any network or filesystem work.
 :parse_args
 if "%~1"=="" goto end_parse
+set "ARG_RAW=%~1"
 set "ARG_KEY=%~1"
 set "ARG_VALUE="
+set "ARG_HAS_INLINE_VALUE=0"
 for /f "tokens=1,* delims==" %%A in ("%~1") do (
     set "ARG_KEY=%%~A"
     set "ARG_VALUE=%%~B"
 )
+if not "!ARG_KEY!"=="!ARG_RAW!" set "ARG_HAS_INLINE_VALUE=1"
 if /i "!ARG_KEY!"=="--source" (
-    if not "!ARG_VALUE!"=="" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --source requires a value
+            exit /b 1
+        )
         set "SOURCE=!ARG_VALUE!"
         shift
         goto parse_args
@@ -66,7 +73,11 @@ if /i "%~1"=="-s" (
     goto parse_args
 )
 if /i "!ARG_KEY!"=="--method" (
-    if not "!ARG_VALUE!"=="" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --method requires a value
+            exit /b 1
+        )
         set "METHOD=!ARG_VALUE!"
         shift
         goto parse_args
@@ -81,7 +92,11 @@ if /i "!ARG_KEY!"=="--method" (
     goto parse_args
 )
 if /i "!ARG_KEY!"=="--mirror" (
-    if not "!ARG_VALUE!"=="" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --mirror requires a value
+            exit /b 1
+        )
         set "MIRROR=!ARG_VALUE!"
         shift
         goto parse_args
@@ -96,7 +111,11 @@ if /i "!ARG_KEY!"=="--mirror" (
     goto parse_args
 )
 if /i "!ARG_KEY!"=="--base-url" (
-    if not "!ARG_VALUE!"=="" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --base-url requires a value
+            exit /b 1
+        )
         set "BASE_URL=!ARG_VALUE!"
         shift
         goto parse_args
@@ -111,7 +130,11 @@ if /i "!ARG_KEY!"=="--base-url" (
     goto parse_args
 )
 if /i "!ARG_KEY!"=="--archive" (
-    if not "!ARG_VALUE!"=="" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --archive requires a value
+            exit /b 1
+        )
         set "ARCHIVE_PATH=!ARG_VALUE!"
         shift
         goto parse_args
@@ -126,7 +149,11 @@ if /i "!ARG_KEY!"=="--archive" (
     goto parse_args
 )
 if /i "!ARG_KEY!"=="--version" (
-    if not "!ARG_VALUE!"=="" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --version requires a value
+            exit /b 1
+        )
         set "VERSION=!ARG_VALUE!"
         shift
         goto parse_args
@@ -141,7 +168,11 @@ if /i "!ARG_KEY!"=="--version" (
     goto parse_args
 )
 if /i "!ARG_KEY!"=="--registry" (
-    if not "!ARG_VALUE!"=="" (
+    if "!ARG_HAS_INLINE_VALUE!"=="1" (
+        if "!ARG_VALUE!"=="" (
+            echo ERROR: --registry requires a value
+            exit /b 1
+        )
         set "NPM_REGISTRY=!ARG_VALUE!"
         shift
         goto parse_args
@@ -193,8 +224,9 @@ echo.
 REM Discover all qwen executables on disk BEFORE we install. We can't
 REM reliably simulate the user's PATH ordering, so enumerate well-known
 REM per-tool bin directories plus everything `where qwen` returns.
-set "PRE_INSTALL_QWENS_FILE=%TEMP%\qwen-pre-install-%RANDOM%-%RANDOM%.txt"
-del /f /q "!PRE_INSTALL_QWENS_FILE!" >nul 2>&1
+call :CreateTempFile "qwen-pre-install"
+if !ERRORLEVEL! NEQ 0 exit /b 1
+set "PRE_INSTALL_QWENS_FILE=!TEMP_FILE!"
 for /f "delims=" %%i in ('where qwen 2^>nul') do call echo %%i>>"!PRE_INSTALL_QWENS_FILE!"
 for %%c in (
     "!USERPROFILE!\.opencode\bin\qwen.cmd"
@@ -303,7 +335,9 @@ set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
 set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
 set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
 set "QWEN_VALIDATE_SOURCE=!SOURCE!"
-set "QWEN_VALIDATE_OPTIONS_SCRIPT=%TEMP%\qwen-validate-options-%RANDOM%-%RANDOM%.ps1"
+call :CreateTempFile "qwen-validate-options"
+if !ERRORLEVEL! NEQ 0 exit /b 1
+set "QWEN_VALIDATE_OPTIONS_SCRIPT=!TEMP_FILE!"
 > "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo $unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124)
 >> "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo $names = @('METHOD','MIRROR','BASE_URL','ARCHIVE_PATH','VERSION','NPM_REGISTRY','INSTALL_BASE','INSTALL_DIR','INSTALL_BIN_DIR','SOURCE')
 >> "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo foreach ($name in $names) {
@@ -562,7 +596,9 @@ if "!CHECKSUM_FILE!"=="" (
 ) else (
     if /i "!CHECKSUM_FILE:~0,8!"=="https://" (
         set "REQUIRE_CHECKSUM=1"
-        set "TEMP_CHECKSUM=%TEMP%\qwen-code-checksums-%RANDOM%%RANDOM%.txt"
+        call :CreateTempFile "qwen-code-checksums"
+        if !ERRORLEVEL! NEQ 0 exit /b 1
+        set "TEMP_CHECKSUM=!TEMP_FILE!"
         call :DownloadFile "!CHECKSUM_FILE!" "!TEMP_CHECKSUM!"
         if !ERRORLEVEL! NEQ 0 (
             if exist "!TEMP_CHECKSUM!" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
@@ -843,6 +879,17 @@ set "TEMP_DIR="
 for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $dir = Join-Path $env:TEMP ('qwen-code-install-' + [IO.Path]::GetRandomFileName()); New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null; [Console]::Write($dir)"`) do set "TEMP_DIR=%%I"
 if "!TEMP_DIR!"=="" (
     echo ERROR: Failed to create a temporary directory.
+    exit /b 1
+)
+exit /b 0
+
+:CreateTempFile
+set "TEMP_FILE="
+set "QWEN_TEMP_FILE_PREFIX=%~1"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $file = Join-Path $env:TEMP ($env:QWEN_TEMP_FILE_PREFIX + '-' + [IO.Path]::GetRandomFileName()); New-Item -ItemType File -Path $file -ErrorAction Stop | Out-Null; [Console]::Write($file)"`) do set "TEMP_FILE=%%I"
+set "QWEN_TEMP_FILE_PREFIX="
+if "!TEMP_FILE!"=="" (
+    echo ERROR: Failed to create a temporary file.
     exit /b 1
 )
 exit /b 0
