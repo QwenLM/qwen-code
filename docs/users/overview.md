@@ -9,9 +9,8 @@
 
 ### Install Qwen Code:
 
-After the hosted installer endpoint is synced with the latest installer assets,
-the recommended installer uses a standalone archive when one is available for
-your platform. If it falls back to npm, Node.js 22 or later with npm must be
+The recommended installer uses a standalone archive when one is available for
+your platform. If it falls back to npm, Node.js 20 or later with npm must be
 available on PATH.
 
 **Linux / macOS**
@@ -23,7 +22,7 @@ curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/in
 **Windows**
 
 ```cmd
-powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
+powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
 > [!note]

@@ -23,17 +23,14 @@ const rootDir = path.resolve(__dirname, '..');
 
 const HOSTED_INSTALLATION_ASSETS = [
   {
-    sourcePath: ['scripts', 'installation', 'install-qwen-with-source.sh'],
+    sourcePath: ['scripts', 'installation', 'install-qwen.sh'],
     output: 'install-qwen.sh',
     mode: 0o755,
   },
   {
-    sourcePath: ['scripts', 'installation', 'install-qwen-with-source.bat'],
+    sourcePath: ['scripts', 'installation', 'install-qwen.bat'],
     output: 'install-qwen.bat',
-  },
-  {
-    sourcePath: ['scripts', 'installation', 'install-qwen-with-source.ps1'],
-    output: 'install-qwen.ps1',
+    lineEndings: 'crlf',
   },
 ];
 const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
@@ -113,7 +110,7 @@ async function buildHostedInstallationAssets(outDir, options = {}) {
     assertHostedInstallerSource(source, asset.output);
 
     const destination = path.join(outDir, asset.output);
-    fs.copyFileSync(source, destination);
+    copyHostedInstallationAsset(source, destination, asset);
     if (asset.mode !== undefined) {
       fs.chmodSync(destination, asset.mode);
     }
@@ -132,6 +129,16 @@ function assertNoUnexpectedHostedFiles(outDir) {
   if (unexpected.length > 0) {
     fail(`Unexpected hosted installer asset: ${unexpected.join(', ')}`);
   }
+}
+
+function copyHostedInstallationAsset(source, destination, asset) {
+  if (asset.lineEndings === 'crlf') {
+    const contents = fs.readFileSync(source, 'utf8');
+    fs.writeFileSync(destination, contents.replace(/\r?\n/g, '\r\n'));
+    return;
+  }
+
+  fs.copyFileSync(source, destination);
 }
 
 function assertHostedInstallerSource(source, output) {

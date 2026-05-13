@@ -22,8 +22,8 @@ are only required when the installer falls back to npm or when
 
 ## Installation Scripts
 
-- Linux/macOS: `install-qwen-with-source.sh`
-- Windows: `install-qwen-with-source.bat`
+- Linux/macOS: `install-qwen.sh`
+- Windows: `install-qwen.bat`
 
 ## Release Artifacts
 
@@ -36,8 +36,8 @@ GitHub releases publish these standalone archives:
 - `qwen-code-win-x64.zip`
 - `SHA256SUMS`
 
-The installer scripts (`install-qwen-with-source.sh`,
-`install-qwen-with-source.bat`) are not republished per release. They are
+The installer scripts (`install-qwen.sh`,
+`install-qwen.bat`) are not republished per release. They are
 served from a hosted installation endpoint and accept `--version` to pin a
 specific standalone release. This keeps the public install command on a stable
 hosted entrypoint while still allowing version pinning, rather than using
@@ -47,7 +47,7 @@ per-release installer URLs.
 > next release, the URL below still serves the legacy NVM-based installer,
 > which does not honor `--version` or `QWEN_INSTALL_VERSION` in the way
 > documented here. To get the standalone-archive-first behavior immediately,
-> run `install-qwen-with-source.sh` from a local checkout of this repository.
+> run `install-qwen.sh` from a local checkout of this repository.
 > The `--version` examples below describe the post-sync behavior.
 
 Latest hosted entrypoints used today:
@@ -58,17 +58,11 @@ curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/in
 ```
 
 ```cmd
-powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
+powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
-To pin a release with the hosted PowerShell entrypoint, set the env var first:
-
-```powershell
-$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'
-powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.ps1 | iex"
-```
-
-Or download `install-qwen.bat` directly and pass `--version`:
+To pin a release with the hosted Windows entrypoint, download `install-qwen.bat`
+and pass `--version`:
 
 ```powershell
 $installer = Join-Path $env:TEMP 'install-qwen.bat'
@@ -83,8 +77,6 @@ Hosted installer assets are staged separately from GitHub Release archives:
 
 - `install-qwen.sh` is the Linux/macOS hosted entrypoint.
 - `install-qwen.bat` is the Windows hosted entrypoint (also runnable directly).
-- `install-qwen.ps1` is the Windows hosted PowerShell shim that wraps
-  `install-qwen.bat` so the documented one-liner can use `irm | iex`.
 
 Build them with:
 
@@ -92,14 +84,13 @@ Build them with:
 npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-The staged `install-qwen.sh`, `install-qwen.bat`, and `install-qwen.ps1` files
-map to the fixed hosted URLs shown above. Upload their contents byte-for-byte
-to `installation/install-qwen.sh`, `installation/install-qwen.bat`, and
-`installation/install-qwen.ps1`; the staging command also writes `SHA256SUMS`
-for upload verification. The hosted installers intentionally default to
-`latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a standalone
-release. OSS/CDN upload automation is still a follow-up release operation;
-until then, release operators must sync these staged files manually.
+The staged `install-qwen.sh` and `install-qwen.bat` files map to the fixed
+hosted URLs shown above. Upload their contents byte-for-byte to
+`installation/install-qwen.sh` and `installation/install-qwen.bat`; the staging
+command also writes `SHA256SUMS` for upload verification. The hosted installers
+intentionally default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to
+pin a standalone release. OSS/CDN upload automation is still a follow-up release
+operation; until then, release operators must sync these staged files manually.
 
 Archive layout:
 
@@ -127,13 +118,13 @@ The default method is `detect`:
 You can force a method:
 
 ```bash
-bash install-qwen-with-source.sh --method standalone
-bash install-qwen-with-source.sh --method npm
+bash install-qwen.sh --method standalone
+bash install-qwen.sh --method npm
 ```
 
 ```bat
-install-qwen-with-source.bat --method standalone
-install-qwen-with-source.bat --method npm
+install-qwen.bat --method standalone
+install-qwen.bat --method npm
 ```
 
 ## Optional Native Modules
@@ -151,20 +142,20 @@ modules for the current machine.
 
 ```bash
 # Default: standalone archive with npm fallback
-bash install-qwen-with-source.sh
+bash install-qwen.sh
 
 # Record a source value
-bash install-qwen-with-source.sh --source github
+bash install-qwen.sh --source github
 
 # Use npm explicitly
-bash install-qwen-with-source.sh --method npm --registry https://registry.npmjs.org
+bash install-qwen.sh --method npm --registry https://registry.npmjs.org
 
 # Use the Aliyun standalone mirror
-bash install-qwen-with-source.sh --mirror aliyun
+bash install-qwen.sh --mirror aliyun
 
 # Install an offline archive
 # SHA256SUMS must be in the same directory.
-bash install-qwen-with-source.sh --archive ./qwen-code-linux-x64.tar.gz
+bash install-qwen.sh --archive ./qwen-code-linux-x64.tar.gz
 ```
 
 Standalone installs to:
@@ -179,20 +170,20 @@ Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_PARENT`,
 
 ```bat
 REM Default: standalone archive with npm fallback
-install-qwen-with-source.bat
+install-qwen.bat
 
 REM Record a source value
-install-qwen-with-source.bat --source github
+install-qwen.bat --source github
 
 REM Use npm explicitly
-install-qwen-with-source.bat --method npm --registry https://registry.npmjs.org
+install-qwen.bat --method npm --registry https://registry.npmjs.org
 
 REM Use the Aliyun standalone mirror
-install-qwen-with-source.bat --mirror aliyun
+install-qwen.bat --mirror aliyun
 
 REM Install an offline archive
 REM SHA256SUMS must be in the same directory.
-install-qwen-with-source.bat --archive qwen-code-win-x64.zip
+install-qwen.bat --archive qwen-code-win-x64.zip
 ```
 
 Standalone installs to:
