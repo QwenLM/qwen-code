@@ -467,4 +467,42 @@ describe('microcompactHistory', () => {
     );
     expect(result.meta!.toolsCleared).toBe(2);
   });
+
+  it('drops media nested in functionResponse.parts when clearing an old tool result', () => {
+    // Tool results returning images stash them on functionResponse.parts.
+    // Microcompact must drop that nested media when wiping the result.
+    const oldToolWithImage: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'old',
+            name: 'read_file',
+            response: { output: 'pretend file text' },
+            parts: [
+              { inlineData: { mimeType: 'image/png', data: 'BASE64IMAGE' } },
+            ],
+          } as unknown as NonNullable<
+            Content['parts']
+          >[number]['functionResponse'],
+        },
+      ],
+    };
+    const history: Content[] = [
+      makeToolCall('read_file'),
+      oldToolWithImage,
+      makeToolCall('read_file'),
+      makeToolResult('read_file', 'recent'),
+    ];
+
+    const result = microcompactHistory(history, twoHoursAgo, DEFAULT_SETTINGS);
+
+    expect(result.meta).toBeDefined();
+    const cleared = result.history[1]!.parts![0]!.functionResponse as {
+      response: { output: string };
+      parts?: unknown;
+    };
+    expect(cleared.response.output).toBe(MICROCOMPACT_CLEARED_MESSAGE);
+    expect(cleared.parts).toBeUndefined();
+  });
 });

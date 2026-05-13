@@ -92,7 +92,39 @@ export function estimatePartChars(
   if (typeof part.text === 'string') {
     return part.text.length;
   }
+  // Tool results in qwen-code carry media on `functionResponse.parts`
+  // (an extension to the @google/genai schema; see
+  // `coreToolScheduler.createFunctionResponsePart`). Walk into those
+  // nested parts so a base64 image attached to a `read_file` result
+  // isn't billed as ~350K chars by `JSON.stringify`.
+  if (part.functionResponse) {
+    let total = 0;
+    const output = part.functionResponse.response?.['output'];
+    if (typeof output === 'string') {
+      total += output.length;
+    }
+    const nested = getFunctionResponseParts(part);
+    if (nested) {
+      for (const inner of nested) {
+        total += estimatePartChars(inner, imageTokenEstimate);
+      }
+    }
+    // Add a small fixed floor for the wrapper metadata (id, name) so a
+    // pure media-only response isn't reported as just the image budget.
+    return total + 64;
+  }
   return JSON.stringify(part ?? {}).length;
+}
+
+/**
+ * Returns the nested-parts array from a `functionResponse`, if present.
+ * qwen-code attaches media here (see
+ * `coreToolScheduler.createFunctionResponsePart`); the standard
+ * `@google/genai` FunctionResponse type does not declare it.
+ */
+function getFunctionResponseParts(part: Part): Part[] | undefined {
+  const fr = part.functionResponse as { parts?: unknown } | undefined;
+  return Array.isArray(fr?.parts) ? (fr.parts as Part[]) : undefined;
 }
 
 export function estimateContentChars(
@@ -159,6 +191,30 @@ function transformPart(part: Part, stats: SlimStats): Part {
   }
   if (part.fileData) {
     return mediaPlaceholderPart(part.fileData.mimeType, stats);
+  }
+  // Walk into functionResponse.parts (qwen-code's nested-media carrier
+  // for tool results — see `coreToolScheduler.createFunctionResponsePart`).
+  // Without this, base64 images returned by read_file et al. leak into
+  // the side-query payload.
+  const nested = getFunctionResponseParts(part);
+  if (nested) {
+    let touched = false;
+    const newNested = nested.map((inner) => {
+      const replacement = transformPart(inner, stats);
+      if (replacement !== inner) {
+        touched = true;
+      }
+      return replacement;
+    });
+    if (touched) {
+      return {
+        ...part,
+        functionResponse: {
+          ...part.functionResponse!,
+          parts: newNested,
+        } as Part['functionResponse'],
+      };
+    }
   }
   return part;
 }

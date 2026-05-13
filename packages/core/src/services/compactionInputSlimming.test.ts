@@ -253,5 +253,104 @@ describe('compactionInputSlimming', () => {
       expect(result.stats.imagesStripped).toBe(0);
       expect(result.stats.documentsStripped).toBe(0);
     });
+
+    it('strips media nested in functionResponse.parts (tool-returned images)', () => {
+      // Mirrors what coreToolScheduler.convertToFunctionResponse builds
+      // when a tool (e.g. read_file) returns an image.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: '' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'image/png',
+                      data: 'BASE64IMAGEBYTES'.repeat(100),
+                    },
+                  },
+                ],
+              } as unknown as NonNullable<
+                Content['parts']
+              >[number]['functionResponse'],
+            },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history);
+
+      expect(result.stats.imagesStripped).toBe(1);
+      const fnResp = result.slimmedHistory[0]!.parts![0]!.functionResponse as {
+        parts: Array<{ text?: string; inlineData?: unknown }>;
+      };
+      expect(fnResp.parts[0]!.text).toBe('[image: image/png]');
+      expect(fnResp.parts[0]!.inlineData).toBeUndefined();
+      const originalNested = (
+        history[0]!.parts![0]!.functionResponse as {
+          parts: Array<{ inlineData?: { data: string } }>;
+        }
+      ).parts[0]!.inlineData?.data;
+      expect(originalNested?.length).toBeGreaterThan(0);
+    });
+
+    it('strips media nested in functionResponse.parts (documents)', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-2',
+                name: 'read_file',
+                response: { output: '' },
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'application/pdf',
+                      data: 'PDFBYTES',
+                    },
+                  },
+                ],
+              } as unknown as NonNullable<
+                Content['parts']
+              >[number]['functionResponse'],
+            },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history);
+
+      expect(result.stats.documentsStripped).toBe(1);
+      const fnResp = result.slimmedHistory[0]!.parts![0]!.functionResponse as {
+        parts: Array<{ text?: string }>;
+      };
+      expect(fnResp.parts[0]!.text).toBe('[document: application/pdf]');
+    });
+  });
+
+  describe('estimatePartChars (functionResponse with nested media)', () => {
+    it('walks nested parts so nested images are not billed at JSON.stringify length', () => {
+      const huge = 'X'.repeat(1_000_000);
+      const part = {
+        functionResponse: {
+          id: 'c',
+          name: 'read_file',
+          response: { output: '' },
+          parts: [{ inlineData: { mimeType: 'image/png', data: huge } }],
+        },
+      } as unknown as NonNullable<Content['parts']>[number];
+
+      const chars = estimatePartChars(part, 1600);
+      // Key invariant: nested image is treated as ~6,400 chars
+      // (imageTokenEstimate * 4), NOT close to the 1M JSON-stringify size.
+      expect(chars).toBeLessThan(10_000);
+      expect(chars).toBeGreaterThanOrEqual(6400);
+    });
   });
 });

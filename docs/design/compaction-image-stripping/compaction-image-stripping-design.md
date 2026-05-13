@@ -61,9 +61,12 @@ A new pure module that takes `Content[]` and returns a slimmed
 `Content[]`. One transform: inline-media stripping. Walk every `Part`.
 If the part has `inlineData` or `fileData` replace it with a `text`
 part of form `[image: image/png]` (or `[document: application/pdf]`).
-qwen-code's MCP integration emits media as top-level sibling parts
-(see `mcp-tool.ts` `transformMediaBlock`), not nested inside
-`functionResponse.response`, so no recursive walk is needed.
+
+qwen-code attaches tool-returned media on `functionResponse.parts`
+(an extension over the standard `@google/genai` `FunctionResponse`
+schema; see `coreToolScheduler.createFunctionResponsePart`). The
+slimmer recurses into that nested array so a base64 image returned by
+`read_file` or any MCP attachment-emitting tool is also replaced.
 
 The transform returns a fresh `Content[]` array; the original is never
 mutated. If the transform produces zero changes the original array
@@ -98,6 +101,11 @@ screenshot tools). The existing time-based trigger then clears stale
 inline images by replacing the part with `[Old inline media cleared:
 image/png]` once they fall outside the "keep recent" window. Errors
 (un-clearable parts) remain untouched.
+
+When clearing an old tool result, also drop `functionResponse.parts`
+explicitly — without this, the spread of `...part.functionResponse`
+preserves the nested media even though the textual output has been
+replaced with `MICROCOMPACT_CLEARED_MESSAGE`.
 
 ### Layer 4: configuration (`config/config.ts`)
 

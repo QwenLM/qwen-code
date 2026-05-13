@@ -100,11 +100,23 @@ function isErrorResponse(part: Part): boolean {
 
 function estimatePartTokens(part: Part): number {
   if (part.functionResponse?.response) {
+    let total = 0;
     const output = part.functionResponse.response['output'];
     if (typeof output === 'string') {
-      return Math.ceil(output.length / 4);
+      total += Math.ceil(output.length / 4);
     }
-    return 0;
+    // Tool results may carry nested media on `functionResponse.parts`
+    // (see `coreToolScheduler.createFunctionResponsePart`). Count their
+    // approximate cost too so cleared tokens reflect reality.
+    const nested = (part.functionResponse as { parts?: unknown }).parts;
+    if (Array.isArray(nested)) {
+      for (const inner of nested as Part[]) {
+        if (inner.inlineData?.data) {
+          total += Math.ceil(inner.inlineData.data.length / 4);
+        }
+      }
+    }
+    return total;
   }
   if (part.inlineData?.data) {
     // base64 expands ~4/3 over raw bytes; ~4 chars per token is the
@@ -212,9 +224,17 @@ export function microcompactHistory(
         tokensSaved += estimatePartTokens(part);
         toolsCleared++;
         touched = true;
+        // Drop `functionResponse.parts` along with the response text:
+        // qwen-code stashes tool-returned media (read_file images, MCP
+        // attachments) inside `parts`. Without explicitly omitting it
+        // the spread below would carry the original media through.
+        const { parts: _droppedNested, ...rest } =
+          part.functionResponse as typeof part.functionResponse & {
+            parts?: unknown;
+          };
         return {
           functionResponse: {
-            ...part.functionResponse,
+            ...rest,
             response: { output: MICROCOMPACT_CLEARED_MESSAGE },
           },
         };
