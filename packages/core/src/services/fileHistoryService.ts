@@ -397,7 +397,7 @@ export class FileHistoryService {
     );
   }
 
-  async rewind(promptId: string): Promise<string[]> {
+  async rewind(promptId: string, truncateHistory = true): Promise<string[]> {
     if (!this.enabled) return [];
 
     const targetSnapshot = this.findSnapshot(promptId);
@@ -408,12 +408,16 @@ export class FileHistoryService {
     debugLogger.debug(`FileHistory: Rewinding to snapshot for ${promptId}`);
     const filesChanged = await this.applySnapshot(targetSnapshot);
 
-    const targetIdx = this.state.snapshots.indexOf(targetSnapshot);
-    if (targetIdx >= 0) {
-      this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
-      this.state.trackedFiles = new Set(
-        this.state.snapshots.flatMap((s) => Object.keys(s.trackedFileBackups)),
-      );
+    if (truncateHistory) {
+      const targetIdx = this.state.snapshots.indexOf(targetSnapshot);
+      if (targetIdx >= 0) {
+        this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
+        this.state.trackedFiles = new Set(
+          this.state.snapshots.flatMap((s) =>
+            Object.keys(s.trackedFileBackups),
+          ),
+        );
+      }
     }
 
     debugLogger.debug(`FileHistory: Finished rewinding to ${promptId}`);

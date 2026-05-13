@@ -1982,18 +1982,52 @@ export const AppContainer = (props: AppContainerProps) => {
       // while the async file restore is in progress.
       setIsRewindSelectorOpen(false);
 
-      // Restore code (files on disk) — do this before conversation
-      // truncation so the promptId is still accessible, but defer info
-      // messages until after truncation so they aren't immediately removed.
+      // For 'both', validate that conversation can be truncated BEFORE
+      // touching files — otherwise we'd roll back the workspace while
+      // the conversation stays at the newer state.
+      const needsConversation = option === 'conversation' || option === 'both';
+      const geminiClient = needsConversation ? config.getGeminiClient() : null;
+      let apiTruncateIndex = -1;
+      if (needsConversation) {
+        if (!geminiClient) {
+          if (option === 'conversation') return;
+          // 'both' with no client: skip conversation, still try files
+        } else {
+          apiTruncateIndex = computeApiTruncationIndex(
+            historyManager.history,
+            userItem.id,
+            geminiClient.getHistory(),
+          );
+          if (apiTruncateIndex < 0) {
+            historyManager.addItem(
+              {
+                type: 'error',
+                text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+              },
+              Date.now(),
+            );
+            if (option === 'both') {
+              // Abort file restore too — don't create inconsistent state
+              return;
+            }
+            return;
+          }
+        }
+      }
+
+      // Restore code (files on disk). For 'code'-only, don't truncate
+      // the snapshot timeline — the conversation turns remain visible
+      // and their snapshots must stay available for future rewinds.
       let fileRestoreMessage: string | undefined;
       let fileRestoreError: string | undefined;
       if (option === 'code' || option === 'both') {
         const promptId = (userItem as HistoryItemUser).promptId;
         if (promptId) {
           try {
+            const truncateHistory = option === 'both';
             const filesChanged = await config
               .getFileHistoryService()
-              .rewind(promptId);
+              .rewind(promptId, truncateHistory);
             if (filesChanged.length > 0) {
               fileRestoreMessage = t('Restored {{count}} file(s).', {
                 count: String(filesChanged.length),
@@ -2013,77 +2047,39 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
 
-      // Restore conversation
-      if (option === 'conversation' || option === 'both') {
-        const geminiClient = config.getGeminiClient();
-        const canTruncate = (() => {
-          if (!geminiClient) return false;
+      // Truncate conversation (already validated above).
+      if (needsConversation && geminiClient && apiTruncateIndex >= 0) {
+        const originalHistory = historyManager.history;
+        const originalLength = originalHistory.length;
 
-          const apiHistory = geminiClient.getHistory();
-          const apiTruncateIndex = computeApiTruncationIndex(
-            historyManager.history,
-            userItem.id,
-            apiHistory,
-          );
+        let targetTurnIndex = 0;
+        for (const h of originalHistory) {
+          if (h.id === userItem.id) break;
+          if (isRealUserTurn(h)) targetTurnIndex++;
+        }
 
-          if (apiTruncateIndex < 0) {
-            historyManager.addItem(
-              {
-                type: 'error',
-                text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-              },
-              Date.now(),
-            );
-            return false;
-          }
+        geminiClient.truncateHistory(apiTruncateIndex);
 
-          // 1. Compute values from current history BEFORE truncation
-          const originalHistory = historyManager.history;
-          const originalLength = originalHistory.length;
+        const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+        historyManager.loadHistory(truncatedUi);
 
-          let targetTurnIndex = 0;
-          for (const h of originalHistory) {
-            if (h.id === userItem.id) break;
-            if (isRealUserTurn(h)) targetTurnIndex++;
-          }
+        refreshStatic();
 
-          // 2. Truncate API history to the target point.
-          // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
-          // reasoning_content continuity across all turns in the conversation.
-          geminiClient.truncateHistory(apiTruncateIndex);
+        if (userItem.type === 'user' && userItem.text) {
+          buffer.setText(userItem.text);
+        }
 
-          // 3. Truncate UI history (keep everything before the target item)
-          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
-          historyManager.loadHistory(truncatedUi);
+        historyManager.addItem(
+          {
+            type: 'info',
+            text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
+          },
+          Date.now(),
+        );
 
-          // 4. Re-render the terminal
-          refreshStatic();
-
-          // 5. Pre-populate input with the original user text
-          if (userItem.type === 'user' && userItem.text) {
-            buffer.setText(userItem.text);
-          }
-
-          // 6. Add info message
-          historyManager.addItem(
-            {
-              type: 'info',
-              text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
-            },
-            Date.now(),
-          );
-
-          // 7. Record the rewind event — re-roots the parentUuid chain so
-          //    rewound messages end up on a dead branch during resume.
-          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-            truncatedCount: originalLength - truncatedUi.length,
-          });
-          return true;
-        })();
-
-        // If conversation truncation failed but we're in 'both' mode,
-        // still fall through to show file restore messages below.
-        if (!canTruncate && option === 'conversation') return;
+        config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+          truncatedCount: originalLength - truncatedUi.length,
+        });
       }
 
       // Show file restore result after conversation truncation so the
