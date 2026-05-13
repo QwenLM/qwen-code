@@ -97,6 +97,11 @@ export interface HistoryItemBase {
      * rendered in the restored transcript. Set by --quiet-restore.
      */
     suppressOnRestore?: boolean;
+    /**
+     * Identifies special display-only items, like the summary row added
+     * when history is collapsed.
+     */
+    kind?: 'collapse-summary';
   };
 }
 

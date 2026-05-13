@@ -123,17 +123,17 @@ export function useResumeCommand(
 
       // Reset UI history.
       const rawItems = buildResumedHistoryItems(sessionData, config);
-      const defaultCollapsed =
-        settings?.merged.ui?.history?.defaultCollapsed ?? false;
+      const collapseOnResume =
+        settings?.merged.ui?.history?.collapseOnResume ?? false;
 
       const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
-        defaultCollapsed,
+        collapseOnResume,
       });
 
       clearItems?.();
       loadHistory?.(uiHistoryItems);
 
-      if (defaultCollapsed && rawItems.length > 0) {
+      if (collapseOnResume && rawItems.length > 0) {
         addItem?.(
           createHistoryCollapseSummaryItem(rawItems.length),
           Date.now(),
@@ -191,7 +191,7 @@ export function useResumeCommand(
       startNewSession,
       setSessionName,
       remount,
-      settings?.merged.ui?.history?.defaultCollapsed,
+      settings?.merged.ui?.history?.collapseOnResume,
     ],
   );
 

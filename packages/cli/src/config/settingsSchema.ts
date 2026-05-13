@@ -678,9 +678,9 @@ const SETTINGS_SCHEMA = {
         description: 'History display settings.',
         showInDialog: false,
         properties: {
-          defaultCollapsed: {
+          collapseOnResume: {
             type: 'boolean',
-            label: 'Default Collapsed',
+            label: 'Collapse On Resume',
             category: 'UI',
             requiresRestart: false,
             default: false,

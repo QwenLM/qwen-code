@@ -18,7 +18,7 @@ const mockSettings = {
   merged: {
     ui: {
       history: {
-        defaultCollapsed: false,
+        collapseOnResume: false,
       },
     },
   },
@@ -52,9 +52,16 @@ const resumeMocks = vi.hoisted(() => {
   };
 });
 
-vi.mock('../utils/resumeHistoryUtils.js', () => ({
-  buildResumedHistoryItems: vi.fn(() => [{ id: 1, type: 'user', text: 'hi' }]),
-}));
+vi.mock('../utils/resumeHistoryUtils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/resumeHistoryUtils.js')>();
+  return {
+    ...actual,
+    buildResumedHistoryItems: vi.fn(() => [
+      { id: 1, type: 'user', text: 'hi' },
+    ]),
+  };
+});
 
 vi.mock('../utils/restoreGoal.js', () => ({
   restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
@@ -150,16 +157,19 @@ describe('useResumeCommand', () => {
   });
 
   it('should maintain stable function references across renders', () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
     const { result, rerender } = renderHook(() =>
       useResumeCommand({
         settings: mockSettings,
         config: null,
-        historyManager: {
-          addItem: vi.fn(),
-          clearItems: vi.fn(),
-          loadHistory: vi.fn(),
-        },
-        startNewSession: vi.fn(),
+        historyManager,
+        startNewSession,
       }),
     );
 
@@ -295,6 +305,93 @@ describe('useResumeCommand', () => {
       expect.any(Array),
       config,
       historyManager.addItem,
+    );
+  });
+
+  it('applies collapseOnResume policy when resuming a session', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const geminiClient = {
+      initialize: vi.fn(),
+    };
+    const resetMonitorRegistry = vi.fn();
+
+    const config = {
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => geminiClient,
+      startNewSession: vi.fn(),
+      getBackgroundTaskRegistry: () => ({
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: resetMonitorRegistry,
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const settingsWithCollapse = {
+      merged: {
+        ui: {
+          history: {
+            collapseOnResume: true,
+          },
+        },
+      },
+    } as unknown as LoadedSettings;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        settings: settingsWithCollapse,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    let resumePromise: Promise<void> | undefined;
+    act(() => {
+      resumePromise = result.current.handleResume('session-3');
+    });
+
+    resumeMocks.resolvePendingLoadSession({
+      conversation: [{ role: 'user', parts: [{ text: 'hello' }] }],
+    });
+    await act(async () => {
+      await resumePromise;
+    });
+
+    // Verify that loadHistory was called with items having suppressOnRestore: true
+    expect(historyManager.loadHistory).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          display: expect.objectContaining({ suppressOnRestore: true }),
+        }),
+      ]),
+    );
+
+    // Verify that the summary item was added
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        display: expect.objectContaining({ kind: 'collapse-summary' }),
+      }),
+      expect.any(Number),
     );
   });
 

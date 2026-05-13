@@ -491,15 +491,15 @@ export const AppContainer = (props: AppContainerProps) => {
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
         const rawItems = buildResumedHistoryItems(resumedSessionData, config);
-        const defaultCollapsed =
-          settings.merged.ui?.history?.defaultCollapsed ?? false;
+        const collapseOnResume =
+          settings.merged.ui?.history?.collapseOnResume ?? false;
 
         const historyItems = applyResumeDisplayPolicy(rawItems, {
-          defaultCollapsed,
+          collapseOnResume,
         });
         historyManager.loadHistory(historyItems);
 
-        if (defaultCollapsed && rawItems.length > 0) {
+        if (collapseOnResume && rawItems.length > 0) {
           historyManager.addItem(
             createHistoryCollapseSummaryItem(rawItems.length),
             Date.now(),

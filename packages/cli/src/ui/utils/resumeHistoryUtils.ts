@@ -487,15 +487,15 @@ export function buildResumedHistoryItems(
 
 /**
  * Applies the quiet-restore display policy to resumed history items.
- * When `defaultCollapsed` is true, marks each item with
+ * When `collapseOnResume` is true, marks each item with
  * `display.suppressOnRestore` so the rendering layer skips them while
  * the canonical history (used by /rewind turn mapping) is preserved.
  */
 export function applyResumeDisplayPolicy(
   items: HistoryItem[],
-  options: { defaultCollapsed?: boolean },
+  options: { collapseOnResume?: boolean },
 ): HistoryItem[] {
-  if (!options.defaultCollapsed) return items;
+  if (!options.collapseOnResume) return items;
   return items.map((item) => ({
     ...item,
     display: { ...item.display, suppressOnRestore: true },
@@ -512,5 +512,6 @@ export function createHistoryCollapseSummaryItem(
   return {
     type: MessageType.INFO,
     text: `History collapsed: ${messageCount} message${messageCount !== 1 ? 's' : ''} hidden. Use /history expand to show.`,
+    display: { kind: 'collapse-summary' },
   };
 }
