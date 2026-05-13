@@ -8,17 +8,18 @@
  * Run-level budget enforcement for headless / non-interactive Qwen Code
  * sessions. See issue QwenLM/qwen-code#4103.
  *
- * The enforcer is wired into the non-interactive run loop: the loop ticks
- * the API counter immediately before each `sendMessageStream` call and the
- * tool counter immediately after each `executeToolCall`. A wall-clock timer
- * is started in the constructor and torn down by `stop()` on exit. When any
- * limit is exceeded the enforcer aborts the run via the shared
- * `AbortController` and records the reason so the caller can emit a
+ * The enforcer is wired into the non-interactive run loop: both `tickApiCall`
+ * and `tickToolCall` are called *before* the corresponding `sendMessageStream`
+ * / `executeToolCall` so that a budget of N caps the run at exactly N
+ * executions — the (N+1)th tick aborts before the work is performed. A
+ * wall-clock timer is started via `start()` and torn down by `stop()` on
+ * exit. When any limit is exceeded the enforcer aborts the run via the
+ * shared `AbortController` and records the reason so the caller can emit a
  * structured error.
  *
- * Counters are post-increment: the very first call is always allowed; the
- * (N+1)th call after a budget of N is denied. This mirrors how
- * `maxSessionTurns` behaves so users can reason about budgets uniformly.
+ * Counters post-increment internally so the first call is always allowed
+ * and the (N+1)th is denied. This mirrors how `maxSessionTurns` behaves so
+ * users can reason about budgets uniformly.
  */
 
 export type BudgetKind = 'wall-time' | 'tool-calls' | 'api-calls';
@@ -33,11 +34,18 @@ export interface BudgetExceeded {
 }
 
 export interface RunBudgetOptions {
-  /** Wall-clock budget in seconds. `-1` or `undefined` disables. */
+  /** Wall-clock budget in seconds. Non-positive (`-1`, `0`, undefined) disables. */
   maxWallTimeSeconds?: number;
-  /** Max cumulative tool calls. `-1` or `undefined` disables. */
+  /**
+   * Max cumulative tool calls. `-1` / `undefined` disables; `0` is a valid
+   * budget meaning "no tool calls allowed" (the first tick aborts).
+   */
   maxToolCalls?: number;
-  /** Max cumulative model-stream-request calls. `-1` or `undefined` disables. */
+  /**
+   * Max cumulative model-stream-request calls. `-1` / `undefined` disables;
+   * `0` is a valid budget meaning "no API calls allowed" (the first tick
+   * aborts before any stream is opened).
+   */
   maxApiCalls?: number;
 }
 
@@ -46,7 +54,7 @@ const SECOND = 1000;
 /**
  * Parses a duration string used by `--max-wall-time`.
  *
- * Accepted forms:
+ * Accepted forms (all must resolve to a positive duration):
  *   - plain number (interpreted as seconds): `"90"` → 90
  *   - suffixed: `"30s"`, `"5m"`, `"1h"`, `"500ms"`
  *   - case-insensitive suffix; whitespace tolerated
@@ -55,41 +63,54 @@ const SECOND = 1000;
  * in settings.json. Sub-second precision is preserved (e.g. `"500ms"` →
  * `0.5`).
  *
- * Throws on garbage input rather than silently defaulting — a typo in a
- * CI budget flag should fail loud at startup, not silently disable the
- * guardrail.
+ * Throws on garbage input, on negative values (regex-rejected — no sign
+ * allowed), and on zero — rather than silently defaulting. A typo in a CI
+ * budget flag should fail loud at startup, not silently disable the
+ * guardrail. To run without a wall-clock budget, omit the flag.
  */
 export function parseDurationSeconds(input: string): number {
   const trimmed = input.trim().toLowerCase();
   if (trimmed.length === 0) {
     throw new Error('Invalid duration: empty string');
   }
+  // Regex disallows a leading sign, so negatives short-circuit on
+  // structural mismatch below — no explicit `< 0` check needed.
   const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/.exec(trimmed);
   if (!match) {
     throw new Error(
-      `Invalid duration "${input}". Use a number of seconds (e.g. 90) or a duration with unit (e.g. 30s, 5m, 1h, 500ms).`,
+      `Invalid duration "${input}". Use a positive number of seconds (e.g. 90) or a duration with unit (e.g. 30s, 5m, 1h, 500ms).`,
     );
   }
   const value = Number.parseFloat(match[1]);
-  if (!Number.isFinite(value) || value < 0) {
-    throw new Error(
-      `Invalid duration "${input}": must be a non-negative number.`,
-    );
-  }
   const unit = match[2] ?? 's';
+  let seconds: number;
   switch (unit) {
     case 'ms':
-      return value / 1000;
+      seconds = value / 1000;
+      break;
     case 's':
-      return value;
+      seconds = value;
+      break;
     case 'm':
-      return value * 60;
+      seconds = value * 60;
+      break;
     case 'h':
-      return value * 3600;
+      seconds = value * 3600;
+      break;
     default:
       // Unreachable given the regex, but keeps the type-checker honest.
       throw new Error(`Invalid duration unit "${unit}"`);
   }
+  // Zero is rejected as a foot-gun: `--max-wall-time 0` would silently
+  // disable the budget (the enforcer treats <=0 as "no timer"), which is
+  // the opposite of what a user typing "0" probably means. If they want
+  // unlimited, they shouldn't pass the flag at all.
+  if (seconds <= 0) {
+    throw new Error(
+      `Invalid duration "${input}": must be greater than zero. Omit the flag entirely if you don't want a wall-clock budget.`,
+    );
+  }
+  return seconds;
 }
 
 export class RunBudgetEnforcer {
@@ -107,18 +128,6 @@ export class RunBudgetEnforcer {
     this.maxToolCalls = opts.maxToolCalls ?? -1;
     this.maxApiCalls = opts.maxApiCalls ?? -1;
     this.abortController = abortController;
-  }
-
-  /**
-   * True if any budget is configured. Lets the caller skip
-   * instantiation entirely when nothing is constrained.
-   */
-  hasAnyLimit(): boolean {
-    return (
-      this.maxWallTimeSeconds > 0 ||
-      this.maxToolCalls >= 0 ||
-      this.maxApiCalls >= 0
-    );
   }
 
   /**
@@ -193,10 +202,14 @@ export class RunBudgetEnforcer {
     // overruns (e.g. an in-flight tool finishing after wall-time fired)
     // don't clobber the original reason.
     if (this.exceeded !== null) return;
+    // If the abort already happened from a different source (SIGINT, an
+    // external `options.abortController` shared with a parent), don't
+    // claim the abort as a budget event — otherwise routeAbort would
+    // emit exit code 55 ("budget exceeded") when the real cause was
+    // user cancellation (130).
+    if (this.abortController.signal.aborted) return;
     this.exceeded = record;
     this.stop();
-    if (!this.abortController.signal.aborted) {
-      this.abortController.abort();
-    }
+    this.abortController.abort();
   }
 }

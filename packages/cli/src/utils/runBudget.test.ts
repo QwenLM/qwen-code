@@ -17,13 +17,12 @@ describe('parseDurationSeconds', () => {
     ['1h', 3600],
     ['500ms', 0.5],
     ['1.5h', 5400],
-    ['0', 0],
   ])('parses %s as %d seconds', (input, expected) => {
     expect(parseDurationSeconds(input)).toBeCloseTo(expected);
   });
 
-  it.each(['', 'abc', '10x', '-5', '5 m s', 'NaN'])(
-    'rejects garbage input %s',
+  it.each(['', 'abc', '10x', '-5', '5 m s', 'NaN', '0', '0s', '0ms'])(
+    'rejects invalid / non-positive input %s',
     (input) => {
       expect(() => parseDurationSeconds(input)).toThrow();
     },
@@ -36,23 +35,6 @@ describe('RunBudgetEnforcer', () => {
   });
   afterEach(() => {
     vi.useRealTimers();
-  });
-
-  it('hasAnyLimit reports correctly', () => {
-    const ac = new AbortController();
-    expect(new RunBudgetEnforcer({}, ac).hasAnyLimit()).toBe(false);
-    expect(
-      new RunBudgetEnforcer({ maxWallTimeSeconds: -1 }, ac).hasAnyLimit(),
-    ).toBe(false);
-    expect(new RunBudgetEnforcer({ maxToolCalls: 0 }, ac).hasAnyLimit()).toBe(
-      true,
-    );
-    expect(new RunBudgetEnforcer({ maxApiCalls: 5 }, ac).hasAnyLimit()).toBe(
-      true,
-    );
-    expect(
-      new RunBudgetEnforcer({ maxWallTimeSeconds: 1 }, ac).hasAnyLimit(),
-    ).toBe(true);
   });
 
   it('allows up to maxApiCalls calls, aborts on the (N+1)th', () => {
@@ -132,6 +114,17 @@ describe('RunBudgetEnforcer', () => {
     enforcer.tickToolCall();
     enforcer.tickApiCall();
     expect(enforcer.getExceeded()?.kind).toBe('tool-calls');
+  });
+
+  it('does not record an "exceeded" reason when the controller was already aborted by a third party (SIGINT race)', () => {
+    const ac = new AbortController();
+    const enforcer = new RunBudgetEnforcer({ maxApiCalls: 0 }, ac);
+    // Simulate SIGINT landing first: the shared abortController already
+    // fired before any budget tick. The enforcer must not retroactively
+    // claim the abort as a budget overrun.
+    ac.abort();
+    enforcer.tickApiCall();
+    expect(enforcer.getExceeded()).toBeNull();
   });
 
   it('start() is idempotent', () => {

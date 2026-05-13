@@ -613,6 +613,12 @@ export async function runNonInteractive(
               )
             : createToolProgressHandler(requestInfo, adapter);
 
+          // Tick BEFORE the call so that --max-tool-calls=N caps at exactly
+          // N executions: the (N+1)th tick aborts before the tool runs. Tick
+          // after the call would let the (N+1)th tool execute and only then
+          // abort — see issue #4103 review pass.
+          budgetEnforcer.tickToolCall();
+          if (abortController.signal.aborted) await routeAbort();
           const toolResponse = await executeToolCall(
             config,
             requestInfo,
@@ -624,8 +630,6 @@ export async function runNonInteractive(
               }),
             },
           );
-          budgetEnforcer.tickToolCall();
-          if (abortController.signal.aborted) await routeAbort();
 
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
