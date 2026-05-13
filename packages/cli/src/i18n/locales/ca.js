@@ -142,6 +142,8 @@ export default {
   'Restored {{count}} file(s).': "S'han restaurat {{count}} fitxer(s).",
   'Failed to restore files: {{error}}':
     'Error en restaurar els fitxers: {{error}}',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Error en restaurar {{count}} fitxer(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'No es poden restaurar els fitxers: aquest torn es va crear abans que el punt de control de fitxers estigués habilitat.',
   'No files needed restoration.': 'Cap fitxer necessitava restauració.',

@@ -136,6 +136,8 @@ export default {
   'Restored {{count}} file(s).': '{{count}} arquivo(s) restaurado(s).',
   'Failed to restore files: {{error}}':
     'Falha ao restaurar arquivos: {{error}}',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Falha ao restaurar {{count}} arquivo(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Não é possível restaurar arquivos: este turno foi criado antes do checkpoint de arquivos ser ativado.',
   'No files needed restoration.': 'Nenhum arquivo precisou ser restaurado.',

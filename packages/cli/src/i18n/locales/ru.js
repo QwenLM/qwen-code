@@ -145,6 +145,8 @@ export default {
   'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
   'Failed to restore files: {{error}}':
     'Не удалось восстановить файлы: {{error}}',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Не удалось восстановить {{count}} файл(ов): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Невозможно восстановить файлы: этот ход был создан до включения контрольных точек файлов.',
   'No files needed restoration.': 'Файлы не нуждались в восстановлении.',

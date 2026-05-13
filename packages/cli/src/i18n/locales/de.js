@@ -121,6 +121,8 @@ export default {
   'Restored {{count}} file(s).': '{{count}} Datei(en) wiederhergestellt.',
   'Failed to restore files: {{error}}':
     'Fehler beim Wiederherstellen der Dateien: {{error}}',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '{{count}} Datei(en) konnten nicht wiederhergestellt werden: {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Dateien können nicht wiederhergestellt werden: Dieser Turn wurde erstellt, bevor Datei-Checkpointing aktiviert war.',
   'No files needed restoration.':

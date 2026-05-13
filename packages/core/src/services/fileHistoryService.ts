@@ -341,7 +341,12 @@ export class FileHistoryService {
           try {
             const filePath = this.maybeExpandFilePath(trackingPath);
             const latestBackup = mostRecent.trackedFileBackups[trackingPath];
-            const nextVersion = latestBackup ? latestBackup.version + 1 : 1;
+            let maxVersion = 0;
+            for (const s of this.state.snapshots) {
+              const b = s.trackedFileBackups[trackingPath];
+              if (b && b.version > maxVersion) maxVersion = b.version;
+            }
+            const nextVersion = maxVersion + 1;
 
             let fileStats: Stats | undefined;
             try {

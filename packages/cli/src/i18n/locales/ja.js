@@ -102,6 +102,8 @@ export default {
   'Restored {{count}} file(s).': '{{count}} 個のファイルを復元しました。',
   'Failed to restore files: {{error}}':
     'ファイルの復元に失敗しました：{{error}}',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '{{count}} 個のファイルの復元に失敗しました：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'ファイルを復元できません：このターンはファイルチェックポイントが有効になる前に作成されました。',
   'No files needed restoration.': '復元が必要なファイルはありません。',
