@@ -38,7 +38,6 @@ import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
 import type { Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
-import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -56,7 +55,9 @@ import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
+import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
+import { serveCommand } from '../commands/serve.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -959,14 +960,15 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(mcpCommand)
     // Register Extension subcommands
     .command(extensionsCommand)
-    // Register Auth subcommands
     .command(authCommand)
     // Register Hooks subcommands
     .command(hooksCommand)
     // Register Channel subcommands
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand);
+    .command(reviewCommand)
+    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
+    .command(serveCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -987,11 +989,15 @@ export async function parseArguments(): Promise<CliArgs> {
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
+      result._[0] === 'auth' ||
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review')
   ) {
-    // MCP/Extensions/Hooks/Channel/Review commands handle their own
+    // Note: `serve` is intentionally NOT in this list. Its handler blocks
+    // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
+    // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
+    // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
@@ -1471,6 +1477,27 @@ export async function loadCliConfig(
   });
 
   const { model: resolvedModel } = resolvedCliConfig;
+
+  // Disable ToolSearch when explicitly configured or for models that benefit
+  // from prefix-based KV caching. DeepSeek models (v3, v4, deepseek-chat)
+  // all use prefix-based disk KV caching with heavily discounted cached
+  // token pricing (up to 1/120 for v4). When tool_search is in the deny
+  // list, client.ts eagerly reveals all deferred tools so every MCP tool
+  // schema is in the initial declaration list, keeping the prompt prefix
+  // stable and maximizing cache hit rates.
+  // Note: no `^` anchor — model names may include a provider prefix
+  // (e.g. "openrouter/deepseek/deepseek-v4-flash").
+  const toolSearchExplicitlyEnabled = settings.tools?.toolSearch?.enabled;
+  const shouldDisableToolSearch =
+    toolSearchExplicitlyEnabled === false ||
+    (toolSearchExplicitlyEnabled === undefined &&
+      resolvedModel !== undefined &&
+      /deepseek-(v3|v4|chat)/i.test(resolvedModel));
+  if (shouldDisableToolSearch) {
+    if (!mergedDeny.includes('tool_search')) {
+      mergedDeny.push('tool_search');
+    }
+  }
 
   const sandboxConfig = await loadSandboxConfig(
     bareMode ? ({} as Settings) : settings,

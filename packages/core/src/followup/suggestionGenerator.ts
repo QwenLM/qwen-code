@@ -12,6 +12,7 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import {
   uiTelemetryService,
   EVENT_API_RESPONSE,
@@ -198,7 +199,7 @@ async function generateViaForkedQuery(
   return null;
 }
 
-/** Generate via direct ContentGenerator.generateContent (always reports usage) */
+/** Generate via runSideQuery (always reports usage) */
 async function generateViaBaseLlm(
   config: Config,
   conversationHistory: Content[],
@@ -211,33 +212,24 @@ async function generateViaBaseLlm(
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 
-  const generator = config.getContentGenerator();
   const startTime = Date.now();
-  const response = await generator.generateContent(
-    {
-      model,
-      contents,
-      config: {
-        abortSignal,
-        // Disable thinking for suggestion generation — not needed and wastes tokens
-        thinkingConfig: { includeThoughts: false },
-      },
-    },
-    'prompt_suggestion',
-  );
+  const result = await runSideQuery(config, {
+    purpose: 'prompt-suggestion',
+    contents,
+    abortSignal,
+    model,
+    // Suggestions are best-effort UI hints; if the model is unavailable,
+    // the user shouldn't pay 7× the latency for a hint they may ignore.
+    maxAttempts: 1,
+  });
   const durationMs = Date.now() - startTime;
 
   // Report usage to session stats so /stats tracks suggestion model tokens
-  const usage = response.usageMetadata;
-  if (usage) {
-    reportSuggestionUsage(model, usage, durationMs);
+  if (result.usage) {
+    reportSuggestionUsage(model, result.usage, durationMs);
   }
 
-  const text = response.candidates?.[0]?.content?.parts
-    ?.filter((p) => !(p as Record<string, unknown>)['thought'])
-    .map((p) => p.text ?? '')
-    .join('')
-    .trim();
+  const text = result.text;
   if (text) {
     // Try to parse as JSON first (model might return {"suggestion": "..."})
     try {

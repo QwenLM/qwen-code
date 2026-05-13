@@ -6,7 +6,7 @@
 
 import type { Content } from '@google/genai';
 import {
-  getResponseText,
+  runSideQuery,
   SESSION_TITLE_MAX_LENGTH,
   stripTerminalControlSequences,
   tryGenerateSessionTitle,
@@ -56,44 +56,35 @@ async function generateKebabTitle(
       return null;
     }
 
-    // Prefer the fast model for title generation — it's much cheaper and
-    // faster than the main model, and title generation is a small bounded
-    // task that doesn't need main-model reasoning. Falls back to the main
-    // model when no fast model is configured so this path never fails to
-    // start.
-    const model = config.getFastModel() ?? config.getModel();
-    const response = await config.getContentGenerator().generateContent(
-      {
-        model,
-        contents: [
+    const result = await runSideQuery(config, {
+      purpose: 'chat-rename',
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: conversationText }],
+        },
+      ],
+      systemInstruction: {
+        role: 'user',
+        parts: [
           {
-            role: 'user',
-            parts: [{ text: conversationText }],
+            text: 'Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: "fix-login-bug", "add-auth-feature", "refactor-api-client". Reply with ONLY the kebab-case name, nothing else.',
           },
         ],
-        config: {
-          systemInstruction: {
-            role: 'user',
-            parts: [
-              {
-                text: 'Generate a short kebab-case name (2-4 words) that captures the main topic of this conversation. Use lowercase words separated by hyphens. Examples: "fix-login-bug", "add-auth-feature", "refactor-api-client". Reply with ONLY the kebab-case name, nothing else.',
-              },
-            ],
-          },
-          abortSignal: signal,
-        },
       },
-      'rename_generate_title',
-    );
+      abortSignal: signal ?? new AbortController().signal,
+      // Title generation is a one-shot interactive gesture; if the model
+      // is unavailable, surface "could not generate" instead of retrying.
+      maxAttempts: 1,
+    });
 
-    const text = getResponseText(response)?.trim();
-    if (!text) {
+    if (!result.text) {
       return null;
     }
     // Clean up: strip ANSI / control sequences via the shared helper
     // (same security concern as the sentence-case path — the title renders
     // directly in the picker), then take the first line and drop quotes.
-    const cleaned = stripTerminalControlSequences(text)
+    const cleaned = stripTerminalControlSequences(result.text)
       .split('\n')[0]
       .replace(/["`']/g, '')
       .trim();

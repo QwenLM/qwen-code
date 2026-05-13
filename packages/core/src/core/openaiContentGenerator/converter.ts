@@ -21,7 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import type { RequestContext } from './types.js';
+import type { RequestContext, StreamingTextDeltaState } from './types.js';
 import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
   convertSchema,
@@ -57,6 +57,149 @@ export interface ExtendedCompletionChunkDelta
   extends OpenAI.Chat.ChatCompletionChunk.Choice.Delta {
   reasoning_content?: string | null;
   reasoning?: string | null;
+}
+
+// Threshold for treating an exact-repeat chunk as a cumulative marker rather
+// than legitimate repeated content. Cumulative providers replay the entire
+// accumulated buffer (typically hundreds of bytes) on each re-send, while
+// legitimate repeats in real output (duplicated import lines, repeated short
+// boilerplate like "</div>\n</div>", repeated emoji sequences) are usually
+// well under this threshold. 64 sits comfortably above realistic legit-repeat
+// lengths while remaining far below any practical cumulative-buffer replay,
+// so it preserves catch-rate without silently suppressing legitimate chunks.
+const CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH = 64;
+
+// Once this many bytes have been emitted without entering cumulative mode the
+// stream is almost certainly a standard incremental provider. Stop growing
+// emittedText beyond this point to bound per-stream memory and CPU. The true
+// emitted total is preserved separately in `state.emittedLength` so a late
+// transition into cumulative mode still slices the correct suffix.
+const CUMULATIVE_DETECTION_WINDOW_BYTES = 1024;
+
+/**
+ * Some OpenAI-compatible providers (e.g. DashScope) send the entire
+ * accumulated content in each `delta.content` field instead of incremental
+ * suffixes. Normalize that shape to incremental suffixes before the Gemini
+ * stream layer appends it to the live transcript.
+ *
+ * State invariants and lifecycle:
+ * - `state` is per-stream and per-channel — the content and reasoning
+ *   channels are tracked independently to avoid cross-contamination. State
+ *   MUST NOT be shared or reused across requests; stale state will silently
+ *   corrupt text output.
+ * - In cumulative mode `state.emittedText` retains the full accumulated text
+ *   for the request lifetime (worst case: ~final response size, e.g. ~100KB
+ *   for a long answer). This is single-request scoped and bounded by request
+ *   completion. A future optimization could retain only the last N bytes once
+ *   cumulative mode is firmly established, but is not required today.
+ * - In non-cumulative mode `state.emittedText` is capped at
+ *   CUMULATIVE_DETECTION_WINDOW_BYTES; `state.emittedLength` tracks the true
+ *   user-visible total separately so a late transition into cumulative mode
+ *   still produces the correct suffix.
+ * - The "exit cumulative" path is a verbatim-emit path with no overlap
+ *   reconciliation: the diverged chunk is assumed to be fully fresh content.
+ *   Cumulative providers that emit a half-overlapping chunk on exit (not
+ *   observed on DashScope-class providers) would produce visible duplication
+ *   on the overlap.
+ */
+function normalizeStreamingTextDelta(
+  rawDelta: string,
+  state: StreamingTextDeltaState,
+): string {
+  if (rawDelta.length === 0) {
+    return '';
+  }
+
+  if (state.emittedText.length === 0) {
+    state.emittedText = rawDelta;
+    state.emittedLength = rawDelta.length;
+    return rawDelta;
+  }
+
+  if (state.cumulativeMode) {
+    if (rawDelta.startsWith(state.emittedText)) {
+      const suffix = rawDelta.slice(state.emittedText.length);
+      state.emittedText = rawDelta;
+      state.emittedLength = rawDelta.length;
+      return suffix;
+    }
+
+    if (state.emittedText.startsWith(rawDelta)) {
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: cumulative rewind suppression (emitted=${state.emittedText.length}b, chunk=${rawDelta.length}b)`,
+      );
+      return '';
+    }
+
+    debugLogger.debug(
+      'normalizeStreamingTextDelta: exiting cumulative mode (chunk does not match prior accumulated text)',
+    );
+    state.cumulativeMode = false;
+    // Reset baseline to current chunk so future prefix checks use fresh state.
+    // Note: this is a verbatim-emit path with no overlap reconciliation — the
+    // diverged chunk is assumed to be fully fresh content. If a cumulative
+    // provider were to emit a half-overlapping chunk on exit (rare; not
+    // observed on DashScope-class providers) the overlap would be visible.
+    state.emittedText = rawDelta;
+    state.emittedLength += rawDelta.length;
+    return rawDelta;
+  }
+
+  if (
+    rawDelta.length > state.emittedText.length &&
+    rawDelta.startsWith(state.emittedText)
+  ) {
+    const baselineLen = state.emittedText.length;
+    // The baseline may have been frozen at CUMULATIVE_DETECTION_WINDOW_BYTES
+    // during a long incremental phase. If the cap actually kicked in and the
+    // real emitted total exceeds the (frozen) baseline, slice the suffix from
+    // the real total so an incremental-then-cumulative hybrid stream doesn't
+    // re-emit bytes the user already saw between the cap and the true total.
+    // Outside that hybrid-after-cap case, use the baseline so the historical
+    // short-repeat-then-extend behaviour is preserved (the baseline is kept
+    // unmodified across short exact repeats specifically to support that
+    // case).
+    const baselineFrozenAtCap =
+      baselineLen >= CUMULATIVE_DETECTION_WINDOW_BYTES &&
+      state.emittedLength > baselineLen;
+    const sliceFrom = baselineFrozenAtCap ? state.emittedLength : baselineLen;
+    if (rawDelta.length > sliceFrom) {
+      const suffix = rawDelta.slice(sliceFrom);
+      state.emittedText = rawDelta;
+      state.emittedLength = rawDelta.length;
+      state.cumulativeMode = true;
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: entered cumulative mode (prefix overlap, baseline=${baselineLen}b sliceFrom=${sliceFrom}b -> curr=${rawDelta.length}b)`,
+      );
+      return suffix;
+    }
+    // rawDelta startsWith baseline but isn't strictly longer than sliceFrom.
+    // Only reachable in the baselineFrozenAtCap branch when the cumulative
+    // chunk is shorter than the real emitted total (a cumulative-rewind-like
+    // shape during the transition). Treat as a no-op: don't enter cumulative
+    // mode here, fall through to the rewind/passthrough branches below.
+  }
+
+  if (rawDelta === state.emittedText) {
+    if (rawDelta.length >= CUMULATIVE_DELTA_EXACT_REPEAT_MIN_LENGTH) {
+      state.cumulativeMode = true;
+      debugLogger.debug(
+        `normalizeStreamingTextDelta: entered cumulative mode (exact repeat, ${rawDelta.length}b)`,
+      );
+      return '';
+    }
+    // Short exact repeat: don't mutate emittedText so it remains a valid
+    // prefix baseline for the next prefix-overlap check. The chunk is still
+    // emitted verbatim, so bump emittedLength to track user-visible bytes.
+    state.emittedLength += rawDelta.length;
+    return rawDelta;
+  }
+
+  if (state.emittedText.length < CUMULATIVE_DETECTION_WINDOW_BYTES) {
+    state.emittedText += rawDelta;
+  }
+  state.emittedLength += rawDelta.length;
+  return rawDelta;
 }
 
 /**
@@ -1030,19 +1173,41 @@ export function convertOpenAIChunkToGemini(
         (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
         (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
       if (reasoningText) {
-        parts.push({ text: reasoningText, thought: true });
+        const normalizedReasoningText = normalizeStreamingTextDelta(
+          reasoningText,
+          (requestContext.reasoningDeltaState ??= {
+            emittedText: '',
+            emittedLength: 0,
+            cumulativeMode: false,
+          }),
+        );
+        if (normalizedReasoningText) {
+          parts.push({ text: normalizedReasoningText, thought: true });
+        }
       }
     }
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
-      parts.push(
-        ...convertOpenAITextToParts(
-          choice.delta.content,
-          requestContext,
-          Boolean(choice.finish_reason),
-        ),
+      const normalizedContent = normalizeStreamingTextDelta(
+        choice.delta.content,
+        (requestContext.textDeltaState ??= {
+          emittedText: '',
+          emittedLength: 0,
+          cumulativeMode: false,
+        }),
       );
+      // Skip empty-string push mid-stream; still call on finish_reason to
+      // flush any buffered tagged-thinking content.
+      if (normalizedContent || choice.finish_reason) {
+        parts.push(
+          ...convertOpenAITextToParts(
+            normalizedContent,
+            requestContext,
+            Boolean(choice.finish_reason),
+          ),
+        );
+      }
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
       parts.push(...convertOpenAITextToParts('', requestContext, true));

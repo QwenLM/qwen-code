@@ -38,7 +38,11 @@ import {
   useRenderMode,
   type RenderMode,
 } from './contexts/RenderModeContext.js';
-import { type HistoryItem, ToolCallStatus } from './types.js';
+import {
+  type HistoryItem,
+  type HistoryItemWithoutId,
+  ToolCallStatus,
+} from './types.js';
 import { useContext } from 'react';
 import { Box, measureElement } from 'ink';
 
@@ -198,6 +202,7 @@ describe('AppContainer State Management', () => {
       updateItem: vi.fn(),
       clearItems: vi.fn(),
       loadHistory: vi.fn(),
+      truncateToItem: vi.fn(),
     });
     mockedUseThemeCommand.mockReturnValue({
       isThemeDialogOpen: false,
@@ -316,6 +321,7 @@ describe('AppContainer State Management', () => {
     });
     mockedUseLogger.mockReturnValue({
       getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+      removeLastUserMessage: vi.fn().mockResolvedValue(false),
     });
     mockedUseLoadingIndicator.mockReturnValue({
       elapsedTime: '0.0s',
@@ -726,7 +732,25 @@ describe('AppContainer State Management', () => {
     // signature change surfaces as a clear test failure rather than silently
     // grabbing the wrong callback.
     const ON_CANCEL_SUBMIT_ARG_INDEX = 14;
-    let capturedOnCancelSubmit: (() => void) | null = null;
+    type CapturedCancelSubmit = (info?: {
+      pendingItem: HistoryItemWithoutId | null;
+      lastTurnUserItem: { id: number; text: string } | null;
+      turnProducedMeaningfulContent: boolean;
+    }) => void;
+    let capturedOnCancelSubmit: CapturedCancelSubmit | null = null;
+
+    // Most cancel tests want auto-restore to be REACHABLE — the new
+    // ownership guard requires the cancelled turn to have added a
+    // matching user item. This helper builds the info object for the
+    // common case (the cancelled turn added the user prompt in the
+    // history fixture). Defaults to the fixture's id=1 so the tests
+    // that use single-USER history fixtures work without parameterizing.
+    const cancelInfoFor = (text: string, id = 1) =>
+      ({
+        pendingItem: null,
+        lastTurnUserItem: { id, text },
+        turnProducedMeaningfulContent: false,
+      }) as const;
 
     const installCancelCapture = (
       streamReturnValue: Record<string, unknown>,
@@ -735,19 +759,19 @@ describe('AppContainer State Management', () => {
       mockedUseGeminiStream.mockImplementation((...args: unknown[]) => {
         const candidate = args[ON_CANCEL_SUBMIT_ARG_INDEX];
         if (typeof candidate === 'function') {
-          capturedOnCancelSubmit = candidate as () => void;
+          capturedOnCancelSubmit = candidate as CapturedCancelSubmit;
         }
         return streamReturnValue;
       });
     };
 
-    const triggerCancel = () => {
+    const triggerCancel = (info?: Parameters<CapturedCancelSubmit>[0]) => {
       if (!capturedOnCancelSubmit) {
         throw new Error(
           `onCancelSubmit was not captured at arg index ${ON_CANCEL_SUBMIT_ARG_INDEX} — useGeminiStream signature may have changed`,
         );
       }
-      capturedOnCancelSubmit();
+      capturedOnCancelSubmit(info);
     };
 
     it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
@@ -864,14 +888,725 @@ describe('AppContainer State Management', () => {
       expect(mockClearQueue).not.toHaveBeenCalled();
     });
 
-    it('drops the queue when cancelling during tool execution', async () => {
+    it('auto-restores the just-submitted prompt when cancelling before any meaningful output', async () => {
+      // claude-code parity: ESC immediately after submit (model produced
+      // nothing) rewinds the user item + trailing INFO and pulls the prompt
+      // text back into the input box. Up-arrow history is implicitly cleaned
+      // because qwen-code's userMessages list is derived from the same
+      // historyManager.history.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      const mockStripOrphans = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      // Extend the default GeminiClient mock with the orphan-strip
+      // entry-point so the auto-restore branch's third cleanup leg can
+      // be observed.
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        stripOrphanedUserEntriesFromHistory: mockStripOrphans,
+      } as unknown as GeminiClient);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel(cancelInfoFor('what time is it?'));
+
+      // User item (id=1) is the truncation target — slice removes it AND
+      // the trailing INFO in the same render pass.
+      expect(mockTruncateToItem).toHaveBeenCalledWith(1);
+      expect(mockSetText).toHaveBeenCalledWith('what time is it?');
+      // Cross-session ↑-history (disk-backed) is also cleaned.
+      expect(mockRemoveLastUserMessage).toHaveBeenCalled();
+      // Third cleanup leg: in-memory chat history is stripped so the
+      // cancelled prompt doesn't ride along on the next request as an
+      // orphan user turn.
+      expect(mockStripOrphans).toHaveBeenCalled();
+      // Fourth cleanup leg: Ink's static-rendered transcript region
+      // is append-only — shrinking the underlying array doesn't unprint
+      // already-flushed lines. `refreshStatic` writes the clear-terminal
+      // escape so the cancelled `> prompt` actually disappears from
+      // scrollback rather than appearing twice (transcript + input box).
+      expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('does not auto-restore when the cancelled turn did not add a user item (e.g. Cron / slash submit_prompt)', async () => {
+      // Some submit paths (SendMessageType.Cron, slash submit_prompt) run
+      // through useGeminiStream without pushing a `user` history item.
+      // If history happens to end with an older user prompt followed only
+      // by synthetic items (e.g. info), the auto-restore guard must NOT
+      // wrongly truncate/restore that older prompt on behalf of the
+      // cancelled non-USER turn. info.lastTurnUserItem === null is the
+      // signal.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'an older prompt' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // No lastTurnUserItem → guard must bail even though the trailing
+      // slice looks restore-eligible.
+      triggerCancel({
+        pendingItem: null,
+        lastTurnUserItem: null,
+        turnProducedMeaningfulContent: false,
+      });
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the lastTurnUserItem text does not match the candidate user item (sanity)', async () => {
+      // Defensive: even if both sides report a USER from "this turn",
+      // a text mismatch (impossible in practice without intervening
+      // concurrent turns) must bail rather than rewind the wrong item.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'in history' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Text mismatch even though id collides — guard bails.
+      triggerCancel({
+        pendingItem: null,
+        lastTurnUserItem: { id: 1, text: 'a different text' },
+        turnProducedMeaningfulContent: false,
+      });
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the model produced meaningful content', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'gemini_content', text: '12:00pm' },
+          { id: 3, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Pass matching lastTurnUserItem so we reach the
+      // trailing-only-synthetic guard (the one the test name promises).
+      triggerCancel(cancelInfoFor('what time is it?'));
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the sync pendingItem snapshot has meaningful content (closes stale-state race)', async () => {
+      // Race scenario from PR review: stream chunk arrives → cancelOngoingRequest
+      // commits via addItem → fires onCancelSubmit before React re-renders, so
+      // the consumer's pendingGeminiHistoryItems prop reads as [] even though
+      // pendingHistoryItemRef.current was non-null. The synchronous snapshot
+      // passed via info.pendingItem must override the stale React-state copy.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'what time is it?' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        // React-state pending is empty (the race window).
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Simulate cancelOngoingRequest passing the just-arrived (uncommitted)
+      // pending item via the sync snapshot.
+      capturedOnCancelSubmit!({
+        pendingItem: {
+          type: 'gemini_content',
+          text: 'partial reply…',
+        },
+        lastTurnUserItem: { id: 1, text: 'what time is it?' },
+        turnProducedMeaningfulContent: false,
+      });
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when info.turnProducedMeaningfulContent is true (closes the flush-race)', async () => {
+      // Race scenario flagged in PR review: pre-cancel flush commits a
+      // gemini_content via addItem and then a synthetic thought event
+      // replaces pendingHistoryItem. AppContainer's historyRef.current
+      // doesn't see the committed content yet (React hasn't
+      // re-rendered), so the trailing-only-synthetic check would
+      // otherwise pass. `info.turnProducedMeaningfulContent: true`
+      // must short-circuit auto-restore regardless.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'what time is it?' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [], // stale — content already committed in flush
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // pendingItem is a (synthetic) thought, but turnProducedMeaningfulContent
+      // says content DID happen earlier — guard must bail.
+      triggerCancel({
+        pendingItem: { type: 'gemini_thought', text: 'thinking…' },
+        lastTurnUserItem: { id: 1, text: 'what time is it?' },
+        turnProducedMeaningfulContent: true,
+      });
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when lastTurnUserItem.id does not match the candidate user item (catches addItem dedup)', async () => {
+      // Regression for the consecutive-duplicate path: `useHistoryManager.addItem`
+      // skips inserting a USER row whose text equals the last item's,
+      // but still returns a freshly-generated id. If the auto-restore
+      // guard compared text only, a re-submitted identical prompt would
+      // wrongly match the OLDER USER row.
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'foo' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Same text but a different (later) id — addItem skipped the
+      // insert, but the producer-side ref still recorded the
+      // freshly-generated id. Guard bails on id mismatch even though
+      // text matches.
+      triggerCancel({
+        pendingItem: null,
+        lastTurnUserItem: { id: 999, text: 'foo' },
+        turnProducedMeaningfulContent: false,
+      });
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the user typed text after submitting (preserves the draft)', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: 'follow-up I am typing',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Matching lastTurnUserItem so the test reaches the
+      // buffer-non-empty bail path (the one the test name promises).
+      triggerCancel(cancelInfoFor('what time is it?'));
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when the user queued a follow-up (drains queue but keeps prompt)', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'what time is it?' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['queued thought'],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('queued thought'),
+        popAllMessages: vi.fn().mockReturnValue('queued thought'),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue('queued thought'),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Matching lastTurnUserItem so the test reaches the
+      // queue-non-empty bail path.
+      triggerCancel(cancelInfoFor('what time is it?'));
+
+      // Queue drained to buffer, but prompt NOT undone.
+      expect(mockSetText).toHaveBeenCalledWith('queued thought');
+      expect(mockSetText).not.toHaveBeenCalledWith('what time is it?');
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-restore when a tool_group is pending (covers tool-execution cancel)', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'edit foo.ts' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [
+          {
+            type: 'tool_group',
+            tools: [
+              {
+                callId: 'call-1',
+                name: 'replace',
+                description: 'edit foo.ts',
+                status: ToolCallStatus.Executing,
+                resultDisplay: undefined,
+                confirmationDetails: undefined,
+                renderOutputAsMarkdown: false,
+              },
+            ],
+          },
+        ],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Matching lastTurnUserItem so the test reaches the
+      // pending-tool-group bail path (the one the test name promises).
+      triggerCancel(cancelInfoFor('edit foo.ts'));
+
+      expect(mockTruncateToItem).not.toHaveBeenCalled();
+      expect(mockSetText).not.toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('preserves the queue into the buffer when cancelling during tool execution', async () => {
       // Simulates: user asks for a shell tool (e.g. sleep 30), queues
       // `/model` and `hi` while the tool is running, then hits Ctrl+C.
-      // The cancel must clear BOTH the buffer and the queue so that
-      // `hi` does not auto-fire once the tool settles and the app
-      // returns to idle.
+      // The cancel must drain the queue back into the buffer (so the user
+      // can edit or delete it) instead of silently dropping it. This still
+      // resolves issue #3204 (no auto-fire after tool settles) because the
+      // queue ends up empty — but without losing the user's queued work.
+      // Mirrors claude-code's popAllEditable behaviour.
       const mockSetText = vi.fn();
       const mockClearQueue = vi.fn();
+      const mockPopAllMessages = vi.fn().mockReturnValue('/model\n\nhi');
       mockedUseTextBuffer.mockReturnValue({
         text: '',
         setText: mockSetText,
@@ -905,7 +1640,7 @@ describe('AppContainer State Management', () => {
         addMessage: vi.fn(),
         clearQueue: mockClearQueue,
         getQueuedMessagesText: vi.fn().mockReturnValue('/model\n\nhi'),
-        popAllMessages: vi.fn().mockReturnValue('/model'),
+        popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue([]),
         popNextSegment: vi.fn().mockReturnValue('/model'),
       });
@@ -924,10 +1659,12 @@ describe('AppContainer State Management', () => {
 
       triggerCancel();
 
-      // Buffer cleared and queue dropped — same "abort and redirect"
-      // contract as the non-tool cancel path.
-      expect(mockSetText).toHaveBeenCalledWith('');
-      expect(mockClearQueue).toHaveBeenCalled();
+      // Queue moved into buffer for editing; popAllMessages drains the
+      // queue internally so clearQueue is not called separately.
+      expect(mockPopAllMessages).toHaveBeenCalled();
+      expect(mockSetText).toHaveBeenCalledWith('/model\n\nhi');
+      expect(mockSetText).not.toHaveBeenCalledWith('');
+      expect(mockClearQueue).not.toHaveBeenCalled();
     });
 
     it('preserves an in-progress draft when restoring queued messages on cancel', async () => {

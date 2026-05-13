@@ -32,6 +32,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { createSessionRootContext } from './tracer.js';
 import { setSessionContext } from './session-context.js';
+import { endInteractionSpan } from './session-tracing.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
   const debugLogger = createDebugLogger('OTEL');
@@ -317,6 +318,7 @@ export async function shutdownTelemetry(): Promise<void> {
   if (!telemetryInitialized || !sdk) {
     return;
   }
+  endInteractionSpan('cancelled');
   const currentSdk = sdk;
   const debugLogger = createDebugLogger('OTEL');
   telemetryShutdownPromise = (async () => {

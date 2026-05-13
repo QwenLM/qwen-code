@@ -79,7 +79,7 @@ esbuild
     outfile: 'dist/cli.js',
     platform: 'node',
     format: 'esm',
-    target: 'node20',
+    target: 'node22',
     external,
     packages: 'bundle',
     inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],

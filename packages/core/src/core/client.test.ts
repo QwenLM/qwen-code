@@ -24,6 +24,7 @@ import {
   type ContentGenerator,
   type ContentGeneratorConfig,
 } from './contentGenerator.js';
+import { BaseLlmClient } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { type GeminiChat } from './geminiChat.js';
 import type { Config } from '../config/config.js';
@@ -469,12 +470,7 @@ describe('Gemini Client (client.ts)', () => {
           .mockReturnValue('/test/project/root/.gemini/projects/test-project'),
       },
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
-      getBaseLlmClient: vi.fn().mockReturnValue({
-        generateJson: vi.fn().mockResolvedValue({
-          next_speaker: 'user',
-          reasoning: 'test',
-        }),
-      }),
+      getBaseLlmClient: vi.fn(),
       getSubagentManager: vi.fn().mockReturnValue(mockSubagentManager),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
@@ -501,6 +497,19 @@ describe('Gemini Client (client.ts)', () => {
         clear: vi.fn(),
       }),
     } as unknown as Config;
+
+    // Real BaseLlmClient routes generateText through mockContentGenerator;
+    // generateJson is stubbed only for the next-speaker classifier so the
+    // next-speaker schema isn't reproduced in every test.
+    const realBaseLlmClient = new BaseLlmClient(
+      mockContentGenerator,
+      mockConfig,
+    );
+    realBaseLlmClient.generateJson = vi.fn().mockResolvedValue({
+      next_speaker: 'user',
+      reasoning: 'test',
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue(realBaseLlmClient);
 
     client = new GeminiClient(mockConfig);
     await client.initialize();
@@ -780,12 +789,54 @@ describe('Gemini Client (client.ts)', () => {
       expect(getHistory).not.toHaveBeenCalled();
     });
 
+    it('stripOrphanedUserEntriesFromHistory forces full IDE context only when entries were removed', async () => {
+      const cacheClear = mockFileReadCacheClear();
+      const strip = vi.fn();
+      // Case 1: history actually shrank → forceFullIdeContext + cache clear.
+      client['chat'] = {
+        getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValueOnce(1),
+        stripOrphanedUserEntriesFromHistory: strip,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      expect(strip).toHaveBeenCalledOnce();
+      expect(cacheClear).toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(true);
+
+      // Case 2: no entries removed → don't touch caches / IDE context.
+      const cacheClear2 = mockFileReadCacheClear();
+      const strip2 = vi.fn();
+      client['chat'] = {
+        getHistoryLength: vi.fn().mockReturnValue(2),
+        stripOrphanedUserEntriesFromHistory: strip2,
+      } as unknown as GeminiChat;
+      client['forceFullIdeContext'] = false;
+
+      client.stripOrphanedUserEntriesFromHistory();
+
+      expect(strip2).toHaveBeenCalledOnce();
+      expect(cacheClear2).not.toHaveBeenCalled();
+      expect(client['forceFullIdeContext']).toBe(false);
+    });
+
     it('retry strips orphaned trailing user entries and clears the cache', async () => {
       const cacheClear = mockFileReadCacheClear();
       const stripOrphanedUserEntriesFromHistory = vi.fn();
+      // The wrapper now gates cache-clear / forceFullIdeContext on a
+      // before/after length comparison — return one value pre-strip
+      // (mocked first) and a smaller value post-strip (subsequent
+      // calls) so the simulated mutation actually triggers the
+      // post-strip cleanup branch.
+      const getHistoryLength = vi
+        .fn()
+        .mockReturnValueOnce(3)
+        .mockReturnValue(2);
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength,
         stripOrphanedUserEntriesFromHistory,
       } as unknown as GeminiChat;
       mockTurnRunFn.mockReturnValue(
@@ -2907,6 +2958,7 @@ Other open files:
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
@@ -2938,6 +2990,7 @@ Other open files:
         const mockChat: Partial<GeminiChat> = {
           addHistory: vi.fn(),
           getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
