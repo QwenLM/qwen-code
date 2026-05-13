@@ -105,7 +105,7 @@ describe('<AppHeader />', () => {
 
   it('shows the header with all info when banner is visible', () => {
     const { lastFrame } = renderWithProviders(createMockUIState());
-    expect(lastFrame()).toContain('>_ Qwen Code');
+    expect(lastFrame()).toContain('> DataWorks DataAgent');
     expect(lastFrame()).toContain('gemini-pro');
     expect(lastFrame()).toContain('/projects/qwen-code');
   });
@@ -115,8 +115,8 @@ describe('<AppHeader />', () => {
       createMockUIState(),
       createSettings({ hideTips: false, hideBanner: true }),
     );
-    expect(lastFrame()).not.toContain('>_ Qwen Code');
-    expect(lastFrame()).not.toContain('██╔═══██╗');
+    expect(lastFrame()).not.toContain('> DataWorks DataAgent');
+    expect(lastFrame()).not.toContain('██████╗');
   });
 
   it('renders the custom subtitle end-to-end through resolveCustomBanner (replaces the blank spacer between title and auth line)', () => {

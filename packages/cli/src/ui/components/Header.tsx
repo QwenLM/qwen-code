@@ -58,10 +58,9 @@ interface HeaderProps {
    */
   customAsciiArt?: { small?: string; large?: string };
   /**
-   * Sanitized replacement for the bold ">_ Qwen Code" title in the info
-   * panel. The version suffix is always appended. When undefined or empty
-   * the default title is used; the leading `>_` glyph is part of the
-   * default brand and is dropped when a custom title is set.
+   * Sanitized replacement for the bold ">_ DataWorks DataAgent (Powered by
+   * Qwen Code)" title in the info panel. The version suffix is always
+   * appended. When undefined or empty the default title is used.
    */
   customBannerTitle?: string;
   /**
@@ -204,10 +203,12 @@ export const Header: React.FC<HeaderProps> = ({
         width={showLogo ? availableInfoPanelWidth : undefined}
       >
         {/* Title line: customBannerTitle (already sanitized) or the default
-            ">_ Qwen Code" brand. Version suffix is always appended. */}
+            DataWorks DataAgent brand. Version suffix is always appended. */}
         <Text>
           <Text bold color={theme.text.accent}>
-            {customBannerTitle ? customBannerTitle : '>_ Qwen Code'}
+            {customBannerTitle
+              ? customBannerTitle
+              : '>_ DataWorks DataAgent (Powered by Qwen Code)'}
           </Text>
           <Text color={theme.text.secondary}> (v{version})</Text>
         </Text>
@@ -217,7 +218,9 @@ export const Header: React.FC<HeaderProps> = ({
         {customBannerSubtitle ? (
           <Text color={theme.text.secondary}>{customBannerSubtitle}</Text>
         ) : (
-          <Text> </Text>
+          <Text color={theme.text.secondary}>
+            Built-in DataWorks Official Skills
+          </Text>
         )}
         {/* Auth and Model line */}
         <Text>
