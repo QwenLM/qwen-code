@@ -143,6 +143,21 @@ const RECOVERY_OVERLAP_MAX_SCAN_CHARS = 4000;
 const RECOVERY_OVERLAP_MIN_BYTES = 6;
 
 /**
+ * Companion floor in *code points* for prose overlaps. The byte floor alone is
+ * too permissive for CJK: a single Chinese character is 3 UTF-8 bytes, so
+ * `RECOVERY_OVERLAP_MIN_BYTES = 6` would accept a coincidental 2-character
+ * overlap like `"我们"` / `"但是"` that is extremely common across unrelated
+ * Chinese turns. Requiring at least 4 code points in addition to the byte
+ * floor makes CJK collisions need a 4-character coincidence (~10⁻⁵ when
+ * each character is independent), without raising the bar for ASCII (4 ASCII
+ * chars is only 4 bytes — still gated by the 6-byte floor, so ASCII effectively
+ * needs ≥6 chars). Structural anchors (`#|`\n) are exempted because the
+ * structural floor already governs them and structural collisions are far
+ * rarer than prose.
+ */
+const RECOVERY_OVERLAP_MIN_CHARS = 4;
+
+/**
  * Lower floor for overlaps that contain Markdown structural characters
  * (`#`, `|`, backtick, newline). Structural anchors are far less likely to
  * collide coincidentally than prose — a 4-byte overlap like `"| a "` or
@@ -170,10 +185,19 @@ function byteLength(text: string): number {
 function isSignificantRecoveryOverlap(overlap: string): boolean {
   const overlapBytes = byteLength(overlap);
   const hasMarkdownStructure = /[#|`\n]/.test(overlap);
+  if (
+    hasMarkdownStructure &&
+    overlapBytes >= RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES
+  ) {
+    return true;
+  }
+  // Prose overlaps must clear *both* the byte floor (covers ASCII) and the
+  // code-point floor (covers CJK). Counting code points via the spread
+  // iterator handles surrogate pairs correctly so emoji do not double-count.
+  const overlapChars = [...overlap].length;
   return (
-    overlapBytes >= RECOVERY_OVERLAP_MIN_BYTES ||
-    (hasMarkdownStructure &&
-      overlapBytes >= RECOVERY_STRUCTURAL_OVERLAP_MIN_BYTES)
+    overlapBytes >= RECOVERY_OVERLAP_MIN_BYTES &&
+    overlapChars >= RECOVERY_OVERLAP_MIN_CHARS
   );
 }
 
@@ -203,11 +227,6 @@ function findContainedRecoveryPrefixReplayLength(
     previousText.length > RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS
       ? previousText.slice(-RECOVERY_CONTAINED_TAIL_LOOKBACK_CHARS)
       : previousText;
-  const maxPrefix = Math.min(
-    previousTail.length,
-    continuationText.length,
-    RECOVERY_OVERLAP_MAX_SCAN_CHARS,
-  );
 
   // The contained-prefix path is intended *only* for replayed Markdown blocks
   // (tables, headings, fenced code) that providers re-emit when resuming after
@@ -219,13 +238,30 @@ function findContainedRecoveryPrefixReplayLength(
     return 0;
   }
 
+  // The anchor check above tolerates leading whitespace because some providers
+  // re-emit the replayed block with extra leading spaces/tabs. The actual
+  // substring match must use the *trimmed* continuation, otherwise a
+  // continuation like `"  ### Heading"` would never match a previous tail
+  // containing `"### Heading"` (no leading whitespace). Track the offset so
+  // the returned length consumes the leading whitespace too — keeping the
+  // caller's `continuationText.slice(replayedLength)` invariant intact.
+  const leadingMatch = continuationText.match(/^\s+/);
+  const leadingWhitespaceLength = leadingMatch?.[0].length ?? 0;
+  const trimmedContinuation = continuationText.slice(leadingWhitespaceLength);
+
+  const maxPrefix = Math.min(
+    previousTail.length,
+    trimmedContinuation.length,
+    RECOVERY_OVERLAP_MAX_SCAN_CHARS,
+  );
+
   for (let length = maxPrefix; length > 0; length -= 1) {
-    const prefix = continuationText.slice(0, length);
+    const prefix = trimmedContinuation.slice(0, length);
     if (
       byteLength(prefix) >= RECOVERY_CONTAINED_PREFIX_MIN_BYTES &&
       previousTailContainsAtLineBoundary(previousTail, prefix)
     ) {
-      return length;
+      return leadingWhitespaceLength + length;
     }
   }
 
@@ -402,28 +438,57 @@ function appendRecoveryContinuationParts(
 ): Part[] {
   const mergedParts = [...(previousParts ?? [])];
   const nextParts = [...(continuationParts ?? [])];
-  const previousLastPart = mergedParts[mergedParts.length - 1];
-  const continuationFirstPart = nextParts[0];
 
-  if (
-    isPlainTextPart(previousLastPart) &&
-    isPlainTextPart(continuationFirstPart)
-  ) {
+  // `processStreamResponse` orders parts as
+  // `[thoughtPart?, ...consolidatedHistoryParts]`, so for thinking models the
+  // first element of `nextParts` is the recovery turn's thought, not its
+  // plain-text continuation. Similarly the previous truncated turn may end
+  // with a non-text part. Scan both sides for the dedup-relevant plain-text
+  // anchor instead of locking onto the boundary indices, otherwise thinking
+  // models leak duplicated text into durable history because the dedup block
+  // gets skipped wholesale.
+  const previousTextIndex = findLastPlainTextPartIndex(mergedParts);
+  const continuationTextIndex = nextParts.findIndex(isPlainTextPart);
+
+  if (previousTextIndex >= 0 && continuationTextIndex >= 0) {
+    const previousTextPart = mergedParts[previousTextIndex] as Part & {
+      text: string;
+    };
+    const continuationTextPart = nextParts[continuationTextIndex] as Part & {
+      text: string;
+    };
     const suffix = getRecoveryContinuationSuffix(
-      previousLastPart.text,
-      continuationFirstPart.text,
+      previousTextPart.text,
+      continuationTextPart.text,
     );
     if (suffix.length > 0) {
-      previousLastPart.text += suffix;
+      // Allocate a fresh part rather than mutating in place: `mergedParts`
+      // shares element references with the caller's history slot, and any
+      // downstream caller that cached a `part` reference would observe the
+      // mutation. Cheap allocation; eliminates a fragile invariant.
+      mergedParts[previousTextIndex] = {
+        ...previousTextPart,
+        text: previousTextPart.text + suffix,
+      };
     }
-    // Always drop the first continuation text part: a non-empty suffix has
-    // already been appended to previousLastPart above, and an empty suffix
-    // means the part was a pure replay of the previous tail and should be
-    // discarded so it does not duplicate into history.
-    nextParts.shift();
+    // Drop the matched continuation text part: a non-empty suffix has already
+    // been appended above, and an empty suffix means the part was a pure
+    // replay of the previous tail and should be discarded so it does not
+    // duplicate into history. Non-text parts in `nextParts` (thoughts, tool
+    // calls) are preserved.
+    nextParts.splice(continuationTextIndex, 1);
   }
 
   return [...mergedParts, ...nextParts];
+}
+
+function findLastPlainTextPartIndex(parts: Part[]): number {
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    if (isPlainTextPart(parts[i])) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 /**

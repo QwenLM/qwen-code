@@ -2861,6 +2861,135 @@ describe('GeminiChat', async () => {
       expect(recoveryMessage).not.toContain('<previous_response_suffix>');
     });
 
+    it('should dedup recovery continuation when the continuation begins with a thought part', async () => {
+      // Regression: `processStreamResponse` orders parts as
+      // `[thoughtPart?, ...consolidatedHistoryParts]`. Before the fix,
+      // `appendRecoveryContinuationParts` only looked at `nextParts[0]`. For
+      // thinking models the first part is the recovery turn's thought, the
+      // plain-text predicate returned false on it, and the entire dedup
+      // block was skipped — leaking the replayed overlap into history.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk([{ text: 'Alpha shared recovery suffix' }], 'MAX_TOKENS'),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              // Thought first — recovery dedup must scan past it on the
+              // continuation side instead of giving up.
+              { text: 'planning the rest', thought: true },
+              { text: 'shared recovery suffix and continuation' },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-thinking-continuation',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const nonThoughtText = lastEntry.parts
+        ?.filter((part) => !('thought' in part) || !part.thought)
+        .map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(nonThoughtText).toBe(
+        'Alpha shared recovery suffix and continuation',
+      );
+    });
+
+    it('should preserve a coincidental 2-character CJK overlap (byte floor insufficient for CJK)', async () => {
+      // Regression: `RECOVERY_OVERLAP_MIN_BYTES = 6` admits a 2-character
+      // CJK overlap (each Chinese char is 3 UTF-8 bytes). Two-character
+      // boundary coincidences such as "我们" / "但是" are extremely common
+      // across unrelated Chinese sentences. The companion char-floor must
+      // require ≥4 code points so a 2-char CJK collision does not silently
+      // strip legitimate continuation. The longer "需要" tail of `previous`
+      // is meaningful continuation, NOT a replayed suffix of the previous
+      // turn — the continuation must survive verbatim.
+      const previous = '在分析数据之前我们';
+      const continuation = '我们需要先完成准备工作。';
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: continuation }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: '帮我分析数据' },
+        'prompt-recovery-cjk-floor',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(text).toBe(previous + continuation);
+    });
+
+    it('should dedup a replayed structural prefix even when the continuation has leading whitespace', async () => {
+      // Regression: the structural-anchor check tolerates leading whitespace
+      // (some providers re-emit the replayed block with extra spaces/tabs),
+      // but the substring-match loop must also strip that whitespace before
+      // matching against the previous tail — otherwise the replayed block
+      // never finds its mirror in `previousTail` and the duplicate leaks
+      // into history.
+      const replayedBlock = '### 常用语法速查\n| 语法 | 说明 |';
+      const previous = ['Intro', replayedBlock, 'tail that was truncated'].join(
+        '\n',
+      );
+      // Continuation re-emits the same block prefixed by two spaces.
+      const continuation = `  ${replayedBlock}\nnew suffix`;
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: continuation }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long markdown answer' },
+        'prompt-recovery-leading-whitespace',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      // The duplicated `### 常用语法速查\n| 语法 | 说明 |` block must NOT
+      // appear twice; only the new suffix should follow the previous tail.
+      expect(text).toBe(`${previous}\nnew suffix`);
+    });
+
     it('should truncate the previous_response_suffix to the trailing 1200 chars when the previous turn is longer', async () => {
       // Covers the slice(-OUTPUT_RECOVERY_TAIL_CHARS) branch in
       // buildOutputRecoveryMessage. The truncation tail is 1200 chars; we
