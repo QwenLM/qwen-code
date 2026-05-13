@@ -259,13 +259,19 @@ export interface CancelSubmitInfo {
   /**
    * The USER history item that this turn added, if any. `null` when the
    * turn took a path that does NOT push a user history item (Cron,
-   * Notification, slash `submit_prompt`, etc.). Consumers use this to
-   * verify the candidate `user` item being rewound actually came from
-   * the cancelled turn before truncating — without this guard, an older
-   * user item that happens to be followed only by synthetic content
-   * could be wrongly auto-restored when a non-USER turn is cancelled.
+   * Notification, slash `submit_prompt`, Retry, etc.). The `id` lets
+   * consumers verify identity even when `addItem` skipped a
+   * consecutive-duplicate user message (text alone would wrongly match
+   * the older row).
    */
-  lastTurnUserItem: { text: string } | null;
+  lastTurnUserItem: { id: number; text: string } | null;
+  /**
+   * True if a content event landed during this turn, including during
+   * the pre-cancel flush of throttle-buffered events. Lets the
+   * auto-restore guard reject a turn that produced meaningful text even
+   * when the consumer's React history snapshot is still stale.
+   */
+  turnProducedMeaningfulContent: boolean;
 }
 
 /**
@@ -303,14 +309,28 @@ export const useGeminiStream = (
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   // Records the USER history item that THIS turn's prepareQueryForGemini
-  // added (if any). Reset to null at the start of every turn. Cron /
-  // Notification / slash submit_prompt paths don't add a user item, so
-  // this stays null on those turns. The cancel handler uses this to
-  // verify that the candidate `lastUserItem` it's about to rewind
-  // actually came from the cancelled turn — without the guard, an
-  // older user item with only-synthetic trailing could be wrongly
-  // truncated when a non-USER turn is cancelled.
-  const lastTurnUserItemRef = useRef<{ text: string } | null>(null);
+  // added (if any). Reset to null at the start of every turn (including
+  // Retry, which bypasses prepareQueryForGemini). Cron / Notification /
+  // slash submit_prompt paths don't add a user item, so this stays null
+  // on those turns. The cancel handler uses this to verify that the
+  // candidate `lastUserItem` it's about to rewind actually came from the
+  // cancelled turn — without the guard, an older user item with
+  // only-synthetic trailing could be wrongly truncated when a non-USER
+  // turn is cancelled.
+  //
+  // Identity is carried as `{ id, text }` (not just text) because
+  // `useHistoryManager.addItem` skips consecutive-duplicate user
+  // messages while still returning a freshly-generated id — text alone
+  // would let the auto-restore guard wrongly match an older USER row
+  // when the user re-submits the same prompt.
+  const lastTurnUserItemRef = useRef<{ id: number; text: string } | null>(null);
+  // Set to true the first time a content event lands this turn — even
+  // during the pre-cancel flush. AppContainer's auto-restore guard
+  // can't otherwise see content that was just addItem'd inside flush
+  // (React history hasn't re-rendered) and would wrongly truncate the
+  // committed text alongside the cancelled prompt. Reset at turn start
+  // alongside lastTurnUserItemRef.
+  const turnSawContentEventRef = useRef(false);
   const lastPromptErroredRef = useRef(false);
   const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
@@ -662,6 +682,7 @@ export const useGeminiStream = (
       onCancelSubmit({
         pendingItem: pendingItemAtCancel,
         lastTurnUserItem: lastTurnUserItemRef.current,
+        turnProducedMeaningfulContent: turnSawContentEventRef.current,
       });
     } finally {
       setIsResponding(false);
@@ -774,13 +795,19 @@ export const useGeminiStream = (
         // the queue drain, so skip the user-message history item to avoid
         // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
         if (submitType !== SendMessageType.Cron) {
-          addItem(
+          const insertedId = addItem(
             { type: MessageType.USER, text: trimmedQuery },
             userMessageTimestamp,
           );
-          // Record what we added so the cancel handler can verify it
-          // owns the user item it's about to rewind.
-          lastTurnUserItemRef.current = { text: trimmedQuery };
+          // Capture id+text so the cancel handler can verify identity,
+          // not just text. `addItem` returns a fresh id even when it
+          // skipped insertion (consecutive-duplicate user); the older
+          // matching USER in history carries a DIFFERENT id, so the
+          // mismatch makes auto-restore bail correctly in that case.
+          lastTurnUserItemRef.current = {
+            id: insertedId,
+            text: trimmedQuery,
+          };
         }
 
         // Handle @-commands (which might involve tool calls)
@@ -839,6 +866,11 @@ export const useGeminiStream = (
       // Track output chars for real-time token estimation & mark as receiving.
       streamingResponseLengthRef.current += eventValue.length;
       setIsReceivingContent(true);
+      // Pin "this turn produced meaningful content" so the cancel
+      // handler's snapshot reflects content events even when they land
+      // during the pre-cancel flush (their addItem hasn't re-rendered
+      // React history by the time AppContainer's guard runs).
+      turnSawContentEventRef.current = true;
       let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
       if (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
@@ -1578,6 +1610,25 @@ export const useGeminiStream = (
 
       // Set the flag to indicate we're now executing
       isSubmittingQueryRef.current = true;
+
+      // Reset turn-local ownership trackers at the very top of every
+      // top-level submit (UserQuery, Retry, Cron, Notification, etc.).
+      // `prepareQueryForGemini` also resets `lastTurnUserItemRef`, but
+      // Retry skips that path — without this earlier reset, a stale
+      // ownership snapshot from the prior UserQuery would survive into
+      // the retry's cancel info and let auto-restore wrongly truncate
+      // the original prompt.
+      //
+      // ToolResult continuations and same-turn btw concurrencies keep
+      // the trackers untouched — they're piggybacking on an in-flight
+      // turn that already owns its own snapshot.
+      if (
+        submitType !== SendMessageType.ToolResult &&
+        !allowConcurrentBtwDuringResponse
+      ) {
+        lastTurnUserItemRef.current = null;
+        turnSawContentEventRef.current = false;
+      }
 
       const userMessageTimestamp = Date.now();
 

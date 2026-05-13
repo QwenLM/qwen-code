@@ -320,16 +320,29 @@ export class GeminiClient {
    *     thought had been undone.
    */
   stripOrphanedUserEntriesFromHistory() {
-    this.getChat().stripOrphanedUserEntriesFromHistory();
+    const chat = this.getChat();
+    const before = chat.getHistoryLength();
+    chat.stripOrphanedUserEntriesFromHistory();
+    const after = chat.getHistoryLength();
+    if (after >= before) {
+      // Nothing to strip — leave caches and IDE context alone.
+      return;
+    }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
     // FileReadCache would still record those reads, so the retry's
     // re-issued Read could hit the file_unchanged placeholder while
     // the model has nothing to fall back on. Clear to be safe.
     debugLogger.debug(
-      '[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory',
+      `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
+    // The stripped user turn may have carried the IDE context (open files,
+    // workspace state) that `lastSentIdeContext` advanced past. Without
+    // forcing a resend, the next request would either skip IDE context
+    // entirely or send only a diff against a now-removed baseline. Match
+    // the invalidation `setHistory()` / `truncateHistory()` already do.
+    this.forceFullIdeContext = true;
   }
 
   setHistory(history: Content[]) {

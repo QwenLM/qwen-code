@@ -1427,14 +1427,27 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
+      // Synchronous "did the turn produce any content event" flag from
+      // useGeminiStream. Catches the race where the pre-cancel flush
+      // committed gemini_content via addItem and a later thought event
+      // overwrote pendingHistoryItem with a synthetic value — the
+      // committed text isn't in historyRef.current yet (React hasn't
+      // re-rendered), so the trailing-only-synthetic check below would
+      // otherwise pass and we'd wrongly truncate the committed content.
+      if (info?.turnProducedMeaningfulContent) {
+        debugLogger.debug(
+          'auto-restore bail: turn produced meaningful content during stream/flush',
+        );
+        return;
+      }
 
       // The cancelled turn must have added a `user` history item itself —
-      // Cron / Notification / slash submit_prompt paths submit without
-      // pushing a user item, so an older user item that happens to be
-      // followed only by synthetic content must NOT be wrongly auto-
-      // restored on top of those turns.
-      const cancelledTurnUserText = info?.lastTurnUserItem?.text;
-      if (cancelledTurnUserText == null) {
+      // Cron / Notification / slash submit_prompt / Retry paths submit
+      // without pushing a user item, so an older user item that happens
+      // to be followed only by synthetic content must NOT be wrongly
+      // auto-restored on top of those turns.
+      const cancelledTurnUserItem = info?.lastTurnUserItem;
+      if (cancelledTurnUserItem == null) {
         debugLogger.debug(
           'auto-restore bail: cancelled turn did not add a user history item',
         );
@@ -1462,13 +1475,17 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       // Identity match: the user item we're rewinding has to be the one
-      // this turn added. Text equality is sufficient because
-      // useGeminiStream sets lastTurnUserItemRef synchronously next to
-      // the addItem call, and no concurrent turn can interleave —
-      // submitQuery is serialized on isSubmittingQueryRef.
-      if (lastUserItem.text !== cancelledTurnUserText) {
+      // this turn added. Use ID (not just text) so a consecutive-
+      // duplicate user submit — where `addItem` skipped insertion but
+      // still returned a fresh id — doesn't make this guard wrongly
+      // match an older identical-text USER row. Text is checked too as
+      // a cheap sanity belt.
+      if (
+        lastUserItem.id !== cancelledTurnUserItem.id ||
+        lastUserItem.text !== cancelledTurnUserItem.text
+      ) {
         debugLogger.debug(
-          'auto-restore bail: lastUserItem text does not match cancelled-turn text',
+          'auto-restore bail: lastUserItem identity does not match cancelled-turn user item',
         );
         return;
       }

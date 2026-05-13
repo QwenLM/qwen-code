@@ -154,7 +154,10 @@ describe('useGeminiStream', () => {
       (s: string) => s.length,
     );
 
-    mockAddItem = vi.fn();
+    // Match production addItem's contract of returning a monotonic id
+    // (used by lastTurnUserItemRef's identity check).
+    let nextItemId = 1000;
+    mockAddItem = vi.fn(() => nextItemId++);
     // Define the mock for getGeminiClient
     const mockGetGeminiClient = vi.fn().mockImplementation(() => {
       // MockedGeminiClientClass is defined in the module scope by the previous change.
@@ -1586,7 +1589,15 @@ describe('useGeminiStream', () => {
 
       expect(cancelSubmitSpy).toHaveBeenCalledTimes(1);
       const info = cancelSubmitSpy.mock.calls[0][0];
-      expect(info?.lastTurnUserItem).toEqual({ text: 'what time is it?' });
+      // Identity is carried as `{ id, text }` — id makes the cancel
+      // handler's guard robust against `addItem` skipping a
+      // consecutive-duplicate user message. (Whether the content flag
+      // ended up true depends on whether the stream's mock yielded
+      // content before cancel; that's covered by a separate test below.)
+      expect(info?.lastTurnUserItem).toEqual({
+        id: expect.any(Number),
+        text: 'what time is it?',
+      });
     });
 
     it('emits lastTurnUserItem: null for paths that do NOT add a user history item (Notification)', async () => {
@@ -1638,6 +1649,154 @@ describe('useGeminiStream', () => {
       expect(cancelSubmitSpy).toHaveBeenCalledTimes(1);
       const info = cancelSubmitSpy.mock.calls[0][0];
       expect(info?.lastTurnUserItem).toBeNull();
+    });
+
+    it('resets lastTurnUserItem to null when a Retry turn cancels, even though Retry skips prepareQueryForGemini', async () => {
+      // Retry takes a shortcut at submitQuery's dispatch site that
+      // bypasses prepareQueryForGemini — and therefore bypasses the
+      // ref reset that lives there. The submit-level reset must fire
+      // for every top-level submit so a stale ownership snapshot from
+      // an earlier UserQuery can't ride into the retry's cancel info
+      // and let AppContainer's auto-restore truncate the original
+      // prompt.
+      const cancelSubmitSpy = vi.fn();
+      // Two held-open streams; require-yield wants at least one yield.
+      // (Stream type 'content' is harmless here — these tests only
+      // assert on lastTurnUserItem, not on the content flag.)
+      const heldStream = () =>
+        (async function* () {
+          yield { type: ServerGeminiEventType.Content, value: 'x' };
+          await new Promise(() => {});
+        })();
+      mockSendMessageStream.mockReturnValueOnce(heldStream());
+      mockSendMessageStream.mockReturnValueOnce(heldStream());
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          mockConfig.getGeminiClient(),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          cancelSubmitSpy,
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      // Original UserQuery — populates `lastTurnUserItemRef`.
+      await act(async () => {
+        result.current.submitQuery('first prompt');
+      });
+      expect(cancelSubmitSpy).not.toHaveBeenCalled();
+
+      // Cancel the first turn so streamingState drops back to Idle and
+      // submitQuery's responding-state guard doesn't block the retry.
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+      expect(cancelSubmitSpy).toHaveBeenCalledTimes(1);
+      // Sanity: the first cancel correctly reported ownership of the
+      // user item from the original UserQuery.
+      const firstCall = cancelSubmitSpy.mock.calls[0]?.[0];
+      expect(firstCall?.lastTurnUserItem).toEqual({
+        id: expect.any(Number),
+        text: 'first prompt',
+      });
+
+      // Retry the same prompt. Retry bypasses prepareQueryForGemini's
+      // reset, so the submit-level reset at the top of submitQuery is
+      // the only thing that clears the stale ref carried over from the
+      // first turn.
+      await act(async () => {
+        result.current.submitQuery('first prompt', SendMessageType.Retry);
+      });
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      // The most recent cancelSubmit call corresponds to the retry, and
+      // it must report `lastTurnUserItem: null` — Retry didn't add a
+      // user history item, so auto-restore must not have a target.
+      const retryCall = cancelSubmitSpy.mock.calls.at(-1)?.[0];
+      expect(retryCall?.lastTurnUserItem).toBeNull();
+    });
+
+    it('flags turnProducedMeaningfulContent=true when a content event landed even before cancel', async () => {
+      // Race scenario: stream produced content during the throttle
+      // window. Even if the flush moves the pending item to a
+      // synthetic thought afterwards, `turnSawContentEventRef` must
+      // stay set so AppContainer's auto-restore can't wipe the
+      // committed text.
+      vi.useFakeTimers();
+
+      const cancelSubmitSpy = vi.fn();
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const mockStream = (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'visible reply' };
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          mockConfig.getGeminiClient(),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          cancelSubmitSpy,
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Cancel without advancing the throttle timer; the cancel-time
+      // flush is what surfaces the content into the in-handler refs.
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      const info = cancelSubmitSpy.mock.calls.at(-1)?.[0];
+      expect(info?.turnProducedMeaningfulContent).toBe(true);
+
+      await act(async () => {
+        releaseStream();
+      });
+      vi.useRealTimers();
     });
 
     it('should call setShellInputFocused(false) when cancelOngoingRequest is called', async () => {
