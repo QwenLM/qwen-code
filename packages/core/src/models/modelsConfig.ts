@@ -765,19 +765,6 @@ export class ModelsConfig {
       detail: 'baseUrl',
     };
 
-    if (model.providerType !== undefined) {
-      this._generationConfig.providerType = model.providerType;
-      this.generationConfigSources['providerType'] = {
-        kind: 'modelProviders',
-        authType: model.authType,
-        modelId: model.id,
-        detail: 'providerType',
-      };
-    } else {
-      delete this._generationConfig.providerType;
-      delete this.generationConfigSources['providerType'];
-    }
-
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {

@@ -186,18 +186,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
-    it('should return true when providerType explicitly opts into DashScope', () => {
-      const config = {
-        authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://company.example.com/dashscope-compatible/v1',
-        providerType: 'dashscope',
-      } as ContentGeneratorConfig;
-
-      const result =
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
-      expect(result).toBe(true);
-    });
-
     it('should return false for bare dw.alibaba-inc.com domain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,

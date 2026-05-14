@@ -44,17 +44,12 @@ export const CREDENTIAL_FIELDS = [
   'baseUrl',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
 
-export const PROVIDER_TYPE_FIELDS = [
-  'providerType',
-] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
-
 /**
  * All provider-sourced fields that need to be tracked for source attribution
  * and cleared when switching from provider to manual credentials.
  */
 export const PROVIDER_SOURCED_FIELDS = [
   ...CREDENTIAL_FIELDS,
-  ...PROVIDER_TYPE_FIELDS,
   ...MODEL_GENERATION_CONFIG_FIELDS,
 ] as const;
 
