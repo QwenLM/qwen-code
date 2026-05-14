@@ -2809,6 +2809,55 @@ describe('GeminiChat', async () => {
       expect(text).toBe(previous + continuation);
     });
 
+    it('should preserve prose continuation that opens with a single-cell pipe expression matching mid-tail', async () => {
+      // Regression: `startsWithMarkdownStructuralAnchor` must reject
+      // single-cell pipe patterns like `|expression|` in technical/math
+      // prose. A real GFM table row has ≥3 pipes (≥2 cells) or is a
+      // separator row (`|---|`). Without this tightening, prose continuation
+      // that coincidentally starts with `|x| more text` and happens to
+      // re-appear at a line boundary mid-tail of the previous response would
+      // be silently stripped by the contained-prefix path.
+      //
+      // Setup: the suspect prose fragment `|expression| evaluates to a
+      // scalar value.` appears at a line boundary in the middle of
+      // `previous`, but `previous` itself ends with a different line — so
+      // the suffix-anchored scan in `getRecoveryContinuationSuffix` cannot
+      // match. The only path that could strip the continuation is the
+      // contained-prefix fallback, which now correctly refuses to anchor on
+      // a non-GFM single-cell pipe.
+      const previous =
+        'We define the expression as follows:\n|expression| evaluates to a scalar value.\nWe also note other facts here.';
+      const continuation =
+        '|expression| evaluates to a scalar value. Continuing the derivation now.';
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: continuation }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'continue the derivation' },
+        'prompt-recovery-single-cell-pipe-prose',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      // No silent strip: the full continuation must follow the previous tail
+      // verbatim because `|expression|` is prose, not a GFM table row.
+      expect(text).toBe(previous + continuation);
+    });
+
     it('should insert a newline separator when the replayed prefix ends with newline but previous tail does not', async () => {
       // Covers the three-condition normalization branch in
       // `getRecoveryContinuationSuffix`: when `replayedPrefix` ends with

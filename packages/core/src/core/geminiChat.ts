@@ -184,6 +184,15 @@ function byteLength(text: string): number {
 
 function isSignificantRecoveryOverlap(overlap: string): boolean {
   const overlapBytes = byteLength(overlap);
+  // This is intentionally a loose "contains any of these chars" check rather
+  // than a strict Markdown-block-anchor parse: an overlap that picks up `#`,
+  // `` ` ``, `|`, or `\n` is *probably* a replayed structural marker, and
+  // the 4-byte structural floor only differs from the 6-byte prose floor by
+  // a 2-byte window. The worst realistic over-classification (4–5 byte prose
+  // fragments like `"C#dev"` or `"a|b|c"` slipping through the structural
+  // path instead of the prose path) still requires that fragment to be
+  // identical at the truncation boundary on both sides, which is far rarer
+  // than the structural-replay scenarios this lower floor exists to catch.
   const hasMarkdownStructure = /[#|`\n]/.test(overlap);
   if (
     hasMarkdownStructure &&
@@ -210,10 +219,18 @@ function isSignificantRecoveryOverlap(overlap: string): boolean {
  * start of a line and be followed by the syntactic gap the spec requires
  * (e.g. `# ` not `#abc`), so incidental `#` or `|` characters in prose do
  * not count.
+ *
+ * The table-row alternation requires either ≥3 pipes (GFM tables need at
+ * least 2 cells, i.e. 3 separator pipes) *or* a separator row (`|---|`,
+ * `|:---:|`, etc.). A bare `|expression|` in technical prose has only 2
+ * pipes and no separator syntax, so it is intentionally rejected — that
+ * pattern is not a valid GFM table row anyway.
  */
 function startsWithMarkdownStructuralAnchor(text: string): boolean {
   const trimmed = text.replace(/^\s+/, '');
-  return /^(\|[^\n]*\||#{1,6} |```|>\s|[-*+] |\d+\. )/.test(trimmed);
+  return /^(\|[^\n]*\|[^\n]*\||\|[\s\-:]+\||#{1,6} |```|>\s|[-*+] |\d+\. )/.test(
+    trimmed,
+  );
 }
 
 function findContainedRecoveryPrefixReplayLength(
