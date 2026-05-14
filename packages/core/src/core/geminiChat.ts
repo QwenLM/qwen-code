@@ -554,10 +554,10 @@ export class GeminiChat {
     this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
   }
 
-  async applySessionStartContext(
+  applySessionStartContext(
     extraInstruction: string,
     _source: SessionStartSource,
-  ): Promise<void> {
+  ): void {
     const trimmed = extraInstruction.trim();
     if (!trimmed) {
       return;

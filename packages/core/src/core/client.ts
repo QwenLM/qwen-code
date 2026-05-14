@@ -491,6 +491,31 @@ export class GeminiClient {
     );
   }
 
+  private async fireSessionStartHook(
+    source: SessionStartSource,
+  ): Promise<string | undefined> {
+    const hookSystem = this.config.getHookSystem();
+    if (
+      this.config.getDisableAllHooks() ||
+      !hookSystem ||
+      !this.config.hasHooksForEvent('SessionStart')
+    ) {
+      return undefined;
+    }
+
+    try {
+      const output = await hookSystem.fireSessionStartEvent(
+        source,
+        this.config.getModel() ?? '',
+        String(this.config.getApprovalMode()) as PermissionMode,
+      );
+      return output?.getAdditionalContext()?.trim() || undefined;
+    } catch (err) {
+      this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      return undefined;
+    }
+  }
+
   async startChat(
     extraHistory?: Content[],
     sessionStartSource = extraHistory
@@ -504,29 +529,8 @@ export class GeminiClient {
     const history = await getInitialChatHistory(this.config, extraHistory);
 
     try {
-      let sessionStartAdditionalContext: string | undefined;
-      const hookSystem = this.config.getHookSystem();
-      const hooksEnabled = !this.config.getDisableAllHooks();
-      if (
-        hooksEnabled &&
-        hookSystem &&
-        this.config.hasHooksForEvent('SessionStart')
-      ) {
-        try {
-          const permissionMode = String(
-            this.config.getApprovalMode(),
-          ) as PermissionMode;
-          const startHookOutput = await hookSystem.fireSessionStartEvent(
-            sessionStartSource,
-            this.config.getModel() ?? '',
-            permissionMode,
-          );
-          sessionStartAdditionalContext =
-            startHookOutput?.getAdditionalContext();
-        } catch (err) {
-          this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
-        }
-      }
+      const sessionStartAdditionalContext =
+        await this.fireSessionStartHook(sessionStartSource);
 
       // Warm the tool registry before building the system prompt so we know
       // which tools are marked `shouldDefer`. The deferred list is appended to
@@ -597,7 +601,7 @@ export class GeminiClient {
       );
 
       if (sessionStartAdditionalContext) {
-        await this.chat.applySessionStartContext(
+        this.chat.applySessionStartContext(
           sessionStartAdditionalContext,
           sessionStartSource,
         );
@@ -1366,33 +1370,14 @@ export class GeminiClient {
         // the previous merged IDE context.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
-          const hookSystem = this.config.getHookSystem();
-          const hooksEnabled = !this.config.getDisableAllHooks();
-          if (
-            hooksEnabled &&
-            hookSystem &&
-            this.config.hasHooksForEvent('SessionStart')
-          ) {
-            try {
-              const compactContext = await hookSystem.fireSessionStartEvent(
-                SessionStartSource.Compact,
-                this.config.getModel() ?? '',
-                String(this.config.getApprovalMode()) as PermissionMode,
-              );
-              const compactAdditionalContext = compactContext
-                ?.getAdditionalContext()
-                ?.trim();
-              if (compactAdditionalContext) {
-                await this.getChat().applySessionStartContext(
-                  compactAdditionalContext,
-                  SessionStartSource.Compact,
-                );
-              }
-            } catch (err) {
-              this.config
-                .getDebugLogger()
-                .warn(`SessionStart hook failed: ${err}`);
-            }
+          const compactAdditionalContext = await this.fireSessionStartHook(
+            SessionStartSource.Compact,
+          );
+          if (compactAdditionalContext) {
+            this.getChat().applySessionStartContext(
+              compactAdditionalContext,
+              SessionStartSource.Compact,
+            );
           }
         }
 

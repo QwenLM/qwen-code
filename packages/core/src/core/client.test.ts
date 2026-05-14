@@ -673,6 +673,75 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('fireSessionStartHook', () => {
+    it('returns trimmed additionalContext from the SessionStart hook', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: '  hook context  ',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await expect(
+        client['fireSessionStartHook'](SessionStartSource.Startup),
+      ).resolves.toBe('hook context');
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Startup,
+        'test-model',
+        PermissionMode.Default,
+      );
+    });
+
+    it('returns undefined without firing when SessionStart hooks are disabled', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn(),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await expect(
+        client['fireSessionStartHook'](SessionStartSource.Startup),
+      ).resolves.toBeUndefined();
+      expect(hookSystem.fireSessionStartEvent).not.toHaveBeenCalled();
+    });
+
+    it('logs and returns undefined when the SessionStart hook throws', async () => {
+      const fireSessionStartEvent = vi
+        .fn()
+        .mockRejectedValue(new Error('hook failed'));
+      const debugLogger = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireSessionStartEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      vi.mocked(mockConfig.getDebugLogger).mockReturnValue(debugLogger);
+
+      await expect(
+        client['fireSessionStartHook'](SessionStartSource.Compact),
+      ).resolves.toBeUndefined();
+      expect(debugLogger.warn).toHaveBeenCalledWith(
+        'SessionStart hook failed: Error: hook failed',
+      );
+    });
+  });
+
   describe('startChat — deferred tools', () => {
     // Pulls the registry mock used by the surrounding suite so each test
     // can stub the deferred-summary + ToolSearch availability per case.
@@ -1440,7 +1509,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+        applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
       mockTurnRunFn.mockReturnValue(
@@ -1482,7 +1551,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+        applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
       mockTurnRunFn.mockReturnValue(
@@ -1522,7 +1591,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+        applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
       mockTurnRunFn.mockReturnValue(
@@ -1571,7 +1640,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
-        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+        applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
       mockTurnRunFn.mockReturnValue(

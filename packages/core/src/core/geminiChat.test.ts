@@ -25,6 +25,7 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
+import { SessionStartSource } from '../hooks/types.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -244,6 +245,26 @@ describe('GeminiChat', async () => {
 
       expect(isolatedChat['generationConfig'].systemInstruction).toBe(
         'Base content instruction\n\n---\n\nSessionStart additional context:\nCtx2',
+      );
+    });
+
+    it('applies session-start context synchronously via applySessionStartContext', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction('Base instruction');
+
+      isolatedChat.applySessionStartContext(
+        '  Sync ctx  ',
+        SessionStartSource.Startup,
+      );
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n---\n\nSessionStart additional context:\nSync ctx',
       );
     });
   });
