@@ -674,7 +674,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       }
 
       // Find the nearest editor group to the left or right of the chat webview.
-      // Fall back to ViewColumn.Beside when neither neighbor exists.
+      // Fall back to ViewColumn.Beside when neither neighbor exists or the webview is missing.
       const targetViewColumn =
         findLeftGroupOfChatWebview() ??
         findRightGroupOfChatWebview() ??

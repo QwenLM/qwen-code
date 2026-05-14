@@ -225,7 +225,7 @@ export class DiffManager {
     // Prefer opening the diff in the group to the left of the chat webview.
     // When that isn't available (e.g. chat is in the leftmost group), try the
     // group to the right so we reuse existing layout. Only fall back to
-    // ViewColumn.Beside when neither neighbor exists.
+    // ViewColumn.Beside when neither neighbor exists or the webview is missing.
     const targetViewColumn =
       findLeftGroupOfChatWebview() ??
       findRightGroupOfChatWebview() ??
