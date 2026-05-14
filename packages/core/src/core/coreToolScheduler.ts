@@ -49,7 +49,7 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
-import { escapeXml } from '../utils/xml.js';
+import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
@@ -2077,7 +2077,7 @@ export class CoreToolScheduler {
               // PLUS one for skill activation — a multi-path tool could
               // produce N+1 envelopes, diluting the model's attention. One
               // wrapper / one append also lets us share the breakout-prevention
-              // sanitization step (closing-tag scrub) in one place.
+              // sanitization step (escapeSystemReminderTags) in one place.
               const reminderBlocks: string[] = [];
 
               for (const candidatePath of candidatePaths) {
@@ -2123,16 +2123,18 @@ export class CoreToolScheduler {
               }
 
               if (reminderBlocks.length > 0) {
-                // Final closing-tag scrub on the joined body — defense in
-                // depth against rules whose markdown body contains a
-                // literal `</system-reminder>` sequence (which would
-                // otherwise close our envelope mid-content). Full XML
-                // escaping would mangle code blocks in rule bodies; the
-                // targeted scrub is the minimum needed to keep the
-                // envelope intact.
-                const body = reminderBlocks
-                  .join('\n\n')
-                  .replace(/<\/system-reminder>/gi, '<\\/system-reminder>');
+                // Final tag scrub on the joined body — defense in depth
+                // against rules whose markdown body contains a
+                // `<system-reminder>` open/close sequence (literal or
+                // obfuscated with whitespace / zero-width / control
+                // chars). Full XML escaping would mangle code blocks in
+                // rule bodies; the shared targeted scrub keeps markdown
+                // readable while neutralizing envelope-breakout
+                // attempts. Mirrors the IDE-context scrub via the same
+                // `escapeSystemReminderTags` helper.
+                const body = escapeSystemReminderTags(
+                  reminderBlocks.join('\n\n'),
+                );
                 content = appendAdditionalContext(
                   content,
                   `<system-reminder>\n${body}\n</system-reminder>`,
