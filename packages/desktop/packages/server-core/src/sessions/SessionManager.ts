@@ -302,6 +302,11 @@ const EXTERNAL_SESSION_LIST_SYNC_INTERVAL_MS = 5_000;
 const EXTERNAL_SESSION_LIST_PAGE_SIZE = 100;
 const EXTERNAL_SESSION_LIST_MAX_PAGES = 20;
 const EXTERNAL_SESSION_PLACEHOLDER_TITLE = '(session)';
+const EXTERNAL_SESSION_PLACEHOLDER_TITLES = new Set([
+  EXTERNAL_SESSION_PLACEHOLDER_TITLE,
+  'New chat',
+  '新聊天',
+]);
 
 function isSlashCommandMessage(message: string): boolean {
   return /^\/[A-Za-z][\w-]*(?:\s|$)/.test(message.trim());
@@ -1155,6 +1160,7 @@ type StoredSessionWithHeaderOptions = StoredSession & {
   omitMessageDerivedHeaderFields?: boolean;
   omitTranscriptDerivedHeaderFields?: boolean;
   omitHeaderTokenUsage?: boolean;
+  preserveSessionTimestamps?: boolean;
 };
 
 function stripQwenCanonicalStoredFields<T extends Partial<StoredSession>>(
@@ -2542,6 +2548,10 @@ export class SessionManager implements ISessionManager {
     return Number.isFinite(parsed) ? parsed : Date.now();
   }
 
+  private isExternalSessionPlaceholderTitle(title: string): boolean {
+    return EXTERNAL_SESSION_PLACEHOLDER_TITLES.has(title.trim());
+  }
+
   private hasNoRenderableLocalMessages(managed: ManagedSession): boolean {
     const loadedMessageCount = managed.messages.length;
     const persistedMessageCount = managed.messageCount ?? loadedMessageCount;
@@ -2683,7 +2693,11 @@ export class SessionManager implements ISessionManager {
     messages: Message[],
   ): void {
     managed.messages = messages;
-    managed.messageCount = messages.length;
+    if (this.isQwenCanonicalMessageSession(managed)) {
+      delete managed.messageCount;
+    } else {
+      managed.messageCount = messages.length;
+    }
     managed.preview = this.extractMessagePreview(messages);
 
     const firstMessage = messages[0];
@@ -2703,10 +2717,9 @@ export class SessionManager implements ISessionManager {
       ) {
         managed.lastMessageRole = lastMessage.role;
       }
-      managed.lastUsedAt = Math.max(
-        managed.lastUsedAt ?? 0,
-        lastMessage.timestamp,
-      );
+      managed.lastUsedAt = this.isQwenCanonicalMessageSession(managed)
+        ? lastMessage.timestamp
+        : Math.max(managed.lastUsedAt ?? 0, lastMessage.timestamp);
     }
 
     const lastFinalAssistant = [...messages]
@@ -2742,7 +2755,10 @@ export class SessionManager implements ISessionManager {
       return false;
 
     const timestamp = this.parseExternalSessionTimestamp(info.updatedAt);
-    const title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE;
+    const createdTimestamp =
+      parseOptionalTimestamp(info.createdAt) ??
+      parseOptionalTimestamp(info.startTime);
+    let title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE;
     const managed = this.selectManagedSessionBySdkSessionId(
       workspace.id,
       info.sessionId,
@@ -2757,7 +2773,7 @@ export class SessionManager implements ISessionManager {
     let inspectedResult: BackendSessionMessagesResult | undefined;
 
     if (
-      title === EXTERNAL_SESSION_PLACEHOLDER_TITLE &&
+      this.isExternalSessionPlaceholderTitle(title) &&
       this.shouldInspectExternalPlaceholderSession(managed)
     ) {
       inspectedResult = await this.loadExternalListedMessages(
@@ -2779,6 +2795,7 @@ export class SessionManager implements ISessionManager {
           (managed.isProcessing || !this.hasNoRenderableLocalMessages(managed))
         );
       }
+      title = this.extractMessagePreview(inspectedMessages) ?? title;
     }
 
     if (managed) {
@@ -2786,17 +2803,25 @@ export class SessionManager implements ISessionManager {
       managed.workingDirectory = info.cwd;
       managed.sdkCwd = info.cwd;
       managed.name = title;
-      managed.createdAt =
-        parseOptionalTimestamp(info.startTime) ?? managed.createdAt;
       if (info.preview !== undefined)
         managed.preview = info.preview ?? undefined;
-      if (typeof info.messageCount === 'number')
-        managed.messageCount = info.messageCount;
-      managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, timestamp);
-      managed.lastMessageAt = Math.max(managed.lastMessageAt ?? 0, timestamp);
       if (!managed.llmConnection) managed.llmConnection = connectionSlug;
       if (!managed.model && model) managed.model = model;
       if (!managed.thinkingLevel) managed.thinkingLevel = defaultThinkingLevel;
+      let shouldPersistManagedMetadata = false;
+      if (connectionSlug === QWEN_CODE_CONNECTION_SLUG) {
+        managed.createdAt = createdTimestamp ?? managed.createdAt ?? timestamp;
+        managed.lastUsedAt = timestamp;
+        managed.lastMessageAt = timestamp;
+        delete managed.messageCount;
+        shouldPersistManagedMetadata = true;
+      } else {
+        managed.createdAt = createdTimestamp ?? managed.createdAt;
+        if (typeof info.messageCount === 'number')
+          managed.messageCount = info.messageCount;
+        managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, timestamp);
+        managed.lastMessageAt = Math.max(managed.lastMessageAt ?? 0, timestamp);
+      }
       this.applyAvailableCommandsFromMessagesResult(
         managed,
         inspectedResult,
@@ -2808,6 +2833,8 @@ export class SessionManager implements ISessionManager {
         this.markExternalMessagesLoadedThrough(managed);
         managed.messagesLoaded = true;
         this.persistSession(managed);
+      } else if (shouldPersistManagedMetadata) {
+        this.persistSession(managed);
       }
       return true;
     }
@@ -2815,9 +2842,11 @@ export class SessionManager implements ISessionManager {
     const inspectedMessages = inspectedResult?.messages;
     const lastInspectedMessage =
       inspectedMessages?.[inspectedMessages.length - 1];
+    const firstInspectedMessage = inspectedMessages?.[0];
     const shouldPersistInspectedMessages =
       connectionSlug !== QWEN_CODE_CONNECTION_SLUG;
-    const createdAt = parseOptionalTimestamp(info.startTime) ?? timestamp;
+    const createdAt =
+      firstInspectedMessage?.timestamp ?? createdTimestamp ?? timestamp;
     const inMemoryLastMessageAt = lastInspectedMessage?.timestamp ?? timestamp;
     const storedSessionBase: StoredSession = {
       id: info.sessionId,
@@ -2845,6 +2874,7 @@ export class SessionManager implements ISessionManager {
             omitMessageDerivedHeaderFields: true,
             omitTranscriptDerivedHeaderFields: true,
             omitHeaderTokenUsage: true,
+            preserveSessionTimestamps: true,
           }
         : storedSessionBase
     ) as StoredSessionWithHeaderOptions;
@@ -2865,7 +2895,8 @@ export class SessionManager implements ISessionManager {
       lastUsedAt: Math.max(timestamp, inMemoryLastMessageAt),
       lastMessageAt: inMemoryLastMessageAt,
       preview: info.preview ?? undefined,
-      ...(typeof info.messageCount === 'number'
+      ...(connectionSlug !== QWEN_CODE_CONNECTION_SLUG &&
+      typeof info.messageCount === 'number'
         ? { messageCount: info.messageCount }
         : {}),
     });
@@ -2942,7 +2973,12 @@ export class SessionManager implements ISessionManager {
         ...pickSessionFields(managed),
         workspaceRootPath: managed.workspace.rootPath,
         createdAt: managed.createdAt ?? Date.now(),
-        lastUsedAt: Date.now(),
+        lastUsedAt: usesQwenCanonicalMessages
+          ? (managed.lastUsedAt ??
+            managed.lastMessageAt ??
+            managed.createdAt ??
+            Date.now())
+          : Date.now(),
         messages: persistableMessages.map(messageToStored),
         tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
       } as StoredSession;
@@ -2953,6 +2989,7 @@ export class SessionManager implements ISessionManager {
               omitMessageDerivedHeaderFields: true,
               omitTranscriptDerivedHeaderFields: true,
               omitHeaderTokenUsage: true,
+              preserveSessionTimestamps: true,
             }
           : storedSessionBase
       ) as StoredSessionWithHeaderOptions;
@@ -3536,6 +3573,9 @@ export class SessionManager implements ISessionManager {
       const usesQwenCanonicalMessages =
         this.isQwenCanonicalMessageSession(managed);
       managed.messages = usesQwenCanonicalMessages ? [] : storedMessages;
+      if (usesQwenCanonicalMessages) {
+        delete managed.messageCount;
+      }
       sessionLog.debug(
         `Lazy-loaded ${managed.messages.length} messages for session ${managed.id}`,
       );
@@ -3579,10 +3619,7 @@ export class SessionManager implements ISessionManager {
       }
     }
     managed.messagesLoaded = true;
-    if (
-      loadedExternalMessages &&
-      !this.isQwenCanonicalMessageSession(managed)
-    ) {
+    if (loadedExternalMessages) {
       this.persistSession(managed);
       await this.flushSession(managed.id);
     }
@@ -3621,10 +3658,7 @@ export class SessionManager implements ISessionManager {
     if (externalLoadResult === 'loaded' || externalLoadResult === 'empty') {
       this.markExternalMessagesLoadedThrough(managed);
     }
-    if (
-      externalLoadResult === 'loaded' &&
-      !this.isQwenCanonicalMessageSession(managed)
-    ) {
+    if (externalLoadResult === 'loaded') {
       this.persistSession(managed);
       await this.flushSession(managed.id);
     }
@@ -6011,9 +6045,7 @@ export class SessionManager implements ISessionManager {
    * Get pending plan execution state for a session.
    * Used on reload/init to check if we need to resume plan execution.
    */
-  getPendingPlanExecution(
-    sessionId: string,
-  ): {
+  getPendingPlanExecution(sessionId: string): {
     planPath: string;
     draftInputSnapshot?: string;
     awaitingCompaction: boolean;

@@ -5,10 +5,23 @@
  * Format: Line 1 = SessionHeader, Lines 2+ = StoredMessage (one per line)
  */
 
-import { openSync, readSync, closeSync, readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
-import { open, readFile } from 'fs/promises';
+import {
+  openSync,
+  readSync,
+  closeSync,
+  readFileSync,
+  writeFileSync,
+  renameSync,
+  unlinkSync,
+} from 'fs';
+import { open } from 'fs/promises';
 import { dirname } from 'path';
-import type { SessionHeader, StoredSession, StoredMessage, SessionTokenUsage } from './types.ts';
+import type {
+  SessionHeader,
+  StoredSession,
+  StoredMessage,
+  SessionTokenUsage,
+} from './types.ts';
 import type { PermissionMode } from '../agent/mode-types.ts';
 import { parsePermissionMode } from '../agent/mode-types.ts';
 import { toPortablePath, expandPath, normalizePath } from '../utils/paths.ts';
@@ -26,12 +39,14 @@ type HeaderWriteOptions = {
   omitMessageDerivedFields?: boolean;
   omitTranscriptDerivedFields?: boolean;
   omitTokenUsage?: boolean;
+  preserveSessionTimestamps?: boolean;
 };
 
 type StoredSessionWithHeaderOptions = StoredSession & {
   omitMessageDerivedHeaderFields?: boolean;
   omitTranscriptDerivedHeaderFields?: boolean;
   omitHeaderTokenUsage?: boolean;
+  preserveSessionTimestamps?: boolean;
 };
 
 const EMPTY_TOKEN_USAGE: SessionTokenUsage = {
@@ -47,7 +62,10 @@ const EMPTY_TOKEN_USAGE: SessionTokenUsage = {
  * Applied after JSON.stringify so paths embedded anywhere in message content
  * (datatable src, planPath, attachment storedPath, etc.) are made portable.
  */
-export function makeSessionPathPortable(jsonLine: string, sessionDir: string): string {
+export function makeSessionPathPortable(
+  jsonLine: string,
+  sessionDir: string,
+): string {
   if (!sessionDir) return jsonLine;
   const normalized = normalizePath(sessionDir);
   let result = jsonLine.replaceAll(normalized, SESSION_PATH_TOKEN);
@@ -64,7 +82,10 @@ export function makeSessionPathPortable(jsonLine: string, sessionDir: string): s
  * Expand the portable session path token back to an absolute path.
  * Applied before JSON.parse so all path references resolve correctly at runtime.
  */
-export function expandSessionPath(jsonLine: string, sessionDir: string): string {
+export function expandSessionPath(
+  jsonLine: string,
+  sessionDir: string,
+): string {
   if (!jsonLine.includes(SESSION_PATH_TOKEN)) return jsonLine;
   return jsonLine.replaceAll(SESSION_PATH_TOKEN, normalizePath(sessionDir));
 }
@@ -76,7 +97,9 @@ function normalizePermissionMode(value: unknown): PermissionMode | undefined {
 
 function normalizeHeaderPermissionModes<T extends SessionHeader>(header: T): T {
   const permissionMode = normalizePermissionMode(header.permissionMode);
-  const previousPermissionMode = normalizePermissionMode(header.previousPermissionMode);
+  const previousPermissionMode = normalizePermissionMode(
+    header.previousPermissionMode,
+  );
 
   if (permissionMode) {
     header.permissionMode = permissionMode;
@@ -111,9 +134,12 @@ export function readSessionHeader(sessionFile: string): SessionHeader | null {
 
     const content = buffer.toString('utf-8', 0, bytesRead);
     const firstNewline = content.indexOf('\n');
-    const firstLine = firstNewline > 0 ? content.slice(0, firstNewline) : content;
+    const firstLine =
+      firstNewline > 0 ? content.slice(0, firstNewline) : content;
 
-    const parsed = safeJsonParse(expandSessionPath(firstLine, dirname(sessionFile))) as SessionHeader;
+    const parsed = safeJsonParse(
+      expandSessionPath(firstLine, dirname(sessionFile)),
+    ) as SessionHeader;
     return normalizeSessionHeader(parsed);
   } catch (error) {
     debug('[jsonl] Failed to read session header:', sessionFile, error);
@@ -135,17 +161,21 @@ export function readSessionJsonl(sessionFile: string): StoredSession | null {
 
     const sessionDir = dirname(sessionFile);
     const header = normalizeSessionHeader(
-      safeJsonParse(expandSessionPath(firstLine, sessionDir)) as SessionHeader
+      safeJsonParse(expandSessionPath(firstLine, sessionDir)) as SessionHeader,
     );
     // Parse messages resiliently: skip lines that fail to parse (e.g. truncated by crash)
     // rather than losing the entire session's messages.
     // Expand session path tokens before parsing so embedded paths resolve correctly.
-    const expandedMessageLines = lines.slice(1).map(line => expandSessionPath(line, sessionDir));
+    const expandedMessageLines = lines
+      .slice(1)
+      .map((line) => expandSessionPath(line, sessionDir));
     const messages = parseMessagesResilient(expandedMessageLines);
 
     // Migration: For sessions created before sdkCwd was added, use workingDirectory as fallback.
     // This is correct because the old code used workingDirectory for SDK's cwd parameter.
-    const workingDir = header.workingDirectory ? expandPath(header.workingDirectory) : undefined;
+    const workingDir = header.workingDirectory
+      ? expandPath(header.workingDirectory)
+      : undefined;
     const sdkCwd = header.sdkCwd ? expandPath(header.sdkCwd) : workingDir;
 
     return {
@@ -172,27 +202,36 @@ export function readSessionJsonl(sessionFile: string): StoredSession | null {
  * Line 1: Header with pre-computed metadata
  * Lines 2+: Messages (one per line)
  */
-export function writeSessionJsonl(sessionFile: string, session: StoredSession): void {
+export function writeSessionJsonl(
+  sessionFile: string,
+  session: StoredSession,
+): void {
   const headerOptionsSource = session as StoredSessionWithHeaderOptions;
   const header = createSessionHeader(session, {
     omitMessageDerivedFields:
       headerOptionsSource.omitMessageDerivedHeaderFields,
     omitTranscriptDerivedFields:
       headerOptionsSource.omitTranscriptDerivedHeaderFields,
-    omitTokenUsage:
-      headerOptionsSource.omitHeaderTokenUsage,
+    omitTokenUsage: headerOptionsSource.omitHeaderTokenUsage,
+    preserveSessionTimestamps: headerOptionsSource.preserveSessionTimestamps,
   });
   const sessionDir = dirname(sessionFile);
 
   const lines = [
     makeSessionPathPortable(JSON.stringify(header), sessionDir),
-    ...session.messages.map(m => makeSessionPathPortable(JSON.stringify(m), sessionDir)),
+    ...session.messages.map((m) =>
+      makeSessionPathPortable(JSON.stringify(m), sessionDir),
+    ),
   ];
 
   const tmpFile = sessionFile + '.tmp';
   writeFileSync(tmpFile, lines.join('\n') + '\n');
   // On Windows, rename fails if target exists. Delete first for cross-platform compatibility.
-  try { unlinkSync(sessionFile); } catch { /* ignore if doesn't exist */ }
+  try {
+    unlinkSync(sessionFile);
+  } catch {
+    /* ignore if doesn't exist */
+  }
   renameSync(tmpFile, sessionFile);
 }
 
@@ -216,7 +255,7 @@ export function createSessionHeader(
     delete header.createdAt;
     delete header.lastUsedAt;
     delete header.lastMessageAt;
-  } else {
+  } else if (!options.preserveSessionTimestamps) {
     // Override lastUsedAt with current timestamp (save time, not original)
     header.lastUsedAt = Date.now();
   }
@@ -235,12 +274,20 @@ export function createSessionHeader(
  * Extract the role of the last message for badge display.
  * Only returns roles that are meaningful for UI display (user, assistant, plan, tool, error).
  */
-function extractLastMessageRole(messages: StoredMessage[]): SessionHeader['lastMessageRole'] {
+function extractLastMessageRole(
+  messages: StoredMessage[],
+): SessionHeader['lastMessageRole'] {
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage) return undefined;
   // Map message types to the subset we care about for display
   const role = lastMessage.type;
-  if (role === 'user' || role === 'assistant' || role === 'plan' || role === 'tool' || role === 'error') {
+  if (
+    role === 'user' ||
+    role === 'assistant' ||
+    role === 'plan' ||
+    role === 'tool' ||
+    role === 'error'
+  ) {
     return role;
   }
   return undefined;
@@ -250,7 +297,9 @@ function extractLastMessageRole(messages: StoredMessage[]): SessionHeader['lastM
  * Extract the ID of the last final (non-intermediate) assistant message.
  * Used for unread detection in session list without loading all messages.
  */
-function extractLastFinalMessageId(messages: StoredMessage[]): string | undefined {
+function extractLastFinalMessageId(
+  messages: StoredMessage[],
+): string | undefined {
   // Walk backwards to find the last assistant message that isn't intermediate
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -267,18 +316,18 @@ function extractLastFinalMessageId(messages: StoredMessage[]): string | undefine
  * Returns first 150 chars.
  */
 function extractPreview(messages: StoredMessage[]): string | undefined {
-  const firstUserMessage = messages.find(m => m.type === 'user');
+  const firstUserMessage = messages.find((m) => m.type === 'user');
   if (!firstUserMessage?.content) return undefined;
 
   // Sanitize: strip special blocks, tags, and bracket mentions, normalize whitespace
   const sanitized = firstUserMessage.content
     .replace(/<edit_request>[\s\S]*?<\/edit_request>/g, '') // Strip entire edit_request blocks
-    .replace(/<[^>]+>/g, '')     // Strip remaining XML/HTML tags
-    .replace(/\[skill:(?:[\w-]+:)?[\w-]+\]/g, '')   // Strip [skill:...] mentions
-    .replace(/\[source:[\w-]+\]/g, '')              // Strip [source:...] mentions
-    .replace(/\[file:[^\]]+\]/g, '')                // Strip [file:...] mentions
-    .replace(/\[folder:[^\]]+\]/g, '')              // Strip [folder:...] mentions
-    .replace(/\s+/g, ' ')        // Collapse whitespace (including newlines)
+    .replace(/<[^>]+>/g, '') // Strip remaining XML/HTML tags
+    .replace(/\[skill:(?:[\w-]+:)?[\w-]+\]/g, '') // Strip [skill:...] mentions
+    .replace(/\[source:[\w-]+\]/g, '') // Strip [source:...] mentions
+    .replace(/\[file:[^\]]+\]/g, '') // Strip [file:...] mentions
+    .replace(/\[folder:[^\]]+\]/g, '') // Strip [folder:...] mentions
+    .replace(/\s+/g, ' ') // Collapse whitespace (including newlines)
     .trim();
 
   return sanitized.substring(0, 150) || undefined;
@@ -288,7 +337,9 @@ function extractPreview(messages: StoredMessage[]): string | undefined {
  * Async version of readSessionHeader for parallel I/O.
  * Uses fs/promises for non-blocking reads.
  */
-export async function readSessionHeaderAsync(sessionFile: string): Promise<SessionHeader | null> {
+export async function readSessionHeaderAsync(
+  sessionFile: string,
+): Promise<SessionHeader | null> {
   try {
     const handle = await open(sessionFile, 'r');
     try {
@@ -296,8 +347,11 @@ export async function readSessionHeaderAsync(sessionFile: string): Promise<Sessi
       const { bytesRead } = await handle.read(buffer, 0, 8192, 0);
       const content = buffer.toString('utf-8', 0, bytesRead);
       const firstNewline = content.indexOf('\n');
-      const firstLine = firstNewline > 0 ? content.slice(0, firstNewline) : content;
-      const parsed = safeJsonParse(expandSessionPath(firstLine, dirname(sessionFile))) as SessionHeader;
+      const firstLine =
+        firstNewline > 0 ? content.slice(0, firstNewline) : content;
+      const parsed = safeJsonParse(
+        expandSessionPath(firstLine, dirname(sessionFile)),
+      ) as SessionHeader;
       return normalizeSessionHeader(parsed);
     } finally {
       await handle.close();
@@ -319,7 +373,9 @@ export function readSessionMessages(sessionFile: string): StoredMessage[] {
     const lines = content.split('\n').filter(Boolean);
     // Skip first line (header), expand session path tokens, parse rest as messages resiliently
     const sessionDir = dirname(sessionFile);
-    const expandedLines = lines.slice(1).map(line => expandSessionPath(line, sessionDir));
+    const expandedLines = lines
+      .slice(1)
+      .map((line) => expandSessionPath(line, sessionDir));
     return parseMessagesResilient(expandedLines);
   } catch (error) {
     debug('[jsonl] Failed to read session messages:', sessionFile, error);
@@ -339,7 +395,10 @@ function parseMessagesResilient(lines: string[]): StoredMessage[] {
     } catch {
       // Corrupted/truncated line (likely from a crash during write).
       // Skip it and continue — losing one message is better than losing all.
-      debug('[jsonl] Skipping corrupted message line (truncated?):', line.substring(0, 100));
+      debug(
+        '[jsonl] Skipping corrupted message line (truncated?):',
+        line.substring(0, 100),
+      );
     }
   }
   return messages;

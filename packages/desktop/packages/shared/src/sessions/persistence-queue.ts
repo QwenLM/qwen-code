@@ -1,30 +1,39 @@
-import { writeFile, rename, unlink } from 'fs/promises'
-import { dirname } from 'path'
-import type { StoredSession, SessionHeader } from './types.js'
-import { getSessionFilePath, ensureSessionsDir, ensureSessionDir } from './storage.js'
-import { toPortablePath } from '../utils/paths.js'
-import { createSessionHeader, makeSessionPathPortable, readSessionHeader } from './jsonl.js'
-import { debug } from '../utils/debug.js'
+import { writeFile, rename, unlink } from 'fs/promises';
+import { dirname } from 'path';
+import type { StoredSession, SessionHeader } from './types.js';
+import {
+  getSessionFilePath,
+  ensureSessionsDir,
+  ensureSessionDir,
+} from './storage.js';
+import { toPortablePath } from '../utils/paths.js';
+import {
+  createSessionHeader,
+  makeSessionPathPortable,
+  readSessionHeader,
+} from './jsonl.js';
+import { debug } from '../utils/debug.js';
 
 interface PendingWrite {
-  data: StoredSession
-  timer: ReturnType<typeof setTimeout>
+  data: StoredSession;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 type StoredSessionWithHeaderOptions = StoredSession & {
-  omitMessageDerivedHeaderFields?: boolean
-  omitTranscriptDerivedHeaderFields?: boolean
-  omitHeaderTokenUsage?: boolean
-}
+  omitMessageDerivedHeaderFields?: boolean;
+  omitTranscriptDerivedHeaderFields?: boolean;
+  omitHeaderTokenUsage?: boolean;
+  preserveSessionTimestamps?: boolean;
+};
 
 interface HeaderMetadataSignature {
-  name?: string
-  labels?: string[]
-  isFlagged?: boolean
-  sessionStatus?: string
-  permissionMode?: string
-  hasUnread?: boolean
-  lastReadMessageId?: string
+  name?: string;
+  labels?: string[];
+  isFlagged?: boolean;
+  sessionStatus?: string;
+  permissionMode?: string;
+  hasUnread?: boolean;
+  lastReadMessageId?: string;
 }
 
 function getHeaderMetadataSignature(header: SessionHeader): string {
@@ -36,11 +45,14 @@ function getHeaderMetadataSignature(header: SessionHeader): string {
     permissionMode: header.permissionMode,
     hasUnread: header.hasUnread,
     lastReadMessageId: header.lastReadMessageId,
-  }
-  return JSON.stringify(signature)
+  };
+  return JSON.stringify(signature);
 }
 
-function mergeHeaderWithExternalMetadata(localHeader: SessionHeader, diskHeader: SessionHeader): SessionHeader {
+function mergeHeaderWithExternalMetadata(
+  localHeader: SessionHeader,
+  diskHeader: SessionHeader,
+): SessionHeader {
   return {
     ...localHeader,
     name: diskHeader.name,
@@ -50,7 +62,7 @@ function mergeHeaderWithExternalMetadata(localHeader: SessionHeader, diskHeader:
     permissionMode: diskHeader.permissionMode,
     hasUnread: diskHeader.hasUnread,
     lastReadMessageId: diskHeader.lastReadMessageId,
-  }
+  };
 }
 
 /**
@@ -63,13 +75,13 @@ function mergeHeaderWithExternalMetadata(localHeader: SessionHeader, diskHeader:
  * would otherwise write to the same .tmp file concurrently.
  */
 class SessionPersistenceQueue {
-  private pending = new Map<string, PendingWrite>()
-  private writeInProgress = new Map<string, Promise<void>>()
-  private lastWrittenHeaderSignature = new Map<string, string>()
-  private debounceMs: number
+  private pending = new Map<string, PendingWrite>();
+  private writeInProgress = new Map<string, Promise<void>>();
+  private lastWrittenHeaderSignature = new Map<string, string>();
+  private debounceMs: number;
 
   constructor(debounceMs = 500) {
-    this.debounceMs = debounceMs
+    this.debounceMs = debounceMs;
   }
 
   /**
@@ -77,16 +89,16 @@ class SessionPersistenceQueue {
    * session, it will be replaced with the new data and the timer reset.
    */
   enqueue(session: StoredSession): void {
-    const existing = this.pending.get(session.id)
+    const existing = this.pending.get(session.id);
     if (existing) {
-      clearTimeout(existing.timer)
+      clearTimeout(existing.timer);
     }
 
     const timer = setTimeout(() => {
-      void this.write(session.id)
-    }, this.debounceMs)
+      void this.write(session.id);
+    }, this.debounceMs);
 
-    this.pending.set(session.id, { data: session, timer })
+    this.pending.set(session.id, { data: session, timer });
   }
 
   /**
@@ -94,27 +106,31 @@ class SessionPersistenceQueue {
    * Uses atomic write (write-to-temp-then-rename) to prevent corruption on crash.
    */
   private async write(sessionId: string): Promise<void> {
-    const entry = this.pending.get(sessionId)
-    if (!entry) return
+    const entry = this.pending.get(sessionId);
+    if (!entry) return;
 
-    this.pending.delete(sessionId)
+    this.pending.delete(sessionId);
 
     try {
-      const { data } = entry
-      const headerOptionsSource = data as StoredSessionWithHeaderOptions
-      ensureSessionsDir(data.workspaceRootPath)
-      ensureSessionDir(data.workspaceRootPath, sessionId)
+      const { data } = entry;
+      const headerOptionsSource = data as StoredSessionWithHeaderOptions;
+      ensureSessionsDir(data.workspaceRootPath);
+      ensureSessionDir(data.workspaceRootPath, sessionId);
 
-      const filePath = getSessionFilePath(data.workspaceRootPath, sessionId)
+      const filePath = getSessionFilePath(data.workspaceRootPath, sessionId);
 
       // Prepare session with portable paths for cross-machine compatibility
       const storageSession: StoredSession = {
         ...data,
         workspaceRootPath: toPortablePath(data.workspaceRootPath),
-        workingDirectory: data.workingDirectory ? toPortablePath(data.workingDirectory) : undefined,
+        workingDirectory: data.workingDirectory
+          ? toPortablePath(data.workingDirectory)
+          : undefined,
         sdkCwd: data.sdkCwd ? toPortablePath(data.sdkCwd) : undefined,
-        lastUsedAt: Date.now(),
-      }
+        lastUsedAt: headerOptionsSource.preserveSessionTimestamps
+          ? data.lastUsedAt
+          : Date.now(),
+      };
 
       // Create JSONL content: header + messages (one per line)
       // Filter out intermediate messages - they're transient streaming status updates
@@ -123,13 +139,16 @@ class SessionPersistenceQueue {
           headerOptionsSource.omitMessageDerivedHeaderFields,
         omitTranscriptDerivedFields:
           headerOptionsSource.omitTranscriptDerivedHeaderFields,
-        omitTokenUsage:
-          headerOptionsSource.omitHeaderTokenUsage,
-      })
-      const localSig = getHeaderMetadataSignature(localHeader)
-      const diskHeader = readSessionHeader(filePath)
-      const previousSig = this.lastWrittenHeaderSignature.get(sessionId)
-      const diskSig = diskHeader ? getHeaderMetadataSignature(diskHeader) : undefined
+        omitTokenUsage: headerOptionsSource.omitHeaderTokenUsage,
+        preserveSessionTimestamps:
+          headerOptionsSource.preserveSessionTimestamps,
+      });
+      const localSig = getHeaderMetadataSignature(localHeader);
+      const diskHeader = readSessionHeader(filePath);
+      const previousSig = this.lastWrittenHeaderSignature.get(sessionId);
+      const diskSig = diskHeader
+        ? getHeaderMetadataSignature(diskHeader)
+        : undefined;
 
       // Queue writes should never clobber session metadata changed externally
       // (watcher edits, direct header edits, other instances), but they must
@@ -137,25 +156,36 @@ class SessionPersistenceQueue {
       //
       // Preserve disk metadata only when disk diverged from our last written
       // signature, which indicates an external mutation.
-      const hasMetadataMismatch = !!diskHeader && !!diskSig && diskSig !== localSig
-      const hasExternalMetadataChange = !!diskHeader && !!diskSig && !!previousSig && diskSig !== previousSig
-      const header = hasExternalMetadataChange && diskHeader
-        ? mergeHeaderWithExternalMetadata(localHeader, diskHeader)
-        : localHeader
+      const hasMetadataMismatch =
+        !!diskHeader && !!diskSig && diskSig !== localSig;
+      const hasExternalMetadataChange =
+        !!diskHeader && !!diskSig && !!previousSig && diskSig !== previousSig;
+      const header =
+        hasExternalMetadataChange && diskHeader
+          ? mergeHeaderWithExternalMetadata(localHeader, diskHeader)
+          : localHeader;
 
       if (hasMetadataMismatch) {
-        const baseline = previousSig ? `, previousSig=${previousSig.slice(0, 12)}` : ', previousSig=<none>'
-        const mode = hasExternalMetadataChange ? 'disk preserved' : 'local preserved'
-        debug(`[PersistenceQueue] Session ${sessionId} metadata mismatch detected (${mode}${baseline})`)
+        const baseline = previousSig
+          ? `, previousSig=${previousSig.slice(0, 12)}`
+          : ', previousSig=<none>';
+        const mode = hasExternalMetadataChange
+          ? 'disk preserved'
+          : 'local preserved';
+        debug(
+          `[PersistenceQueue] Session ${sessionId} metadata mismatch detected (${mode}${baseline})`,
+        );
       }
 
-      const persistableMessages = storageSession.messages
+      const persistableMessages = storageSession.messages;
       // Use original absolute sessionDir (before toPortablePath) for path replacement
-      const sessionDir = dirname(filePath)
+      const sessionDir = dirname(filePath);
       const lines = [
         makeSessionPathPortable(JSON.stringify(header), sessionDir),
-        ...persistableMessages.map(m => makeSessionPathPortable(JSON.stringify(m), sessionDir)),
-      ]
+        ...persistableMessages.map((m) =>
+          makeSessionPathPortable(JSON.stringify(m), sessionDir),
+        ),
+      ];
 
       // Atomic write: write to .tmp then rename over the real file.
       // If the process crashes mid-write, only the .tmp is corrupted —
@@ -165,17 +195,21 @@ class SessionPersistenceQueue {
       // during unlink/rename are correctly identified as self-writes.
       // Without this, onSessionMetadataChange sees the stale signature
       // and reverts in-memory metadata on idle sessions.
-      const finalSignature = getHeaderMetadataSignature(header)
-      this.lastWrittenHeaderSignature.set(sessionId, finalSignature)
+      const finalSignature = getHeaderMetadataSignature(header);
+      this.lastWrittenHeaderSignature.set(sessionId, finalSignature);
 
-      const tmpFile = filePath + '.tmp'
-      await writeFile(tmpFile, lines.join('\n') + '\n', 'utf-8')
+      const tmpFile = filePath + '.tmp';
+      await writeFile(tmpFile, lines.join('\n') + '\n', 'utf-8');
       // On Windows, rename fails if target exists. Delete first for cross-platform compatibility.
-      try { await unlink(filePath) } catch { /* ignore if doesn't exist */ }
-      await rename(tmpFile, filePath)
-      debug(`[PersistenceQueue] Wrote session ${sessionId}`)
+      try {
+        await unlink(filePath);
+      } catch {
+        /* ignore if doesn't exist */
+      }
+      await rename(tmpFile, filePath);
+      debug(`[PersistenceQueue] Wrote session ${sessionId}`);
     } catch (error) {
-      console.error(`[PersistenceQueue] Failed to write session ${sessionId}:`, error)
+      debug(`[PersistenceQueue] Failed to write session ${sessionId}:`, error);
     }
   }
 
@@ -185,24 +219,24 @@ class SessionPersistenceQueue {
    * to prevent race conditions on the shared .tmp file.
    */
   async flush(sessionId: string): Promise<void> {
-    const entry = this.pending.get(sessionId)
+    const entry = this.pending.get(sessionId);
     if (entry) {
-      clearTimeout(entry.timer)
+      clearTimeout(entry.timer);
 
       // Wait for any in-progress write to complete first
-      const inProgress = this.writeInProgress.get(sessionId)
+      const inProgress = this.writeInProgress.get(sessionId);
       if (inProgress) {
-        await inProgress
+        await inProgress;
       }
 
       // Start new write and track it
-      const writePromise = this.write(sessionId)
-      this.writeInProgress.set(sessionId, writePromise)
+      const writePromise = this.write(sessionId);
+      this.writeInProgress.set(sessionId, writePromise);
 
       try {
-        await writePromise
+        await writePromise;
       } finally {
-        this.writeInProgress.delete(sessionId)
+        this.writeInProgress.delete(sessionId);
       }
     }
   }
@@ -211,28 +245,30 @@ class SessionPersistenceQueue {
    * Cancel a pending write for a session (e.g., when deleting the session).
    */
   cancel(sessionId: string): void {
-    const entry = this.pending.get(sessionId)
+    const entry = this.pending.get(sessionId);
     if (entry) {
-      clearTimeout(entry.timer)
-      this.pending.delete(sessionId)
-      debug(`[PersistenceQueue] Cancelled pending write for session ${sessionId}`)
+      clearTimeout(entry.timer);
+      this.pending.delete(sessionId);
+      debug(
+        `[PersistenceQueue] Cancelled pending write for session ${sessionId}`,
+      );
     }
-    this.lastWrittenHeaderSignature.delete(sessionId)
+    this.lastWrittenHeaderSignature.delete(sessionId);
   }
 
   /**
    * Flush all pending sessions. Call this on app quit.
    */
   async flushAll(): Promise<void> {
-    const sessionIds = [...this.pending.keys()]
-    await Promise.all(sessionIds.map(id => this.flush(id)))
+    const sessionIds = [...this.pending.keys()];
+    await Promise.all(sessionIds.map((id) => this.flush(id)));
   }
 
   /**
    * Check if a session has a pending write.
    */
   hasPending(sessionId: string): boolean {
-    return this.pending.has(sessionId)
+    return this.pending.has(sessionId);
   }
 
   /**
@@ -240,19 +276,23 @@ class SessionPersistenceQueue {
    * Used by ConfigWatcher to suppress self-triggered metadata change events.
    */
   getLastWrittenSignature(sessionId: string): string | undefined {
-    return this.lastWrittenHeaderSignature.get(sessionId)
+    return this.lastWrittenHeaderSignature.get(sessionId);
   }
 
   /**
    * Get count of pending writes.
    */
   get pendingCount(): number {
-    return this.pending.size
+    return this.pending.size;
   }
 }
 
 // Singleton instance
-export const sessionPersistenceQueue = new SessionPersistenceQueue()
+export const sessionPersistenceQueue = new SessionPersistenceQueue();
 
 // Named exports for testing/customization
-export { SessionPersistenceQueue, getHeaderMetadataSignature, mergeHeaderWithExternalMetadata }
+export {
+  SessionPersistenceQueue,
+  getHeaderMetadataSignature,
+  mergeHeaderWithExternalMetadata,
+};
