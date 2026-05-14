@@ -22,6 +22,9 @@ import {
   SPAN_TOOL_EXECUTION,
 } from './constants.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SESSION_TRACING');
 
 type InteractionStatus = 'ok' | 'error' | 'cancelled';
 
@@ -254,8 +257,10 @@ export function endLLMRequestSpan(
     }
 
     span.end();
-  } catch {
-    // OTel errors must not affect API behavior.
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end LLM request span: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
@@ -312,6 +317,12 @@ export function runInToolSpanContext<T>(span: Span, fn: () => T): T {
   return toolContext.run(spanCtx, fn);
 }
 
+/**
+ * When metadata is omitted, span status is NOT set — callers on failure paths
+ * must pre-set status via setToolSpanFailure/setToolSpanCancelled before calling
+ * this. This asymmetry with endLLMRequestSpan (which defaults to OK) is intentional:
+ * tool spans have multiple failure modes that set status before endToolSpan runs.
+ */
 export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
@@ -343,8 +354,10 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
     }
 
     spanCtx.span.end();
-  } catch {
-    // OTel errors must not affect tool scheduling.
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end tool span: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);
@@ -358,6 +371,11 @@ export function startToolExecutionSpan(): Span {
   }
 
   const parentCtx = toolContext.getStore();
+  if (!parentCtx) {
+    debugLogger.warn(
+      'startToolExecutionSpan called outside runInToolSpanContext — span will not be parented to tool span',
+    );
+  }
   const ctx = parentCtx
     ? trace.setSpan(otelContext.active(), parentCtx.span)
     : otelContext.active();
@@ -416,8 +434,10 @@ export function endToolExecutionSpan(
     }
 
     spanCtx.span.end();
-  } catch {
-    // OTel errors must not affect tool scheduling.
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to end tool execution span: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   activeSpans.delete(spanId);
   strongSpans.delete(spanId);

@@ -1898,9 +1898,7 @@ export class CoreToolScheduler {
     const toolUseId = generateToolUseId();
 
     // Get MessageBus for hook execution
-    const messageBus = this.config.getMessageBus() as
-      | MessageBus
-      | undefined;
+    const messageBus = this.config.getMessageBus() as MessageBus | undefined;
     const hooksEnabled = !this.config.getDisableAllHooks();
 
     // PreToolUse Hook
@@ -2092,10 +2090,7 @@ export class CoreToolScheduler {
             ? toolResult.resultFilePaths
             : [];
         const candidatePaths = Array.from(
-          new Set([
-            ...inputPaths.map((p) => unescapePath(p)),
-            ...resultPaths,
-          ]),
+          new Set([...inputPaths.map((p) => unescapePath(p)), ...resultPaths]),
         );
 
         if (candidatePaths.length > 0) {
@@ -2137,9 +2132,7 @@ export class CoreToolScheduler {
             // and would waste a turn trying. Gate the reminder on
             // whether the active tool registry actually exposes
             // SkillTool to the model.
-            const hasSkillTool = !!this.toolRegistry.getTool(
-              ToolNames.SKILL,
-            );
+            const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
             if (hasSkillTool) {
               // Escape skill names defensively: validateSkillName already
               // excludes `<>&` for parsed file-based skills, but
@@ -2164,11 +2157,7 @@ export class CoreToolScheduler {
           }
         }
 
-        const response = convertToFunctionResponse(
-          toolName,
-          callId,
-          content,
-        );
+        const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
           callId,
           responseParts: response,
@@ -2225,7 +2214,7 @@ export class CoreToolScheduler {
           : String(executionError);
       endToolExecutionSpan(execSpan, {
         success: false,
-        error: errorMessage,
+        error: TOOL_SPAN_STATUS_TOOL_EXCEPTION,
       });
 
       if (signal.aborted) {
