@@ -227,7 +227,9 @@ export class DiffManager {
     // group to the right so we reuse existing layout. Only fall back to
     // ViewColumn.Beside when neither neighbour exists.
     const targetViewColumn =
-      findLeftGroupOfChatWebview() ?? findRightGroupOfChatWebview();
+      findLeftGroupOfChatWebview() ??
+      findRightGroupOfChatWebview() ??
+      vscode.ViewColumn.Beside;
 
     await vscode.commands.executeCommand(
       'vscode.diff',

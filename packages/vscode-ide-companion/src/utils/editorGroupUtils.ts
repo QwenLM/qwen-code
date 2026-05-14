@@ -24,6 +24,20 @@ function findWebviewGroup(): vscode.TabGroup | undefined {
   );
 }
 
+function findNeighborGroup(
+  isOnSide: (v: vscode.ViewColumn) => boolean,
+  isCloser: (cur: vscode.ViewColumn, cand: vscode.ViewColumn) => boolean,
+): vscode.ViewColumn | undefined {
+  let candidate: vscode.ViewColumn | undefined;
+  for (const g of vscode.window.tabGroups.all) {
+    if (!isOnSide(g.viewColumn)) continue;
+    if (candidate === undefined || isCloser(candidate, g.viewColumn)) {
+      candidate = g.viewColumn;
+    }
+  }
+  return candidate;
+}
+
 /**
  * Find the editor group immediately to the left of the Qwen chat webview.
  * - If the chat webview group is the leftmost group, returns undefined.
@@ -37,16 +51,10 @@ export function findLeftGroupOfChatWebview(): vscode.ViewColumn | undefined {
     }
 
     // Among groups with smaller viewColumn, pick the largest (closest neighbor).
-    let candidate: vscode.ViewColumn | undefined;
-    for (const g of vscode.window.tabGroups.all) {
-      if (
-        g.viewColumn < webviewGroup.viewColumn &&
-        (candidate === undefined || g.viewColumn > candidate)
-      ) {
-        candidate = g.viewColumn;
-      }
-    }
-    return candidate;
+    return findNeighborGroup(
+      (v) => v < webviewGroup.viewColumn,
+      (_cur, cand) => cand > _cur,
+    );
   } catch (_err) {
     return undefined;
   }
@@ -65,16 +73,10 @@ export function findRightGroupOfChatWebview(): vscode.ViewColumn | undefined {
     }
 
     // Among groups with larger viewColumn, pick the smallest (closest neighbor).
-    let candidate: vscode.ViewColumn | undefined;
-    for (const g of vscode.window.tabGroups.all) {
-      if (
-        g.viewColumn > webviewGroup.viewColumn &&
-        (candidate === undefined || g.viewColumn < candidate)
-      ) {
-        candidate = g.viewColumn;
-      }
-    }
-    return candidate;
+    return findNeighborGroup(
+      (v) => v > webviewGroup.viewColumn,
+      (_cur, cand) => cand < _cur,
+    );
   } catch (_err) {
     return undefined;
   }

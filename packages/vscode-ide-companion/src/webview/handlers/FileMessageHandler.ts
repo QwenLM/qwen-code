@@ -677,7 +677,7 @@ export class FileMessageHandler extends BaseMessageHandler {
       const targetViewColumn =
         findLeftGroupOfChatWebview() ?? findRightGroupOfChatWebview();
 
-      // Open as readonly document in the left group and focus it (single click should be enough)
+      // Open as readonly document in the selected neighboring group and focus it (single click should be enough)
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, {
         viewColumn: targetViewColumn ?? vscode.ViewColumn.Beside,
