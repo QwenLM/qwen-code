@@ -512,6 +512,68 @@ describe('runForkedAgent (cache path)', () => {
     );
   });
 
+  it('falls back to the parent model when `fast` cannot resolve (no fast model configured)', async () => {
+    // Public API footgun: a caller passing `model: 'fast'` while the user
+    // has no fast model configured must not see the literal `'fast'` sent
+    // to the provider. The forked path should inherit the parent model in
+    // that case, matching the subagent path's semantics.
+    saveCacheSafeParams(
+      { systemInstruction: 'You are helpful' },
+      [{ role: 'user', parts: [{ text: 'hello' }] }],
+      'parent-model',
+    );
+
+    let capturedModel: string | undefined;
+    const mockSendMessageStream = vi.fn(
+      (model: string, _params: unknown, _promptId: string) => {
+        capturedModel = model;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'ok' }],
+                  },
+                },
+              ],
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    const mockConfig = {
+      getModel: vi.fn().mockReturnValue('parent-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'parent-model',
+        authType: AuthType.QWEN_OAUTH,
+      }),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getAllConfiguredModels: vi.fn(() => []),
+    } as unknown as Config;
+
+    await runForkedAgent({
+      config: mockConfig,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      model: 'fast',
+    });
+
+    expect(capturedModel).toBe('parent-model');
+    expect(createRuntimeContentGeneratorView).not.toHaveBeenCalled();
+  });
+
   it('throws when CacheSafeParams are not available', async () => {
     const mockConfig = {} as unknown as Config;
 

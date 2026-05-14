@@ -621,6 +621,38 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('does not cache the unregistered-model fallback across runtime-view changes', async () => {
+      // Unregistered selector: createContentGeneratorForModel falls back to
+      // getCurrentContentGenerator(). The runtime view changes between calls
+      // — caching would pin the first call's generator under the selector
+      // key and return it on the second call after the view has unwound.
+      getResolvedModel.mockReturnValue(undefined);
+
+      const firstRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const secondRuntimeGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      const getContentGenerator = vi
+        .fn()
+        .mockReturnValueOnce(firstRuntimeGenerator)
+        .mockReturnValueOnce(secondRuntimeGenerator);
+      crossProviderConfig.getContentGenerator = getContentGenerator;
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const first = await c.resolveForModel('unknown-model');
+      const second = await c.resolveForModel('unknown-model');
+
+      expect(first.contentGenerator).toBe(firstRuntimeGenerator);
+      expect(second.contentGenerator).toBe(secondRuntimeGenerator);
+      expect(getContentGenerator).toHaveBeenCalledTimes(2);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
     it('falls back to the main generator when createContentGenerator throws', async () => {
       getResolvedModel.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,

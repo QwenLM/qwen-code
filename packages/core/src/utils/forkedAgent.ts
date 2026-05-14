@@ -179,7 +179,12 @@ async function buildForkedModelRuntime(
     modelSelector,
     buildModelIdContext(base),
   );
-  const model = resolvedModel?.modelId ?? modelSelector;
+  // When the selector cannot resolve (e.g. `fast` with no fast model
+  // configured, or `inherit` on a config without a current model), fall back
+  // to the parent session model instead of passing the raw selector string
+  // to the provider. Matches the subagent path, where an unresolvable
+  // selector means "inherit parent".
+  const model = resolvedModel?.modelId ?? base.getModel();
   const runtimeView = await buildForkedRuntimeContentGeneratorView(
     base,
     contentGeneratorOwner,
