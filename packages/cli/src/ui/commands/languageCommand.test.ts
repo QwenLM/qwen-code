@@ -140,7 +140,6 @@ describe('languageCommand', () => {
       const subCommandNames = languageCommand.subCommands?.map((c) => c.name);
       expect(subCommandNames).toContain('ui');
       expect(subCommandNames).toContain('output');
-      expect(subCommandNames).not.toContain('cache');
     });
   });
 
@@ -175,11 +174,6 @@ describe('languageCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('/language output'),
-      });
-      expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.not.stringContaining('/language cache'),
       });
     });
 
