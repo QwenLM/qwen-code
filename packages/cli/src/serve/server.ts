@@ -65,13 +65,6 @@ export function createServeApp(
   const bridge =
     deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
 
-  // --- Demo page: registered BEFORE CORS/auth so the browser can load
-  // the page and make same-origin API calls. The page is a self-contained
-  // HTML debug UI for exercising all daemon routes.
-  app.get('/demo', (_req, res) => {
-    res.type('html').send(getDemoHtml(getPort()));
-  });
-
   // Allow same-origin requests from the demo page. Browsers send an
   // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
   // below would reject them. This middleware strips `Origin` when it
@@ -87,6 +80,7 @@ export function createServeApp(
         `http://127.0.0.1:${port}`,
         `http://localhost:${port}`,
         `http://[::1]:${port}`,
+        `http://host.docker.internal:${port}`,
       ]);
       if (selfOrigins.has(origin)) {
         delete req.headers.origin;
@@ -158,6 +152,22 @@ export function createServeApp(
   }
 
   app.use(bearerAuth(opts.token));
+
+  // --- Demo page: registered AFTER CORS, Host allowlist, and bearer auth
+  // so the debug UI is protected by the same guards as all other routes.
+  // The same-origin Origin-stripping middleware above ensures the demo
+  // page's own API calls pass through denyBrowserOriginCors.
+  app.get('/demo', (_req, res) => {
+    try {
+      res.type('html').send(getDemoHtml(getPort()));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({ error: 'Failed to render demo page' });
+    }
+  });
+
   app.use(express.json({ limit: '10mb' }));
 
   if (!loopback) {

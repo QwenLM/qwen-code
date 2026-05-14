@@ -1425,6 +1425,93 @@ describe('GET /session/:id/events (SSE)', () => {
   });
 });
 
+describe('GET /demo', () => {
+  it('returns 200 with text/html content type', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+    expect(res.text).toContain('Qwen Serve');
+    expect(res.text).toContain('<!DOCTYPE html>');
+  });
+
+  it('is protected by bearer auth (401 without token)', async () => {
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app).get('/demo').set('Host', '0.0.0.0:4170');
+    expect(res.status).toBe(401);
+  });
+
+  it('is accessible with valid bearer token', async () => {
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', '0.0.0.0:4170')
+      .set('Authorization', 'Bearer secret');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+});
+
+describe('same-origin Origin-stripping middleware', () => {
+  it('strips loopback Origin header matching daemon port', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    // A request with matching same-origin should pass CORS check
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:4170');
+    // Should NOT be rejected by denyBrowserOriginCors (status != 403)
+    expect(res.status).not.toBe(403);
+  });
+
+  it('does not strip non-loopback Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://evil.com:4170');
+    expect(res.status).toBe(403);
+  });
+
+  it('does not strip Origin with wrong port', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:9999');
+    expect(res.status).toBe(403);
+  });
+
+  it('strips host.docker.internal Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://host.docker.internal:4170');
+    expect(res.status).not.toBe(403);
+  });
+});
+
 describe('runQwenServe SIGINT handler', () => {
   it('does not register signal handlers until the listener is up', () => {
     // Sanity: we register `once` so we don't leak across test runs.

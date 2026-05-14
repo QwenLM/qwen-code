@@ -115,6 +115,12 @@ export function getDemoHtml(_port: number): string {
     </div>
 
     <div class="panel">
+      <h3>Auth Token</h3>
+      <label>Bearer Token (if --token is set)</label>
+      <input type="password" id="tokenInput" placeholder="Optional bearer token" />
+    </div>
+
+    <div class="panel">
       <h3>Quick Actions</h3>
       <div class="btn-row">
         <button class="btn" id="btnHealth">Health</button>
@@ -171,6 +177,7 @@ export function getDemoHtml(_port: number): string {
   const cwdInput = $('#cwdInput');
   const promptInput = $('#promptInput');
   const modelInput = $('#modelInput');
+  const tokenInput = $('#tokenInput');
   const chatArea = $('#chatArea');
   const chatInput = $('#chatInput');
   const eventLog = $('#eventLog');
@@ -214,8 +221,13 @@ export function getDemoHtml(_port: number): string {
   }
 
   // --- API helpers ---
+  function authHeaders() {
+    const token = tokenInput.value.trim();
+    return token ? { 'Authorization': 'Bearer ' + token } : {};
+  }
+
   async function api(method, path, body) {
-    const opts = { method, headers: {} };
+    const opts = { method, headers: { ...authHeaders() } };
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
@@ -290,7 +302,8 @@ export function getDemoHtml(_port: number): string {
 
     (async function readSSE() {
       try {
-        const res = await fetch(url, { signal: abort.signal });
+        const hdrs = authHeaders();
+        const res = await fetch(url, { signal: abort.signal, headers: hdrs });
         if (!res.ok) {
           logEvent('SSE-ERR', 'HTTP ' + res.status);
           return;
@@ -298,6 +311,7 @@ export function getDemoHtml(_port: number): string {
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let currentEvent = {};
 
         while (true) {
           const { done, value } = await reader.read();
@@ -307,7 +321,6 @@ export function getDemoHtml(_port: number): string {
           const lines = buffer.split('\\n');
           buffer = lines.pop();
 
-          let currentEvent = {};
           for (const line of lines) {
             if (line.startsWith('data: ')) {
               currentEvent.data = line.slice(6);
@@ -323,9 +336,17 @@ export function getDemoHtml(_port: number): string {
             }
           }
         }
+        // Process any remaining buffered data
+        if (currentEvent.data) handleSSEMessage(currentEvent);
+        statusDot.classList.remove('ok');
+        statusText.textContent = 'SSE stream ended';
+        enablePrompt(false);
+        logEvent('SSE', 'Stream ended by server');
       } catch (err) {
         if (err.name !== 'AbortError') {
           logEvent('SSE-ERR', err.message);
+          statusDot.classList.remove('ok');
+          statusText.textContent = 'SSE error';
         }
       }
     })();
@@ -454,31 +475,53 @@ export function getDemoHtml(_port: number): string {
     for (const [id, req] of pendingPerms) {
       const card = document.createElement('div');
       card.className = 'permission-card';
-      let html = '<h4>' + escHtml(req.tool?.name || 'Permission') + '</h4>';
-      html += '<div style="font-size:11px;color:var(--text2);margin-bottom:6px">' + escHtml(id) + '</div>';
+
+      const h4 = document.createElement('h4');
+      h4.textContent = req.tool?.name || 'Permission';
+      card.appendChild(h4);
+
+      const idDiv = document.createElement('div');
+      idDiv.style.cssText = 'font-size:11px;color:var(--text2);margin-bottom:6px';
+      idDiv.textContent = id;
+      card.appendChild(idDiv);
+
+      function makePermBtn(reqId, optId, label, isCancel) {
+        const btn = document.createElement('button');
+        btn.className = 'btn opt-btn';
+        btn.textContent = label;
+        btn.dataset.req = reqId;
+        if (isCancel) {
+          btn.dataset.cancel = '1';
+          btn.style.borderColor = 'var(--err)';
+          btn.style.color = 'var(--err)';
+        } else {
+          btn.dataset.opt = optId;
+        }
+        btn.addEventListener('click', async () => {
+          let outcome;
+          if (isCancel) {
+            outcome = { outcome: 'cancelled' };
+          } else {
+            outcome = { outcome: 'selected', optionId: optId };
+          }
+          const result = await api('POST', '/permission/' + reqId, { outcome });
+          if (result.ok) {
+            removePermission(reqId);
+          } else {
+            logError('PERM-ERR', 'Failed to resolve permission ' + reqId + ': ' + JSON.stringify(result.data));
+          }
+        });
+        return btn;
+      }
+
       if (req.options && Array.isArray(req.options)) {
         for (const opt of req.options) {
-          html += '<button class="btn opt-btn" data-req="' + escHtml(id) + '" data-opt="' + escHtml(opt.optionId) + '">' + escHtml(opt.name || opt.optionId) + '</button>';
+          card.appendChild(makePermBtn(id, opt.optionId, opt.name || opt.optionId, false));
         }
       }
-      html += '<button class="btn opt-btn" data-req="' + escHtml(id) + '" data-cancel="1" style="border-color:var(--err);color:var(--err)">Cancel</button>';
-      card.innerHTML = html;
+      card.appendChild(makePermBtn(id, null, 'Cancel', true));
       permissionList.appendChild(card);
     }
-
-    permissionList.querySelectorAll('.opt-btn').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const reqId = btn.dataset.req;
-        let outcome;
-        if (btn.dataset.cancel === '1') {
-          outcome = { outcome: 'cancelled' };
-        } else {
-          outcome = { outcome: 'selected', optionId: btn.dataset.opt };
-        }
-        await api('POST', '/permission/' + reqId, { outcome });
-        removePermission(reqId);
-      });
-    });
   }
 
   // --- Button bindings ---
