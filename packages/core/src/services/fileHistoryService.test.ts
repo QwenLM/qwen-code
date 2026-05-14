@@ -240,6 +240,78 @@ describe('FileHistoryService', () => {
         'The selected snapshot was not found',
       );
     });
+
+    it('should not truncate snapshot timeline when restore has failures', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'modified');
+      await service.makeSnapshot('p2');
+      await service.makeSnapshot('p3');
+
+      // Corrupt the p1 backup so applySnapshot reports a failure.
+      const snapshots = service.getSnapshots();
+      const key = Object.keys(snapshots[0].trackedFileBackups)[0];
+      const backupFileName =
+        snapshots[0].trackedFileBackups[key].backupFileName!;
+      await rm(
+        join(storageDir, 'file-history', 'test-session', backupFileName),
+        { force: true },
+      );
+
+      const result = await service.rewind('p1', true);
+      expect(result.filesFailed.length).toBeGreaterThan(0);
+      // Timeline must stay intact so the user can retry without losing state.
+      const after = service.getSnapshots();
+      expect(after.map((s) => s.promptId)).toEqual(['p1', 'p2', 'p3']);
+    });
+  });
+
+  describe('trackEdit before any snapshot', () => {
+    it('should no-op when there is no most-recent snapshot', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await service.trackEdit(file);
+
+      expect(service.getSnapshots()).toEqual([]);
+    });
+  });
+
+  describe('restoreFromSnapshots', () => {
+    it('should rehydrate snapshots and derive trackedFiles', async () => {
+      const fresh = new FileHistoryService('test-session', true, projectDir);
+      const absPath = join(projectDir, 'a.txt');
+      const externalPath = join(tmpdir(), 'fh-external-x.txt');
+
+      fresh.restoreFromSnapshots([
+        {
+          promptId: 'p1',
+          trackedFileBackups: {
+            [absPath]: {
+              backupFileName: 'deadbeefcafebabe@v1',
+              version: 1,
+              backupTime: new Date(),
+            },
+            [externalPath]: {
+              backupFileName: null,
+              version: 1,
+              backupTime: new Date(),
+            },
+          },
+          timestamp: new Date(),
+        },
+      ]);
+
+      const snapshots = fresh.getSnapshots();
+      expect(snapshots).toHaveLength(1);
+      // Path under cwd should be shortened to a relative key.
+      expect(snapshots[0].trackedFileBackups['a.txt']).toBeDefined();
+      // Path outside cwd should be preserved as-is.
+      expect(snapshots[0].trackedFileBackups[externalPath]).toBeDefined();
+    });
   });
 
   describe('snapshot eviction', () => {
