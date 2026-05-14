@@ -261,6 +261,45 @@ describe('OpenAILogger', () => {
       });
     });
 
+    it('should derive session id from bare UUID prompt ids', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+      const sessionId = 'e097d32b-82d6-422a-afa6-f6184565a8ab';
+
+      const logPath = await logger.logInteraction(
+        { model: 'claude-opus-4-7' },
+        { id: 'test-id', choices: [] },
+        undefined,
+        sessionId,
+      );
+
+      const logContent = JSON.parse(await fs.readFile(logPath, 'utf-8'));
+      expect(logContent.context).toEqual({
+        promptId: sessionId,
+        sessionId,
+      });
+    });
+
+    it('should derive session id from subagent prompt ids with extra separators', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+      const sessionId = 'e097d32b-82d6-422a-afa6-f6184565a8ab';
+      const promptId = `${sessionId}#Explore#nested#7`;
+
+      const logPath = await logger.logInteraction(
+        { model: 'claude-opus-4-7' },
+        { id: 'test-id', choices: [] },
+        undefined,
+        promptId,
+      );
+
+      const logContent = JSON.parse(await fs.readFile(logPath, 'utf-8'));
+      expect(logContent.context).toEqual({
+        promptId,
+        sessionId,
+      });
+    });
+
     it('should write correct log data structure', async () => {
       const logger = new OpenAILogger(testTempDir);
       await logger.initialize();

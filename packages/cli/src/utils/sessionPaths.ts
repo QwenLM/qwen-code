@@ -6,8 +6,15 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { resolveOpenAILogDir, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  resolveOpenAILogDir,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import type { CommandContext } from '../ui/commands/types.js';
+
+const debugLogger = createDebugLogger('SESSION_PATHS');
+const OPENAI_LOG_SCAN_LIMIT = 100;
 
 export interface SessionPathEntry {
   label: string;
@@ -43,7 +50,7 @@ export async function collectSessionPathInfo(
       : undefined;
   const transcriptPath = config?.getTranscriptPath() || '';
   const debugLogPath =
-    config?.getDebugMode() === true && sessionId !== 'unknown'
+    config?.getDebugMode() && sessionId !== 'unknown'
       ? Storage.getDebugLogPath(sessionId)
       : '';
   const planFilePath =
@@ -103,15 +110,22 @@ async function findLatestOpenAILogForSession(
   const files = await listLogFiles(logDir, (name) =>
     /^openai-.*\.json$/.test(name),
   );
-  for (const file of files) {
+  const recentFiles = files.slice(0, OPENAI_LOG_SCAN_LIMIT);
+  for (const file of recentFiles) {
     try {
       const raw = await fs.readFile(file, 'utf-8');
       const parsed: unknown = JSON.parse(raw);
       if (hasContextSessionId(parsed, sessionId)) {
         return file;
       }
-    } catch {
-      // Ignore malformed or concurrently-written log files.
+    } catch (error) {
+      if (
+        error instanceof SyntaxError ||
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        continue;
+      }
+      debugLogger.warn('Error reading OpenAI log file', file, error);
     }
   }
   return undefined;
@@ -129,10 +143,10 @@ async function listLogFiles(
       .sort()
       .reverse();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return [];
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn('Unable to list OpenAI log directory', dir, error);
     }
-    throw error;
+    return [];
   }
 }
 
@@ -153,5 +167,6 @@ function hasContextSessionId(value: unknown, sessionId: string): boolean {
   if (!context || typeof context !== 'object') {
     return false;
   }
-  return (context as { sessionId?: unknown }).sessionId === sessionId;
+  const ctx = context as { sessionId?: unknown; promptId?: unknown };
+  return ctx.sessionId === sessionId || ctx.promptId === sessionId;
 }

@@ -13,6 +13,8 @@ import { isInternalPromptId } from './internalPromptIds.js';
 
 const debugLogger = createDebugLogger('OPENAI_LOGGER');
 const MAIN_SESSION_PROMPT_ID_DELIMITER = '########';
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface OpenAILogContext {
   promptId?: string;
@@ -81,8 +83,12 @@ function sessionIdFromPromptId(
     return promptId.slice(0, mainSessionDelimiterIndex);
   }
 
+  if (UUID_PATTERN.test(promptId)) {
+    return promptId;
+  }
+
   const parts = promptId.split('#');
-  if (parts.length === 3 && parts[0]) {
+  if (parts.length >= 3 && parts[0]) {
     return parts[0];
   }
 
