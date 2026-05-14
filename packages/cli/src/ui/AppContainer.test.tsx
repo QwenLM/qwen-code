@@ -3077,6 +3077,84 @@ describe('AppContainer State Management', () => {
       expect(trigger.activeCount()).toBe(0);
     });
   });
+
+  describe('IDE mode rewind guard', () => {
+    it('shows info message instead of opening rewind selector when IDE mode is enabled', () => {
+      const mockAddItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'hello' }],
+        addItem: mockAddItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.openRewindSelector();
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringMatching(/rewind.*disabled.*IDE/i),
+        }),
+        expect.any(Number),
+      );
+      expect(capturedUIState.isRewindSelectorOpen).toBeFalsy();
+    });
+
+    it('opens rewind selector normally when IDE mode is disabled', () => {
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'hello' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(false);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.openRewindSelector();
+
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+  });
 });
 
 describe('dedupeNewestFirst', () => {
