@@ -42,6 +42,98 @@ function Download-File {
     }
 }
 
+function Get-QwenInstallBinDir {
+    if (-not [string]::IsNullOrEmpty($env:QWEN_INSTALL_BIN_DIR)) {
+        return $env:QWEN_INSTALL_BIN_DIR
+    }
+
+    if (-not [string]::IsNullOrEmpty($env:QWEN_INSTALL_ROOT)) {
+        return Join-Path $env:QWEN_INSTALL_ROOT 'bin'
+    }
+
+    if (-not [string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
+        return Join-Path (Join-Path $env:LOCALAPPDATA 'qwen-code') 'bin'
+    }
+
+    return Join-Path (Join-Path $env:USERPROFILE 'AppData\Local\qwen-code') 'bin'
+}
+
+function Update-CurrentSessionPath {
+    param([string]$BinDir)
+
+    if ([string]::IsNullOrEmpty($BinDir)) {
+        return
+    }
+
+    $entries = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrEmpty($_) })
+    foreach ($entry in $entries) {
+        if ([string]::Equals($entry, $BinDir, [StringComparison]::OrdinalIgnoreCase)) {
+            return
+        }
+    }
+
+    $env:Path = (@($BinDir) + $entries) -join ';'
+}
+
+function Get-ParentProcessName {
+    try {
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction Stop
+        if ($null -eq $current -or $null -eq $current.ParentProcessId) {
+            return $null
+        }
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($current.ParentProcessId)" -ErrorAction Stop
+        if ($null -eq $parent) {
+            return $null
+        }
+        return $parent.Name
+    } catch {
+        return $null
+    }
+}
+
+function Install-CmdSessionAlias {
+    param([string]$QwenCommand)
+
+    if ([string]::IsNullOrEmpty($QwenCommand)) {
+        return $false
+    }
+
+    $doskey = Join-Path $env:SystemRoot 'System32\doskey.exe'
+    if (-not (Test-Path -LiteralPath $doskey -PathType Leaf)) {
+        $doskey = 'doskey.exe'
+    }
+
+    & $doskey /exename=cmd.exe "qwen=`"$QwenCommand`" `$*" | Out-Null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Update-CurrentShell {
+    $qwenInstallBinDir = Get-QwenInstallBinDir
+    $qwenCommandPath = Join-Path $qwenInstallBinDir 'qwen.cmd'
+    if (-not (Test-Path -LiteralPath $qwenCommandPath -PathType Leaf)) {
+        return
+    }
+
+    Update-CurrentSessionPath -BinDir $qwenInstallBinDir
+
+    Write-Output "Run: qwen"
+    $parentProcessName = Get-ParentProcessName
+    if ($parentProcessName -ieq 'cmd.exe') {
+        if (Install-CmdSessionAlias -QwenCommand $qwenCommandPath) {
+            Write-Output "INFO: Added a qwen alias for this cmd.exe window."
+            Write-Output "qwen is ready to use after this installer command returns."
+            return
+        }
+
+        Write-Output "WARNING: Windows does not allow this PowerShell child process to update the parent cmd.exe PATH."
+        Write-Output "Run this in the current cmd.exe window to use qwen immediately:"
+        Write-Output "  set `"PATH=${qwenInstallBinDir};%PATH%`""
+        return
+    }
+
+    Write-Output "qwen is ready to use in this PowerShell session."
+}
+
 $qwenDefaultInstallerUrl = 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.bat'
 $qwenDefaultChecksumsUrl = 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/SHA256SUMS'
 if ([string]::IsNullOrEmpty($env:QWEN_INSTALLER_BAT_URL)) {
@@ -115,10 +207,17 @@ if ($qwenActualHash -ne $qwenExpectedHash) {
 }
 
 $qwenInstallerExitCode = 0
+$qwenPreviousParentPowerShell = $env:QWEN_INSTALLER_PARENT_POWERSHELL
 try {
+    $env:QWEN_INSTALLER_PARENT_POWERSHELL = '1'
     & $qwenInstallerPath @args
     $qwenInstallerExitCode = $LASTEXITCODE
 } finally {
+    if ($null -eq $qwenPreviousParentPowerShell) {
+        Remove-Item Env:\QWEN_INSTALLER_PARENT_POWERSHELL -ErrorAction SilentlyContinue
+    } else {
+        $env:QWEN_INSTALLER_PARENT_POWERSHELL = $qwenPreviousParentPowerShell
+    }
     Remove-Item -LiteralPath $qwenInstallerPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $qwenChecksumsPath -Force -ErrorAction SilentlyContinue
 }
@@ -126,3 +225,5 @@ try {
 if ($qwenInstallerExitCode -ne 0) {
     exit $qwenInstallerExitCode
 }
+
+Update-CurrentShell

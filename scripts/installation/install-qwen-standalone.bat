@@ -1110,6 +1110,10 @@ if defined OTHER_QWENS (
     exit /b 0
 )
 
+if /i "!QWEN_INSTALLER_PARENT_POWERSHELL!"=="1" (
+    echo INFO: Final PATH refresh is handled by the PowerShell entrypoint.
+    exit /b 0
+)
 echo Run: qwen
 echo qwen is ready to use in this terminal.
 exit /b 0
