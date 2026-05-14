@@ -55,6 +55,7 @@ import {
   IDLE_SPECULATION,
   ApprovalMode,
   ConditionalRulesRegistry,
+  MCPDiscoveryState,
   type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
@@ -69,7 +70,30 @@ import {
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
+import {
+  profileCheckpoint,
+  finalizeStartupProfile,
+} from '../utils/startupProfiler.js';
+import { appEvents } from '../utils/events.js';
 import process from 'node:process';
+
+/**
+ * Window in which mcp-client-update events are coalesced before the cli calls
+ * `setTools()`. Matches Claude Code's `MCP_BATCH_FLUSH_MS` (16 ≈ one 60Hz
+ * frame). Smaller windows would refresh the model tool list more often
+ * without user benefit; larger windows would let multiple servers settle
+ * before the model sees them. 16ms is the sweet spot validated by Claude's
+ * production deployment (see design.md § 8.3 + § 3.2 Round 2).
+ */
+const MCP_BATCH_FLUSH_MS = 16;
+
+/**
+ * Maximum time we keep the startup profile open waiting for MCP discovery to
+ * settle. Slightly longer than the default 30s per-server discovery timeout
+ * so a server that times out can still log its `outcome: failed` event into
+ * the profile. After this cap the profile file is written regardless.
+ */
+const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
@@ -384,7 +408,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
-  const previousTerminalWidthRef = useRef(terminalWidth);
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
 
@@ -419,8 +442,19 @@ export const AppContainer = (props: AppContainerProps) => {
     (async () => {
       // Note: the program will not work if this fails so let errors be
       // handled by the global catch.
+      profileCheckpoint('config_initialize_start');
       await config.initialize();
+      profileCheckpoint('config_initialize_end');
       setConfigInitialized(true);
+      profileCheckpoint('input_enabled');
+      // Profile finalize is intentionally NOT here. With PR-A's background
+      // MCP discovery, MCP-related events (`mcp_server_ready:*`,
+      // `mcp_first_tool_registered`, `mcp_all_servers_settled`,
+      // `gemini_tools_updated`) arrive AFTER `input_enabled`. The dedicated
+      // `useEffect` below (gated by `configInitialized`) defers finalize
+      // until MCP discovery settles or the 35s hard cap elapses — that way
+      // the profile captures the full MCP timeline without holding back
+      // the user-facing TTI.
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
@@ -499,6 +533,138 @@ export const AppContainer = (props: AppContainerProps) => {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
+
+  /**
+   * PR-A wiring: progressive MCP availability.
+   *
+   * This effect does two coupled things, both gated on `configInitialized`:
+   *
+   * 1. **16ms batch-flush of `setTools()`**: as each MCP server completes
+   *    discover, `McpClientManager` emits `mcp-client-update`. We coalesce
+   *    these into at most one `GeminiClient.setTools()` call per ~16ms
+   *    window. With three MCP servers settling within a few ms of each
+   *    other, the model sees one consolidated tool refresh instead of
+   *    three back-to-back; with a server stream over 1s, the model sees
+   *    each batch with at most one frame of lag (this is the gap the
+   *    baseline measured at 6235 ms in three-mixed-mcp before PR-A).
+   *
+   * 2. **Deferred startup-profile finalize**: in PR-A's default mode
+   *    MCP discovery runs in the background, so MCP-related profiler
+   *    events arrive AFTER `input_enabled`. The profile file is held open
+   *    until either the manager's discovery state reaches `COMPLETED`
+   *    (all servers ready or failed) or `STARTUP_PROFILE_FINALIZE_CAP_MS`
+   *    elapses (so a hung server doesn't keep the profile open forever).
+   *
+   * In legacy blocking mode (`QWEN_CODE_LEGACY_MCP_BLOCKING=1`) MCP
+   * discovery already completed inside `config.initialize()`, so this
+   * effect observes `MCPDiscoveryState.COMPLETED` immediately and finalizes
+   * without waiting.
+   */
+  useEffect(() => {
+    if (!isConfigInitialized) return undefined;
+    const geminiClient = config.getGeminiClient();
+    if (!geminiClient) return undefined;
+
+    const manager = config.getToolRegistry().getMcpClientManager();
+    let flushTimer: NodeJS.Timeout | null = null;
+    let finalized = false;
+
+    const finalizeOnce = () => {
+      if (finalized) return;
+      finalized = true;
+      finalizeStartupProfile(config.getSessionId());
+    };
+
+    // Runs the pending batched setTools() immediately and clears the timer.
+    // Returns a promise that resolves when setTools() finishes so callers
+    // can sequence subsequent work after `gemini_tools_updated` is
+    // recorded into the startup profile.
+    const flushNow = (): Promise<void> => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      // GeminiClient.setTools() has no try/catch around warmAll() /
+      // getFunctionDeclarations() / getChat().setTools(). A silent
+      // discard here would make production tool-registration regressions
+      // invisible, so route the error through debugLogger.
+      return geminiClient.setTools().catch((err) => {
+        debugLogger.error(
+          `setTools() batch-flush failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    };
+
+    const scheduleFlush = () => {
+      if (flushTimer !== null) return;
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        void flushNow();
+      }, MCP_BATCH_FLUSH_MS);
+    };
+
+    // Match the non-interactive entry points (`gemini.tsx`, `session.ts`,
+    // `acpAgent.ts`) which warn to stderr when MCP discovery completes with
+    // failed servers. The interactive path can't use stderr (it would
+    // collide with Ink's rendered output), so we route through
+    // `debugLogger.warn` so it shows up under `QWEN_CODE_DEBUG=1` and in
+    // the debug log file — matching the channel `setTools()` errors above
+    // use. The MCP status footer pill already surfaces failures
+    // continuously in the UI; this log is the actionable-on-debug record
+    // wenshao asked for in round 7.
+    let failureSurfaced = false;
+    const surfaceFailuresOnce = () => {
+      if (failureSurfaced) return;
+      failureSurfaced = true;
+      const failedNames =
+        typeof config.getFailedMcpServerNames === 'function'
+          ? config.getFailedMcpServerNames()
+          : [];
+      if (failedNames.length > 0) {
+        debugLogger.warn(
+          `MCP server(s) failed to start: ${failedNames.join(', ')}. ` +
+            `Continuing with built-in tools and any servers that did connect.`,
+        );
+      }
+    };
+
+    const onMcpUpdate = () => {
+      if (manager.getDiscoveryState() === MCPDiscoveryState.COMPLETED) {
+        // Discovery has settled. Flush the pending setTools() NOW (rather
+        // than waiting for the 16ms batch timer) and only finalize after
+        // it runs — `setTools()` emits the `gemini_tools_updated` event,
+        // and finalizing before it fires would drop that event because
+        // the module-level `finalized` guard suppresses every subsequent
+        // record. That dropped event is what `gemini_tools_lag` is
+        // derived from in the profile summary.
+        surfaceFailuresOnce();
+        void flushNow().finally(finalizeOnce);
+      } else {
+        scheduleFlush();
+      }
+    };
+
+    // Legacy / no-MCP path: discovery already finished synchronously
+    // inside config.initialize(), so finalize immediately and only keep
+    // the flush listener around for late refreshes (e.g. SkillTool's
+    // post-construction refreshSkills triggering setTools).
+    if (manager.getDiscoveryState() === MCPDiscoveryState.COMPLETED) {
+      surfaceFailuresOnce();
+      finalizeOnce();
+    }
+
+    appEvents.on('mcp-client-update', onMcpUpdate);
+    const finalizeCap = setTimeout(
+      finalizeOnce,
+      STARTUP_PROFILE_FINALIZE_CAP_MS,
+    );
+
+    return () => {
+      appEvents.off('mcp-client-update', onMcpUpdate);
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      clearTimeout(finalizeCap);
+    };
+  }, [isConfigInitialized, config]);
 
   // Track idle state via ref so the update handler can defer notifications
   // while the model is streaming, without triggering re-renders.
@@ -582,11 +748,20 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [remountStaticHistory, stdout]);
 
   // Targeted repaint for resize events: move cursor to top-left and erase
-  // downward instead of a full clearTerminal, avoiding the full-screen flash.
+  // downward instead of a full clearTerminal, avoiding the full-screen
+  // flash. Ink's <Static> region is append-only, so when terminal width
+  // changes (tmux split, fullscreen toggle, font size change) we must
+  // explicitly re-emit the static history at the new width — otherwise
+  // header content stays at the old width and visibly tears.
   const repaintStaticViewport = useCallback(() => {
     stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
+
+  // Track previous terminal width across renders so we only repaint when
+  // the width actually changes. Initialized to the current width to avoid
+  // a spurious repaint on first mount.
+  const previousTerminalWidthRef = useRef(terminalWidth);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -722,6 +897,7 @@ export const AppContainer = (props: AppContainerProps) => {
     openDeleteDialog,
     closeDeleteDialog,
     handleDelete,
+    handleDeleteMany,
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
@@ -1934,6 +2110,11 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
+  // Repaint static header on terminal resize. Without this, tmux pane
+  // resizes and fullscreen toggles leave the static region rendered at the
+  // old width — header content visibly tears until the next refreshStatic
+  // (e.g. /model). Cheap repaint (cursor-to + erase-down) rather than a
+  // full clearTerminal to avoid the full-screen flash.
   useEffect(() => {
     if (previousTerminalWidthRef.current === terminalWidth) {
       return;
@@ -2910,6 +3091,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      handleDeleteMany,
       // Help dialog
       openHelpDialog,
       closeHelpDialog,
@@ -2981,6 +3163,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      handleDeleteMany,
       // Help dialog
       openHelpDialog,
       closeHelpDialog,

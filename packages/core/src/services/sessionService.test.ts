@@ -580,6 +580,82 @@ describe('SessionService', () => {
     });
   });
 
+  describe('removeSessions', () => {
+    it('should remove multiple sessions and report each outcome', async () => {
+      // recordA1 belongs to current project; recordB1 also; the third id
+      // never has a backing record (notFound).
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdB,
+        sessionIdC,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdA, sessionIdB]);
+      expect(result.notFound).toEqual([sessionIdC]);
+      expect(result.errors).toEqual([]);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should de-duplicate input ids', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdA,
+        sessionIdA,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdA]);
+      expect(result.notFound).toEqual([]);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should keep going when one removal fails', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const failure = new Error('boom');
+      unlinkSyncSpy.mockImplementation((p: fs.PathLike) => {
+        if (p.toString().includes(sessionIdA)) {
+          throw failure;
+        }
+      });
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdB,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdB]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: failure },
+      ]);
+    });
+
+    it('should return empty results when given an empty list', async () => {
+      const result = await sessionService.removeSessions([]);
+
+      expect(result.removed).toEqual([]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('countSessionMessages', () => {
     // The lazy counter that replaces the per-file readline scan from
     // listSessions. Four contracts to pin: it actually counts what it

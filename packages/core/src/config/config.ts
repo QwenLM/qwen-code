@@ -46,9 +46,14 @@ import { GitService } from '../services/gitService.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
-import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
+import {
+  MCPServerStatus,
+  getMCPServerStatus,
+  type SendSdkMcpMessage,
+} from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient } from '../lsp/types.js';
@@ -361,6 +366,16 @@ export class MCPServerConfig {
     readonly targetServiceAccount?: string,
     // SDK MCP server type - 'sdk' indicates server runs in SDK process
     readonly type?: 'sdk',
+    /**
+     * Per-server cap on the discovery handshake (`connect` + `tools/list` +
+     * `prompts/list` + `resources/list`). Defaults: 30s for stdio servers,
+     * 5s for remote HTTP/SSE. Tool-call timeout (`timeout` above) is
+     * unaffected — a long-running tool invocation is not a startup
+     * pathology. Appended at the end of the parameter list to avoid
+     * shifting positional arguments at the many `new MCPServerConfig(...)`
+     * call sites.
+     */
+    readonly discoveryTimeoutMs?: number,
   ) {}
 }
 
@@ -1216,10 +1231,25 @@ export class Config {
     await this.refreshHierarchicalMemory();
     this.debugLogger.debug('Hierarchical memory loaded');
 
+    // Progressive MCP availability: skip MCP discovery in the synchronous
+    // tool-registry construction path and kick it off in the background
+    // after the registry exists. This lets `Config.initialize()` (and the
+    // cli's `input_enabled` checkpoint) resolve without waiting on MCP
+    // server response time. Users can opt back into the legacy synchronous
+    // behavior with `QWEN_CODE_LEGACY_MCP_BLOCKING=1` — kept ≥ 1 release as
+    // an escape hatch.
+    const legacyBlockingMcp =
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
+    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
-      this.getBareMode() ? { skipDiscovery: true } : undefined,
+      skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
     );
+    recordStartupEvent('tool_registry_created', {
+      toolCount: this.toolRegistry.getAllToolNames().length,
+      mcpInline: !skipInlineMcpDiscovery,
+    });
     this.debugLogger.info(
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
@@ -1234,8 +1264,152 @@ export class Config {
     // Use strict mode so a broken built-in tool surfaces immediately at startup.
     await this.toolRegistry.warmAll({ strict: true });
 
+    // Fire-and-forget MCP discovery. Each server's tools land in the
+    // registry as it becomes ready; the cli's AppContainer debounces
+    // `setTools()` (~16ms / one frame) so the model sees the new tools
+    // shortly after each server settles. See `AppContainer.tsx`'s
+    // `mcp-client-update` subscriber.
+    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+      this.startMcpDiscoveryInBackground();
+    }
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
+  }
+
+  /**
+   * In-flight background MCP discovery promise. Captured so non-interactive
+   * code paths can await it before invoking the model (see
+   * {@link waitForMcpReady}). Undefined when MCP discovery was skipped
+   * entirely (bare mode, legacy blocking mode, or no MCP servers).
+   */
+  private mcpDiscoveryPromise?: Promise<void>;
+
+  /**
+   * Kicks off MCP server discovery in the background after the synchronous
+   * portion of {@link initialize} returns. Errors are logged, never thrown:
+   * a broken MCP server must not bring down the cli, and per-server
+   * connect/discover failures are already surfaced through the
+   * `mcp-client-update` event stream the UI subscribes to.
+   *
+   * Defensive against partially-stubbed `ToolRegistry` in some tests, where
+   * the manager getter is unavailable — we'd rather log-and-skip than crash
+   * the init path in tests that don't exercise MCP at all.
+   */
+  private startMcpDiscoveryInBackground(): void {
+    // `getMcpClientManager` is a public method on `ToolRegistry`. The
+    // cast below is NOT defensive against the production type — it
+    // exists only because some tests (e.g. those using
+    // `createMockToolRegistry`) stub `ToolRegistry` as a plain object
+    // that doesn't implement the method. The optional-chaining call
+    // (`?.()`) means the stubbed path resolves to `undefined` instead
+    // of crashing `initialize()` for tests that never exercise MCP.
+    //
+    // Crucially, the inner shape is `ReturnType<ToolRegistry['getMcpClientManager']>`
+    // — not a hand-rolled `{ discoverAllMcpToolsIncremental: ... }` — so
+    // a future rename of `getMcpClientManager` on `ToolRegistry` still
+    // surfaces here as a type error rather than silently falling
+    // through to the `if (!manager) return` branch.
+    const manager = (
+      this.toolRegistry as ToolRegistry & {
+        getMcpClientManager?: () => ReturnType<
+          ToolRegistry['getMcpClientManager']
+        >;
+      }
+    ).getMcpClientManager?.();
+    if (!manager) {
+      this.debugLogger.debug(
+        'Skipping background MCP discovery: ToolRegistry has no MCP client manager',
+      );
+      return;
+    }
+    this.mcpDiscoveryPromise = manager
+      .discoverAllMcpToolsIncremental(this)
+      .then(async () => {
+        // After background discovery completes, push the newly-registered
+        // MCP tools into the active GeminiChat so the next model request
+        // sees them. Interactive mode also calls setTools() via
+        // AppContainer's batch-flush effect — this trailing call is
+        // idempotent there, but it's the ONLY path that updates
+        // `chat.tools` for non-interactive runs (no AppContainer).
+        // Without this, `chat.tools` would be frozen at the built-in-only
+        // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
+        // and `runNonInteractive` / stream-json / ACP would silently lose
+        // every MCP tool — a regression vs the legacy synchronous path.
+        try {
+          await this.geminiClient?.setTools();
+        } catch (err) {
+          this.debugLogger.error(
+            `setTools() after background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        this.debugLogger.error(
+          `Background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  }
+
+  /**
+   * Resolves when background MCP discovery has settled (all servers ready,
+   * failed, or timed out). Non-interactive code paths (`runNonInteractive`,
+   * stream-json, ACP) MUST await this before invoking the model so the
+   * first model request sees the same tool surface the legacy
+   * synchronous-MCP path produced.
+   *
+   * Interactive code paths should NOT call this — `AppContainer`'s
+   * `mcp-client-update` subscriber handles `setTools()` refreshes
+   * progressively without blocking the UI.
+   *
+   * Resolves immediately when:
+   * - bare mode is on (no MCP discovery is started),
+   * - `QWEN_CODE_LEGACY_MCP_BLOCKING=1` is set (MCP already discovered
+   *   synchronously inside {@link initialize}), or
+   * - no MCP servers are configured.
+   */
+  async waitForMcpReady(): Promise<void> {
+    if (this.mcpDiscoveryPromise) {
+      await this.mcpDiscoveryPromise;
+    }
+  }
+
+  /**
+   * Returns the names of configured (non-disabled) MCP servers whose
+   * discovery did NOT end in a CONNECTED state. Intended to be called by
+   * non-interactive entry points AFTER {@link waitForMcpReady} resolves,
+   * so they can surface a single user-visible warning summarizing which
+   * servers failed.
+   *
+   * The legacy synchronous MCP path surfaced these failures visibly
+   * during `config.initialize()` (because they happened on the main
+   * thread and per-server errors logged to stderr). Under PR-A's
+   * progressive discovery, per-server errors are caught inside
+   * `McpClientManager.discoverAllMcpToolsIncremental` and routed to
+   * profiler events + `mcp-client-update` notifications — both of which
+   * are invisible to a non-interactive run with only built-in stderr.
+   * This helper closes that gap WITHOUT re-introducing the blocking
+   * behavior.
+   *
+   * Returns an empty array when MCP discovery was skipped (bare mode /
+   * legacy blocking / no servers configured) or when every configured
+   * server settled successfully.
+   */
+  getFailedMcpServerNames(): string[] {
+    const servers = this.getMcpServers();
+    if (!servers) {
+      return [];
+    }
+    const failed: string[] = [];
+    for (const name of Object.keys(servers)) {
+      if (this.isMcpServerDisabled(name)) {
+        continue;
+      }
+      if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
+        failed.push(name);
+      }
+    }
+    return failed;
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
