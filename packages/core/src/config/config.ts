@@ -7,6 +7,7 @@
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -43,6 +44,8 @@ import {
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
@@ -151,6 +154,7 @@ import {
   type AvailableModel,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 // Re-export types
@@ -1283,6 +1287,74 @@ export class Config {
 
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
+
+    // Fire-and-forget sweep of stale ephemeral worktrees left behind by
+    // earlier `agent` runs that exited before their cleanup helper ran
+    // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
+    // is fail-closed against tracked changes or unpushed commits — so
+    // running it on every startup cannot destroy user work. We do not
+    // await this: it is a hygiene task that must never delay the
+    // first model turn.
+    //
+    // Anchor the sweep at the repo top-level so it scans the same
+    // directory the worktree creators (`enter_worktree` and
+    // `agent isolation:'worktree'`) write to. Using `this.targetDir`
+    // directly would cause launches from a monorepo subdirectory to
+    // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
+    // sweep would silently be a no-op forever.
+    if (!this.getBareMode()) {
+      void (async () => {
+        try {
+          // Resolve the repo top-level FIRST. The previous code bailed
+          // on `fs.access(<targetDir>/.qwen/worktrees)` before resolving,
+          // so a monorepo subdir launch (where `targetDir` is the
+          // subdir, not the repo root) always early-returned and the
+          // sweep was permanently a no-op. Fast-bail still happens, just
+          // against the *correct* directory.
+          const probe = new GitWorktreeService(this.targetDir);
+          const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
+          const worktreesDir = path.join(root, '.qwen', 'worktrees');
+          try {
+            await fsPromises.access(worktreesDir);
+          } catch {
+            // Skipped (no worktrees dir) is the common-case happy
+            // path on every CLI start for ~99% of users. `debug` so
+            // operators can opt in via `--debug` when they actually
+            // want to confirm the sweep is wired up — `info` would
+            // be log noise.
+            this.debugLogger.debug(
+              `Stale worktree sweep skipped: ${worktreesDir} does not exist`,
+            );
+            return;
+          }
+          const removed = await cleanupStaleAgentWorktrees(root);
+          if (removed > 0) {
+            // Only the "actually removed something" path warrants
+            // `info` — that's the signal an operator chasing a leak
+            // would grep for. The "ran, found nothing" path is
+            // reconstructable at `debug` and is otherwise noise:
+            // every CLI start that has any worktree dir would emit
+            // it, drowning the actually-actionable message.
+            this.debugLogger.info(
+              `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`,
+            );
+          } else {
+            this.debugLogger.debug(
+              `Stale worktree sweep ran under ${root}: nothing to remove`,
+            );
+          }
+        } catch (error: unknown) {
+          // Promote sweep errors to `warn` for the same reason: a
+          // permission failure / disk full / repo-corruption case
+          // should leave a visible breadcrumb instead of being
+          // invisible at the default log level.
+          this.debugLogger.warn(
+            `Stale worktree sweep failed (non-fatal): ${error}`,
+          );
+        }
+      })();
+    }
   }
 
   /**
@@ -1761,18 +1833,55 @@ export class Config {
   }
 
   /**
-   * Returns the fast model if one is configured and valid for the current auth type,
-   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
-   * use this as a cheaper alternative to the main session model.
+   * Returns the fast model if one is configured and valid for the current auth
+   * type, otherwise returns undefined. Direct runtime paths use this as a
+   * cheaper alternative to the main session model, so it intentionally stays
+   * current-auth-only.
    */
   getFastModel(): string | undefined {
-    if (!this.fastModel) return undefined;
-    const authType = this.contentGeneratorConfig?.authType;
+    const authType =
+      this.contentGeneratorConfig?.authType ??
+      this.modelsConfig.getCurrentAuthType();
     if (!authType) return undefined;
-    const available = this.getAvailableModelsForAuthType(authType);
-    return available.some((m) => m.id === this.fastModel)
-      ? this.fastModel
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+    if (selector.authType && selector.authType !== authType) return undefined;
+
+    const available = this.getAllConfiguredModels([authType]);
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
       : undefined;
+  }
+
+  /**
+   * Returns the fast model for side-query paths. Unlike {@link getFastModel},
+   * this can return an authType-qualified selector because BaseLlmClient can
+   * route a single request through a provider different from the main session.
+   */
+  getFastModelForSideQuery(): string | undefined {
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+
+    if (selector.authType) {
+      const available = this.getAllConfiguredModels([selector.authType]);
+      return available.some((m) => m.id === selector.modelId)
+        ? `${selector.authType}:${selector.modelId}`
+        : undefined;
+    }
+
+    const available = this.getAllConfiguredModels();
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
+      : undefined;
+  }
+
+  private resolveFastModelSelector() {
+    if (!this.fastModel) return undefined;
+    try {
+      return resolveModelId(this.fastModel);
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -3254,6 +3363,14 @@ export class Config {
         return new ExitPlanModeTool(this);
       });
     }
+    await registerLazy(ToolNames.ENTER_WORKTREE, async () => {
+      const { EnterWorktreeTool } = await import('../tools/enter-worktree.js');
+      return new EnterWorktreeTool(this);
+    });
+    await registerLazy(ToolNames.EXIT_WORKTREE, async () => {
+      const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
+      return new ExitWorktreeTool(this);
+    });
     await registerLazy(ToolNames.WEB_FETCH, async () => {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);

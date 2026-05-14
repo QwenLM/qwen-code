@@ -760,6 +760,190 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
+    it('keeps getFastModel current-auth-only for direct runtime callers', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'deepseek-v4-flash',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBe('deepseek-v4-flash');
+    });
+
+    it('returns an authType-qualified fast model selector for side queries', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'shared-model',
+        fastModel: 'openai:shared-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'shared-model',
+              name: 'OpenAI shared model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'shared-model',
+              name: 'Anthropic shared model',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBe('openai:shared-model');
+    });
+
+    it('returns a bare fast model for getFastModel when authType-qualified selector matches the current auth type', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+        fastModel: 'openai:deepseek-v4-flash',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe('deepseek-v4-flash');
+      expect(config.getFastModelForSideQuery()).toBe(
+        'openai:deepseek-v4-flash',
+      );
+    });
+
+    it('accepts runtime fast models for authType-qualified selectors', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-fast-model',
+        fastModel: 'openai:runtime-fast-model',
+        generationConfig: {
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          apiKey: { kind: 'programmatic', detail: 'test' },
+          baseUrl: { kind: 'programmatic', detail: 'test' },
+        },
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'registry-model',
+              name: 'Registry Model',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+      config.getModelsConfig().detectAndCaptureRuntimeModel();
+
+      expect(config.getFastModel()).toBe('runtime-fast-model');
+      expect(config.getFastModelForSideQuery()).toBe(
+        'openai:runtime-fast-model',
+      );
+    });
+
+    it('returns undefined when the fast model is not configured for any auth type', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'missing-fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
+    it('returns undefined when the fast model selector is malformed', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'openai:',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
+    it('returns undefined when fastModel points back to the fast selector', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'fast',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
     it('should refresh auth when switching to model with different envKey', async () => {
       // This test verifies the fix for switching between modelProvider models
       // with different envKeys (e.g., deepseek-chat with DEEPSEEK_API_KEY)
