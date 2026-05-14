@@ -91,22 +91,6 @@ function Get-ParentProcessName {
     }
 }
 
-function Install-CmdSessionAlias {
-    param([string]$QwenCommand)
-
-    if ([string]::IsNullOrEmpty($QwenCommand)) {
-        return $false
-    }
-
-    $doskey = Join-Path $env:SystemRoot 'System32\doskey.exe'
-    if (-not (Test-Path -LiteralPath $doskey -PathType Leaf)) {
-        $doskey = 'doskey.exe'
-    }
-
-    & $doskey /exename=cmd.exe "qwen=`"$QwenCommand`" `$*" | Out-Null
-    return ($LASTEXITCODE -eq 0)
-}
-
 function Update-CurrentShell {
     $qwenInstallBinDir = Get-QwenInstallBinDir
     $qwenCommandPath = Join-Path $qwenInstallBinDir 'qwen.cmd'
@@ -119,19 +103,10 @@ function Update-CurrentShell {
     Write-Output "Run: qwen"
     $parentProcessName = Get-ParentProcessName
     if ($parentProcessName -ieq 'cmd.exe') {
-        if (Install-CmdSessionAlias -QwenCommand $qwenCommandPath) {
-            Write-Output "INFO: Added a qwen alias for this cmd.exe window."
-            Write-Output "qwen is ready to use after this installer command returns."
-            return
-        }
-
-        Write-Output "WARNING: Windows does not allow this PowerShell child process to update the parent cmd.exe PATH."
-        Write-Output "Run this in the current cmd.exe window to use qwen immediately:"
+        Write-Output "Or, for this cmd.exe window, run:"
         Write-Output "  set `"PATH=${qwenInstallBinDir};%PATH%`""
         return
     }
-
-    Write-Output "qwen is ready to use in this PowerShell session."
 }
 
 $qwenDefaultInstallerUrl = 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.bat'
