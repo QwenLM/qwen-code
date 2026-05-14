@@ -96,8 +96,8 @@ vi.mock('@opentelemetry/api', async (importOriginal) => {
 });
 
 vi.mock('../../telemetry/tracer.js', () => ({
-    API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
-  }));
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
+}));
 
 vi.mock('../../telemetry/index.js', () => {
   function createSpan(
@@ -135,8 +135,8 @@ vi.mock('../../telemetry/index.js', () => {
   return {
     startLLMRequestSpan: vi.fn((model: string, promptId: string) =>
       createSpan('qwen-code.llm_request', {
-        'qwen-code.model': model,
-        'qwen-code.prompt_id': promptId,
+        model,
+        prompt_id: promptId,
       }),
     ),
     endLLMRequestSpan: vi.fn(
@@ -150,17 +150,22 @@ vi.mock('../../telemetry/index.js', () => {
           error?: string;
         },
       ) => {
-        if (metadata) {
-          if (metadata.success) {
-            span.setStatus({ code: 1 }); // OK
-          } else {
-            span.setStatus({
-              code: 2,
-              message: metadata.error ?? 'unknown error',
-            }); // ERROR
+        try {
+          if (metadata) {
+            if (metadata.success) {
+              span.setStatus({ code: 1 }); // OK
+            } else {
+              span.setStatus({
+                code: 2,
+                message: metadata.error ?? 'unknown error',
+              }); // ERROR
+            }
           }
+          span.end();
+        } catch {
+          // Match production best-effort behavior.
+          span.end();
         }
-        span.end();
       },
     ),
   };

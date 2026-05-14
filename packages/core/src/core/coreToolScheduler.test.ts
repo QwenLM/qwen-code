@@ -79,62 +79,88 @@ vi.mock('../telemetry/tracer.js', () => ({
       // Match production best-effort telemetry behavior.
     }
   },
-  withSpan: vi.fn(
-    async (
-      name: string,
-      attributes: Record<string, string | number | boolean>,
-      fn: (span: {
-        setStatus: (status: { code: number; message?: string }) => void;
-        setAttribute: (key: string, value: string | number | boolean) => void;
-        end: () => void;
-      }) => Promise<unknown>,
-      options?: { autoOkOnSuccess?: boolean },
-    ) => {
-      const autoOkOnSuccess = options?.autoOkOnSuccess ?? true;
-      const record: ToolSpanRecord = {
-        name,
-        attributes,
-        statusCalls: [],
-        spanAttributes: {},
-        ended: false,
-      };
-      toolSpanRecords.push(record);
-      let statusSet = false;
-      const span = {
-        setStatus(status: { code: number; message?: string }) {
-          statusSet = true;
-          if (shouldThrowToolSpanSetStatus.value) {
-            throw new Error('setStatus failed');
-          }
-          record.statusCalls.push(status);
-        },
-        setAttribute(key: string, value: string | number | boolean) {
-          if (shouldThrowToolSpanSetAttribute.value) {
-            throw new Error('setAttribute failed');
-          }
-          record.spanAttributes[key] = value;
-        },
-        end() {
-          record.ended = true;
-        },
-      };
+}));
 
+function createMockToolSpan(
+  name: string,
+  attributes: Record<string, string | number | boolean>,
+): ToolSpanRecord & {
+  setStatus: (status: { code: number; message?: string }) => void;
+  setAttribute: (key: string, value: string | number | boolean) => void;
+  setAttributes: (attrs: Record<string, string | number | boolean>) => void;
+  end: () => void;
+  spanContext: () => { spanId: string; traceId: string; traceFlags: number };
+} {
+  const record: ToolSpanRecord = {
+    name,
+    attributes,
+    statusCalls: [],
+    spanAttributes: {},
+    ended: false,
+  };
+  toolSpanRecords.push(record);
+  const spanId = Math.random().toString(16).slice(2, 18).padEnd(16, '0');
+  return Object.assign(record, {
+    setStatus(status: { code: number; message?: string }) {
+      if (shouldThrowToolSpanSetStatus.value) {
+        throw new Error('setStatus failed');
+      }
+      record.statusCalls.push(status);
+    },
+    setAttribute(key: string, value: string | number | boolean) {
+      if (shouldThrowToolSpanSetAttribute.value) {
+        throw new Error('setAttribute failed');
+      }
+      record.spanAttributes[key] = value;
+    },
+    setAttributes(attrs: Record<string, string | number | boolean>) {
+      Object.assign(record.spanAttributes, attrs);
+    },
+    end() {
+      record.ended = true;
+    },
+    spanContext: () => ({ spanId, traceId: '0'.repeat(32), traceFlags: 0 }),
+  });
+}
+
+vi.mock('../telemetry/index.js', () => ({
+  startToolSpan: vi.fn(
+    (name: string, attrs?: Record<string, string | number | boolean>) =>
+      createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
+  ),
+  endToolSpan: vi.fn(
+    (
+      span: ReturnType<typeof createMockToolSpan>,
+      metadata?: { success?: boolean; error?: string },
+    ) => {
       try {
-        const result = await fn(span);
-        if (autoOkOnSuccess && !statusSet) {
-          record.statusCalls.push({ code: 1 });
+        if (metadata) {
+          if (metadata.success !== false) {
+            span.setStatus({ code: 1 });
+          } else {
+            span.setStatus({
+              code: 2,
+              message: metadata.error ?? 'tool error',
+            });
+          }
         }
-        return result;
-      } catch (error) {
-        if (!statusSet) {
-          record.statusCalls.push({
-            code: 2,
-            message: error instanceof Error ? error.message : String(error),
-          });
-        }
-        throw error;
-      } finally {
-        record.ended = true;
+        span.end();
+      } catch {
+        // best-effort
+      }
+    },
+  ),
+  runInToolSpanContext: vi.fn(<T>(_span: unknown, fn: () => T): T => fn()),
+  startToolExecutionSpan: vi.fn(() => createMockToolSpan('tool.execution', {})),
+  endToolExecutionSpan: vi.fn(
+    (
+      span: ReturnType<typeof createMockToolSpan>,
+      _metadata?: { success?: boolean; error?: string },
+    ) => {
+      try {
+        span.end();
+      } catch {
+        // best-effort
       }
     },
   ),
@@ -3275,7 +3301,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
-  it('leaves cancellation spans with no explicit status (autoOkOnSuccess: false)', async () => {
+  it('marks cancellation spans with UNSET status', async () => {
     const abortController = new AbortController();
     const { spanRecord, completedCalls } = await runSingleTool({
       abortController,
@@ -3289,9 +3315,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     expect(completedCalls[0].status).toBe('cancelled');
-    // autoOkOnSuccess: false prevents withSpan from auto-setting OK;
-    // setToolSpanCancelled only sets the failure_kind attribute, not a status.
-    expect(spanRecord.statusCalls).toEqual([]);
+    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
     expect(spanRecord.ended).toBe(true);
   });
@@ -3311,9 +3335,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     expect(completedCalls[0].status).toBe('cancelled');
-    // No status set — autoOkOnSuccess: false, and setToolSpanCancelled
-    // only sets the attribute (which fails here, caught internally).
-    expect(spanRecord.statusCalls).toEqual([]);
+    // setAttribute throws, but safeSetStatus still attempts setStatus.
+    // Since throwSpanSetAttribute only affects setAttribute, setStatus succeeds.
+    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
   });
@@ -3333,9 +3357,8 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     expect(completedCalls[0].status).toBe('cancelled');
-    // setToolSpanCancelled no longer calls setStatus, so throwSpanSetStatus
-    // only affects the safeSetStatus(span, OK) in the success path (not hit).
-    // With autoOkOnSuccess: false, withSpan does not attempt setStatus either.
+    // setToolSpanCancelled calls safeSetStatus which catches the throw.
+    // Status call is attempted but swallowed by safeSetStatus.
     expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
     expect(spanRecord.ended).toBe(true);
@@ -3352,7 +3375,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
-  it('leaves successful tool calls to be marked OK by withSpan', async () => {
+  it('marks successful tool calls with OK status via endToolSpan', async () => {
     const { spanRecord, completedCalls } = await runSingleTool();
 
     expect(completedCalls[0].status).toBe('success');
