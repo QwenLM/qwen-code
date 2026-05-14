@@ -1331,6 +1331,8 @@ describe('standalone release packaging', () => {
 
     expect(uninstallShellSource).toContain('is_qwen_standalone_install_dir');
     expect(uninstallShellSource).toContain('remove_shell_path_entry');
+    expect(uninstallShellSource).toContain('shell_quote');
+    expect(uninstallShellSource).toContain('quoted_qwen_bin');
     expect(uninstallShellSource).toContain('QWEN_UNINSTALL_PURGE');
     expect(uninstallShellSource).toContain('Preserving');
     expect(uninstallShellSource).toContain('source.json');

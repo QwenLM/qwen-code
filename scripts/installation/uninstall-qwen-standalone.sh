@@ -138,6 +138,10 @@ is_qwen_standalone_install_dir() {
     [[ -f "${install_dir}/node/bin/node" && ! -L "${install_dir}/node/bin/node" && -x "${install_dir}/node/bin/node" ]] || return 1
 }
 
+shell_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 remove_install_wrapper() {
     local wrapper_path="${INSTALL_BIN_DIR}/qwen"
     local qwen_bin="${INSTALL_LIB_DIR}/bin/qwen"
@@ -151,7 +155,13 @@ remove_install_wrapper() {
         return 0
     fi
 
-    if ! grep -qF "${qwen_bin}" "${wrapper_path}" 2>/dev/null; then
+    # The installer writes the path through shell_quote, so the wrapper may
+    # contain the raw path (no special chars) or the single-quoted form
+    # (paths with spaces, quotes, or other shell metacharacters).
+    local quoted_qwen_bin
+    quoted_qwen_bin=$(shell_quote "${qwen_bin}")
+    if ! grep -qF "${qwen_bin}" "${wrapper_path}" 2>/dev/null &&
+        ! grep -qF "${quoted_qwen_bin}" "${wrapper_path}" 2>/dev/null; then
         log_warning "${wrapper_path} does not point at this standalone install; skipping."
         return 0
     fi
