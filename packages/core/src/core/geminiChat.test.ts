@@ -2765,6 +2765,97 @@ describe('GeminiChat', async () => {
       expect(text).toBe(previous + continuation);
     });
 
+    it('should preserve continuation when its structural prefix appears mid-paragraph in the previous tail (line-boundary rejection)', async () => {
+      // Regression: `previousTailContainsAtLineBoundary` must reject matches
+      // that land mid-paragraph in `previousTail` even when a structural
+      // anchor at the start of `continuationText` would otherwise pass the
+      // contained-prefix gate. Without that check, a plain substring match
+      // (e.g. inside a code block that quotes the literal string
+      // `"### Heading\n..."` as prose) would silently strip legitimate
+      // continuation. The only `"### Heading"` occurrence here is preceded
+      // by `"some text"`, not a newline, so the contained-prefix path MUST
+      // reject the match and pass the continuation through verbatim.
+      const previous =
+        'some text ### Heading and then more inline prose follows';
+      const continuation =
+        '### Heading\nfresh continuation that should not be stripped';
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: continuation }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write something with a heading' },
+        'prompt-recovery-line-boundary-reject',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      // No silent strip: the full continuation must follow the previous tail
+      // verbatim because the only `"### Heading"` occurrence in `previous`
+      // is mid-paragraph (not preceded by `\n`).
+      expect(text).toBe(previous + continuation);
+    });
+
+    it('should insert a newline separator when the replayed prefix ends with newline but previous tail does not', async () => {
+      // Covers the three-condition normalization branch in
+      // `getRecoveryContinuationSuffix`: when `replayedPrefix` ends with
+      // `\n`, `previousText` does NOT, and `suffix` does NOT start with
+      // `\n`, the helper prepends a `\n` so the coalesced text keeps the
+      // block-level boundary intact. Without normalization, the suffix
+      // would butt up against the previous tail with no separator.
+      //
+      // Setup: previous tail ends with `### Section` (no trailing newline,
+      // because the truncation cut the response immediately after the
+      // heading). Continuation replays `### Section\n` followed by body
+      // prose. The contained-prefix path strips the replayed heading +
+      // newline, leaving a suffix that starts with prose. The
+      // normalization branch must restore a `\n` between `### Section` in
+      // history and the body prose.
+      const previous = 'Intro paragraph.\n### Section';
+      const replayedBlock = '### Section\n';
+      const continuation = `${replayedBlock}body prose continuation`;
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: previous }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: continuation }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a structured answer' },
+        'prompt-recovery-newline-normalization',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      // No duplicated `### Section`, and the heading is separated from the
+      // body prose by exactly one newline — the normalization branch fired.
+      expect(text).toBe(`${previous}\nbody prose continuation`);
+    });
+
     it('should drop continuation entirely when it exactly replays the previous tail', async () => {
       // Covers the full-overlap guard in getRecoveryContinuationSuffix:
       // previousText.endsWith(continuationText) AND the overlap is significant.

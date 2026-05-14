@@ -297,6 +297,20 @@ function previousTailContainsAtLineBoundary(
   return false;
 }
 
+/**
+ * Compute the portion of `continuationText` that should be appended to
+ * `previousText` after a MAX_TOKENS recovery, stripping any overlap that the
+ * provider replayed at the boundary.
+ *
+ * The empty-input guard (`previousText.length === 0 ||
+ * continuationText.length === 0`) is *defensive only*. The sole production
+ * caller is {@link appendRecoveryContinuationParts}, which already short-
+ * circuits when either side has no plain-text part — neither branch of the
+ * guard can fire from production code. It exists so that anyone reusing this
+ * helper directly (e.g. a future unit test, a refactor that bypasses the
+ * caller's filter) cannot crash or read out of bounds. We deliberately leave
+ * the guard in place rather than rely on the caller's invariant alone.
+ */
 function getRecoveryContinuationSuffix(
   previousText: string,
   continuationText: string,
@@ -432,6 +446,29 @@ function buildOutputRecoveryMessage(previousModelTurn: Content | undefined) {
   );
 }
 
+/**
+ * Coalesce a recovery continuation turn into the preceding (truncated) model
+ * turn, dropping any replayed overlap.
+ *
+ * Coupling with `processStreamResponse`. This function assumes the parts
+ * arrays it receives were produced by {@link GeminiChat.processStreamResponse}
+ * — i.e. all plain-text streaming chunks from a given turn have been
+ * consolidated in place into a single text part via `lastPart.text +=
+ * part.text`. The dedup logic only inspects the *last* plain-text part of
+ * `previousParts` and the *first* plain-text part of `continuationParts`, so
+ * if a future refactor of `processStreamResponse` ever emits multiple adjacent
+ * unconsolidated text parts per turn, this function would compare the
+ * continuation against only the trailing fragment and miss real overlaps with
+ * earlier fragments. Both functions live in this file precisely so the
+ * coupling is reviewable in a single window.
+ *
+ * Return-value shape. The returned array preserves the *shape convention* of
+ * `processStreamResponse` output: `[thoughtPart?, ...consolidatedTextParts,
+ * ...nonTextParts]`. {@link GeminiChat.coalesceRecoveryPairs} relies on this
+ * by feeding the merged result back as `previousParts` on the next recovery
+ * iteration; if the shape ever diverges, multi-iteration recovery dedup would
+ * fail silently against the wrong part.
+ */
 function appendRecoveryContinuationParts(
   previousParts: Part[] | undefined,
   continuationParts: Part[] | undefined,
