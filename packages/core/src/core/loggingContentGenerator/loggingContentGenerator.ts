@@ -204,6 +204,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    try {
+      llmSpan.setAttribute('llm_request.stream', false);
+    } catch {
+      /* best-effort */
+    }
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
@@ -274,6 +279,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    try {
+      llmSpan.setAttribute('llm_request.stream', true);
+    } catch {
+      /* best-effort */
+    }
 
     // Capture the span context so the stream wrapper can activate it
     // during iteration — not just during generator creation.

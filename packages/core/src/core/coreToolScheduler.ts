@@ -2147,9 +2147,7 @@ export class CoreToolScheduler {
           }
 
           if (reminderBlocks.length > 0) {
-            const body = escapeSystemReminderTags(
-              reminderBlocks.join('\n\n'),
-            );
+            const body = escapeSystemReminderTags(reminderBlocks.join('\n\n'));
             content = appendAdditionalContext(
               content,
               `<system-reminder>\n${body}\n</system-reminder>`,
@@ -2172,7 +2170,6 @@ export class CoreToolScheduler {
             : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
-        safeSetStatus(span, { code: SpanStatusCode.OK });
       } else {
         // It is a failure
         // PostToolUseFailure Hook
