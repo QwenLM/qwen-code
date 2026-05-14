@@ -214,7 +214,7 @@ export class GeminiClient {
     this.loopDetector = new LoopDetectionService(config);
   }
 
-  async initialize() {
+  async initialize(sessionStartSource?: SessionStartSource) {
     this.lastPromptId = this.config.getSessionId();
 
     // Check if we're resuming from a previous session
@@ -226,7 +226,10 @@ export class GeminiClient {
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
-      await this.startChat(resumedHistory);
+      await this.startChat(
+        resumedHistory,
+        sessionStartSource ?? SessionStartSource.Resume,
+      );
       this.getChat().setLastPromptTokenCount(
         uiTelemetryService.getLastPromptTokenCount(),
       );
@@ -234,7 +237,7 @@ export class GeminiClient {
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
-      await this.startChat();
+      await this.startChat(undefined, sessionStartSource);
     }
   }
 
@@ -393,7 +396,7 @@ export class GeminiClient {
     // compression should keep previously-revealed tools so the model can
     // continue using them without re-running ToolSearch.
     this.config.getToolRegistry().clearRevealedDeferredTools();
-    await this.startChat();
+    await this.startChat(undefined, SessionStartSource.Clear);
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -435,7 +438,12 @@ export class GeminiClient {
     );
   }
 
-  async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
+  async startChat(
+    extraHistory?: Content[],
+    sessionStartSource = extraHistory
+      ? SessionStartSource.Resume
+      : SessionStartSource.Startup,
+  ): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
@@ -456,9 +464,7 @@ export class GeminiClient {
             this.config.getApprovalMode(),
           ) as PermissionMode;
           const startHookOutput = await hookSystem.fireSessionStartEvent(
-            extraHistory
-              ? SessionStartSource.Resume
-              : SessionStartSource.Startup,
+            sessionStartSource,
             this.config.getModel() ?? '',
             permissionMode,
           );
@@ -538,7 +544,7 @@ export class GeminiClient {
       );
 
       if (sessionStartAdditionalContext) {
-        this.chat.appendSystemInstruction(sessionStartAdditionalContext);
+        this.chat.setSessionStartContext(sessionStartAdditionalContext);
       }
 
       await this.setTools();
@@ -1622,7 +1628,7 @@ export class GeminiClient {
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const compressedHistory = this.getChat().getHistory();
-      await this.startChat(compressedHistory);
+      await this.startChat(compressedHistory, SessionStartSource.Compact);
       // startChat() creates a new GeminiChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still
       // resolve to the file_unchanged placeholder. Clear so post-compaction

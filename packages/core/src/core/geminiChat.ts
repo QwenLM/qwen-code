@@ -383,6 +383,8 @@ export class InvalidStreamError extends Error {
  * @remarks
  * The session maintains all the turns between user and model.
  */
+const SESSION_START_CONTEXT_DELIMITER = '\n\n---\n\n';
+
 export class GeminiChat {
   // A promise to represent the current state of the message being sent to the
   // model.
@@ -516,15 +518,19 @@ export class GeminiChat {
     this.generationConfig.systemInstruction = sysInstr;
   }
 
-  appendSystemInstruction(extraInstruction: string) {
+  setSessionStartContext(extraInstruction: string) {
     const trimmed = extraInstruction.trim();
     if (!trimmed) {
       return;
     }
 
     const current = this.generationConfig.systemInstruction;
-    this.generationConfig.systemInstruction = current
-      ? `${current}\n\n---\n\n${trimmed}`
+    const baseInstruction =
+      typeof current === 'string'
+        ? current.split(SESSION_START_CONTEXT_DELIMITER)[0]
+        : undefined;
+    this.generationConfig.systemInstruction = baseInstruction
+      ? `${baseInstruction}${SESSION_START_CONTEXT_DELIMITER}${trimmed}`
       : trimmed;
   }
 

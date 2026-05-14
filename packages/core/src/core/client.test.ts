@@ -700,6 +700,68 @@ describe('Gemini Client (client.ts)', () => {
         'Resume hook context',
       );
     });
+
+    it('uses the explicit SessionStart source when provided', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Clear hook context',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat(undefined, SessionStartSource.Clear);
+
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Clear,
+        'test-model',
+        PermissionMode.Default,
+      );
+      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
+        'Clear hook context',
+      );
+    });
+
+    it('replaces prior SessionStart additionalContext instead of accumulating blocks', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi
+          .fn()
+          .mockResolvedValueOnce(
+            createHookOutput('SessionStart', {
+              hookSpecificOutput: {
+                additionalContext: 'Ctx1',
+              },
+            }),
+          )
+          .mockResolvedValueOnce(
+            createHookOutput('SessionStart', {
+              hookSpecificOutput: {
+                additionalContext: 'Ctx2',
+              },
+            }),
+          ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat(undefined, SessionStartSource.Clear);
+      await client.startChat(undefined, SessionStartSource.Clear);
+
+      const systemInstruction = client.getChat()['generationConfig']
+        .systemInstruction as string;
+      expect(systemInstruction).toContain('Ctx2');
+      expect(systemInstruction).not.toContain('Ctx1\n\n---\n\nCtx2');
+    });
   });
 
   describe('addHistory', () => {
@@ -767,6 +829,25 @@ describe('Gemini Client (client.ts)', () => {
       await client.resetChat();
 
       expect(reg.clearRevealedDeferredTools).toHaveBeenCalledTimes(1);
+    });
+
+    it('fires SessionStart with Clear source when resetting chat', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.resetChat();
+
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Clear,
+        'test-model',
+        PermissionMode.Default,
+      );
     });
   });
 
@@ -1159,6 +1240,48 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
       expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('preserves Compact SessionStart additionalContext on the new chat', async () => {
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+      ];
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Compact hook context',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      const originalChat = client.getChat();
+      vi.spyOn(originalChat, 'tryCompress').mockImplementation(async () => {
+        originalChat.setHistory(compressedHistory);
+        return {
+          originalTokenCount: 1000,
+          newTokenCount: 200,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        };
+      });
+
+      await client.tryCompressChat('p4');
+
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Compact,
+        'test-model',
+        PermissionMode.Default,
+      );
+      expect(client.getChat()['generationConfig'].systemInstruction).toContain(
+        'Compact hook context',
+      );
     });
 
     it('does not flip forceFullIdeContext when compression NOOPs', async () => {

@@ -186,6 +186,26 @@ describe('GeminiChat', async () => {
     return collecting;
   }
 
+  describe('system instruction helpers', () => {
+    it('replaces prior session-start context instead of appending indefinitely', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction('Base instruction');
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n---\n\nCtx2',
+      );
+    });
+  });
+
   describe('sendMessageStream', () => {
     it('should succeed if a tool call is followed by an empty part', async () => {
       // 1. Mock a stream that contains a tool call, then an invalid (empty) part.

@@ -13,12 +13,7 @@ import { getCompressionPrompt } from '../core/prompts.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
-import type { PermissionMode } from '../hooks/types.js';
-import {
-  SessionStartSource,
-  PreCompactTrigger,
-  PostCompactTrigger,
-} from '../hooks/types.js';
+import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -454,28 +449,6 @@ export class ChatCompressionService {
         },
       };
     } else {
-      // Fire SessionStart event after successful compression
-      try {
-        const permissionMode = String(
-          config.getApprovalMode(),
-        ) as PermissionMode;
-        const hookOutput = await config
-          .getHookSystem()
-          ?.fireSessionStartEvent(
-            SessionStartSource.Compact,
-            model ?? '',
-            permissionMode,
-            undefined,
-            signal,
-          );
-        const additionalContext = hookOutput?.getAdditionalContext();
-        if (additionalContext) {
-          chat.appendSystemInstruction(additionalContext);
-        }
-      } catch (err) {
-        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
-      }
-
       // Fire PostCompact event after successful compression
       try {
         const postCompactTrigger =

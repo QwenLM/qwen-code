@@ -97,6 +97,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   SessionStartSource: {
     Startup: 'startup',
     Resume: 'resume',
+    Branch: 'branch',
+    Clear: 'clear',
+    Compact: 'compact',
   },
   SessionEndReason: {
     PromptInputExit: 'prompt_input_exit',
@@ -846,16 +849,21 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('newSession does not fire SessionStart directly in ACP agent', async () => {
+  it('first ACP session relies on initialize for SessionStart', async () => {
     const innerConfig = await setupSessionMocks(
       'session-no-direct-session-start',
     );
     const fireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
+    const initialize = vi.fn().mockResolvedValue(undefined);
     innerConfig.getHookSystem = vi.fn().mockReturnValue({
       fireSessionStartEvent,
     });
     innerConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
     innerConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+    innerConfig.getGeminiClient = vi.fn().mockReturnValue({
+      isInitialized: vi.fn().mockReturnValue(false),
+      initialize,
+    });
 
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -872,7 +880,60 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
+    expect(initialize).toHaveBeenCalledTimes(1);
     expect(fireSessionStartEvent).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('fires SessionStart for subsequent ACP sessions when GeminiClient is already initialized', async () => {
+    const innerConfig = await setupSessionMocks(
+      'session-followup-session-start',
+    );
+    const fireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    innerConfig.getHookSystem = vi.fn().mockReturnValue({
+      fireSessionStartEvent,
+    });
+    innerConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    innerConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+    innerConfig.getModel = vi.fn().mockReturnValue('test-model');
+    innerConfig.getApprovalMode = vi.fn().mockReturnValue('default');
+    innerConfig.getGeminiClient = vi
+      .fn()
+      .mockReturnValueOnce({
+        isInitialized: vi.fn().mockReturnValue(false),
+        initialize,
+      })
+      .mockReturnValueOnce({
+        isInitialized: vi.fn().mockReturnValue(true),
+        initialize,
+      });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);
+    expect(fireSessionStartEvent).toHaveBeenCalledWith(
+      'startup',
+      'test-model',
+      'default',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
