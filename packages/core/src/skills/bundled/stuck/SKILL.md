@@ -35,7 +35,7 @@ Signs of a stuck session:
    - Child processes: `pgrep -lP <pid>`
    - If high CPU: sample again after 1-2s to confirm it's sustained
    - If a child looks hung (e.g., a git command), note its full command line with `ps -p <child_pid> -o command=`
-   - Check the session's debug log if you can infer the session ID: `~/.qwen/debug/<session-id>.txt` (the last few hundred lines often show what it was doing before hanging)
+   - Check the session's debug log if you can infer the session ID: `~/.qwen/debug/<session-id>.txt` (the last few hundred lines often show what it was doing before hanging). If `QWEN_RUNTIME_DIR` or `QWEN_HOME` is set, the debug directory is `$QWEN_RUNTIME_DIR/debug/` or `$QWEN_HOME/debug/` instead of the default.
    - The `~/.qwen/debug/latest` symlink points to the most recent session's log
 
 3. **Consider a stack dump** for a truly frozen process (advanced, optional):
