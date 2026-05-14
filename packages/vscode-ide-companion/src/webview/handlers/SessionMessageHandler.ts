@@ -241,14 +241,41 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     const conversation =
       await this.conversationStore.getConversation(conversationId);
-    if (!conversation) {
+    if (conversation) {
+      return {
+        ...conversation,
+        messages: conversation.messages.map((message) => ({ ...message })),
+      };
+    }
+
+    const getSessionMessages = (
+      this.agentManager as {
+        getSessionMessages?: (sessionId: string) => Promise<ChatMessage[]>;
+      }
+    ).getSessionMessages;
+    if (!getSessionMessages) {
       return null;
     }
 
-    return {
-      ...conversation,
-      messages: conversation.messages.map((message) => ({ ...message })),
+    const messages = await getSessionMessages.call(
+      this.agentManager,
+      conversationId,
+    );
+    if (messages.length === 0) {
+      return null;
+    }
+
+    const timestamps = messages.map((message) => message.timestamp);
+    const recoveredConversation: Conversation = {
+      id: conversationId,
+      title: messages.find((message) => message.role === 'user')?.content ?? '',
+      messages: messages.map((message) => ({ ...message })),
+      createdAt: Math.min(...timestamps),
+      updatedAt: Math.max(...timestamps),
     };
+    await this.conversationStore.upsertConversation(recoveredConversation);
+
+    return recoveredConversation;
   }
 
   private async restoreConversationSnapshot(
@@ -630,25 +657,22 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
 
       if (!editRestoreSnapshot) {
-        const errorMsg = 'Failed to capture conversation state before editing.';
-        console.error('[SessionMessageHandler]', errorMsg);
-        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
-        this.sendToWebView({
-          type: 'error',
-          data: { message: errorMsg },
-        });
-        return;
+        console.warn(
+          '[SessionMessageHandler] Local conversation snapshot missing before edit; continuing with ACP rewind only.',
+        );
       }
 
       try {
-        const truncated = await this.conversationStore.truncateFromUserTurn(
-          this.currentConversationId,
-          editTargetTurnIndex,
-        );
-        if (!truncated) {
-          throw new Error('Conversation not found for edit target.');
+        if (editRestoreSnapshot) {
+          const truncated = await this.conversationStore.truncateFromUserTurn(
+            this.currentConversationId,
+            editTargetTurnIndex,
+          );
+          if (!truncated) {
+            throw new Error('Conversation not found for edit target.');
+          }
+          editStoreMutationApplied = true;
         }
-        editStoreMutationApplied = true;
 
         const rewindResult =
           await this.agentManager.rewindSession(editTargetTurnIndex);
@@ -691,16 +715,20 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     // Check if this is the first message
     let isFirstMessage = false;
-    try {
-      const conversation = await this.conversationStore.getConversation(
-        this.currentConversationId,
-      );
-      isFirstMessage = !conversation || conversation.messages.length === 0;
-    } catch (error) {
-      console.error(
-        '[SessionMessageHandler] Failed to check conversation:',
-        error,
-      );
+    if (editTargetTurnIndex !== undefined) {
+      isFirstMessage = editTargetTurnIndex === 0;
+    } else {
+      try {
+        const conversation = await this.conversationStore.getConversation(
+          this.currentConversationId,
+        );
+        isFirstMessage = !conversation || conversation.messages.length === 0;
+      } catch (error) {
+        console.error(
+          '[SessionMessageHandler] Failed to check conversation:',
+          error,
+        );
+      }
     }
 
     // Generate title for first message, but only if it hasn't been set yet
@@ -843,6 +871,20 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // After first message, sync ACP session ID to webview for session list highlighting
       const acpSessionId = this.agentManager.currentSessionId;
       if (acpSessionId && acpSessionId !== this.currentConversationId) {
+        const previousConversationId = this.currentConversationId;
+        if (previousConversationId) {
+          const renamed = await this.conversationStore.renameConversationId(
+            previousConversationId,
+            acpSessionId,
+          );
+          if (!renamed) {
+            console.warn(
+              '[SessionMessageHandler] Failed to align conversation store with ACP session id:',
+              previousConversationId,
+              acpSessionId,
+            );
+          }
+        }
         this.currentConversationId = acpSessionId;
         this.sendToWebView({
           type: 'sessionTitleUpdated',
