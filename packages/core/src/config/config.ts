@@ -1270,28 +1270,32 @@ export class Config {
           try {
             await fsPromises.access(worktreesDir);
           } catch {
-            // No worktrees directory at the repo root either; nothing
-            // to sweep. Log so operators can distinguish "sweep
-            // skipped (no worktrees)" from "sweep ran, found nothing"
-            // — the previous version was silent in both cases.
-            this.debugLogger.info(
+            // Skipped (no worktrees dir) is the common-case happy
+            // path on every CLI start for ~99% of users. `debug` so
+            // operators can opt in via `--debug` when they actually
+            // want to confirm the sweep is wired up — `info` would
+            // be log noise.
+            this.debugLogger.debug(
               `Stale worktree sweep skipped: ${worktreesDir} does not exist`,
             );
             return;
           }
           const removed = await cleanupStaleAgentWorktrees(root);
-          // Log unconditionally at `info` so operators chasing a
-          // worktree leak can distinguish the three cases that all
-          // looked identical before:
-          //   • sweep skipped (no worktrees dir) — handled in the
-          //     fast-bail branch above
-          //   • sweep ran, found nothing                ← this branch when removed === 0
-          //   • sweep ran, removed N stale worktrees   ← this branch when removed > 0
-          this.debugLogger.info(
-            removed > 0
-              ? `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`
-              : `Stale worktree sweep ran under ${root}: nothing to remove`,
-          );
+          if (removed > 0) {
+            // Only the "actually removed something" path warrants
+            // `info` — that's the signal an operator chasing a leak
+            // would grep for. The "ran, found nothing" path is
+            // reconstructable at `debug` and is otherwise noise:
+            // every CLI start that has any worktree dir would emit
+            // it, drowning the actually-actionable message.
+            this.debugLogger.info(
+              `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`,
+            );
+          } else {
+            this.debugLogger.debug(
+              `Stale worktree sweep ran under ${root}: nothing to remove`,
+            );
+          }
         } catch (error: unknown) {
           // Promote sweep errors to `warn` for the same reason: a
           // permission failure / disk full / repo-corruption case
