@@ -57,6 +57,14 @@ const collapseCommand: SlashCommand = {
     // Add summary item.
     addItem(createHistoryCollapseSummaryItem(totalToHideCount), Date.now());
     refreshStatic();
+
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: t(
+        'History collapsed. (This is now your default preference for future sessions)',
+      ),
+    };
   },
 };
 
@@ -95,6 +103,14 @@ const expandCommand: SlashCommand = {
       }));
     loadHistory(updated);
     refreshStatic();
+
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: t(
+        'History expanded. (This is now your default preference for future sessions)',
+      ),
+    };
   },
 };
 
@@ -108,8 +124,8 @@ export const historyCommand: SlashCommand = {
   supportedModes: ['interactive'] as const,
   subCommands: [collapseCommand, expandCommand],
   action: async () => ({
-      type: 'message',
-      messageType: 'error',
-      content: t('Usage: /history collapse|expand'),
-    }),
+    type: 'message',
+    messageType: 'error',
+    content: t('Usage: /history collapse|expand'),
+  }),
 };

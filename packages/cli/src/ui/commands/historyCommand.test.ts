@@ -50,7 +50,11 @@ describe('historyCommand', () => {
     )!;
     const result = await collapseCommand.action!(mockContext, '');
 
-    expect(result).toBeUndefined();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('History collapsed'),
+    });
     expect(mockLoadHistory).toHaveBeenCalledWith([
       expect.objectContaining({ id: 1, display: { suppressOnRestore: true } }),
       expect.objectContaining({ id: 2, display: { suppressOnRestore: true } }),
@@ -163,7 +167,11 @@ describe('historyCommand', () => {
 
     const result = await expandCommand.action!(mockContext, '');
 
-    expect(result).toBeUndefined();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('History expanded'),
+    });
     expect(mockLoadHistory).toHaveBeenCalledWith([
       expect.objectContaining({ id: 1, display: { suppressOnRestore: false } }),
       expect.objectContaining({ id: 2, display: { suppressOnRestore: false } }),

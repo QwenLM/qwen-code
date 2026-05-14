@@ -21,6 +21,7 @@ import type {
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
+import { t } from '../../i18n/index.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -511,7 +512,29 @@ export function createHistoryCollapseSummaryItem(
 ): Omit<HistoryItem, 'id'> {
   return {
     type: MessageType.INFO,
-    text: `History collapsed: ${messageCount} message${messageCount !== 1 ? 's' : ''} hidden. Use /history expand to show.`,
+    text: t(
+      'History collapsed: {{n}} messages hidden. Use /history expand to show.',
+      { n: String(messageCount) },
+    ),
     display: { kind: 'collapse-summary' },
   };
+}
+
+/**
+ * Helper to apply the collapse policy and append the summary item if needed.
+ */
+export function applyCollapsePolicyAndSummary(
+  rawItems: HistoryItem[],
+  collapseOnResume: boolean,
+  addItem?: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
+): HistoryItem[] {
+  const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
+    collapseOnResume,
+  });
+
+  if (collapseOnResume && rawItems.length > 0 && addItem) {
+    addItem(createHistoryCollapseSummaryItem(rawItems.length), Date.now());
+  }
+
+  return uiHistoryItems;
 }

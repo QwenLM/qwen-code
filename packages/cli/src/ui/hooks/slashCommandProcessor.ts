@@ -136,6 +136,11 @@ export const useSlashCommandProcessor = (
   logger: Logger | null,
   setSessionName?: (name: string | null) => void,
 ) => {
+  const historyRef = useRef(history);
+  useEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
   const [recentCommands, setRecentCommands] = useState<
@@ -317,7 +322,9 @@ export const useSlashCommandProcessor = (
         logger,
       },
       ui: {
-        history,
+        get history() {
+          return historyRef.current;
+        },
         addItem,
         clear: () => {
           cancelBtw();
@@ -355,7 +362,6 @@ export const useSlashCommandProcessor = (
     [
       config,
       settings,
-      history,
       gitService,
       logger,
       loadHistory,

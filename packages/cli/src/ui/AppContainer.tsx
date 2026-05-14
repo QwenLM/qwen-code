@@ -63,8 +63,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
-  applyResumeDisplayPolicy,
-  createHistoryCollapseSummaryItem,
+  applyCollapsePolicyAndSummary,
 } from './utils/resumeHistoryUtils.js';
 import {
   getStickyTodos,
@@ -494,17 +493,12 @@ export const AppContainer = (props: AppContainerProps) => {
         const collapseOnResume =
           settings.merged.ui?.history?.collapseOnResume ?? false;
 
-        const historyItems = applyResumeDisplayPolicy(rawItems, {
+        const historyItems = applyCollapsePolicyAndSummary(
+          rawItems,
           collapseOnResume,
-        });
+          historyManager.addItem,
+        );
         historyManager.loadHistory(historyItems);
-
-        if (collapseOnResume && rawItems.length > 0) {
-          historyManager.addItem(
-            createHistoryCollapseSummaryItem(rawItems.length),
-            Date.now(),
-          );
-        }
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),

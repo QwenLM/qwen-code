@@ -12,8 +12,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
-  applyResumeDisplayPolicy,
-  createHistoryCollapseSummaryItem,
+  applyCollapsePolicyAndSummary,
 } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItem } from '../types.js';
@@ -54,7 +53,7 @@ const BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before resuming another session.";
 
 export function useResumeCommand(
-  options?: UseResumeCommandOptions,
+  options: UseResumeCommandOptions,
 ): UseResumeCommandResult {
   const [isResumeDialogOpen, setIsResumeDialogOpen] = useState(false);
   const [resumeMatchedSessions, setResumeMatchedSessions] = useState<
@@ -81,10 +80,10 @@ export function useResumeCommand(
     startNewSession,
     setSessionName,
     remount,
-  } = options ?? {};
+  } = options;
 
   const hasHistoryManager = !!historyManager;
-  const { addItem, clearItems, loadHistory } = historyManager || {};
+  const { addItem, clearItems, loadHistory } = historyManager;
   const handleResume = useCallback(
     async (sessionId: string) => {
       if (!config || !hasHistoryManager || !startNewSession) {
@@ -124,21 +123,16 @@ export function useResumeCommand(
       // Reset UI history.
       const rawItems = buildResumedHistoryItems(sessionData, config);
       const collapseOnResume =
-        settings?.merged.ui?.history?.collapseOnResume ?? false;
+        settings.merged.ui?.history?.collapseOnResume ?? false;
 
-      const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
+      const uiHistoryItems = applyCollapsePolicyAndSummary(
+        rawItems,
         collapseOnResume,
-      });
+        addItem,
+      );
 
       clearItems?.();
       loadHistory?.(uiHistoryItems);
-
-      if (collapseOnResume && rawItems.length > 0) {
-        addItem?.(
-          createHistoryCollapseSummaryItem(rawItems.length),
-          Date.now(),
-        );
-      }
 
       // Update session history core.
       resetBackgroundStateForSessionSwitch(config);
@@ -191,7 +185,7 @@ export function useResumeCommand(
       startNewSession,
       setSessionName,
       remount,
-      settings?.merged.ui?.history?.collapseOnResume,
+      settings.merged.ui?.history?.collapseOnResume,
     ],
   );
 
