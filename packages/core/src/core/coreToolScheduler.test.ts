@@ -133,24 +133,17 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     ),
     endToolSpan: vi.fn(
       (
-        span: ReturnType<typeof createMockToolSpan>,
+        span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
         metadata?: { success?: boolean; error?: string },
       ) => {
-        try {
-          if (metadata) {
-            if (metadata.success !== false) {
-              span.setStatus({ code: 1 });
-            } else {
-              span.setStatus({
-                code: 2,
-                message: metadata.error ?? 'tool error',
-              });
-            }
-          }
-          span.end();
-        } catch {
-          // best-effort
+        if (metadata) {
+          const status =
+            metadata.success !== false
+              ? { code: 1 }
+              : { code: 2, message: metadata.error ?? 'tool error' };
+          span.statusCalls.push(status);
         }
+        span.ended = true;
       },
     ),
     runInToolSpanContext: vi.fn(<T>(_span: unknown, fn: () => T): T => fn()),
