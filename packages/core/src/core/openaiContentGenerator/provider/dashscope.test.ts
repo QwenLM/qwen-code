@@ -164,6 +164,50 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
+    it('should return true for internal dw.alibaba-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dataworks.dw.alibaba-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for internal data.aliyun-inc.com subdomain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://model-gateway.data.aliyun-inc.com/dashscope/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare alibaba-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://alibaba-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for bare aliyun-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://aliyun-inc.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
     it('should return false for non-DashScope configurations', () => {
       const configs = [
         {
