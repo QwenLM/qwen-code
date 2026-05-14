@@ -24,14 +24,15 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
+const useBun = process.env.QWEN_RUNTIME === 'bun';
 
 // npm install if node_modules was removed (e.g. via npm run clean or scripts/clean.js)
 if (!existsSync(join(root, 'node_modules'))) {
-  execSync('bun install', { stdio: 'inherit', cwd: root });
+  execSync(useBun ? 'bun install' : 'npm install', { stdio: 'inherit', cwd: root });
 }
 
 // build all workspaces/packages in dependency order
-execSync('bun run generate', { stdio: 'inherit', cwd: root });
+execSync(useBun ? 'bun run generate' : 'npm run generate', { stdio: 'inherit', cwd: root });
 
 // Build in dependency order:
 // 1. core (foundation package, includes test-utils)
@@ -57,7 +58,7 @@ const buildOrder = [
 ];
 
 for (const workspace of buildOrder) {
-  execSync(`bun run --filter=./${workspace} build`, {
+  execSync(useBun ? `bun run --filter=./${workspace} build` : `npm run build --workspace=${workspace}`, {
     stdio: 'inherit',
     cwd: root,
   });

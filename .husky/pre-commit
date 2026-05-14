@@ -1,4 +1,4 @@
-bun run pre-commit || {
+npm run pre-commit || {
   echo ''
   echo '===================================================='
   echo 'pre-commit checks failed. in case of emergency, run:'
