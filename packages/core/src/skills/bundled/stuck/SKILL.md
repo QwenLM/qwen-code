@@ -2,6 +2,9 @@
 name: stuck
 description: Diagnose frozen, stuck, or slow Qwen Code sessions on this machine. Scans for problematic processes, high CPU/memory usage, hung subprocesses, and debug logs. Use /stuck or /stuck <PID> to focus on a specific process.
 argument-hint: '[PID or symptom]'
+allowedTools:
+  - run_shell_command
+  - read_file
 ---
 
 # /stuck — diagnose frozen/slow Qwen Code sessions
@@ -54,7 +57,7 @@ Present a structured diagnostic report directly to the user with these sections:
 - Your diagnosis of what's likely wrong
 - Relevant debug log tail if you captured it
 - Stack dump output if you captured it
-- Recommended action (e.g., "safe to kill with `kill <pid>`", "waiting on I/O — check disk", "accidentally stopped — resume with `kill -CONT <pid>`")
+- Suggested next step for the user to decide (e.g., "user may consider `kill <pid>` if the session is unresponsive", "likely waiting on I/O — check disk", "accidentally stopped — user can resume with `kill -CONT <pid>`"). Do not execute these actions yourself — present them as options for the user.
 
 **If every session looks healthy**, tell the user directly — no diagnostic dump needed. Mention how many sessions you checked and that none showed signs of being stuck.
 
