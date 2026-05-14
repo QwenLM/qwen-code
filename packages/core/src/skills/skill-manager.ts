@@ -230,8 +230,13 @@ export class SkillManager {
       }
     }
 
-    // Sort by name for consistent ordering
-    skills.sort((a, b) => a.name.localeCompare(b.name));
+    // Sort by priority desc, then by name for consistent ordering
+    skills.sort(
+      (a, b) =>
+        (b.priority ?? Number.NEGATIVE_INFINITY) -
+          (a.priority ?? Number.NEGATIVE_INFINITY) ||
+        a.name.localeCompare(b.name),
+    );
 
     debugLogger.info(`Listed ${skills.length} unique skills`);
     return skills;
@@ -677,6 +682,15 @@ export class SkillManager {
       // is offered to the model (conditional skill).
       const paths = parsePathsField(frontmatter);
 
+      // Optional `priority` frontmatter: higher values sort first.
+      let priority: number | undefined;
+      if (frontmatter['priority'] !== undefined) {
+        priority = Number(frontmatter['priority']);
+        if (!Number.isFinite(priority)) {
+          throw new Error('"priority" must be a finite number');
+        }
+      }
+
       const config: SkillConfig = {
         name,
         description,
@@ -691,6 +705,7 @@ export class SkillManager {
         whenToUse,
         disableModelInvocation,
         paths,
+        priority,
       };
 
       // Validate the parsed configuration
