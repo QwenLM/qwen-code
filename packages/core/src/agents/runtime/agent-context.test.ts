@@ -6,8 +6,11 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  DEFAULT_AGENT_MAX_DEPTH,
+  getConfiguredAgentMaxDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  MAX_AGENT_MAX_DEPTH,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
@@ -159,5 +162,30 @@ describe('agent-context (merging)', () => {
       expect(getRuntimeContentGenerator()).toBe(view);
       expect(getCurrentAgentId()).toBeNull();
     });
+  });
+});
+
+describe('agent-context (max depth config)', () => {
+  it('uses the default when the max depth env var is missing or invalid', () => {
+    expect(getConfiguredAgentMaxDepth({})).toBe(DEFAULT_AGENT_MAX_DEPTH);
+    expect(getConfiguredAgentMaxDepth({ QWEN_AGENT_MAX_DEPTH: '' })).toBe(
+      DEFAULT_AGENT_MAX_DEPTH,
+    );
+    expect(getConfiguredAgentMaxDepth({ QWEN_AGENT_MAX_DEPTH: '0' })).toBe(
+      DEFAULT_AGENT_MAX_DEPTH,
+    );
+    expect(getConfiguredAgentMaxDepth({ QWEN_AGENT_MAX_DEPTH: '-1' })).toBe(
+      DEFAULT_AGENT_MAX_DEPTH,
+    );
+    expect(getConfiguredAgentMaxDepth({ QWEN_AGENT_MAX_DEPTH: 'nope' })).toBe(
+      DEFAULT_AGENT_MAX_DEPTH,
+    );
+  });
+
+  it('floors and caps configured max depth', () => {
+    expect(getConfiguredAgentMaxDepth({ QWEN_AGENT_MAX_DEPTH: '2.9' })).toBe(2);
+    expect(
+      getConfiguredAgentMaxDepth({ QWEN_AGENT_MAX_DEPTH: '2000000000' }),
+    ).toBe(MAX_AGENT_MAX_DEPTH);
   });
 });

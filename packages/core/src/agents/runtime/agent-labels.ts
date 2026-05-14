@@ -12,11 +12,16 @@ export const AGENT_DEPTH_LABEL = 'agent_depth';
 export function withAgentDepthLabel(
   config: GenerateContentConfig,
 ): GenerateContentConfig {
+  const agentDepth = getCurrentAgentDepth();
+  if (agentDepth <= 0) {
+    return config;
+  }
+
   return {
     ...config,
     labels: {
       ...(config.labels ?? {}),
-      [AGENT_DEPTH_LABEL]: getCurrentAgentDepth().toString(),
+      [AGENT_DEPTH_LABEL]: agentDepth.toString(),
     },
   };
 }

@@ -984,11 +984,7 @@ describe('GeminiChat', async () => {
               parts: [{ text: 'hello' }],
             },
           ],
-          config: {
-            labels: {
-              agent_depth: '0',
-            },
-          },
+          config: { labels: {} },
         },
         'prompt-id-1',
       );

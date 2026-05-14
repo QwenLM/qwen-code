@@ -1103,6 +1103,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const parentExecutionMode = getCurrentAgentExecutionMode();
       const childDepth = parentDepth + 1;
       if (parentExecutionMode === 'background') {
+        debugLogger.warn(
+          `Rejected agent launch from background agent: childDepth=${childDepth}, subagentType=${this.params.subagent_type ?? FORK_AGENT.name}`,
+        );
         return {
           llmContent:
             'Error: Background agents cannot launch child agents. Please execute the work directly in the current background agent.',
@@ -1120,6 +1123,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const maxDepth = getConfiguredAgentMaxDepth();
       if (childDepth > maxDepth) {
+        debugLogger.warn(
+          `Rejected agent launch beyond maximum depth: childDepth=${childDepth}, maxDepth=${maxDepth}, subagentType=${this.params.subagent_type ?? FORK_AGENT.name}`,
+        );
         return {
           llmContent:
             `Error: Cannot launch agent at depth ${childDepth}; ` +
@@ -1142,6 +1148,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // A fork child is instructed to execute directly. Keep the runtime guard
       // aligned with that contract for both implicit forks and named agents.
       if (isInForkExecution()) {
+        debugLogger.warn(
+          `Rejected nested agent launch from fork child: childDepth=${childDepth}, subagentType=${this.params.subagent_type ?? FORK_AGENT.name}`,
+        );
         return {
           llmContent:
             'Error: Cannot launch an agent from within an existing fork child. Please execute tasks directly.',
@@ -1164,6 +1173,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           this.params.subagent_type!,
         );
         if (!loadedConfig) {
+          debugLogger.warn(
+            `Rejected agent launch for missing subagent: subagentType=${this.params.subagent_type}`,
+          );
           return {
             llmContent: `Subagent "${this.params.subagent_type}" not found`,
             returnDisplay: {
@@ -1184,6 +1196,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.params.run_in_background === true ||
         subagentConfig.background === true;
       if (parentExecutionMode === 'foreground' && shouldRunInBackground) {
+        debugLogger.warn(
+          `Rejected background agent launch from foreground agent: childDepth=${childDepth}, subagentType=${subagentConfig.name}`,
+        );
         return {
           llmContent:
             'Error: Foreground subagents cannot launch background agents. Please run the child agent in the foreground or do the work directly.',

@@ -78,6 +78,9 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AGENT_CORE');
 
 /**
  * Result of a single reasoning loop invocation.
@@ -108,6 +111,10 @@ export function getExcludedToolsForAgentDepth(
   const excluded = new Set(EXCLUDED_TOOLS_FOR_SUBAGENTS);
   if (executionMode === 'foreground' && agentDepth < maxDepth) {
     excluded.delete(ToolNames.AGENT);
+  } else if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.AGENT)) {
+    debugLogger.info(
+      `Agent tool excluded from subagent tools: agentDepth=${agentDepth}, maxDepth=${maxDepth}, executionMode=${executionMode}`,
+    );
   }
   return excluded;
 }

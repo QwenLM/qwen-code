@@ -41,6 +41,7 @@ interface AgentContext {
 const storage = new AsyncLocalStorage<AgentContext>();
 export const AGENT_MAX_DEPTH_ENV = 'QWEN_AGENT_MAX_DEPTH';
 export const DEFAULT_AGENT_MAX_DEPTH = 1;
+export const MAX_AGENT_MAX_DEPTH = 10;
 
 export function runWithAgentContext<T>(
   agentId: string,
@@ -95,11 +96,11 @@ export function getConfiguredAgentMaxDepth(
   }
 
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  if (!Number.isFinite(parsed) || parsed < 1) {
     return DEFAULT_AGENT_MAX_DEPTH;
   }
 
-  return Math.floor(parsed);
+  return Math.min(Math.floor(parsed), MAX_AGENT_MAX_DEPTH);
 }
 
 export function getRuntimeContentGenerator():
