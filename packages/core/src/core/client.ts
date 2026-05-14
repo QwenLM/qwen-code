@@ -448,6 +448,33 @@ export class GeminiClient {
     );
   }
 
+  /**
+   * Rebuilds the main-session system instruction from the current
+   * `userMemory` / model / prompt overrides and re-binds it to the live chat.
+   *
+   * Use this after mutating inputs that feed into the system instruction
+   * (e.g. user memory refreshed from `output-language.md`) so the change
+   * takes effect on the next turn without restarting the session. No-op if
+   * no chat has been started yet.
+   */
+  async refreshSystemInstruction(): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+    const toolRegistry = this.config.getToolRegistry();
+    await toolRegistry.warmAll();
+    const deferredSummary = toolRegistry.getDeferredToolSummary();
+    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+    const deferredTools = toolSearchAvailable
+      ? deferredSummary.filter(
+          (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+        )
+      : undefined;
+    this.chat.setSystemInstruction(
+      this.getMainSessionSystemInstruction(deferredTools),
+    );
+  }
+
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     // Clear stale cache params on session reset to prevent cross-session leakage

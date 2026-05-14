@@ -489,20 +489,39 @@ describe('languageCommand', () => {
       });
     });
 
-    it('should include restart notice in success message', async () => {
+    it('should apply the new output language to the running session without requiring a restart', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
       }
+
+      const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
+      const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
+      const getGeminiClient = vi
+        .fn()
+        .mockReturnValue({ refreshSystemInstruction });
+      (
+        mockContext.services as unknown as {
+          config: Record<string, unknown>;
+        }
+      ).config = {
+        getModel: vi.fn().mockReturnValue('test-model'),
+        refreshHierarchicalMemory,
+        getGeminiClient,
+      };
 
       const result = await languageCommand.action(
         mockContext,
         'output Japanese',
       );
 
+      expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+      expect(getGeminiClient).toHaveBeenCalledTimes(1);
+      expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
+      // The success message no longer asks the user to restart.
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining('restart'),
+        content: expect.not.stringContaining('restart'),
       });
     });
 
