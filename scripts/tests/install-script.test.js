@@ -251,6 +251,19 @@ describe('installation scripts', () => {
       'scripts/installation/install-qwen-standalone.bat: eol: crlf',
     );
   });
+
+  it('creates PowerShell validation scripts with a ps1 extension', () => {
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.bat',
+    );
+
+    expect(script).toContain(
+      'call :CreateTempFile "qwen-validate-options" ".ps1"',
+    );
+    expect(script).toContain(
+      "($env:QWEN_TEMP_FILE_PREFIX + '-' + [IO.Path]::GetRandomFileName() + $env:QWEN_TEMP_FILE_EXTENSION)",
+    );
+  });
 });
 
 describe('release-script-utils', () => {

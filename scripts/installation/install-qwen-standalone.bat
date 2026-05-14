@@ -335,7 +335,7 @@ set "QWEN_VALIDATE_INSTALL_BASE=!INSTALL_BASE!"
 set "QWEN_VALIDATE_INSTALL_DIR=!INSTALL_DIR!"
 set "QWEN_VALIDATE_INSTALL_BIN_DIR=!INSTALL_BIN_DIR!"
 set "QWEN_VALIDATE_SOURCE=!SOURCE!"
-call :CreateTempFile "qwen-validate-options"
+call :CreateTempFile "qwen-validate-options" ".ps1"
 if !ERRORLEVEL! NEQ 0 exit /b 1
 set "QWEN_VALIDATE_OPTIONS_SCRIPT=!TEMP_FILE!"
 > "!QWEN_VALIDATE_OPTIONS_SCRIPT!" echo $unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124)
@@ -886,8 +886,10 @@ exit /b 0
 :CreateTempFile
 set "TEMP_FILE="
 set "QWEN_TEMP_FILE_PREFIX=%~1"
-for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $file = Join-Path $env:TEMP ($env:QWEN_TEMP_FILE_PREFIX + '-' + [IO.Path]::GetRandomFileName()); New-Item -ItemType File -Path $file -ErrorAction Stop | Out-Null; [Console]::Write($file)"`) do set "TEMP_FILE=%%I"
+set "QWEN_TEMP_FILE_EXTENSION=%~2"
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $file = Join-Path $env:TEMP ($env:QWEN_TEMP_FILE_PREFIX + '-' + [IO.Path]::GetRandomFileName() + $env:QWEN_TEMP_FILE_EXTENSION); New-Item -ItemType File -Path $file -ErrorAction Stop | Out-Null; [Console]::Write($file)"`) do set "TEMP_FILE=%%I"
 set "QWEN_TEMP_FILE_PREFIX="
+set "QWEN_TEMP_FILE_EXTENSION="
 if "!TEMP_FILE!"=="" (
     echo ERROR: Failed to create a temporary file.
     exit /b 1
