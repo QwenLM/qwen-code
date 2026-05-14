@@ -128,7 +128,6 @@ export function useResumeCommand(
       const uiHistoryItems = applyCollapsePolicyAndSummary(
         rawItems,
         collapseOnResume,
-        addItem,
       );
 
       clearItems?.();

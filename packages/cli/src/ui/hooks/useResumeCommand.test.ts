@@ -10,7 +10,7 @@ import {
   BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
   useResumeCommand,
 } from './useResumeCommand.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
+import { useHistory } from './useHistoryManager.js';
 
 import type { LoadedSettings } from '../../config/settings.js';
 
@@ -309,11 +309,6 @@ describe('useResumeCommand', () => {
   });
 
   it('applies collapseOnResume policy when resuming a session', async () => {
-    const historyManager = {
-      addItem: vi.fn(),
-      clearItems: vi.fn(),
-      loadHistory: vi.fn(),
-    };
     const startNewSession = vi.fn();
     const geminiClient = {
       initialize: vi.fn(),
@@ -356,18 +351,20 @@ describe('useResumeCommand', () => {
       },
     } as unknown as LoadedSettings;
 
-    const { result } = renderHook(() =>
-      useResumeCommand({
+    const { result } = renderHook(() => {
+      const historyManager = useHistory();
+      const resumeCommand = useResumeCommand({
         config,
         settings: settingsWithCollapse,
         historyManager,
         startNewSession,
-      }),
-    );
+      });
+      return { historyManager, resumeCommand };
+    });
 
     let resumePromise: Promise<void> | undefined;
     act(() => {
-      resumePromise = result.current.handleResume('session-3');
+      resumePromise = result.current.resumeCommand.handleResume('session-3');
     });
 
     resumeMocks.resolvePendingLoadSession({
@@ -377,21 +374,17 @@ describe('useResumeCommand', () => {
       await resumePromise;
     });
 
-    // Verify that loadHistory was called with items having suppressOnRestore: true
-    expect(historyManager.loadHistory).toHaveBeenCalledWith(
+    // Verify that the history state contains the suppressed item and the summary item
+    const history = result.current.historyManager.history;
+    expect(history).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           display: expect.objectContaining({ suppressOnRestore: true }),
         }),
+        expect.objectContaining({
+          display: expect.objectContaining({ kind: 'collapse-summary' }),
+        }),
       ]),
-    );
-
-    // Verify that the summary item was added
-    expect(historyManager.addItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        display: expect.objectContaining({ kind: 'collapse-summary' }),
-      }),
-      expect.any(Number),
     );
   });
 

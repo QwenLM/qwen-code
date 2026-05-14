@@ -526,14 +526,18 @@ export function createHistoryCollapseSummaryItem(
 export function applyCollapsePolicyAndSummary(
   rawItems: HistoryItem[],
   collapseOnResume: boolean,
-  addItem?: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
 ): HistoryItem[] {
   const uiHistoryItems = applyResumeDisplayPolicy(rawItems, {
     collapseOnResume,
   });
 
-  if (collapseOnResume && rawItems.length > 0 && addItem) {
-    addItem(createHistoryCollapseSummaryItem(rawItems.length), Date.now());
+  if (collapseOnResume && rawItems.length > 0) {
+    const summaryItem = createHistoryCollapseSummaryItem(rawItems.length);
+    const nextId = Math.max(...rawItems.map((i) => i.id)) + 1;
+    uiHistoryItems.push({
+      ...summaryItem,
+      id: nextId,
+    });
   }
 
   return uiHistoryItems;

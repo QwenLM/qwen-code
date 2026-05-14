@@ -496,7 +496,6 @@ export const AppContainer = (props: AppContainerProps) => {
         const historyItems = applyCollapsePolicyAndSummary(
           rawItems,
           collapseOnResume,
-          historyManager.addItem,
         );
         historyManager.loadHistory(historyItems);
 
