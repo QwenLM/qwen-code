@@ -21,6 +21,15 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockSessionServiceInstance = vi.hoisted(() => ({
+  loadLastSession: vi.fn(),
+  loadSession: vi.fn(),
+  forkSession: vi.fn(),
+  sessionExists: vi.fn(),
+}));
+const mockSessionServiceCtor = vi.hoisted(() =>
+  vi.fn(() => mockSessionServiceInstance),
+);
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
@@ -139,6 +148,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     NativeLspService: vi
       .fn()
       .mockImplementation(() => createNativeLspServiceInstance()),
+    SessionService: mockSessionServiceCtor,
     SkillManager: SkillManagerMock,
     IdeClient: {
       getInstance: vi.fn().mockResolvedValue({
@@ -410,6 +420,44 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '-c'];
     const argv = await parseArguments();
     expect(argv.continue).toBe(true);
+  });
+
+  it('should parse --fork-session with --resume', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--resume',
+      '123e4567-e89b-12d3-a456-426614174000',
+      '--fork-session',
+    ];
+    const argv = await parseArguments();
+    expect(argv.resume).toBe('123e4567-e89b-12d3-a456-426614174000');
+    expect(argv.forkSession).toBe(true);
+  });
+
+  it('should parse --fork-session with the --resume picker form', async () => {
+    process.argv = ['node', 'script.js', '--resume', '--fork-session'];
+    const argv = await parseArguments();
+    expect(argv.resume).toBe('');
+    expect(argv.forkSession).toBe(true);
+  });
+
+  it('should reject --fork-session without --resume or --continue', async () => {
+    process.argv = ['node', 'script.js', '--fork-session'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--fork-session must be used with --resume or --continue',
+      ),
+    );
+
+    mockExit.mockRestore();
   });
 
   it('should convert positional query argument to prompt by default', async () => {
@@ -787,6 +835,14 @@ describe('loadCliConfig', () => {
     nativeLspServiceMock.mockImplementation(
       () => createNativeLspServiceInstance() as unknown as NativeLspService,
     );
+    mockSessionServiceCtor.mockImplementation(() => mockSessionServiceInstance);
+    mockSessionServiceInstance.loadLastSession.mockResolvedValue(undefined);
+    mockSessionServiceInstance.loadSession.mockResolvedValue(undefined);
+    mockSessionServiceInstance.forkSession.mockResolvedValue({
+      filePath: '/mock/fork.jsonl',
+      copiedCount: 1,
+    });
+    mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
   });
@@ -851,6 +907,38 @@ describe('loadCliConfig', () => {
     expect(config.getOutputFormat()).toBe('stream-json');
     expect(config.getInputFormat()).toBe('stream-json');
     expect(config.getIncludePartialMessages()).toBe(true);
+  });
+
+  it('should fork and load a new session when --resume is combined with --fork-session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const sourceData = {
+      conversation: { sessionId: sourceSessionId, messages: [] },
+      uiHistory: [],
+    };
+    const forkedData = {
+      conversation: { sessionId: 'forked-session-id', messages: [] },
+      uiHistory: [],
+    };
+    mockSessionServiceInstance.loadSession.mockImplementation(
+      async (sessionId: string) => {
+        if (sessionId === sourceSessionId) return sourceData;
+        return forkedData;
+      },
+    );
+
+    const config = await loadCliConfig({}, {
+      resume: sourceSessionId,
+      forkSession: true,
+    } as CliArgs);
+
+    expect(mockSessionServiceInstance.forkSession).toHaveBeenCalledWith(
+      sourceSessionId,
+      config.getSessionId(),
+    );
+    expect(config.getSessionId()).not.toBe(sourceSessionId);
+    expect(mockSessionServiceInstance.loadSession).toHaveBeenCalledWith(
+      config.getSessionId(),
+    );
   });
 
   it('should reset context filenames to defaults when context.fileName is not configured', async () => {

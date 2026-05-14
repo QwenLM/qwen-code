@@ -47,6 +47,7 @@ import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
 
 import { resolvePath } from '../utils/resolvePath.js';
@@ -159,6 +160,8 @@ export interface CliArgs {
   resume: string | undefined;
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
+  /** Fork the resumed session into a new session before continuing */
+  forkSession?: boolean | undefined;
   maxSessionTurns: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
@@ -803,6 +806,12 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Specify a session ID for this run.',
         })
+        .option('fork-session', {
+          type: 'boolean',
+          description:
+            'Fork the resumed session into a new session before continuing. Must be used with --resume or --continue.',
+          default: false,
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
@@ -900,8 +909,12 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['continue'] && argv['resume']) {
             return 'Cannot use both --continue and --resume together. Use --continue to resume the latest session, or --resume <sessionId> to resume a specific session.';
           }
-          if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
+          const hasResume = argv['resume'] !== undefined;
+          if (argv['sessionId'] && (argv['continue'] || hasResume)) {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
+          }
+          if (argv['forkSession'] && !(argv['continue'] || hasResume)) {
+            return '--fork-session must be used with --resume or --continue.';
           }
           if (
             argv['sessionId'] &&
@@ -1517,6 +1530,9 @@ export async function loadCliConfig(
       sessionData = await sessionService.loadLastSession();
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
+      } else if (argv.forkSession) {
+        writeStderrLine('No saved session found to fork.');
+        process.exit(1);
       }
     }
 
@@ -1529,6 +1545,18 @@ export async function loadCliConfig(
       if (!sessionData) {
         const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
         writeStderrLine(message);
+        process.exit(1);
+      }
+    }
+
+    if (argv.forkSession && sessionId) {
+      const sourceSessionId = sessionId;
+      const forkedSessionId = randomUUID();
+      await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      sessionId = forkedSessionId;
+      sessionData = await sessionService.loadSession(forkedSessionId);
+      if (!sessionData) {
+        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
         process.exit(1);
       }
     }
