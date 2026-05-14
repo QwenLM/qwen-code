@@ -2160,8 +2160,11 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // --- Rewind selector callbacks ---
+  // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
+  // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
   const openRewindSelector = useCallback(() => {
     if (streamingState !== StreamingState.Idle) return;
+    if (dialogsVisibleRef.current) return;
     if (config.getIdeMode()) {
       historyManager.addItem(
         {
@@ -2172,7 +2175,6 @@ export const AppContainer = (props: AppContainerProps) => {
       );
       return;
     }
-    if (dialogsVisibleRef.current) return;
     const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
     if (!hasUserTurns) return;
     setIsRewindSelectorOpen(true);
