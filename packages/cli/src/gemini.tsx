@@ -513,7 +513,7 @@ export async function main() {
         return finalArgs;
       };
 
-      const injectSessionIdIntoArgs = (
+      const injectSandboxSessionIdIntoArgs = (
         args: string[],
         sessionId: string,
       ): string[] => {
@@ -525,28 +525,24 @@ export async function main() {
             names.some((name) => arg === name || arg.startsWith(`${name}=`)),
           );
         if (
-          hasArg(['--session-id']) ||
+          hasArg(['--session-id', '--sandbox-session-id']) ||
           hasArg(['--continue', '-c']) ||
           hasArg(['--resume', '-r'])
         ) {
           return args;
         }
 
-        const sessionArgs = ['--session-id', sessionId];
+        const sessionArgs = ['--sandbox-session-id', sessionId];
         if (separatorIndex < 0) {
           return [...args, ...sessionArgs];
         }
 
-        return [
-          ...args.slice(0, separatorIndex),
-          ...sessionArgs,
-          ...args.slice(separatorIndex),
-        ];
+        return [...cliArgs, ...sessionArgs, ...args.slice(separatorIndex)];
       };
 
       const sessionId = partialConfig.getSessionId();
       const sandboxArgs = sessionId
-        ? injectSessionIdIntoArgs(
+        ? injectSandboxSessionIdIntoArgs(
             injectStdinIntoArgs(process.argv, stdinData),
             sessionId,
           )
