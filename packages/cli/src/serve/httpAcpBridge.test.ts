@@ -39,6 +39,7 @@ import {
   type AcpChannel,
   type ChannelFactory,
 } from './httpAcpBridge.js';
+import { createInMemoryChannel } from './inMemoryChannel.js';
 import type { BridgeEvent } from './eventBus.js';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -146,6 +147,12 @@ interface ChannelHandle {
  * Create a paired in-memory NDJSON channel: bridge sees `clientChannel`,
  * fake agent sees `agentStream`. Each `TransformStream` carries one
  * direction.
+ *
+ * Not migrated to `createInMemoryChannel()` (used by the other 10 sites
+ * in this file): `kill()` below needs the underlying `ab` / `ba`
+ * writables to simulate child-process termination, which the bare
+ * helper deliberately does not expose. See `inMemoryChannel.ts` JSDoc
+ * for the rationale.
  */
 function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
   const ab = new TransformStream<Uint8Array, Uint8Array>();
@@ -631,10 +638,7 @@ describe('createHttpAcpBridge', () => {
       let capturedConn: AgentSideConnection | undefined;
       const handles: Array<{ killed: boolean }> = [];
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         // The agent side gets an AgentSideConnection; that exposes a
         // ClientSideConnection-equivalent on its `agent` callback. We need
@@ -943,10 +947,7 @@ describe('createHttpAcpBridge', () => {
       // (it sees the cancelled outcome). Both sides settle.
       let conn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent({
           promptImpl: async (p): Promise<PromptResponse> => {
             // Issue the permission request from inside prompt() so
@@ -1023,10 +1024,7 @@ describe('createHttpAcpBridge', () => {
     function setup(opts: { setModelImpl?: () => Promise<unknown> } = {}) {
       const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         const augmented = new Proxy(fakeAgent, {
           get(target, prop) {
@@ -1223,10 +1221,7 @@ describe('createHttpAcpBridge', () => {
     it('publishes model_switch_failed and surfaces the error when the agent rejects', async () => {
       let attempts = 0;
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         const augmented = new Proxy(fakeAgent, {
           get(target, prop) {
@@ -1301,10 +1296,7 @@ describe('createHttpAcpBridge', () => {
     it('serializes concurrent model-change calls (FIFO)', async () => {
       const callOrder: string[] = [];
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         const augmented = new Proxy(fakeAgent, {
           get(target, prop) {
@@ -1370,10 +1362,7 @@ describe('createHttpAcpBridge', () => {
     function setupRecording() {
       const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         const augmented = new Proxy(fakeAgent, {
           get(target, prop) {
@@ -1460,10 +1449,7 @@ describe('createHttpAcpBridge', () => {
         resolveExited = () => r(undefined);
       });
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         // Fake agent's prompt() never replies — we want the bridge's
         // race-against-exited to be the only resolution path.
         const stuckAgent: Agent = {
@@ -1618,10 +1604,7 @@ describe('createHttpAcpBridge', () => {
     async function setupForFs() {
       let capturedConn: AgentSideConnection | undefined;
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         capturedConn = new AgentSideConnection(
           () => new FakeAgent(),
           agentStream,
@@ -2013,10 +1996,7 @@ describe('createHttpAcpBridge', () => {
     async function setup() {
       const setModelCalls: Array<{ sessionId: string; modelId: string }> = [];
       const factory: ChannelFactory = async () => {
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         // Augment the agent with the unstable model setter via a proxy so we
         // don't need to extend the FakeAgent class with optional methods.
@@ -2116,10 +2096,7 @@ describe('createHttpAcpBridge', () => {
       const factory: ChannelFactory = async () => {
         // Build a channel pair where we capture the agent-side connection
         // so we can drive sessionUpdate notifications from the test.
-        const ab = new TransformStream<Uint8Array, Uint8Array>();
-        const ba = new TransformStream<Uint8Array, Uint8Array>();
-        const clientStream = ndJsonStream(ab.writable, ba.readable);
-        const agentStream = ndJsonStream(ba.writable, ab.readable);
+        const { clientStream, agentStream } = createInMemoryChannel();
         const fakeAgent = new FakeAgent();
         capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
         return {
