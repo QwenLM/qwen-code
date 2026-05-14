@@ -25,32 +25,39 @@ describe('resolveBundleDir', () => {
   });
 
   it('strips the trailing chunks segment when the module lives under dist/chunks/', () => {
+    // Use `path.resolve` so the expected value matches whatever the current
+    // platform considers absolute. On Windows, `pathToFileURL` of a
+    // drive-less path resolves against the current drive (e.g. `\tmp\dist`
+    // becomes `D:\tmp\dist`), so both the URL we synthesise and the
+    // expected return value must be built via `path.resolve` to stay aligned.
+    const distDir = path.resolve(path.sep, 'tmp', 'dist');
     const fakeChunk = pathToFileURL(
-      path.join(path.sep, 'tmp', 'dist', BUNDLE_CHUNK_DIR, 'chunk-AAAA.js'),
+      path.join(distDir, BUNDLE_CHUNK_DIR, 'chunk-AAAA.js'),
     ).toString();
-    expect(resolveBundleDir(fakeChunk)).toBe(
-      path.join(path.sep, 'tmp', 'dist'),
-    );
+    expect(resolveBundleDir(fakeChunk)).toBe(distDir);
   });
 
   it('returns the module directory unchanged when not under chunks/', () => {
     // Source / transpiled / non-split builds: the trailing segment is the
     // module's own directory name, never the chunk constant.
-    const sourceFile = pathToFileURL(
-      path.join(path.sep, 'repo', 'packages', 'cli', 'src', 'i18n', 'index.ts'),
-    ).toString();
-    expect(resolveBundleDir(sourceFile)).toBe(
-      path.join(path.sep, 'repo', 'packages', 'cli', 'src', 'i18n'),
+    const i18nDir = path.resolve(
+      path.sep,
+      'repo',
+      'packages',
+      'cli',
+      'src',
+      'i18n',
     );
+    const sourceFile = pathToFileURL(path.join(i18nDir, 'index.ts')).toString();
+    expect(resolveBundleDir(sourceFile)).toBe(i18nDir);
   });
 
   it('only strips when the basename matches exactly', () => {
     // A directory whose name merely contains "chunks" must not be stripped.
+    const myChunksDir = path.resolve(path.sep, 'tmp', 'dist', 'my-chunks');
     const looksLikeChunks = pathToFileURL(
-      path.join(path.sep, 'tmp', 'dist', 'my-chunks', 'mod.js'),
+      path.join(myChunksDir, 'mod.js'),
     ).toString();
-    expect(resolveBundleDir(looksLikeChunks)).toBe(
-      path.join(path.sep, 'tmp', 'dist', 'my-chunks'),
-    );
+    expect(resolveBundleDir(looksLikeChunks)).toBe(myChunksDir);
   });
 });
