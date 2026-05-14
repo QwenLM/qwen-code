@@ -34,10 +34,7 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
   condition,
   iterations,
   durationMs,
-  // `lastReason` is accepted on the props interface so callers (history
-  // factory, observer, restore) can pass it without conditionals, but it is
-  // intentionally NOT rendered — checking shows a slim status line and the
-  // terminal cards drop "Last check:" to stay compact.
+  lastReason,
 }) => {
   // The "checking" kind is the per-iteration "judge said not met, continuing"
   // marker that replaces the generic `stop_hook_loop` rendering for /goal.
@@ -132,12 +129,21 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
             <Text wrap="wrap">{condition}</Text>
           </Box>
         </Box>
-        {/* `lastReason` is intentionally NOT rendered in achieved / cleared /
-            aborted cards. The judge's verbose reason is more useful inline
-            during the loop (as the model's continuation prompt) than as a
-            persistent footer on the final summary — and the achieved card is
-            usually long enough to wrap awkwardly when the reason is also
-            shown. */}
+        {/* `lastReason` is shown on terminal cards (achieved / aborted) so
+            the final summary records *why* the judge ruled the goal complete
+            or why the loop gave up. Skipped for `cleared` because user-driven
+            clears don't carry a judge reason.
+            Rendered as a single `<Text wrap="wrap">` (label + value inline)
+            rather than the flex-row split used for `Goal:` above — the judge
+            reason is capped at 240 chars and almost always wraps, and the
+            flex-row variant hangs the continuation at the value column's
+            left edge (≈12 cols of empty space, easily mistaken for a blank
+            line). One Text + natural wrap keeps the continuation flush. */}
+        {(kind === 'achieved' || kind === 'aborted') && lastReason?.trim() ? (
+          <Text color={theme.text.secondary} wrap="wrap">
+            Last check: {lastReason.trim()}
+          </Text>
+        ) : null}
       </Box>
     </Box>
   );

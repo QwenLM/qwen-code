@@ -62,16 +62,19 @@ function formatDuration(ms: number): string {
 }
 
 function formatTerminalSummary(event: GoalTerminalEvent): string {
-  // Mirrors GoalStatusMessage: drop the judge's `lastReason` from the
-  // final summary so the empty-`/goal` view stays compact and matches the
-  // history card style.
+  // Mirrors GoalStatusMessage: empty-`/goal` after completion surfaces the
+  // most recent terminal event, including the judge's `lastReason` (when
+  // present) so this view matches the inline `Goal achieved / aborted`
+  // history card.
   const title = event.kind === 'achieved' ? 'Goal achieved' : 'Goal aborted';
   const stats: string[] = [];
   if (event.iterations > 0) stats.push(formatTurns(event.iterations));
   if (typeof event.durationMs === 'number')
     stats.push(formatDuration(event.durationMs));
   const subtitle = stats.length > 0 ? ` · ${stats.join(' · ')}` : '';
-  return `${title}${subtitle}\nGoal: ${event.condition}`;
+  const reason = event.lastReason?.trim();
+  const reasonLine = reason ? `\nLast check: ${reason}` : '';
+  return `${title}${subtitle}\nGoal: ${event.condition}${reasonLine}`;
 }
 
 function infoMessage(content: string): MessageActionReturn {

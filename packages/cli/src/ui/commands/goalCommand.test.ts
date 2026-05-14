@@ -242,11 +242,9 @@ describe('goalCommand', () => {
     expect(content).toMatch(/3 turns/);
     expect(content).toMatch(/24s/);
     expect(content).toMatch(/Goal: do x/);
-    // `Last check:` line was dropped from the achieved summary — the judge
-    // reason is informative only during the in-flight loop, not in the
-    // final card.
-    expect(content).not.toMatch(/Last check/);
-    expect(content).not.toMatch(/transcript shows completion/);
+    // `Last check:` line is preserved on the achieved summary so the
+    // empty-`/goal` re-display matches the inline terminal history card.
+    expect(content).toMatch(/Last check: transcript shows completion/);
   });
 
   it('strict claude alignment: `/goal clear` with no active goal does NOT dismiss the achievement summary', async () => {
