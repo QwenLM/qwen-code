@@ -69,6 +69,9 @@ export enum GeminiEventType {
 export type ServerGeminiRetryEvent = {
   type: GeminiEventType.Retry;
   retryInfo?: RetryInfo;
+  /** When true, the retry is a continuation (recovery) rather than a fresh
+   *  restart. The UI should keep accumulated text so the continuation appends. */
+  isContinuation?: boolean;
 };
 
 export interface StructuredError {
@@ -298,8 +301,22 @@ export class Turn {
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,
+            isContinuation: streamEvent.isContinuation,
           };
           continue; // Skip to the next event in the stream
+        }
+
+        // Surface auto-compaction that fired inside chat.sendMessageStream
+        // as the top-level ChatCompressed event so existing UI handlers stay
+        // connected. This bridge is the primary path for auto-compaction
+        // events; manual /compress emits its own ChatCompressed in
+        // GeminiClient.tryCompressChat.
+        if (streamEvent.type === 'compressed') {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: streamEvent.info,
+          };
+          continue;
         }
 
         // Assuming other events are chunks with a `value` property

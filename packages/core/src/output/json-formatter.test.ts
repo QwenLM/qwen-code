@@ -64,8 +64,8 @@ describe('JsonFormatter', () => {
             total: 24719,
             cached: 10656,
             thoughts: 103,
-            tool: 0,
           },
+          bySource: {},
         },
         'gemini-2.5-flash': {
           api: {
@@ -79,8 +79,8 @@ describe('JsonFormatter', () => {
             total: 21657,
             cached: 0,
             thoughts: 138,
-            tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {

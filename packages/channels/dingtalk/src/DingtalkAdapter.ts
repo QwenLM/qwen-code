@@ -68,6 +68,16 @@ interface DingTalkMessageData {
   };
 }
 
+/** Track per-session interactive card state. */
+interface CardSessionState {
+  outTrackId: string;
+  created: boolean;
+  creating: boolean; // lock to prevent duplicate createCard calls
+  accumulatedText: string;
+  lastUpdateAt: number;
+  pendingUpdateTimer?: ReturnType<typeof setTimeout>;
+}
+
 /** Track seen msgIds to deduplicate retried callbacks. */
 const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -76,12 +86,21 @@ const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 
+/** Minimum interval between card updates (ms) to avoid API rate limiting. */
+const CARD_UPDATE_INTERVAL_MS = 1500;
+
+/** Default AI streaming card template (official DingTalk template, not robot-specific). */
+const DEFAULT_AI_CARD_TEMPLATE = '17b30ffb-26c6-4ace-a2cb-49ed03c6d1f2.schema';
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private seenMessages: Map<string, number> = new Map();
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
+  private cardSessions: Map<string, CardSessionState> = new Map();
+  private tokenExpiry = 0;
+  private cachedToken?: string;
 
   constructor(
     name: string,
@@ -128,7 +147,9 @@ export class DingtalkChannel extends ChannelBase {
       }
     }, 60_000);
 
-    process.stderr.write(`[DingTalk:${this.name}] Connected via stream.\n`);
+    process.stderr.write(
+      `[DingTalk:${this.name}] Connected via stream. cardTemplateId=${this.cardTemplateId}\n`,
+    );
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -147,8 +168,8 @@ export class DingtalkChannel extends ChannelBase {
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i]!;
       const body = {
-        msgtype: 'markdown',
-        markdown: {
+        msgtype: 'actionCard',
+        actionCard: {
           title: i === 0 ? title : `${title} (cont.)`,
           text: chunk,
         },
@@ -171,6 +192,289 @@ export class DingtalkChannel extends ChannelBase {
 
   private getAccessToken(): string | undefined {
     return this.client.getConfig().access_token;
+  }
+
+  // ----- Interactive Card API -----
+
+  private async getCardAccessToken(): Promise<string | undefined> {
+    if (this.cachedToken && Date.now() < this.tokenExpiry) {
+      return this.cachedToken;
+    }
+
+    try {
+      const resp = await fetch('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          appKey: this.config.clientId,
+          appSecret: this.config.clientSecret,
+        }),
+      });
+
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[DingTalk:${this.name}] getCardAccessToken failed: HTTP ${resp.status} ${detail}\n`,
+        );
+        return undefined;
+      }
+
+      const data = (await resp.json()) as { accessToken: string; expireIn: number };
+      this.cachedToken = data.accessToken;
+      this.tokenExpiry = Date.now() + (data.expireIn - 300) * 1000;
+      return this.cachedToken;
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] getCardAccessToken error: ${err}\n`,
+      );
+      return undefined;
+    }
+  }
+
+  private async createCard(
+    chatId: string,
+    _title: string,
+    text: string,
+  ): Promise<{ outTrackId: string; success: boolean }> {
+    const cardTemplateId = this.cardTemplateId;
+    if (!cardTemplateId) return { outTrackId: '', success: false };
+
+    const token = await this.getCardAccessToken();
+    if (!token) return { outTrackId: '', success: false };
+
+    const outTrackId = `ding-${this.name}-${chatId}-${randomUUID()}`;
+
+    // AI card uses flowStatus to indicate card state:
+    // 1=PROCESSING, 2=INPUTING, 3=FINISHED, 4=EXECUTING, 5=FAILED
+    const body = {
+      cardTemplateId,
+      outTrackId,
+      callbackType: 'STREAM',
+      openSpaceId: `dtv1.card//IM_GROUP.${chatId}`,
+      imGroupOpenSpaceModel: {
+        supportForward: true,
+      },
+      imGroupOpenDeliverModel: {
+        robotCode: this.config.clientId,
+      },
+      cardData: {
+        cardParamMap: {
+          content: text,
+          flowStatus: '2', // INPUTING
+        },
+      },
+    };
+
+    try {
+      const resp = await fetch('https://api.dingtalk.com/v1.0/card/instances/createAndDeliver', {
+        method: 'POST',
+        headers: {
+          'x-acs-dingtalk-access-token': token,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[DingTalk:${this.name}] createCard failed: HTTP ${resp.status} ${detail}\n`,
+        );
+        return { outTrackId: '', success: false };
+      }
+
+      return { outTrackId, success: true };
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] createCard error: ${err}\n`,
+      );
+      return { outTrackId: '', success: false };
+    }
+  }
+
+  /**
+   * Stream update to an AI card via the streaming API.
+   * Uses PUT /v1.0/card/streaming with key/content/isFinalize/isError.
+   */
+  private async streamingCard(
+    outTrackId: string,
+    text: string,
+    finished = false,
+    failed = false,
+  ): Promise<boolean> {
+    const token = await this.getCardAccessToken();
+    if (!token) return false;
+
+    const body = {
+      outTrackId,
+      guid: randomUUID(),
+      key: 'content',
+      content: text,
+      isFull: true,
+      isFinalize: finished,
+      isError: failed,
+    };
+
+    try {
+      const resp = await fetch('https://api.dingtalk.com/v1.0/card/streaming', {
+        method: 'PUT',
+        headers: {
+          'x-acs-dingtalk-access-token': token,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[DingTalk:${this.name}] streamingCard failed: HTTP ${resp.status} ${detail}\n`,
+        );
+        return false;
+      }
+
+      return true;
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] streamingCard error: ${err}\n`,
+      );
+      return false;
+    }
+  }
+
+  private get cardTemplateId(): string {
+    return ((this.config as unknown as Record<string, unknown>)['cardTemplateId'] as string) || DEFAULT_AI_CARD_TEMPLATE;
+  }
+
+  private get hasCardTemplate(): boolean {
+    return !!this.cardTemplateId;
+  }
+
+  /**
+   * Override to enable interactive card streaming when cardTemplateId is configured.
+   * Creates a card on first chunk immediately, then throttles updates.
+   */
+  protected override onResponseChunk(
+    chatId: string,
+    chunk: string,
+    _sessionId: string,
+  ): void {
+    if (!this.hasCardTemplate) return;
+
+    let cardState = this.cardSessions.get(chatId);
+    if (!cardState) {
+      cardState = {
+        outTrackId: '',
+        created: false,
+        creating: false,
+        accumulatedText: '',
+        lastUpdateAt: 0,
+      };
+      this.cardSessions.set(chatId, cardState);
+    }
+
+    cardState.accumulatedText += chunk;
+
+    // First chunk: create card immediately (use `creating` lock to prevent duplicates)
+    if (!cardState.created && !cardState.creating) {
+      cardState.creating = true;
+      const cs = cardState;
+      setTimeout(async () => {
+        try {
+          const title = extractTitle(cs.accumulatedText);
+          const result = await this.createCard(chatId, title, cs.accumulatedText);
+          if (result.success) {
+            cs.outTrackId = result.outTrackId;
+            cs.created = true;
+            cs.lastUpdateAt = Date.now();
+            process.stderr.write(
+              `[DingTalk:${this.name}] Card created: ${result.outTrackId}\n`,
+            );
+          } else {
+            process.stderr.write(
+              `[DingTalk:${this.name}] Card creation failed, will fallback\n`,
+            );
+          }
+        } catch (err) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] card create error: ${err}\n`,
+          );
+        }
+        cs.creating = false;
+      }, 0);
+      return;
+    }
+
+    // Subsequent chunks: throttle updates (not debounce)
+    if (cardState.created && !cardState.pendingUpdateTimer) {
+      const cs = cardState;
+      const elapsed = Date.now() - cardState.lastUpdateAt;
+      const delay = Math.max(0, CARD_UPDATE_INTERVAL_MS - elapsed);
+
+      cardState.pendingUpdateTimer = setTimeout(async () => {
+        cs.pendingUpdateTimer = undefined;
+        cs.lastUpdateAt = Date.now();
+        try {
+          await this.streamingCard(cs.outTrackId, cs.accumulatedText);
+        } catch (err) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] card stream error: ${err}\n`,
+          );
+        }
+      }, delay);
+    }
+  }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    fullText: string,
+    _sessionId: string,
+  ): Promise<void> {
+    const cardState = this.cardSessions.get(chatId);
+
+    if (cardState?.pendingUpdateTimer) {
+      clearTimeout(cardState.pendingUpdateTimer);
+    }
+
+    if (cardState?.created) {
+      // Final streaming update with isFinalize=true to mark card as completed
+      process.stderr.write(
+        `[DingTalk:${this.name}] Sending via interactive card (outTrackId=${cardState.outTrackId})\n`,
+      );
+      try {
+        await this.streamingCard(cardState.outTrackId, fullText, true);
+      } catch {
+        // ignore
+      }
+      this.cardSessions.delete(chatId);
+      return;
+    }
+
+    // Card not yet created (response finished before debounce timer fired).
+    // Create the card, then immediately finalize it via streaming API.
+    if (this.hasCardTemplate) {
+      const title = extractTitle(fullText);
+      const result = await this.createCard(chatId, title, fullText);
+      if (result.success) {
+        // Finalize the card so it transitions from PROCESSING to FINISHED
+        await this.streamingCard(result.outTrackId, fullText, true);
+        process.stderr.write(
+          `[DingTalk:${this.name}] Sending via interactive card (created at complete, outTrackId=${result.outTrackId})\n`,
+        );
+        this.cardSessions.delete(chatId);
+        return;
+      }
+      process.stderr.write(
+        `[DingTalk:${this.name}] Card creation failed at complete, falling back to actionCard\n`,
+      );
+    }
+
+    // Fall back to actionCard webhook
+    process.stderr.write(
+      `[DingTalk:${this.name}] Sending via actionCard webhook fallback\n`,
+    );
+    this.cardSessions.delete(chatId);
+    await this.sendMessage(chatId, fullText);
   }
 
   private async emotionApi(
@@ -234,6 +538,12 @@ export class DingtalkChannel extends ChannelBase {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    for (const state of this.cardSessions.values()) {
+      if (state.pendingUpdateTimer) {
+        clearTimeout(state.pendingUpdateTimer);
+      }
+    }
+    this.cardSessions.clear();
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }

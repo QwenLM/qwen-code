@@ -6,8 +6,8 @@
 # 拿到最新版本的脚本。
 #
 # 上传目标:
-#   https://<bucket>.oss-cn-hangzhou.aliyuncs.com/aone-release/<group>/<project>/deploy-qwen.sh
-#   https://<bucket>.oss-cn-hangzhou.aliyuncs.com/aone-release/<group>/<project>/upgrade-qwen.sh
+#   https://<bucket>.oss-cn-shanghai.aliyuncs.com/public-datasets/aone-release/<group>/<project>/deploy-qwen.sh
+#   https://<bucket>.oss-cn-shanghai.aliyuncs.com/public-datasets/aone-release/<group>/<project>/upgrade-qwen.sh
 #
 # 此脚本与 upload-oss.sh 独立：upload-oss.sh 在构建流水线中
 # 上传二进制产物 + 脚本；本脚本仅在脚本自身变更时同步脚本。
@@ -26,12 +26,12 @@ set -eux
 SOURCE_DIR="${SOURCE_DIR:?SOURCE_DIR is required}"
 OSS_GROUP="${OSS_GROUP:?OSS_GROUP is required}"
 OSS_PROJECT="${OSS_PROJECT:?OSS_PROJECT is required}"
-OSS_ENDPOINT="${OSS_ENDPOINT:-https://oss-cn-hangzhou.aliyuncs.com}"
-OSS_BUCKET="${OSS_BUCKET:-dw-vscode}"
+OSS_ENDPOINT="${OSS_ENDPOINT:-https://oss-cn-shanghai.aliyuncs.com}"
+OSS_BUCKET="${OSS_BUCKET:-dataworks-notebook-cn-shanghai}"
 OSS_ACCESS_KEY_ID="${OSS_ACCESS_KEY_ID:?OSS_ACCESS_KEY_ID is required}"
 OSS_ACCESS_KEY_SECRET="${OSS_ACCESS_KEY_SECRET:?OSS_ACCESS_KEY_SECRET is required}"
 
-OSS_PROJECT_ROOT="aone-release/${OSS_GROUP}/${OSS_PROJECT}"
+OSS_PROJECT_ROOT="public-datasets/aone-release/${OSS_GROUP}/${OSS_PROJECT}"
 SCRIPTS_DIR="${SOURCE_DIR}/.aoneci/scripts"
 
 # ── 安装 ossutil（如果不存在）──
@@ -69,7 +69,7 @@ else
 fi
 
 # ── 打印结果 ──
-OSS_HOST="${OSS_BUCKET}.oss-cn-hangzhou.aliyuncs.com"
+OSS_HOST="${OSS_BUCKET}.oss-cn-shanghai.aliyuncs.com"
 echo ""
 echo "============================================"
 echo "  Qwen Code Scripts — Upload Complete"

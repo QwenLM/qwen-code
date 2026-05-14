@@ -37,8 +37,17 @@ export function buildPermissionCheckContext(
   toolParams: Record<string, unknown>,
   targetDir: string,
 ): PermissionCheckContext {
-  const command =
+  const rawCommand =
     'command' in toolParams ? String(toolParams['command']) : undefined;
+  // Monitor command normalization is handled by
+  // PermissionManager.normalizePermissionContext — single point of truth.
+  const command = rawCommand;
+  const cwd =
+    typeof toolParams['directory'] === 'string'
+      ? path.isAbsolute(toolParams['directory'])
+        ? toolParams['directory']
+        : path.resolve(targetDir, toolParams['directory'])
+      : undefined;
 
   // Extract file path — tools use 'file_path' or 'path' (LS / grep / glob).
   let filePath =
@@ -69,7 +78,7 @@ export function buildPermissionCheckContext(
         ? toolParams['subagent_type']
         : undefined;
 
-  return { toolName, command, filePath, domain, specifier };
+  return { toolName, command, cwd, filePath, domain, specifier };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,9 +190,6 @@ export async function persistPermissionOutcome(
     return;
   }
 
-  // ProceedAlways (from compact mode / sub-agent confirmations) defaults to
-  // project scope so that permission is persisted and the user won't be
-  // asked again for the same tool/command pattern.
   const scope =
     outcome === ToolConfirmationOutcome.ProceedAlwaysUser ? 'user' : 'project';
 

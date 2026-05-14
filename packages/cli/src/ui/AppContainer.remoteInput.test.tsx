@@ -14,6 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
+import { Box } from 'ink';
 import { AppContainer } from './AppContainer.js';
 import {
   type Config,
@@ -35,7 +36,7 @@ vi.mock('ink', async (importOriginal) => {
 });
 
 vi.mock('./App.js', () => ({
-  App: () => null,
+  App: () => <Box />,
 }));
 vi.mock('./hooks/useHistoryManager.js');
 vi.mock('./hooks/useThemeCommand.js');
@@ -155,25 +156,29 @@ describe('AppContainer remote input and dual output integration', () => {
       handleThemeHighlight: vi.fn(),
     });
     mockedUseAuthCommand.mockReturnValue({
-      authState: 'authenticated',
-      setAuthState: vi.fn(),
-      authError: null,
-      onAuthError: vi.fn(),
-      isAuthDialogOpen: false,
-      isAuthenticating: false,
-      pendingAuthType: undefined,
-      externalAuthState: null,
-      qwenAuthState: {
-        deviceAuth: null,
-        authStatus: 'idle',
-        authMessage: null,
+      state: {
+        authState: 'authenticated',
+        authError: null,
+        isAuthDialogOpen: false,
+        isAuthenticating: false,
+        pendingAuthType: undefined,
+        externalAuthState: null,
+        qwenAuthState: {
+          deviceAuth: null,
+          authStatus: 'idle',
+          authMessage: null,
+        },
       },
-      handleAuthSelect: vi.fn(),
-      handleCodingPlanSubmit: vi.fn(),
-      handleAlibabaStandardSubmit: vi.fn(),
-      handleOpenRouterSubmit: vi.fn(),
-      openAuthDialog: vi.fn(),
-      cancelAuthentication: vi.fn(),
+      actions: {
+        setAuthState: vi.fn(),
+        onAuthError: vi.fn(),
+        handleAuthSelect: vi.fn(),
+        handleCodingPlanSubmit: vi.fn(),
+        handleAlibabaStandardSubmit: vi.fn(),
+        handleOpenRouterSubmit: vi.fn(),
+        openAuthDialog: vi.fn(),
+        cancelAuthentication: vi.fn(),
+      },
     });
     mockedUseEditorSettings.mockReturnValue({
       isEditorDialogOpen: false,
@@ -207,6 +212,12 @@ describe('AppContainer remote input and dual output integration', () => {
       thought: null,
       cancelOngoingRequest: vi.fn(),
       retryLastPrompt: vi.fn(),
+      handleApprovalModeChange: vi.fn(),
+      activePtyId: undefined,
+      loopDetectionConfirmationRequest: null,
+      pendingToolCalls: [],
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
     });
     mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
     mockedUseFolderTrust.mockReturnValue({
@@ -312,6 +323,12 @@ describe('AppContainer remote input and dual output integration', () => {
       thought: null,
       cancelOngoingRequest: vi.fn(),
       retryLastPrompt: vi.fn(),
+      handleApprovalModeChange: vi.fn(),
+      activePtyId: undefined,
+      loopDetectionConfirmationRequest: null,
+      pendingToolCalls: [],
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
     });
     mockedUseRemoteInput.mockReturnValue(remoteInput);
 
@@ -325,8 +342,8 @@ describe('AppContainer remote input and dual output integration', () => {
     );
 
     expect(remoteInput.setSubmitFn).toHaveBeenCalledTimes(1);
-    expect(remoteInput.setSubmitFn).toHaveBeenCalledWith(expect.any(Function));
     expect(remoteInput.notifyIdle).toHaveBeenCalledTimes(1);
+    expect(remoteInput.setSubmitFn).toHaveBeenCalledWith(expect.any(Function));
   });
 
   it('bridges pending tool confirmations to dual output and remote input', () => {
@@ -350,6 +367,9 @@ describe('AppContainer remote input and dual output integration', () => {
       thought: null,
       cancelOngoingRequest: vi.fn(),
       retryLastPrompt: vi.fn(),
+      handleApprovalModeChange: vi.fn(),
+      activePtyId: undefined,
+      loopDetectionConfirmationRequest: null,
       pendingToolCalls: [
         {
           status: 'awaiting_approval',
@@ -361,6 +381,8 @@ describe('AppContainer remote input and dual output integration', () => {
           confirmationDetails: { onConfirm },
         },
       ],
+      streamingResponseLengthRef: { current: 0 },
+      isReceivingContent: false,
     });
     mockedUseRemoteInput.mockReturnValue(remoteInput);
     mockedUseDualOutput.mockReturnValue(dualOutput);

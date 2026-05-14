@@ -12,6 +12,7 @@ import type {
   ToolConfirmationOutcome,
   ToolResultDisplay,
   AgentStatus,
+  ArenaDiffSummary,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -69,6 +70,7 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  executionStartTime?: number;
   /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
   isMemoryOp?: 'read' | 'write';
 }
@@ -173,6 +175,41 @@ export type HistoryItemStats = HistoryItemBase & {
   duration: string;
 };
 
+/**
+ * Structured payload rendered by `/diff`. Kept as plain data (not React nodes)
+ * so the same model can feed both the Ink-based interactive display and the
+ * plain-text non-interactive / ACP output.
+ */
+export interface DiffRenderRow {
+  filename: string;
+  /** `undefined` for binary files; a line count (lower bound if `truncated`)
+   *  otherwise. */
+  added?: number;
+  /** `undefined` for binary and untracked files. */
+  removed?: number;
+  isBinary: boolean;
+  isUntracked: boolean;
+  /** `true` when the file is removed from the worktree relative to HEAD.
+   *  Mutually exclusive with `isUntracked`. */
+  isDeleted: boolean;
+  /** Only set for untracked text files that exceeded the read cap. */
+  truncated: boolean;
+}
+
+export interface DiffRenderModel {
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  rows: DiffRenderRow[];
+  /** `filesCount - rows.length` when the per-file cap truncated the listing. */
+  hiddenCount: number;
+}
+
+export type HistoryItemDiffStats = HistoryItemBase & {
+  type: 'diff_stats';
+  model: DiffRenderModel;
+};
+
 export type HistoryItemModelStats = HistoryItemBase & {
   type: 'model_stats';
 };
@@ -206,6 +243,19 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+};
+
+/**
+ * Short LLM-generated label summarizing a preceding tool batch. Emitted after
+ * the batch completes and consumed by compact-mode rendering to replace the
+ * generic "Tool × N" line with something like "Searched in auth/". Also
+ * surfaces to SDK clients as a `tool_use_summary` stream message.
+ */
+export type HistoryItemToolUseSummary = HistoryItemBase & {
+  type: 'tool_use_summary';
+  summary: string;
+  /** Tool callIds this summary describes. Used to locate the target tool_group. */
+  precedingToolUseIds: string[];
 };
 
 export type HistoryItemNotification = HistoryItemBase & {
@@ -353,6 +403,9 @@ export interface ArenaAgentCardData {
   rounds: number;
   error?: string;
   diff?: string;
+  diffSummary?: ArenaDiffSummary;
+  modifiedFiles?: string[];
+  approachSummary?: string;
 }
 
 export type HistoryItemArenaAgentComplete = HistoryItemBase & {
@@ -389,8 +442,9 @@ export type HistoryItemBtw = HistoryItemBase & {
 
 /**
  * Away-summary recap shown when the user returns to the session after a
- * period of inactivity (or via /recap). Rendered in dim color so it is
- * visually distinct from real assistant replies.
+ * period of inactivity (or via /recap). Rendered inline as a regular
+ * history item (matching Claude Code's away_summary message); scrolls
+ * with the conversation, no sticky pinning.
  */
 export type HistoryItemAwayRecap = HistoryItemBase & {
   type: 'away_recap';
@@ -465,6 +519,7 @@ export type HistoryItemWithoutId =
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
+  | HistoryItemToolUseSummary
   | HistoryItemStats
   | HistoryItemModelStats
   | HistoryItemToolStats
@@ -486,7 +541,8 @@ export type HistoryItemWithoutId =
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage
-  | HistoryItemDoctor;
+  | HistoryItemDoctor
+  | HistoryItemDiffStats;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -515,6 +571,7 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  DIFF_STATS = 'diff_stats',
 }
 
 export interface InsightProgressProps {

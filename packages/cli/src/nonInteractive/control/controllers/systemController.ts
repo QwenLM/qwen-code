@@ -448,6 +448,7 @@ export class SystemController extends BaseController {
         this.context.config,
         signal,
         'non_interactive',
+        this.context.settings,
       );
 
       if (signal.aborted) {

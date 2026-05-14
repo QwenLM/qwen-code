@@ -173,7 +173,7 @@ feat/* ──── MR ────→ main ──── CI 手动触发 ──�
 #### OSS 目录结构
 
 ```
-dw-vscode.oss-cn-hangzhou.aliyuncs.com/aone-release/alishu/qwen-code/
+dataworks-notebook-cn-shanghai.oss-cn-shanghai.aliyuncs.com/public-datasets/aone-release/alishu/qwen-code/
   {version}/
     qwen-code-{version}-linux-{arch}.tar.gz
     SHA256SUMS
@@ -188,7 +188,7 @@ dw-vscode.oss-cn-hangzhou.aliyuncs.com/aone-release/alishu/qwen-code/
 
 ```bash
 # 首次安装
-curl -fsSL https://dw-vscode.oss-cn-hangzhou.aliyuncs.com/aone-release/alishu/qwen-code/deploy-qwen.sh | bash
+curl -fsSL https://dataworks-notebook-cn-shanghai.oss-cn-shanghai.aliyuncs.com/public-datasets/aone-release/alishu/qwen-code/deploy-qwen.sh | bash
 
 # 升级
 curl -fsSL .../upgrade-qwen.sh | bash

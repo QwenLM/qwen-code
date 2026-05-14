@@ -20,6 +20,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
 import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
+import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
 
 /**
  * Unified tool call event emitter.
@@ -273,6 +274,16 @@ export class ToolCallEmitter extends BaseEmitter {
 
     // Check if this is a diff display (edit tool result)
     if ('fileName' in obj && 'newContent' in obj) {
+      if (obj['truncatedForSession'] === true) {
+        return {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: buildTruncatedDiffPreviewText(obj),
+          },
+        };
+      }
+
       return {
         type: 'diff',
         path: obj['fileName'] as string,

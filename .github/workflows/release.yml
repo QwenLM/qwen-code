@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'The version to release (e.g., v0.1.11). Required for manual patch releases.'
+        description: 'The version to release (e.g., v0.1.11 or v0.1.11-preview.0). Required for manual patch releases.'
         required: false
         type: 'string'
       ref:
@@ -28,7 +28,7 @@ on:
         type: 'boolean'
         default: false
       create_preview_release:
-        description: 'Auto apply the preview release tag, input version is ignored.'
+        description: 'Create a preview release. If version is X.Y.Z-preview.N, use it as-is. If version is X.Y.Z, derive X.Y.Z-preview.0.'
         required: false
         type: 'boolean'
         default: false
@@ -115,7 +115,15 @@ jobs:
           elif [[ "${IS_PREVIEW}" == "true" ]]; then
             VERSION_ARGS+=(--type=preview)
             if [[ -n "${MANUAL_VERSION}" ]]; then
-              VERSION_ARGS+=("--preview_version_override=${MANUAL_VERSION}")
+              MANUAL_CLEAN="${MANUAL_VERSION#v}"
+              if [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]; then
+                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}")
+              elif [[ "${MANUAL_CLEAN}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                VERSION_ARGS+=("--preview_version_override=${MANUAL_CLEAN}-preview.0")
+              else
+                echo "::error::For preview releases, version must be X.Y.Z or X.Y.Z-preview.N; got ${MANUAL_VERSION}"
+                exit 1
+              fi
             fi
           else
             VERSION_ARGS+=(--type=stable)
@@ -304,6 +312,8 @@ jobs:
       contents: 'write'
       packages: 'write'
       id-token: 'write'
+      pull-requests: 'write'
+      issues: 'write'
 
     steps:
       - name: 'Checkout'
@@ -371,6 +381,11 @@ jobs:
           npm run bundle
           npm run prepare:package
 
+      - name: 'Build Standalone Archives'
+        env:
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+        run: 'npm run package:standalone:release -- --version "${RELEASE_VERSION}" --out-dir dist/standalone'
+
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
@@ -403,11 +418,53 @@ jobs:
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
+            dist/standalone/qwen-code-* \
+            dist/standalone/SHA256SUMS \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
             --generate-notes \
             ${PRERELEASE_FLAG}
+
+      - name: 'Create PR to merge release branch into main'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        id: 'pr'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          set -euo pipefail
+
+          pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json url --jq '.[0].url')"
+          if [[ -z "${pr_url}" ]]; then
+            pr_url="$(gh pr create \
+              --base main \
+              --head "${RELEASE_BRANCH}" \
+              --title "chore(release): ${RELEASE_TAG}" \
+              --body "Automated release PR for ${RELEASE_TAG}. Syncs package.json versions on main.")"
+          fi
+
+          echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Enable auto-merge for release PR'
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_URL: '${{ steps.pr.outputs.PR_URL }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          set -euo pipefail
+          # Keep [skip ci] only on the squash commit that lands on main. The
+          # release branch commit and PR title intentionally omit it so tag-push
+          # workflows and PR metadata stay unaffected.
+          gh pr merge "${PR_URL}" \
+            --squash \
+            --auto \
+            --delete-branch \
+            --subject "chore(release): ${RELEASE_TAG} [skip ci]"
 
   notify_failure:
     name: 'Notify Release Failure'

@@ -106,6 +106,32 @@ export interface ModelConfigResolutionResult {
 }
 
 /**
+ * Applies QWEN_CODE_API_TIMEOUT_MS env override if modelProvider has not set a timeout.
+ * Precedence: modelProvider > env > settings > default
+ * Mutates generationConfig and sources in-place.
+ */
+function applyTimeoutEnvOverride(
+  env: Record<string, string | undefined>,
+  generationConfig: Partial<ContentGeneratorConfig>,
+  sources: ConfigSources,
+  modelProvider?: ModelProviderConfig,
+): void {
+  if (modelProvider?.generationConfig?.timeout !== undefined) return;
+
+  const raw = env['QWEN_CODE_API_TIMEOUT_MS'];
+  if (raw === undefined) return;
+
+  const parsed = Number(raw);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    generationConfig.timeout = Math.floor(parsed);
+    sources['timeout'] = {
+      kind: 'env',
+      envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+    };
+  }
+}
+
+/**
  * Resolve model configuration from all input sources.
  *
  * This is the single entry point for model configuration resolution.
@@ -231,11 +257,10 @@ export function resolveModelConfig(
   let apiKeyEnvKey: string | undefined;
   if (authType && modelProvider?.envKey) {
     apiKeyEnvKey = modelProvider.envKey;
-    sources['apiKeyEnvKey'] = modelProvidersSource(
-      authType,
-      modelProvider.id,
-      'envKey',
-    );
+    sources['apiKeyEnvKey'] = {
+      ...modelProvidersSource(authType, modelProvider.id, 'envKey'),
+      envKey: modelProvider.envKey,
+    };
   }
 
   // ---- Generation Config (from settings or modelProvider) ----
@@ -246,6 +271,9 @@ export function resolveModelConfig(
     modelProvider?.id,
     sources,
   );
+
+  // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
+  applyTimeoutEnvOverride(env, generationConfig, sources, modelProvider);
 
   // Build final config
   const config: ContentGeneratorConfig = {
@@ -324,6 +352,9 @@ function resolveQwenOAuthConfig(
     resolvedModel,
     sources,
   );
+
+  // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
+  applyTimeoutEnvOverride(input.env, generationConfig, sources, modelProvider);
 
   const config: ContentGeneratorConfig = {
     authType: AuthType.QWEN_OAUTH,

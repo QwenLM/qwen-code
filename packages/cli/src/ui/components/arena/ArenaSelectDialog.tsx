@@ -5,12 +5,13 @@
  */
 
 import type React from 'react';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
 import {
   type ArenaManager,
   isSuccessStatus,
   type Config,
+  type ArenaAgentResult,
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
@@ -134,6 +135,17 @@ export function ArenaSelectDialog({
 
   const result = manager.getResult();
   const agents = manager.getAgentStates();
+  const firstSelectableAgentId = agents.find((agent) =>
+    isSuccessStatus(agent.status),
+  )?.agentId;
+  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(
+    firstSelectableAgentId,
+  );
+  const [showPreview, setShowPreview] = useState(false);
+  const [showDetailedDiff, setShowDetailedDiff] = useState(false);
+  const selectedResult = result?.agents.find(
+    (agent) => agent.agentId === selectedAgentId,
+  );
 
   const items: Array<DescriptiveRadioSelectItem<string>> = useMemo(
     () =>
@@ -146,11 +158,16 @@ export function ArenaSelectDialog({
         // Build diff summary from cached result if available
         let diffAdditions = 0;
         let diffDeletions = 0;
+        let fileCount = 0;
         if (isSuccessStatus(agent.status) && result) {
           const agentResult = result.agents.find(
             (a) => a.agentId === agent.agentId,
           );
-          if (agentResult?.diff) {
+          if (agentResult?.diffSummary) {
+            diffAdditions = agentResult.diffSummary.additions;
+            diffDeletions = agentResult.diffSummary.deletions;
+            fileCount = agentResult.diffSummary.files.length;
+          } else if (agentResult?.diff) {
             const lines = agentResult.diff.split('\n');
             for (const line of lines) {
               if (line.startsWith('+') && !line.startsWith('+++')) {
@@ -160,6 +177,7 @@ export function ArenaSelectDialog({
               }
             }
           }
+          fileCount = agentResult?.modifiedFiles?.length ?? fileCount;
         }
 
         // Title: full model name (not truncated)
@@ -173,6 +191,12 @@ export function ArenaSelectDialog({
             <Text color={theme.text.secondary}>{duration}</Text>
             <Text color={theme.text.secondary}> · </Text>
             <Text color={theme.text.secondary}>{tokens} tokens</Text>
+            {fileCount > 0 && (
+              <>
+                <Text color={theme.text.secondary}> · </Text>
+                <Text color={theme.text.secondary}>{fileCount} files</Text>
+              </>
+            )}
             {(diffAdditions > 0 || diffDeletions > 0) && (
               <>
                 <Text color={theme.text.secondary}> · </Text>
@@ -201,7 +225,13 @@ export function ArenaSelectDialog({
       if (key.name === 'escape') {
         closeArenaDialog();
       }
+      if (key.name === 'p' && !key.ctrl && !key.meta) {
+        setShowPreview((current) => !current);
+      }
       if (key.name === 'd' && !key.ctrl && !key.meta) {
+        setShowDetailedDiff((current) => !current);
+      }
+      if (key.name === 'x' && !key.ctrl && !key.meta) {
         onDiscard();
       }
     },
@@ -245,16 +275,136 @@ export function ArenaSelectDialog({
           onSelect={(agentId: string) => {
             onSelect(agentId);
           }}
+          onHighlight={(agentId: string) => {
+            setSelectedAgentId(agentId);
+          }}
           isFocused={true}
           showNumbers={false}
         />
       </Box>
 
+      {showPreview && selectedResult && (
+        <ArenaAgentPreview result={selectedResult} />
+      )}
+
+      {showDetailedDiff && selectedResult && (
+        <ArenaAgentDetailedDiff result={selectedResult} />
+      )}
+
       <Box marginTop={1}>
         <Text color={theme.text.secondary}>
-          Enter to select, d to discard all, Esc to cancel
+          p preview, d detailed diff, Enter select winner, x discard all, Esc
+          cancel
         </Text>
       </Box>
     </Box>
   );
+}
+
+function ArenaAgentPreview({
+  result,
+}: {
+  result: ArenaAgentResult;
+}): React.JSX.Element {
+  const fileSummary = result.diffSummary?.files ?? [];
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Text bold color={theme.text.primary}>
+        Quick Preview · {result.model.modelId}
+      </Text>
+      <Box marginLeft={2}>
+        <Text color={theme.text.secondary}>Approach: </Text>
+        <Text color={theme.text.primary}>
+          {result.approachSummary ?? 'No approach summary available.'}
+        </Text>
+      </Box>
+      <Box marginLeft={2}>
+        <Text color={theme.text.secondary}>Major files: </Text>
+        <Text color={theme.text.primary}>
+          {formatFileList(fileSummary.map((file) => file.path))}
+        </Text>
+      </Box>
+      <Box marginLeft={2}>
+        <Text color={theme.text.secondary}>Metrics: </Text>
+        <Text color={theme.text.primary}>
+          {result.stats.totalTokens.toLocaleString()} tokens ·{' '}
+          {formatDuration(result.stats.durationMs)} · {result.stats.toolCalls}{' '}
+          tools
+        </Text>
+      </Box>
+    </Box>
+  );
+}
+
+function ArenaAgentDetailedDiff({
+  result,
+}: {
+  result: ArenaAgentResult;
+}): React.JSX.Element {
+  const diffLines = getVisibleDiffLines(result.diff);
+  return (
+    <Box marginTop={1} flexDirection="column">
+      <Text bold color={theme.text.primary}>
+        Detailed Diff · {result.model.modelId}
+      </Text>
+      {diffLines.length === 0 ? (
+        <Box marginLeft={2}>
+          <Text color={theme.text.secondary}>No diff available.</Text>
+        </Box>
+      ) : (
+        <Box marginLeft={2} flexDirection="column">
+          {diffLines.map((line, index) => (
+            <Text key={`${index}-${line}`} color={getDiffLineColor(line)}>
+              {line}
+            </Text>
+          ))}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+function formatFileList(files: string[]): string {
+  if (files.length === 0) {
+    return 'none';
+  }
+  const visible = files.slice(0, 6);
+  const suffix =
+    files.length > visible.length
+      ? `, +${files.length - visible.length} more`
+      : '';
+  return `${visible.join(', ')}${suffix}`;
+}
+
+function getVisibleDiffLines(diff: string | undefined): string[] {
+  if (!diff) {
+    return [];
+  }
+  const lines = diff.split('\n');
+  const maxLines = 180;
+  if (lines.length <= maxLines) {
+    return lines;
+  }
+  return [
+    ...lines.slice(0, maxLines),
+    `... truncated ${lines.length - maxLines} diff lines`,
+  ];
+}
+
+function getDiffLineColor(line: string): string {
+  if (line.startsWith('+') && !line.startsWith('+++')) {
+    return theme.status.success;
+  }
+  if (line.startsWith('-') && !line.startsWith('---')) {
+    return theme.status.error;
+  }
+  if (
+    line.startsWith('diff --git') ||
+    line.startsWith('@@') ||
+    line.startsWith('---') ||
+    line.startsWith('+++')
+  ) {
+    return theme.text.accent;
+  }
+  return theme.text.secondary;
 }

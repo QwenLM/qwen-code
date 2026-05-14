@@ -264,13 +264,13 @@ describe('earlyInputCapture', () => {
       expect(input.toString()).toBe('');
     });
 
-    it('should drop standalone ESC on capture end', () => {
+    it('should replay standalone ESC on capture end', () => {
       startEarlyInputCapture();
       mockStdin.write(Buffer.from('\x1b'));
       stopEarlyInputCapture();
 
       const input = getAndClearCapturedInput();
-      expect(input.toString()).toBe('');
+      expect(input.toString()).toBe('\x1b');
     });
   });
 

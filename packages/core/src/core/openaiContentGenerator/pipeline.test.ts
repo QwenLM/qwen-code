@@ -9,16 +9,24 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type OpenAI from 'openai';
 import type { GenerateContentParameters } from '@google/genai';
 import { GenerateContentResponse, Type, FinishReason } from '@google/genai';
-import type { PipelineConfig } from './pipeline.js';
+import type { ErrorHandler, PipelineConfig } from './types.js';
 import { ContentGenerationPipeline, StreamContentError } from './pipeline.js';
 import { OpenAIContentConverter } from './converter.js';
+import { openaiRequestCaptureContext } from './requestCaptureContext.js';
+import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import type { ContentGeneratorConfig, AuthType } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
-import type { ErrorHandler } from './errorHandler.js';
 
 // Mock dependencies
-vi.mock('./converter.js');
+vi.mock('./converter.js', () => ({
+  OpenAIContentConverter: {
+    convertGeminiRequestToOpenAI: vi.fn(),
+    convertOpenAIResponseToGemini: vi.fn(),
+    convertOpenAIChunkToGemini: vi.fn(),
+    convertGeminiToolsToOpenAI: vi.fn(),
+  },
+}));
 vi.mock('openai');
 
 describe('ContentGenerationPipeline', () => {
@@ -26,7 +34,7 @@ describe('ContentGenerationPipeline', () => {
   let mockConfig: PipelineConfig;
   let mockProvider: OpenAICompatibleProvider;
   let mockClient: OpenAI;
-  let mockConverter: OpenAIContentConverter;
+  let mockConverter: typeof OpenAIContentConverter;
   let mockErrorHandler: ErrorHandler;
   let mockContentGeneratorConfig: ContentGeneratorConfig;
   let mockCliConfig: Config;
@@ -44,16 +52,9 @@ describe('ContentGenerationPipeline', () => {
       },
     } as unknown as OpenAI;
 
-    // Mock converter
-    mockConverter = {
-      setModel: vi.fn(),
-      setModalities: vi.fn(),
-      convertGeminiRequestToOpenAI: vi.fn(),
-      convertOpenAIResponseToGemini: vi.fn(),
-      convertOpenAIChunkToGemini: vi.fn(),
-      convertGeminiToolsToOpenAI: vi.fn(),
-      resetStreamingToolCalls: vi.fn(),
-    } as unknown as OpenAIContentConverter;
+    // Mock converter methods. The pipeline now snapshots request-scoped state
+    // into context and calls the stateless converter namespace directly.
+    mockConverter = OpenAIContentConverter;
 
     // Mock provider
     mockProvider = {
@@ -83,11 +84,6 @@ describe('ContentGenerationPipeline', () => {
       },
     } as ContentGeneratorConfig;
 
-    // Mock the OpenAIContentConverter constructor
-    (OpenAIContentConverter as unknown as Mock).mockImplementation(
-      () => mockConverter,
-    );
-
     mockConfig = {
       cliConfig: mockCliConfig,
       provider: mockProvider,
@@ -101,12 +97,6 @@ describe('ContentGenerationPipeline', () => {
   describe('constructor', () => {
     it('should initialize with correct configuration', () => {
       expect(mockProvider.buildClient).toHaveBeenCalled();
-      // Converter is constructed once and the model is updated per-request via setModel().
-      expect(OpenAIContentConverter).toHaveBeenCalledWith(
-        'test-model',
-        undefined,
-        {},
-      );
     });
   });
 
@@ -148,11 +138,12 @@ describe('ContentGenerationPipeline', () => {
 
       // Assert
       expect(result).toBe(mockGeminiResponse);
-      expect(
-        (mockConverter as unknown as { setModel: Mock }).setModel,
-      ).toHaveBeenCalledWith('test-model');
       expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
         request,
+        expect.objectContaining({
+          model: 'test-model',
+          modalities: {},
+        }),
       );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -168,6 +159,10 @@ describe('ContentGenerationPipeline', () => {
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
         mockOpenAIResponse,
+        expect.objectContaining({
+          model: 'test-model',
+          modalities: {},
+        }),
       );
     });
 
@@ -207,9 +202,12 @@ describe('ContentGenerationPipeline', () => {
 
       // Assert — request.model takes precedence over contentGeneratorConfig.model
       expect(result).toBe(mockGeminiResponse);
-      expect(
-        (mockConverter as unknown as { setModel: Mock }).setModel,
-      ).toHaveBeenCalledWith('override-model');
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          model: 'override-model',
+        }),
+      );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'override-model',
@@ -254,9 +252,12 @@ describe('ContentGenerationPipeline', () => {
 
       // Assert — falls back to contentGeneratorConfig.model
       expect(result).toBe(mockGeminiResponse);
-      expect(
-        (mockConverter as unknown as { setModel: Mock }).setModel,
-      ).toHaveBeenCalledWith('test-model');
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          model: 'test-model',
+        }),
+      );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           model: 'test-model',
@@ -318,11 +319,15 @@ describe('ContentGenerationPipeline', () => {
 
       // Assert
       expect(result).toBe(mockGeminiResponse);
-      expect(
-        (mockConverter as unknown as { setModel: Mock }).setModel,
-      ).toHaveBeenCalledWith('test-model');
+      expect(mockConverter.convertGeminiRequestToOpenAI).toHaveBeenCalledWith(
+        request,
+        expect.objectContaining({
+          model: 'test-model',
+        }),
+      );
       expect(mockConverter.convertGeminiToolsToOpenAI).toHaveBeenCalledWith(
         request.config!.tools,
+        'auto',
       );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -502,6 +507,161 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBe(true);
     });
 
+    it('emits thinking:disabled on DeepSeek hostname when includeThoughts is false', async () => {
+      // DeepSeek V4+ defaults thinking.type to 'enabled' — just stripping
+      // the effort knob keeps thinking on, leaking latency/cost into side
+      // queries. Verify the explicit disable signal is emitted.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest next' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+    });
+
+    it('emits thinking:disabled on DeepSeek hostname when reasoning is configured to false', async () => {
+      // Config-level opt-out should also disable DeepSeek thinking, not
+      // just remove the effort knob.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-v4-pro',
+        reasoning: false,
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Hello' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'main');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toEqual({ type: 'disabled' });
+    });
+
+    it('does NOT emit thinking:disabled on a non-DeepSeek hostname', async () => {
+      // The disable shape is DeepSeek-specific. Pushing it at strict
+      // OpenAI-compat backends could trip an unknown-key 400.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://api.openai.com/v1',
+        model: 'gpt-5',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toBeUndefined();
+    });
+
+    it('does NOT emit thinking:disabled on self-hosted DeepSeek (model-name fallback only)', async () => {
+      // Mirror of the round-7 reasoning_effort decision: the broader
+      // model-name detection covers self-hosted DeepSeek for content
+      // flattening, but the V4 thinking param is a wire-shape that
+      // self-hosted infra (sglang/vllm) may not accept. Hostname-only.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://my-sglang.example.com:8000/v1',
+        model: 'deepseek-v4-pro',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.thinking).toBeUndefined();
+    });
+
     it('should handle errors and log them', async () => {
       // Arrange
       const request: GenerateContentParameters = {
@@ -607,7 +767,22 @@ describe('ContentGenerationPipeline', () => {
       expect(results).toHaveLength(2);
       expect(results[0]).toBe(mockGeminiResponse1);
       expect(results[1]).toBe(mockGeminiResponse2);
-      expect(mockConverter.resetStreamingToolCalls).toHaveBeenCalled();
+      const [, firstChunkContext] = (
+        mockConverter.convertOpenAIChunkToGemini as Mock
+      ).mock.calls[0];
+      const [, secondChunkContext] = (
+        mockConverter.convertOpenAIChunkToGemini as Mock
+      ).mock.calls[1];
+      expect(firstChunkContext).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          modalities: {},
+          toolCallParser: expect.any(StreamingToolCallParser),
+        }),
+      );
+      expect(secondChunkContext.toolCallParser).toBe(
+        firstChunkContext.toolCallParser,
+      );
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           stream: true,
@@ -719,7 +894,6 @@ describe('ContentGenerationPipeline', () => {
       }
 
       expect(results).toHaveLength(0); // No results due to error
-      expect(mockConverter.resetStreamingToolCalls).toHaveBeenCalledTimes(2); // Once at start, once on error
       expect(mockErrorHandler.handle).toHaveBeenCalledWith(
         testError,
         expect.any(Object),
@@ -1475,6 +1649,80 @@ describe('ContentGenerationPipeline', () => {
         }),
       );
     });
+
+    it('should pass arbitrary samplingParams keys through verbatim (e.g. max_completion_tokens for GPT-5)', async () => {
+      // Arrange: user sets a GPT-5 / o-series shape in samplingParams.
+      // None of these are typed fields; all must appear on the wire because
+      // samplingParams is the source of truth.
+      mockContentGeneratorConfig.samplingParams = {
+        max_completion_tokens: 4096,
+        reasoning_effort: 'medium',
+        verbosity: 'low',
+      } as ContentGeneratorConfig['samplingParams'];
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { maxOutputTokens: 999 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: the exact samplingParams keys reach the wire; max_tokens is NOT
+      // synthesized from request.config.maxOutputTokens.
+      const call = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(call).toMatchObject({
+        max_completion_tokens: 4096,
+        reasoning_effort: 'medium',
+        verbosity: 'low',
+      });
+      expect(call).not.toHaveProperty('max_tokens');
+    });
+
+    it('should preserve historical default behavior when samplingParams is absent', async () => {
+      // Arrange: no samplingParams — request.config.maxOutputTokens must still
+      // fall through to max_tokens on the wire (original behavior unchanged).
+      mockContentGeneratorConfig.samplingParams = undefined;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { temperature: 0.5, topP: 0.6, maxOutputTokens: 2048 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: identical to upstream behavior for existing users
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          temperature: 0.5,
+          top_p: 0.6,
+          max_tokens: 2048,
+        }),
+        expect.objectContaining({ signal: undefined }),
+      );
+    });
   });
 
   describe('createRequestContext', () => {
@@ -1685,6 +1933,158 @@ describe('ContentGenerationPipeline', () => {
       // Should only yield the final response (empty ones are filtered)
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalGeminiResponse);
+    });
+  });
+
+  describe('openaiRequestCaptureContext integration', () => {
+    it('forwards the provider-enhanced request to the active capture', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+        created: 0,
+        model: 'test-model',
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      // Provider injects extra_body and metadata, mimicking real DashScope behavior.
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { thinking: { type: 'enabled' } },
+        metadata: { user_id: 'abc' },
+      }));
+
+      let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+      await openaiRequestCaptureContext.run(
+        (built) => {
+          captured = built;
+        },
+        () => pipeline.execute(request, 'p'),
+      );
+
+      expect(captured).toBeDefined();
+      // The captured request must be the same object passed to the SDK.
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        captured,
+        expect.anything(),
+      );
+      expect(captured).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          messages: mockMessages,
+          extra_body: { thinking: { type: 'enabled' } },
+          metadata: { user_id: 'abc' },
+        }),
+      );
+    });
+
+    it('captures the streaming request including stream/stream_options', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const fakeStream = (async function* () {
+        // empty stream
+      })();
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        fakeStream,
+      );
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { enable_thinking: true },
+      }));
+
+      let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+      await openaiRequestCaptureContext.run(
+        (built) => {
+          captured = built;
+        },
+        async () => {
+          const stream = await pipeline.executeStream(request, 'p');
+          for await (const _ of stream) {
+            // drain
+          }
+        },
+      );
+
+      expect(captured).toBeDefined();
+      expect(captured).toEqual(
+        expect.objectContaining({
+          stream: true,
+          stream_options: { include_usage: true },
+          extra_body: { enable_thinking: true },
+        }),
+      );
+    });
+
+    it('isolates concurrent captures', async () => {
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [],
+        created: 0,
+        model: 'test-model',
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      let n = 0;
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        extra_body: { call_index: ++n },
+      }));
+
+      const runOne = async () => {
+        let captured: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+        await openaiRequestCaptureContext.run(
+          (built) => {
+            captured = built;
+          },
+          () => pipeline.execute(request, 'p'),
+        );
+        return captured;
+      };
+
+      const [a, b] = await Promise.all([runOne(), runOne()]);
+      expect(a).toBeDefined();
+      expect(b).toBeDefined();
+      // Each call's capture must have received its own object —
+      // the outer AsyncLocalStorage stores must not bleed across awaits.
+      const aExtra = (a as unknown as { extra_body: { call_index: number } })
+        .extra_body;
+      const bExtra = (b as unknown as { extra_body: { call_index: number } })
+        .extra_body;
+      expect(aExtra).not.toEqual(bExtra);
     });
   });
 });

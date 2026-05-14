@@ -13,11 +13,13 @@ vi.mock('node:fs/promises');
 
 describe('truncateAndSaveToFile', () => {
   const mockWriteFile = vi.mocked(fs.writeFile);
+  const mockMkdir = vi.mocked(fs.mkdir);
   const THRESHOLD = 40_000;
   const TRUNCATE_LINES = 1000;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockMkdir.mockResolvedValue(undefined);
   });
 
   it('should return content unchanged if below both threshold and line limit', async () => {
@@ -35,6 +37,7 @@ describe('truncateAndSaveToFile', () => {
 
     expect(result).toEqual({ content });
     expect(mockWriteFile).not.toHaveBeenCalled();
+    expect(mockMkdir).not.toHaveBeenCalled();
   });
 
   it('should truncate when line limit exceeded even if under character threshold', async () => {
@@ -59,6 +62,9 @@ describe('truncateAndSaveToFile', () => {
     expect(result.outputFile).toBe(
       path.join(projectTempDir, `${fileName}.output`),
     );
+    expect(mockMkdir).toHaveBeenCalledWith(projectTempDir, {
+      recursive: true,
+    });
 
     const head = Math.floor(TRUNCATE_LINES / 5);
     const beginning = lines.slice(0, head);
@@ -133,6 +139,9 @@ describe('truncateAndSaveToFile', () => {
     expect(result.outputFile).toBe(
       path.join(projectTempDir, `${fileName}.output`),
     );
+    expect(mockMkdir).toHaveBeenCalledWith(projectTempDir, {
+      recursive: true,
+    });
     expect(mockWriteFile).toHaveBeenCalledWith(
       path.join(projectTempDir, `${fileName}.output`),
       content,

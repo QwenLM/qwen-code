@@ -15,15 +15,23 @@ import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
+  addMCPStatusChangeListener,
   createTransport,
+  getAllMCPServerStatuses,
+  getMCPServerStatus,
   hasNetworkTransport,
   isEnabled,
+  MCPServerStatus,
   McpClient,
   populateMcpServerCommand,
+  removeMCPServerStatus,
+  removeMCPStatusChangeListener,
+  updateMCPServerStatus,
 } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
 
 const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
+const ORIGINAL_ENV = process.env;
 
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
@@ -37,6 +45,7 @@ vi.mock('../mcp/oauth-token-storage.js');
 describe('mcp-client', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    process.env = ORIGINAL_ENV;
   });
 
   describe('McpClient', () => {
@@ -289,9 +298,71 @@ describe('mcp-client', () => {
         command: 'test-command',
         args: ['--foo', 'bar'],
         cwd: 'test/cwd',
-        env: { ...process.env, FOO: 'bar' },
+        // Use objectContaining because normalizePathEnvForWindows deduplicates
+        // PATH entries on Windows, so the env won't be an exact spread match.
+        env: expect.objectContaining({ FOO: 'bar' }),
         stderr: 'pipe',
       });
+    });
+
+    it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      process.env = {
+        ...ORIGINAL_ENV,
+        PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools',
+        Path: 'C:\\Users\\tester\\bin;C:\\Shared\\Tools',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { FOO: 'bar' },
+        },
+        false,
+      );
+
+      expect(mockedTransport).toHaveBeenCalledWith({
+        command: 'test-command',
+        args: [],
+        cwd: undefined,
+        env: expect.objectContaining({
+          PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin',
+          FOO: 'bar',
+        }),
+        stderr: 'pipe',
+      });
+      const transportOptions = mockedTransport.mock.calls[0]?.[0];
+      expect(transportOptions?.env?.['Path']).toBeUndefined();
+    });
+
+    it('should let server config PATH override parent PATH on Windows', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      process.env = {
+        ...ORIGINAL_ENV,
+        PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools',
+        Path: 'C:\\Users\\tester\\bin;C:\\Shared\\Tools',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { PATH: 'C:\\ServerToolchain\\bin' },
+        },
+        false,
+      );
+
+      const transportOptions = mockedTransport.mock.calls[0]?.[0];
+      // Server-provided PATH should fully replace the parent PATH, not merge
+      expect(transportOptions?.env?.['PATH']).toBe('C:\\ServerToolchain\\bin');
+      expect(transportOptions?.env?.['Path']).toBeUndefined();
     });
 
     it('should connect via command without cwd', async () => {
@@ -434,6 +505,97 @@ describe('mcp-client', () => {
       expect(isEnabled(namelessFuncDecl, serverName, mcpServerConfig)).toBe(
         false,
       );
+    });
+  });
+
+  describe('removeMCPServerStatus', () => {
+    afterEach(() => {
+      // Clean up any state left in the module-level registry between tests.
+      for (const name of getAllMCPServerStatuses().keys()) {
+        removeMCPServerStatus(name);
+      }
+    });
+
+    it('removes the entry from the global status map', () => {
+      updateMCPServerStatus('srv-a', MCPServerStatus.DISCONNECTED);
+      expect(getAllMCPServerStatuses().has('srv-a')).toBe(true);
+
+      removeMCPServerStatus('srv-a');
+
+      expect(getAllMCPServerStatuses().has('srv-a')).toBe(false);
+      // getMCPServerStatus falls back to DISCONNECTED for unknown servers,
+      // but the snapshot map should no longer include the entry.
+      expect(getMCPServerStatus('srv-a')).toBe(MCPServerStatus.DISCONNECTED);
+    });
+
+    it('notifies listeners with undefined to signal removal', () => {
+      const events: Array<[string, MCPServerStatus | undefined]> = [];
+      const listener = (name: string, status: MCPServerStatus | undefined) => {
+        events.push([name, status]);
+      };
+      addMCPStatusChangeListener(listener);
+
+      updateMCPServerStatus('srv-b', MCPServerStatus.CONNECTED);
+      removeMCPServerStatus('srv-b');
+
+      removeMCPStatusChangeListener(listener);
+
+      expect(events).toEqual([
+        ['srv-b', MCPServerStatus.CONNECTED],
+        ['srv-b', undefined],
+      ]);
+    });
+
+    it('is a no-op (no listener fired) when the server is not tracked', () => {
+      const listener = vi.fn();
+      addMCPStatusChangeListener(listener);
+
+      removeMCPServerStatus('never-registered');
+
+      removeMCPStatusChangeListener(listener);
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('a stale status update from an in-flight connect cannot resurrect a removed server', async () => {
+      // Race scenario from PR review: `disableMcpServer` removes the entry,
+      // but `McpClient.connect()`'s catch block could still fire afterwards
+      // and call `updateStatus(DISCONNECTED)`. The `isDisconnecting` guard
+      // inside `McpClient.updateStatus` must prevent that resurrection.
+      const mockedClient = {
+        connect: vi.fn().mockRejectedValue(new Error('connect failed')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        close: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue({
+        close: vi.fn(),
+      } as unknown as SdkClientStdioLib.StdioClientTransport);
+
+      const client = new McpClient(
+        'racy-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+
+      // Kick off connect() but don't await it; it will reject and run its
+      // catch block which calls updateStatus(DISCONNECTED).
+      const connectPromise = client.connect();
+
+      // Simulate the disable path running before connect's catch fires.
+      await client.disconnect();
+      removeMCPServerStatus('racy-server');
+
+      // Now let the rejected connect propagate.
+      await expect(connectPromise).rejects.toThrow('connect failed');
+
+      // The entry must remain absent — no resurrection.
+      expect(getAllMCPServerStatuses().has('racy-server')).toBe(false);
     });
   });
 

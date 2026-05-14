@@ -43,6 +43,7 @@ import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -223,6 +224,14 @@ export class McpClient {
 
   private updateStatus(status: MCPServerStatus): void {
     this.status = status;
+    // Once disconnect has begun, don't propagate further status changes to
+    // the global registry. An in-flight `connect()` whose catch block fires
+    // after `disableMcpServer` has already removed the entry would otherwise
+    // silently resurrect the server and the Footer's MCP health pill would
+    // continue to count it as offline.
+    if (this.isDisconnecting) {
+      return;
+    }
     updateMCPServerStatus(this.serverName, status);
   }
 
@@ -265,11 +274,14 @@ let mcpDiscoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
 export const mcpServerRequiresOAuth: Map<string, boolean> = new Map();
 
 /**
- * Event listeners for MCP server status changes
+ * Event listeners for MCP server status changes.
+ * `status` is `undefined` when the server has been removed from the registry
+ * (e.g. disabled via `/mcp`), so consumers can drop it from their snapshots
+ * rather than continue to count it as `DISCONNECTED`.
  */
 type StatusChangeListener = (
   serverName: string,
-  status: MCPServerStatus,
+  status: MCPServerStatus | undefined,
 ) => void;
 const statusChangeListeners: StatusChangeListener[] = [];
 
@@ -302,9 +314,26 @@ export function updateMCPServerStatus(
   status: MCPServerStatus,
 ): void {
   serverStatuses.set(serverName, status);
-  // Notify all listeners
-  for (const listener of statusChangeListeners) {
+  // Snapshot the listener list so a listener that detaches itself (or
+  // attaches a new one) during dispatch doesn't mutate the array we're
+  // iterating.
+  for (const listener of [...statusChangeListeners]) {
     listener(serverName, status);
+  }
+}
+
+/**
+ * Remove an MCP server from the status registry and notify listeners.
+ * Used when a server is disabled or removed from configuration so it no
+ * longer shows up in the Footer's MCP health pill as offline.
+ */
+export function removeMCPServerStatus(serverName: string): void {
+  if (!serverStatuses.has(serverName)) {
+    return;
+  }
+  serverStatuses.delete(serverName);
+  for (const listener of [...statusChangeListeners]) {
+    listener(serverName, undefined);
   }
 }
 
@@ -1409,13 +1438,19 @@ export async function createTransport(
       );
     }
 
+    // Normalize process.env PATH first (merge PATH+Path → single PATH on
+    // Windows), then apply server-specific overrides on top so that a server
+    // config providing its own PATH fully replaces the parent value instead of
+    // being merged with a stale case-variant.
+    const env = {
+      ...normalizePathEnvForWindows({ ...process.env }),
+      ...(mcpServerConfig.env || {}),
+    };
+
     const transport = new StdioClientTransport({
       command: mcpServerConfig.command,
       args: mcpServerConfig.args || [],
-      env: {
-        ...process.env,
-        ...(mcpServerConfig.env || {}),
-      } as Record<string, string>,
+      env: env as Record<string, string>,
       cwd: mcpServerConfig.cwd,
       stderr: 'pipe',
     });

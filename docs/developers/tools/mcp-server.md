@@ -158,16 +158,28 @@ When connecting to an OAuth-enabled server:
 
 #### Browser Redirect Requirements
 
-**Important:** OAuth authentication requires that your local machine can:
+**Important:** OAuth authentication requires that the redirect URI is accessible:
 
-- Open a web browser for authentication
-- Receive redirects on `http://localhost:7777/oauth/callback`
+- **Default behavior**: Redirects to `http://localhost:7777/oauth/callback` (works for local setups)
+- **Custom redirect URI**: Use `--oauth-redirect-uri` or configure `redirectUri` in settings.json to specify a different URL
 
-This feature will not work in:
+For **remote/cloud server deployments** (e.g., web terminals, SSH sessions, cloud IDEs):
+
+- The default `localhost` redirect will NOT work
+- You MUST configure a custom `redirectUri` pointing to a publicly accessible URL
+- The user's browser must be able to reach this URL and redirect back to the server
+
+Example for remote servers:
+
+```bash
+qwen mcp add --transport sse remote-server https://api.example.com/sse/ \
+  --oauth-redirect-uri https://your-remote-server.example.com/oauth/callback
+```
+
+OAuth will not work in:
 
 - Headless environments without browser access
-- Remote SSH sessions without X11 forwarding
-- Containerized environments without browser support
+- Environments where the configured `redirectUri` is unreachable from the user's browser
 
 #### Managing OAuth Authentication
 
@@ -192,7 +204,7 @@ Use the `/mcp auth` command to manage OAuth authentication:
 - **`authorizationUrl`** (string): OAuth authorization endpoint (auto-discovered if omitted)
 - **`tokenUrl`** (string): OAuth token endpoint (auto-discovered if omitted)
 - **`scopes`** (string[]): Required OAuth scopes
-- **`redirectUri`** (string): Custom redirect URI (defaults to `http://localhost:7777/oauth/callback`)
+- **`redirectUri`** (string): Custom redirect URI. **Critical for remote deployments**: Defaults to `http://localhost:7777/oauth/callback`. When running Qwen Code on remote/cloud servers, set this to a publicly accessible URL (e.g., `https://your-server.com/oauth/callback`). Can be configured via `qwen mcp add --oauth-redirect-uri` or directly in settings.json.
 - **`tokenParamName`** (string): Query parameter name for tokens in SSE URLs
 - **`audiences`** (string[]): Audiences the token is valid for
 
@@ -794,8 +806,6 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 - `--oauth-authorization-url`: OAuth authorization URL.
 - `--oauth-token-url`: OAuth token URL.
 - `--oauth-scopes`: OAuth scopes (comma-separated).
-
-> `--oauth-*` flags apply only to `--transport sse` and `--transport http`. Combining them with `--transport stdio` is rejected.
 
 #### Adding an stdio server
 

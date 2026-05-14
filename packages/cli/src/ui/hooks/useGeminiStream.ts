@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react';
+import {
+  useState,
+  useRef,
+  useCallback,
+  useEffect,
+  useMemo,
+  useLayoutEffect,
+} from 'react';
 import type {
   Config,
   EditorType,
@@ -42,13 +49,13 @@ import {
   ApiCancelEvent,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
+  generateToolUseSummary,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
-  IndividualToolCallDisplay,
   SlashCommandProcessorResult,
 } from '../types.js';
 import { StreamingState, MessageType, ToolCallStatus } from '../types.js';
@@ -80,6 +87,52 @@ import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+/**
+ * Pull the assistant's most recent visible text from the UI history. Used as
+ * an intent prefix for tool-use summary generation so the summarizer knows
+ * what the user was trying to accomplish.
+ */
+function extractLastAssistantText(history: HistoryItem[]): string | undefined {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const item = history[i];
+    if (
+      (item.type === 'gemini' || item.type === 'gemini_content') &&
+      typeof item.text === 'string' &&
+      item.text.trim().length > 0
+    ) {
+      return item.text;
+    }
+  }
+  return undefined;
+}
+
+function stripLeadingBlankLines(text: string): string {
+  return text.replace(/^(?:[ \t]*\r?\n)+/, '');
+}
+
+/**
+ * Flatten `functionResponse` parts into a compact string for the summarizer.
+ * The summarizer itself truncates to 300 chars per field, so we just join
+ * whatever is available without re-serializing.
+ */
+function extractToolResultText(parts: Part[] | Part | undefined): unknown {
+  if (!parts) return '';
+  const list = Array.isArray(parts) ? parts : [parts];
+  const chunks: unknown[] = [];
+  for (const part of list) {
+    if ('functionResponse' in part && part.functionResponse) {
+      const response = (part.functionResponse as { response?: unknown })
+        .response;
+      if (response !== undefined) chunks.push(response);
+    } else if ('text' in part && typeof part.text === 'string') {
+      chunks.push(part.text);
+    }
+  }
+  if (chunks.length === 0) return '';
+  if (chunks.length === 1) return chunks[0];
+  return chunks;
+}
 
 /**
  * Classify API error to StopFailureErrorType
@@ -174,12 +227,16 @@ function checkImageFormatsSupport(parts: PartListUnion): {
 
 enum StreamProcessingStatus {
   Completed,
-  CompletedWithToolCalls,
   UserCancelled,
   Error,
 }
 
 const EDIT_TOOL_NAMES = new Set(['replace', 'write_file']);
+const STREAM_UPDATE_THROTTLE_MS = 60;
+
+type BufferedStreamEvent =
+  | { kind: 'content'; value: string }
+  | { kind: 'thought'; value: ThoughtSummary };
 
 function showCitations(settings: LoadedSettings): boolean {
   const enabled = settings?.merged?.ui?.showCitations;
@@ -216,15 +273,32 @@ export const useGeminiStream = (
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
 ) => {
-  const dualOutput = useDualOutput();
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const flushBufferedStreamEventsRef = useRef<Set<() => void>>(new Set());
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   const lastPromptErroredRef = useRef(false);
+  const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
+  // Hold the latest history in a ref so handleCompletedTools can read it
+  // without depending on `history` (which would recreate the tool scheduler
+  // every render). Use useLayoutEffect instead of writing during render —
+  // writing refs in the render phase is unsafe under React's concurrent
+  // rendering (a bailed-out render could leave the ref with a dropped value).
+  const historyRef = useRef<HistoryItem[]>(history);
+  useLayoutEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+  // In-flight tool-use-summary aborters. Each batch gets its own AbortController
+  // because the captured turn controller is replaced when submitQuery starts
+  // the next turn, and the summary call outlives the current turn (that's the
+  // whole point — it overlaps with the next turn's streaming). cancelOngoingRequest
+  // aborts all in-flight summaries so Ctrl+C during the next turn also kills
+  // this turn's stale summary work.
+  const summaryAbortRefsRef = useRef<Set<AbortController>>(new Set());
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
     useStateAndRef<HistoryItemWithoutId | null>(null);
   const [
@@ -241,13 +315,14 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
-  const [
-    completedToolDisplaysForTurn,
-    completedToolDisplaysForTurnRef,
-    setCompletedToolDisplaysForTurn,
-  ] = useStateAndRef<IndividualToolCallDisplay[]>([]);
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // --- Real-time token display ---
+  // Accumulates output character count across the whole turn (not per API call).
+  // Uses a ref to avoid re-renders on every text_delta.
+  const streamingResponseLengthRef = useRef(0);
+  // Tracks whether we are receiving content (↓) or waiting for API (↑).
+  const [isReceivingContent, setIsReceivingContent] = useState(false);
   const {
     startNewPrompt,
     getPromptCount,
@@ -267,13 +342,13 @@ export const useGeminiStream = (
       async (completedToolCallsFromScheduler) => {
         // This onComplete is called when ALL scheduled tools for a given batch are done.
         if (completedToolCallsFromScheduler.length > 0) {
-          const display = mapTrackedToolCallsToDisplay(
+          const projectRoot = config.getProjectRoot();
+          // Add the final state of these tools to the history for display.
+          const toolGroupDisplay = mapTrackedToolCallsToDisplay(
             completedToolCallsFromScheduler as TrackedToolCall[],
+            projectRoot,
           );
-          setCompletedToolDisplaysForTurn((prev) => [
-            ...prev,
-            ...display.tools,
-          ]);
+          addItem(toolGroupDisplay, Date.now());
 
           // Handle tool response submission immediately when tools complete
           await handleCompletedTools(
@@ -286,19 +361,13 @@ export const useGeminiStream = (
       onEditorClose,
     );
 
-  const pendingToolCallGroupDisplay = useMemo(() => {
-    const currentTools = toolCalls.length
-      ? mapTrackedToolCallsToDisplay(toolCalls).tools
-      : [];
-    const allTools = [...completedToolDisplaysForTurn, ...currentTools];
-    if (allTools.length === 0) {
-      return undefined;
-    }
-    return {
-      type: 'tool_group' as const,
-      tools: allTools,
-    } as HistoryItemToolGroup;
-  }, [toolCalls, completedToolDisplaysForTurn]);
+  const pendingToolCallGroupDisplay = useMemo(
+    () =>
+      toolCalls.length
+        ? mapTrackedToolCallsToDisplay(toolCalls, config.getProjectRoot())
+        : undefined,
+    [toolCalls, config],
+  );
 
   const activeToolPtyId = useMemo(() => {
     const executingShellTool = toolCalls?.find(
@@ -483,24 +552,6 @@ export const useGeminiStream = (
     }
   }, [streamingState, config, history]);
 
-  const flushCompletedToolDisplays = useCallback(
-    (timestamp: number) => {
-      const accumulated = completedToolDisplaysForTurnRef.current;
-      if (accumulated.length === 0) {
-        return;
-      }
-      addItem(
-        {
-          type: 'tool_group',
-          tools: [...accumulated],
-        } as HistoryItemToolGroup,
-        timestamp,
-      );
-      setCompletedToolDisplaysForTurn([]);
-    },
-    [addItem, completedToolDisplaysForTurnRef, setCompletedToolDisplaysForTurn],
-  );
-
   const cancelOngoingRequest = useCallback(() => {
     if (streamingState !== StreamingState.Responding) {
       return;
@@ -508,9 +559,18 @@ export const useGeminiStream = (
     if (turnCancelledRef.current) {
       return;
     }
+    for (const flushBufferedStreamEvents of flushBufferedStreamEventsRef.current) {
+      flushBufferedStreamEvents();
+    }
     turnCancelledRef.current = true;
     isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
+    // Cancel any in-flight tool-use-summary generations so their Promise.then
+    // doesn't addItem a stale label after the user cancelled.
+    for (const ac of summaryAbortRefsRef.current) {
+      ac.abort();
+    }
+    summaryAbortRefsRef.current.clear();
 
     // Report cancellation to arena status reporter (if in arena mode).
     // This is needed because cancellation during tool execution won't
@@ -527,7 +587,6 @@ export const useGeminiStream = (
     );
     logApiCancel(config, cancellationEvent);
 
-    flushCompletedToolDisplays(Date.now());
     if (pendingHistoryItemRef.current) {
       addItem(pendingHistoryItemRef.current, Date.now());
     }
@@ -553,7 +612,6 @@ export const useGeminiStream = (
     clearRetryCountdown,
     config,
     getPromptCount,
-    flushCompletedToolDisplays,
   ]);
 
   const prepareQueryForGemini = useCallback(
@@ -704,17 +762,22 @@ export const useGeminiStream = (
         // Prevents additional output after a user initiated cancel.
         return '';
       }
+      // Track output chars for real-time token estimation & mark as receiving.
+      streamingResponseLengthRef.current += eventValue.length;
+      setIsReceivingContent(true);
       let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
       if (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
         pendingHistoryItemRef.current?.type !== 'gemini_content'
       ) {
+        if (newGeminiMessageBuffer.trim().length === 0) {
+          return newGeminiMessageBuffer;
+        }
         if (pendingHistoryItemRef.current) {
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
-        flushCompletedToolDisplays(userMessageTimestamp);
         setPendingHistoryItem({ type: 'gemini', text: '' });
-        newGeminiMessageBuffer = eventValue;
+        newGeminiMessageBuffer = stripLeadingBlankLines(newGeminiMessageBuffer);
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
@@ -750,12 +813,7 @@ export const useGeminiStream = (
       }
       return newGeminiMessageBuffer;
     },
-    [
-      addItem,
-      pendingHistoryItemRef,
-      setPendingHistoryItem,
-      flushCompletedToolDisplays,
-    ],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const mergeThought = useCallback(
@@ -794,13 +852,22 @@ export const useGeminiStream = (
       const isPendingThought =
         pendingType === 'gemini_thought' ||
         pendingType === 'gemini_thought_content';
+      let thoughtToMerge = eventValue;
 
       // If we're not already showing a thought, start a new one
       if (!isPendingThought) {
+        if (newThoughtBuffer.trim().length === 0) {
+          return newThoughtBuffer;
+        }
         // If there's a pending non-thought item, finalize it first
         if (pendingHistoryItemRef.current) {
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
+        newThoughtBuffer = stripLeadingBlankLines(newThoughtBuffer);
+        thoughtToMerge = {
+          ...eventValue,
+          description: newThoughtBuffer,
+        };
         setPendingHistoryItem({ type: 'gemini_thought', text: '' });
       }
 
@@ -837,7 +904,7 @@ export const useGeminiStream = (
       }
 
       // Also update the thought state for the loading indicator
-      mergeThought(eventValue);
+      mergeThought(thoughtToMerge);
 
       return newThoughtBuffer;
     },
@@ -851,7 +918,6 @@ export const useGeminiStream = (
       }
 
       lastPromptErroredRef.current = false;
-      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -886,14 +952,12 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       setThought,
       clearRetryCountdown,
-      flushCompletedToolDisplays,
     ],
   );
 
   const handleErrorEvent = useCallback(
     (eventValue: GeminiErrorEventValue, userMessageTimestamp: number) => {
       lastPromptErroredRef.current = true;
-      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -942,7 +1006,6 @@ export const useGeminiStream = (
       config,
       setThought,
       clearRetryCountdown,
-      flushCompletedToolDisplays,
     ],
   );
 
@@ -952,20 +1015,13 @@ export const useGeminiStream = (
         return;
       }
 
-      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
       addItem({ type: MessageType.INFO, text }, userMessageTimestamp);
     },
-    [
-      addItem,
-      pendingHistoryItemRef,
-      setPendingHistoryItem,
-      settings,
-      flushCompletedToolDisplays,
-    ],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem, settings],
   );
 
   const handleFinishedEvent = useCallback(
@@ -1023,7 +1079,6 @@ export const useGeminiStream = (
       eventValue: ServerGeminiChatCompressedEvent['value'],
       userMessageTimestamp: number,
     ) => {
-      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -1040,13 +1095,7 @@ export const useGeminiStream = (
         Date.now(),
       );
     },
-    [
-      addItem,
-      config,
-      pendingHistoryItemRef,
-      setPendingHistoryItem,
-      flushCompletedToolDisplays,
-    ],
+    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleMaxSessionTurnsEvent = useCallback(
@@ -1118,7 +1167,6 @@ export const useGeminiStream = (
       value: { reason: string; originalPrompt: string },
       userMessageTimestamp: number,
     ) => {
-      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -1132,12 +1180,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [
-      addItem,
-      pendingHistoryItemRef,
-      setPendingHistoryItem,
-      flushCompletedToolDisplays,
-    ],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const handleStopHookLoopEvent = useCallback(
@@ -1149,7 +1192,6 @@ export const useGeminiStream = (
       },
       userMessageTimestamp: number,
     ) => {
-      flushCompletedToolDisplays(userMessageTimestamp);
       if (pendingHistoryItemRef.current) {
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
@@ -1164,12 +1206,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [
-      addItem,
-      pendingHistoryItemRef,
-      setPendingHistoryItem,
-      flushCompletedToolDisplays,
-    ],
+    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const processGeminiStreamEvents = useCallback(
@@ -1181,72 +1218,183 @@ export const useGeminiStream = (
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
+      const bufferedEvents: BufferedStreamEvent[] = [];
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+      const discardBufferedStreamEvents = () => {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        bufferedEvents.length = 0;
+      };
+
+      const flushBufferedStreamEvents = () => {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+
+        if (bufferedEvents.length === 0) {
+          return;
+        }
+
+        while (bufferedEvents.length > 0) {
+          const nextEvent = bufferedEvents.shift()!;
+
+          if (nextEvent.kind === 'content') {
+            let mergedContent = nextEvent.value;
+
+            while (bufferedEvents[0]?.kind === 'content') {
+              const queuedContent = bufferedEvents.shift();
+              if (queuedContent?.kind !== 'content') {
+                break;
+              }
+              mergedContent += queuedContent.value;
+            }
+
+            geminiMessageBuffer = handleContentEvent(
+              mergedContent,
+              geminiMessageBuffer,
+              userMessageTimestamp,
+            );
+            continue;
+          }
+
+          let mergedThought = nextEvent.value;
+
+          while (bufferedEvents[0]?.kind === 'thought') {
+            const queuedThought = bufferedEvents.shift();
+            if (queuedThought?.kind !== 'thought') {
+              break;
+            }
+            mergedThought = {
+              subject: queuedThought.value.subject || mergedThought.subject,
+              description: `${mergedThought.description ?? ''}${
+                queuedThought.value.description ?? ''
+              }`,
+            };
+          }
+
+          thoughtBuffer = handleThoughtEvent(
+            mergedThought,
+            thoughtBuffer,
+            userMessageTimestamp,
+          );
+        }
+      };
+
+      const scheduleBufferedStreamFlush = () => {
+        if (flushTimer) {
+          return;
+        }
+
+        flushTimer = setTimeout(() => {
+          flushBufferedStreamEvents();
+        }, STREAM_UPDATE_THROTTLE_MS);
+      };
+
+      flushBufferedStreamEventsRef.current.add(flushBufferedStreamEvents);
       dualOutput?.startAssistantMessage();
       try {
         for await (const event of stream) {
           dualOutput?.processEvent(event);
           switch (event.type) {
             case ServerGeminiEventType.Thought:
-              // If the thought has a subject, it's a discrete status update rather than
-              // a streamed textual thought, so we update the thought state directly.
-              if (event.value.subject) {
+              // Subject-only chunks are discrete status updates for the
+              // loading indicator and render immediately. Anything carrying
+              // streamed text (with or without a subject) goes through the
+              // throttled buffer so it batches with adjacent reasoning
+              // chunks; the flush merger preserves the subject.
+              if (event.value.subject && !event.value.description) {
+                flushBufferedStreamEvents();
                 setThought(event.value);
               } else {
-                thoughtBuffer = handleThoughtEvent(
-                  event.value,
-                  thoughtBuffer,
-                  userMessageTimestamp,
-                );
+                bufferedEvents.push({ kind: 'thought', value: event.value });
+                scheduleBufferedStreamFlush();
               }
               break;
             case ServerGeminiEventType.Content:
-              geminiMessageBuffer = handleContentEvent(
-                event.value,
-                geminiMessageBuffer,
-                userMessageTimestamp,
-              );
+              bufferedEvents.push({ kind: 'content', value: event.value });
+              scheduleBufferedStreamFlush();
               break;
             case ServerGeminiEventType.ToolCallRequest:
+              flushBufferedStreamEvents();
               toolCallRequests.push(event.value);
+              // Count tool call args JSON toward token estimation (matches
+              // Claude Code's input_json_delta handling).
+              try {
+                const argsJson = JSON.stringify(event.value.args);
+                streamingResponseLengthRef.current += argsJson.length;
+              } catch {
+                // Best-effort — don't block on serialization errors
+              }
               break;
             case ServerGeminiEventType.UserCancelled:
+              flushBufferedStreamEvents();
               handleUserCancelledEvent(userMessageTimestamp);
               break;
             case ServerGeminiEventType.Error:
+              flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp);
               break;
             case ServerGeminiEventType.ChatCompressed:
+              flushBufferedStreamEvents();
               handleChatCompressionEvent(event.value, userMessageTimestamp);
               break;
             case ServerGeminiEventType.ToolCallConfirmation:
             case ServerGeminiEventType.ToolCallResponse:
-              // do nothing
+              flushBufferedStreamEvents();
               break;
             case ServerGeminiEventType.MaxSessionTurns:
+              flushBufferedStreamEvents();
               handleMaxSessionTurnsEvent();
               break;
             case ServerGeminiEventType.SessionTokenLimitExceeded:
+              flushBufferedStreamEvents();
               handleSessionTokenLimitExceededEvent(event.value);
               break;
             case ServerGeminiEventType.Finished:
+              flushBufferedStreamEvents();
               handleFinishedEvent(
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
               );
               break;
             case ServerGeminiEventType.Citation:
+              flushBufferedStreamEvents();
               handleCitationEvent(event.value, userMessageTimestamp);
               break;
             case ServerGeminiEventType.LoopDetected:
+              flushBufferedStreamEvents();
               // handle later because we want to move pending history to history
               // before we add loop detected message to history
               loopDetectedRef.current = true;
               break;
             case ServerGeminiEventType.Retry:
-              // Clear any pending partial content from the failed attempt
-              if (pendingHistoryItemRef.current) {
-                setPendingHistoryItem(null);
+              // On fresh restart (escalation / rate-limit / invalid stream),
+              // clear pending content and buffers to discard the failed attempt.
+              // On continuation (recovery), keep the pending gemini item AND
+              // buffers so the model's continuation text appends to them —
+              // otherwise handleContentEvent would see a null pending item,
+              // create a fresh one, and reset the buffer to just the new chunk,
+              // losing the partial text we meant to preserve.
+              if (!event.isContinuation) {
+                discardBufferedStreamEvents();
+                if (pendingHistoryItemRef.current) {
+                  setPendingHistoryItem(null);
+                }
+                geminiMessageBuffer = '';
+                thoughtBuffer = '';
+              } else {
+                flushBufferedStreamEvents();
               }
+              // Always discard tool call requests from the truncated/failed
+              // attempt to prevent duplicate execution after escalation or
+              // recovery. The recovery path now skips turns that already
+              // contain a functionCall (see geminiChat.ts), so this only
+              // clears stale requests from pre-RETRY accumulation.
+              toolCallRequests.length = 0;
               // Show retry info if available (rate-limit / throttling errors)
               if (event.retryInfo) {
                 startRetryCountdown(event.retryInfo);
@@ -1256,9 +1404,9 @@ export const useGeminiStream = (
               }
               break;
             case ServerGeminiEventType.HookSystemMessage:
+              flushBufferedStreamEvents();
               // Display system message from Stop hooks with "Stop says:" prefix
               // First commit any pending AI response to ensure correct ordering
-              flushCompletedToolDisplays(userMessageTimestamp);
               if (pendingHistoryItemRef.current) {
                 addItem(pendingHistoryItemRef.current, userMessageTimestamp);
                 setPendingHistoryItem(null);
@@ -1272,12 +1420,14 @@ export const useGeminiStream = (
               );
               break;
             case ServerGeminiEventType.UserPromptSubmitBlocked:
+              flushBufferedStreamEvents();
               handleUserPromptSubmitBlockedEvent(
                 event.value,
                 userMessageTimestamp,
               );
               break;
             case ServerGeminiEventType.StopHookLoop:
+              flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               break;
             default: {
@@ -1288,11 +1438,13 @@ export const useGeminiStream = (
           }
         }
       } finally {
-        dualOutput?.finalizeAssistantMessage();
+        flushBufferedStreamEvents();
+        discardBufferedStreamEvents();
+        flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
       }
+      dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0) {
         scheduleToolCalls(toolCallRequests, signal);
-        return StreamProcessingStatus.CompletedWithToolCalls;
       }
       return StreamProcessingStatus.Completed;
     },
@@ -1316,7 +1468,6 @@ export const useGeminiStream = (
       handleStopHookLoopEvent,
       addItem,
       dualOutput,
-      flushCompletedToolDisplays,
     ],
   );
 
@@ -1362,7 +1513,6 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
-        flushCompletedToolDisplays(userMessageTimestamp);
         // Clear model override for new user turns, but preserve it on retry
         // so the same skill-selected model is used again.
         if (submitType !== SendMessageType.Retry) {
@@ -1462,6 +1612,13 @@ export const useGeminiStream = (
 
         setIsResponding(true);
         setInitError(null);
+        // Entering "requesting" phase — no content yet for this API call.
+        setIsReceivingContent(false);
+        // Reset char counter only on new user queries; tool-result continuations
+        // keep accumulating so the token count only goes up within a turn.
+        if (submitType !== SendMessageType.ToolResult) {
+          streamingResponseLengthRef.current = 0;
+        }
 
         try {
           // Emit user message to dual output sidecar (if enabled).
@@ -1502,11 +1659,6 @@ export const useGeminiStream = (
             return;
           }
 
-          if (
-            processingStatus !== StreamProcessingStatus.CompletedWithToolCalls
-          ) {
-            flushCompletedToolDisplays(userMessageTimestamp);
-          }
           if (pendingHistoryItemRef.current) {
             addItem(pendingHistoryItemRef.current, userMessageTimestamp);
             setPendingHistoryItem(null);
@@ -1576,7 +1728,6 @@ export const useGeminiStream = (
     [
       streamingState,
       setModelSwitchedFromQuotaError,
-      flushCompletedToolDisplays,
       prepareQueryForGemini,
       processGeminiStreamEvents,
       pendingHistoryItemRef,
@@ -1747,6 +1898,13 @@ export const useGeminiStream = (
         (t) => !t.request.isClientInitiated,
       );
 
+      for (const toolCall of geminiTools) {
+        geminiClient?.recordCompletedToolCall(
+          toolCall.request.name,
+          toolCall.request.args as Record<string, unknown>,
+        );
+      }
+
       if (geminiTools.length === 0) {
         return;
       }
@@ -1790,12 +1948,6 @@ export const useGeminiStream = (
         (toolCall) => toolCall.request.prompt_id,
       );
 
-      if (dualOutput) {
-        for (const toolCall of geminiTools) {
-          dualOutput.emitToolResult(toolCall.request, toolCall.response);
-        }
-      }
-
       // Persist model override from skill tool results (last one wins).
       // Uses `in` so that undefined (from inherit/no-model skills) clears a
       // prior override, while non-skill tools (field absent) leave it intact.
@@ -1813,6 +1965,97 @@ export const useGeminiStream = (
       }
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+
+      // Fire tool-use summary generation in parallel with the next API call.
+      // The fast-model Haiku-equivalent latency (~1s) is hidden behind the
+      // main-model streaming (5-30s). Mirrors Claude Code's query.ts:1411-1482
+      // behavior. Fire-and-forget: failures are silent and never block the turn.
+      // Subagent exclusion is implicit — useGeminiStream only drives the
+      // main session; subagents run through agents/runtime/ with their own loop.
+      if (config.getEmitToolUseSummaries()) {
+        // Only summarize successful tools. Error/cancelled entries push
+        // "Cancelled by user" / retry-loop warnings into the summarizer
+        // prompt and produce plausibly-worded but misleading labels (the
+        // fast model happily synthesizes "Attempted to read files" from a
+        // batch that was mostly failures). cleanSummary can reject output
+        // prefixes but not prevent this kind of polluted-input hallucination.
+        const successfulTools = geminiTools.filter(
+          (tc) => tc.status === 'success',
+        );
+        if (successfulTools.length > 0) {
+          const toolInfoForSummary = successfulTools.map((tc) => ({
+            name: tc.request.name,
+            input: tc.request.args,
+            output: extractToolResultText(tc.response.responseParts),
+          }));
+          const toolUseIds = successfulTools.map((tc) => tc.request.callId);
+          const lastAssistantText = extractLastAssistantText(
+            historyRef.current,
+          );
+          // Dedicated AbortController for this batch. Scoping it to the
+          // current turn via abortControllerRef.current would be wrong —
+          // submitQuery() below allocates a new controller for the next
+          // turn, so the captured signal becomes stale the moment the
+          // next turn starts. Instead, check the live abort state at
+          // resolve time (which covers both Ctrl+C on the next turn and
+          // mid-flight cancellation of this batch via turnCancelledRef).
+          const summaryAbort = new AbortController();
+          summaryAbortRefsRef.current.add(summaryAbort);
+
+          // Capture the first callId so we can locate "our" tool_group at
+          // resolve time. If a newer tool_group has been added since we
+          // fired (i.e., the conversation moved on), we drop the summary
+          // rather than wedging the `● <label>` line between later items.
+          const anchorCallId = toolUseIds[0];
+
+          void generateToolUseSummary({
+            config,
+            tools: toolInfoForSummary,
+            signal: summaryAbort.signal,
+            lastAssistantText,
+          })
+            .then((summary) => {
+              summaryAbortRefsRef.current.delete(summaryAbort);
+              const cancelled =
+                turnCancelledRef.current ||
+                abortControllerRef.current?.signal.aborted ||
+                summaryAbort.signal.aborted;
+              if (!summary || cancelled) return;
+
+              // Stale-summary check: only append if our tool_group is still
+              // the latest one in history. If a newer batch landed while
+              // the fast-model call was in flight, the conversation has
+              // moved past this batch and dropping in a `● <label>` line
+              // now would land it after later content (full mode) or
+              // attribute it to the wrong group (compact mode).
+              const currentHistory = historyRef.current;
+              const ourIdx = currentHistory.findIndex(
+                (h) =>
+                  h.type === 'tool_group' &&
+                  h.tools.some((t) => t.callId === anchorCallId),
+              );
+              if (ourIdx < 0) return;
+              const laterToolGroupExists = currentHistory
+                .slice(ourIdx + 1)
+                .some((h) => h.type === 'tool_group');
+              if (laterToolGroupExists) return;
+
+              if (summary && !cancelled) {
+                addItem(
+                  {
+                    type: 'tool_use_summary',
+                    summary,
+                    precedingToolUseIds: toolUseIds,
+                  } as HistoryItemWithoutId,
+                  Date.now(),
+                );
+              }
+            })
+            .catch(() => {
+              summaryAbortRefsRef.current.delete(summaryAbort);
+            });
+        }
+      }
 
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
@@ -1996,6 +2239,15 @@ export const useGeminiStream = (
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  const notificationQueueSessionIdRef = useRef(sessionStates.sessionId);
+
+  useEffect(() => {
+    if (notificationQueueSessionIdRef.current === sessionStates.sessionId) {
+      return;
+    }
+    notificationQueueSessionIdRef.current = sessionStates.sessionId;
+    notificationQueueRef.current = [];
+  }, [sessionStates.sessionId]);
 
   // Start the cron scheduler on mount, stop on unmount.
   // Cron fires enqueue onto the shared notification queue.
@@ -2023,6 +2275,22 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // Register monitor notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getMonitorRegistry();
     registry.setNotificationCallback((displayText, modelText) => {
       notificationQueueRef.current.push({
         displayText,
@@ -2065,5 +2333,7 @@ export const useGeminiStream = (
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    streamingResponseLengthRef,
+    isReceivingContent,
   };
 };

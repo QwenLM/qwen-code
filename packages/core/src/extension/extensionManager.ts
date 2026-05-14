@@ -539,14 +539,20 @@ export class ExtensionManager {
   async refreshCache(options?: { names?: string[] }): Promise<void> {
     this.extensionCache = new Map<string, Extension>();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
-    const extensions =
-      requestedNames.length > 0
-        ? (
-            await Promise.all(
-              requestedNames.map((name) => this.loadExtensionByName(name)),
-            )
-          ).filter((extension): extension is Extension => extension !== null)
-        : await this.loadExtensionsFromDir(os.homedir());
+    let extensions: Extension[];
+    if (requestedNames.length > 0) {
+      extensions = (
+        await Promise.all(
+          requestedNames.map((name) => this.loadExtensionByName(name)),
+        )
+      ).filter((extension): extension is Extension => extension !== null);
+    } else {
+      // Default: load all extensions from QWEN_HOME-aware user extensions dir.
+      extensions = await this.loadExtensionsFromExtensionsDir(
+        ExtensionStorage.getUserExtensionsDir(),
+        this.workspaceDir,
+      );
+    }
     extensions.forEach((extension) => {
       this.extensionCache!.set(extension.name, extension);
     });
@@ -598,23 +604,29 @@ export class ExtensionManager {
 
   async loadExtensionsFromDir(dir: string): Promise<Extension[]> {
     const storage = new Storage(dir);
-    const extensionsDir = storage.getExtensionsDir();
+    return this.loadExtensionsFromExtensionsDir(
+      storage.getExtensionsDir(),
+      dir,
+    );
+  }
 
+  private async loadExtensionsFromExtensionsDir(
+    extensionsDir: string,
+    workspaceDir: string,
+  ): Promise<Extension[]> {
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);
     } catch {
-      // Directory doesn't exist or is inaccessible
       return [];
     }
 
     const extensions: Extension[] = [];
     for (const subdir of subdirs) {
       const extensionDir = path.join(extensionsDir, subdir);
-
       const extension = await this.loadExtension({
         extensionDir,
-        workspaceDir: dir,
+        workspaceDir,
       });
       if (extension != null) {
         extensions.push(extension);
@@ -1346,12 +1358,44 @@ export class ExtensionManager {
     if (!this.config) return;
     // refresh mcp servers
     await this.config.getToolRegistry().restartMcpServers();
-    // refresh skills
-    this.config.getSkillManager()?.refreshCache();
-    // refresh subagents
-    this.config.getSubagentManager().refreshCache();
-    // refresh context files
-    this.config.refreshHierarchicalMemory();
+    // Refresh skills + subagents in parallel. Both `refreshCache` calls
+    // now resolve only after their async change-listener chain settles
+    // — for skills, that includes `SkillTool.refreshSkills()` rebuilding
+    // the model-facing tool description and updating `geminiClient`'s
+    // tool list. allSettled (rather than Promise.all) so a rejection
+    // from one leg does not cascade — the other leg's result is still
+    // applied, refreshHierarchicalMemory below still runs, and the
+    // `refreshTools` callers (`enableExtension`, etc.) don't unwind
+    // because of an unrelated transient failure.
+    const skillManager = this.config.getSkillManager();
+    const settled = await Promise.allSettled([
+      skillManager?.refreshCache(),
+      this.config.getSubagentManager().refreshCache(),
+    ]);
+    for (const result of settled) {
+      if (result.status === 'rejected') {
+        debugLogger.warn(
+          'refreshMemory: a refreshCache leg failed:',
+          result.reason,
+        );
+      }
+    }
+    // Hierarchical memory refresh is now awaited too — the previous
+    // fire-and-forget defeated the rest of the function's "wait until
+    // refresh is done" contract. Wrap in try/catch so a transient
+    // failure doesn't propagate up to `enableExtension` /
+    // `installExtension` callers, which have already mutated their
+    // `isActive`/`installed` flags by the time refreshMemory is
+    // invoked. A failed memory refresh leaves stale memory but should
+    // not back out the surrounding extension transition.
+    try {
+      await this.config.refreshHierarchicalMemory();
+    } catch (err) {
+      debugLogger.error(
+        'refreshMemory: refreshHierarchicalMemory failed:',
+        err,
+      );
+    }
   }
 
   async refreshTools(): Promise<void> {

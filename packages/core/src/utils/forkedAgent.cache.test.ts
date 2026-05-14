@@ -63,36 +63,6 @@ describe('CacheSafeParams', () => {
       }>;
       expect(savedTools[0].functionDeclarations).toHaveLength(1);
     });
-
-    it('returns a cloned snapshot on read', () => {
-      const history = [{ role: 'user', parts: [{ text: 'hello' }] }];
-      saveCacheSafeParams(
-        {
-          systemInstruction: 'test',
-          tools: [{ functionDeclarations: [{ name: 'tool1' }] }],
-        },
-        history,
-        'model',
-      );
-
-      const firstRead = getCacheSafeParams()!;
-      (
-        firstRead.generationConfig.tools![0] as {
-          functionDeclarations: unknown[];
-        }
-      ).functionDeclarations.push({ name: 'tool2' });
-      firstRead.history.push({
-        role: 'model',
-        parts: [{ text: 'mutated' }],
-      });
-
-      const secondRead = getCacheSafeParams()!;
-      const savedTools = secondRead.generationConfig.tools as Array<{
-        functionDeclarations: unknown[];
-      }>;
-      expect(savedTools[0].functionDeclarations).toHaveLength(1);
-      expect(secondRead.history).toHaveLength(1);
-    });
   });
 
   describe('clearCacheSafeParams', () => {

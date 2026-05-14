@@ -18,7 +18,7 @@ export const recapCommand: SlashCommand = {
   name: 'recap',
   kind: CommandKind.BUILT_IN,
   get description() {
-    return t('Show a 1-3 sentence summary of where you left off');
+    return t('Generate a one-line session recap now');
   },
   action: async (
     context: CommandContext,

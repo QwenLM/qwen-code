@@ -6,7 +6,12 @@
 
 import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
-import type { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  GitService,
+  Logger,
+  SessionListItem,
+} from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
   HistoryItem,
@@ -85,7 +90,8 @@ export interface CommandContext {
     loadHistory: UseHistoryManagerReturn['loadHistory'];
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
-    reloadCommands: () => void;
+    reloadCommands: () => void | Promise<void>;
+    setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
     dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
     addConfirmUpdateExtensionRequest: (value: ConfirmationRequest) => void;
@@ -148,6 +154,15 @@ export interface StreamMessagesActionReturn {
 export interface OpenDialogActionReturn {
   type: 'dialog';
 
+  /** Optional session ID to pass directly to the dialog handler (e.g., for /resume <id>). */
+  sessionId?: string;
+
+  /** Pre-filtered sessions for the picker (e.g., multiple title matches from /resume <title>). */
+  matchedSessions?: SessionListItem[];
+
+  /** Optional session name for /branch — passed through to handleBranch. */
+  name?: string;
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -161,15 +176,19 @@ export interface OpenDialogActionReturn {
     | 'memory'
     | 'model'
     | 'fast-model'
+    | 'manage-models'
     | 'subagent_create'
     | 'subagent_list'
     | 'trust'
     | 'permissions'
     | 'approval-mode'
     | 'resume'
+    | 'delete'
+    | 'branch'
     | 'extensions_manage'
     | 'hooks'
-    | 'mcp';
+    | 'mcp'
+    | 'rewind';
 }
 
 /**
@@ -261,22 +280,12 @@ export type CommandSource =
 // | 'plugin-skill'
 // | 'dynamic-skill'
 
-/**
- * The execution type of a slash command, describing *how* it runs.
- *
- * - prompt: Produces a submit_prompt — content is sent to the model.
- *   Default supportedModes: all. Default modelInvocable: true.
- *
- * - local: Runs local logic with no React/Ink UI dependency.
- *   Can return message, stream_messages, submit_prompt, tool, etc.
- *   Default supportedModes: ['interactive'] — must explicitly declare
- *   supportedModes to unlock other modes (mirrors Claude Code's
- *   supportsNonInteractive: true pattern).
- *
- * - local-jsx: Depends on React/Ink UI (dialogs, JSX components, etc.).
- *   Default supportedModes: ['interactive'] only.
- */
-export type CommandType = 'prompt' | 'local' | 'local-jsx';
+export type CommandSourceDetail =
+  | 'user'
+  | 'project'
+  | 'custom'
+  | 'extension'
+  | 'plugin';
 
 export interface CommandCompletionItem {
   value: string;
@@ -317,16 +326,16 @@ export interface SlashCommand {
   sourceLabel?: string;
 
   /**
-   * How this command executes. Set by built-in command files (local/local-jsx)
-   * or by Loaders (prompt). Used by getEffectiveSupportedModes() to infer
-   * which execution modes are supported.
+   * Stable, non-localized source detail for semantic routing and badges.
+   * `sourceLabel` is user-visible display text and may be localized.
    */
-  commandType?: CommandType;
+  sourceDetail?: CommandSourceDetail;
 
   // ── Phase 1: mode capability ───────────────────────────────────────────
   /**
    * Which execution modes this command is available in.
-   * Explicit declaration takes priority over commandType inference.
+   * Explicit declaration is always authoritative. If omitted, the system falls
+   * back to a conservative default based on CommandKind.
    * See getEffectiveSupportedModes() in commandUtils.ts for the full logic.
    */
   supportedModes?: ExecutionMode[];
@@ -357,6 +366,19 @@ export interface SlashCommand {
    * description for modelInvocable commands.
    */
   whenToUse?: string;
+
+  /**
+   * Non-localized description reserved for model-visible metadata.
+   * Dynamic command localization may rewrite `description` for UI display while
+   * keeping this value stable for model invocation hints.
+   */
+  modelDescription?: string;
+
+  /**
+   * Marks command descriptions that should be localized at runtime to match the
+   * current UI language.
+   */
+  localizeDescription?: boolean;
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];

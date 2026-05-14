@@ -194,10 +194,15 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
     );
   });
 
-  it('getGlobalIdeDir uses custom runtime base dir', () => {
+  it('getGlobalIdeDir is anchored to the global Qwen dir, not runtime base dir', () => {
     const customDir = path.resolve('custom');
     Storage.setRuntimeBaseDir(customDir);
-    expect(Storage.getGlobalIdeDir()).toBe(path.join(customDir, 'ide'));
+    // IDE lock files are discovery anchors shared with the VS Code companion,
+    // which can only see env vars (not settings-based runtimeOutputDir), so
+    // getGlobalIdeDir must follow getGlobalQwenDir to keep both sides aligned.
+    expect(Storage.getGlobalIdeDir()).toBe(
+      path.join(Storage.getGlobalQwenDir(), 'ide'),
+    );
   });
 
   it('getProjectDir uses custom runtime base dir', () => {
@@ -310,6 +315,103 @@ describe('Storage – config paths remain at ~/.qwen regardless of runtime dir',
     expect(
       skillsDirs.some((dir) => dir === path.join(globalQwenDir, 'skills')),
     ).toBe(true);
+  });
+});
+
+describe('Storage – QWEN_HOME env var', () => {
+  const originalEnv = process.env['QWEN_HOME'];
+
+  afterEach(() => {
+    if (originalEnv !== undefined) {
+      process.env['QWEN_HOME'] = originalEnv;
+    } else {
+      delete process.env['QWEN_HOME'];
+    }
+  });
+
+  it('defaults to ~/.qwen when QWEN_HOME is not set', () => {
+    delete process.env['QWEN_HOME'];
+    const expected = path.join(os.homedir(), '.qwen');
+    expect(Storage.getGlobalQwenDir()).toBe(expected);
+  });
+
+  it('uses QWEN_HOME when set to absolute path', () => {
+    const configDir = path.resolve('/tmp/custom-qwen');
+    process.env['QWEN_HOME'] = configDir;
+    expect(Storage.getGlobalQwenDir()).toBe(configDir);
+  });
+
+  it('resolves relative QWEN_HOME to absolute path', () => {
+    process.env['QWEN_HOME'] = 'relative/config';
+    const expected = path.resolve('relative/config');
+    expect(Storage.getGlobalQwenDir()).toBe(expected);
+  });
+
+  it('config paths follow QWEN_HOME', () => {
+    const configDir = path.resolve('/tmp/custom-qwen');
+    process.env['QWEN_HOME'] = configDir;
+    expect(Storage.getGlobalSettingsPath()).toBe(
+      path.join(configDir, 'settings.json'),
+    );
+    expect(Storage.getInstallationIdPath()).toBe(
+      path.join(configDir, 'installation_id'),
+    );
+    expect(Storage.getUserCommandsDir()).toBe(path.join(configDir, 'commands'));
+    expect(Storage.getMcpOAuthTokensPath()).toBe(
+      path.join(configDir, 'mcp-oauth-tokens.json'),
+    );
+    expect(Storage.getOAuthCredsPath()).toBe(
+      path.join(configDir, 'oauth_creds.json'),
+    );
+    expect(Storage.getGlobalBinDir()).toBe(path.join(configDir, 'bin'));
+    expect(Storage.getGlobalMemoryFilePath()).toBe(
+      path.join(configDir, 'memory.md'),
+    );
+  });
+
+  it('project-level paths are NOT affected by QWEN_HOME', () => {
+    const configDir = path.resolve('/tmp/custom-qwen');
+    const projectDir = path.resolve('/tmp/project');
+    process.env['QWEN_HOME'] = configDir;
+    const storage = new Storage(projectDir);
+    expect(storage.getWorkspaceSettingsPath()).toBe(
+      path.join(projectDir, '.qwen', 'settings.json'),
+    );
+    expect(storage.getProjectCommandsDir()).toBe(
+      path.join(projectDir, '.qwen', 'commands'),
+    );
+  });
+
+  it('expands tilde (~) in QWEN_HOME', () => {
+    process.env['QWEN_HOME'] = '~/custom-qwen';
+    const expected = path.join(os.homedir(), 'custom-qwen');
+    expect(Storage.getGlobalQwenDir()).toBe(expected);
+  });
+
+  it('expands Windows-style tilde in QWEN_HOME', () => {
+    process.env['QWEN_HOME'] = '~\\custom-qwen';
+    const expected = path.join(os.homedir(), 'custom-qwen');
+    expect(Storage.getGlobalQwenDir()).toBe(expected);
+  });
+
+  it('handles bare tilde (~) as home directory in QWEN_HOME', () => {
+    process.env['QWEN_HOME'] = '~';
+    expect(Storage.getGlobalQwenDir()).toBe(os.homedir());
+  });
+
+  it('QWEN_HOME and QWEN_RUNTIME_DIR are independent', () => {
+    const configDir = path.resolve('/tmp/config');
+    const runtimeDir = path.resolve('/tmp/runtime');
+    process.env['QWEN_HOME'] = configDir;
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    expect(Storage.getGlobalQwenDir()).toBe(configDir);
+    expect(Storage.getRuntimeBaseDir()).toBe(runtimeDir);
+    expect(Storage.getGlobalSettingsPath()).toBe(
+      path.join(configDir, 'settings.json'),
+    );
+    expect(Storage.getGlobalTempDir()).toBe(path.join(runtimeDir, 'tmp'));
+    expect(Storage.getGlobalDebugDir()).toBe(path.join(runtimeDir, 'debug'));
+    delete process.env['QWEN_RUNTIME_DIR'];
   });
 });
 
