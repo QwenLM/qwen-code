@@ -4,6 +4,24 @@ These rules guide automated PR review readiness checks before detailed code
 review. Apply them conservatively: the bot should reduce review noise and route
 unclear PRs to maintainers, not make final product decisions on weak evidence.
 
+## Gate Behavior
+
+- **Blocking gates**: When a blocking gate fails, the review stops before
+  detailed code analysis. The bot posts a process comment explaining which gate
+  failed, why, and what the author should address (e.g., split the PR, provide
+  design rationale, add validation evidence). The PR stays open — the author
+  can address the concern and re-trigger review with `@qwen /review`.
+- **Advisory gates**: When an advisory gate has concerns, the bot flags them
+  in the review body but proceeds with code review.
+
+### Gate Defaults
+
+| Gate | Default | Override |
+|------|---------|----------|
+| Scope / PR Purity | blocking | `scope-gate: advisory` in this file |
+| Product Direction | blocking | `product-direction-gate: advisory` in this file |
+| Validation / Dogfooding | advisory | `validation-gate: blocking` in this file |
+
 ## Review Gates
 
 ### Scope And PR Purity

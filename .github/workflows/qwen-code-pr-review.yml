@@ -153,6 +153,8 @@ jobs:
           # Strip leading blank lines so the prompt doesn't start with an
           # empty line when @qwen /review is on its own line.
           additional_instructions="$(printf '%s' "$additional_instructions" | sed '/./,$!d')"
+          # Keep maintainer focus text from changing the slash-command flags.
+          additional_instructions="$(printf '%s' "$additional_instructions" | LC_ALL=C perl -0pe 's/(?<!\S)--comment(?!\S)/`--comment`/g')"
           # Hard-cap to 2048 characters to keep prompt-injection surface
           # bounded without using a pipe that can trip pipefail on SIGPIPE.
           # Reviewers should keep instructions short.
