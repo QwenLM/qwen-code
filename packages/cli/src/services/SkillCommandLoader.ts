@@ -94,6 +94,7 @@ export class SkillCommandLoader implements ICommandLoader {
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
+          completionPriority: skill.priority,
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
             const body = skill.body;
 
