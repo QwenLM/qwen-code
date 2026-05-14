@@ -59,9 +59,11 @@ jobs:
     timeout-minutes: 30
     runs-on: 'ubuntu-latest'
     permissions:
+      checks: 'read'
       contents: 'read'
       pull-requests: 'write'
       issues: 'write'
+      statuses: 'read'
     env:
       GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
@@ -151,9 +153,10 @@ jobs:
           # Strip leading blank lines so the prompt doesn't start with an
           # empty line when @qwen /review is on its own line.
           additional_instructions="$(printf '%s' "$additional_instructions" | sed '/./,$!d')"
-          # Hard-cap to 2KB to keep prompt-injection surface bounded.
+          # Hard-cap to 2048 characters to keep prompt-injection surface
+          # bounded without using a pipe that can trip pipefail on SIGPIPE.
           # Reviewers should keep instructions short.
-          additional_instructions="$(printf '%s' "$additional_instructions" | head -c 2048)"
+          additional_instructions="${additional_instructions:0:2048}"
 
           # Build the review prompt for qwen-code-action.
           # Pass the full PR URL so the skill can resolve owner/repo unambiguously.
