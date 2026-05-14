@@ -1152,6 +1152,11 @@ export class GeminiClient {
           ideContextText = wrapIdeContext(contextParts.join('\n'));
           nextIdeContext = newIdeContext;
           shouldUpdateIdeContextState = true;
+        } else {
+          debugLogger.debug(
+            'IDE mode enabled but no context parts generated (forceFull=%s)',
+            this.forceFullIdeContext,
+          );
         }
       }
 

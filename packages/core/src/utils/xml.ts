@@ -58,6 +58,9 @@ function normalizeSystemReminderCandidateTag(tag: string): string {
 function getSystemReminderTagKind(
   tag: string,
 ): 'closing' | 'other' | undefined {
+  // NOTE: no fast-path pre-check (e.g. tag.toLowerCase().includes()) here.
+  // Zero-width obfuscated variants would bypass a literal substring check,
+  // which is exactly the injection vector normalization is designed to catch.
   const normalized = normalizeSystemReminderCandidateTag(tag);
   const match = /^<\s*(\/?)\s*system-reminder(?:\s+[^>]*)?\s*(\/?)\s*>$/.exec(
     normalized,
