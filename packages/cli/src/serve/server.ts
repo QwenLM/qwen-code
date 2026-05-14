@@ -30,6 +30,19 @@ import {
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
+  /**
+   * Pre-canonicalized workspace path. When supplied, `createServeApp`
+   * skips its own `canonicalizeWorkspace` call (which would issue a
+   * redundant `realpathSync.native` syscall — idempotent, but a hot
+   * boot-time stat we can avoid). `runQwenServe` passes this after
+   * its own boot-time canonicalize so the value used by
+   * `/capabilities`, the `POST /session` cwd fallback, and the
+   * bridge are all the SAME canonical form. Callers that haven't
+   * canonicalized yet (tests, direct embeds) omit this and
+   * `createServeApp` falls back to canonicalizing `opts.workspace ??
+   * process.cwd()` itself.
+   */
+  boundWorkspace?: string;
 }
 
 /**
@@ -85,17 +98,22 @@ export function createServeApp(
   // `process.cwd()`). `POST /session` with a mismatched cwd is
   // rejected with 400 `workspace_mismatch`.
   //
-  // Canonicalize here so the value advertised on `/capabilities`,
-  // used for the `POST /session` cwd fallback, AND passed into the
-  // bridge are all the SAME canonical form. Without this step the
-  // bridge re-canonicalizes via `realpathSync.native` and on symlinks
-  // / case-insensitive filesystems the bridge's stored form diverges
-  // from the value `/capabilities` advertises — clients echoing the
-  // advertised path back end up with a response whose `workspaceCwd`
-  // differs from what they sent. `canonicalizeWorkspace` is
-  // idempotent so `runQwenServe`'s pre-canonicalization here is a
-  // no-op when the caller already did the work.
-  const boundWorkspace = canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  // The value advertised on `/capabilities`, used for the `POST
+  // /session` cwd fallback, AND passed into the bridge must be the
+  // SAME canonical form — otherwise the bridge's
+  // `realpathSync.native` would diverge from what `/capabilities`
+  // shows on symlinks / case-insensitive filesystems, and clients
+  // echoing the advertised path back would see a response whose
+  // `workspaceCwd` differs from what they sent.
+  //
+  // `deps.boundWorkspace` is the pre-canonicalized fast-path —
+  // `runQwenServe` passes it after its own boot-time
+  // `canonicalizeWorkspace`, so we skip the redundant
+  // `realpathSync.native` here. When omitted (tests, direct embeds)
+  // we canonicalize ourselves.
+  const boundWorkspace =
+    deps.boundWorkspace ??
+    canonicalizeWorkspace(opts.workspace ?? process.cwd());
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -903,9 +921,23 @@ function sendBridgeError(
     // every client request silently 400s. Limited to authenticated
     // requests by the upstream bearer-token gate, so probing-DoS
     // log noise stays bounded.
+    // SECURITY: `err.requested` is derived from the request body
+    // (`req.workspaceCwd` → `canonicalizeWorkspace` → here). `path.resolve`
+    // + `realpathSync.native` both preserve control characters inside
+    // path segments — they only normalize separators / `..` / `.` and
+    // walk symlinks. A body like `{"cwd": "/legit/path\nqwen serve:
+    // FAKE LOG LINE"}` would otherwise emit two valid-looking daemon
+    // log lines, weaponizing line-based log shippers (Splunk / Loki /
+    // journald → SIEM). `JSON.stringify` escapes control chars and
+    // wraps in quotes so any injection attempt surfaces as
+    // visible-as-quoted-noise rather than forged-line. `err.bound` is
+    // safe (canonicalized at boot from operator-controlled
+    // `--workspace` / `process.cwd()`) but quoted symmetrically for
+    // readability.
     writeStderrLine(
       `qwen serve: workspace_mismatch (POST /session): ` +
-        `daemon bound to "${err.bound}", rejected "${err.requested}"`,
+        `daemon bound to ${JSON.stringify(err.bound)}, ` +
+        `rejected ${JSON.stringify(err.requested)}`,
     );
     res.status(400).json({
       error: err.message,

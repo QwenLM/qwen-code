@@ -1151,21 +1151,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
-      // tanzhenxin cold-spawn-window finding: the agent child exists
-      // from the moment `channelFactory(boundWorkspace)` returns, but
-      // pre-fix `aliveChannels.add(info)` ran only AFTER the
-      // `initialize` handshake completed (up to `initTimeoutMs`, default
-      // 10s). A double-Ctrl+C in that handshake window played out as:
-      // first SIGINT entered `shutdown()` and awaited the in-flight
-      // spawn; second SIGINT called `killAllSync()` against an empty
-      // `aliveChannels` (the channel hadn't been added yet) and
-      // `process.exit(1)` orphaned the child. Add to `aliveChannels`
-      // BEFORE the handshake await, and register the `channel.exited`
-      // handler immediately afterward so init-failure / child-crash /
-      // late-shutdown all clean up through the standard exit path
-      // instead of needing bespoke catches. `channelInfo` (the attach
-      // target) stays set only AFTER initialize succeeds — see further
-      // down — so callers don't attach to a still-handshaking channel.
+      // Add to `aliveChannels` + register the `channel.exited` handler
+      // BEFORE the `initialize` handshake (tanzhenxin cold-spawn-window
+      // finding): the agent child exists from the moment
+      // `channelFactory(boundWorkspace)` returns, so a `killAllSync()`
+      // during the handshake window (up to `initTimeoutMs`, default
+      // 10s) must find it to avoid orphaning on `process.exit(1)`.
+      // Init-failure / child-crash / late-shutdown all converge on
+      // the same cleanup path via the handler below.
+      // `channelInfo` (the attach target) is assigned only AFTER
+      // initialize succeeds so callers don't attach to a still-
+      // handshaking channel.
       const info: ChannelInfo = {
         channel,
         connection,
@@ -1174,6 +1170,24 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         isDying: false,
       };
       aliveChannels.add(info);
+      // Belt-and-suspenders leak detection. The set is intentionally
+      // multi-entry to cover the `killSession`-then-`spawnOrAttach`
+      // overlap window (size 2 is legitimate: one dying + one fresh
+      // attach-target). Anything higher implies a `channel.exited`
+      // handler never fired for some prior channel — a real leak we'd
+      // otherwise notice only as gradually-growing RSS over hours.
+      // The warning surfaces it the moment it happens. Threshold is
+      // 2 because that's the design ceiling; bumping it requires
+      // updating both this guard and the comments around
+      // `aliveChannels` declaration.
+      if (aliveChannels.size > 2) {
+        writeStderrLine(
+          `qwen serve: WARNING aliveChannels.size=${aliveChannels.size} ` +
+            `(expected 1, max 2 during killSession-then-spawnOrAttach ` +
+            `overlap) — possible channel leak; check that prior channels' ` +
+            `channel.exited fired and the handler ran cleanup.`,
+        );
+      }
 
       // One-time channel.exited cleanup. The child dying takes ALL
       // multiplexed sessions with it — iterate `sessionIds` (snapshot
@@ -1203,19 +1217,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
         info.sessionIds.clear();
-        // Operator breadcrumb on the daemon side. Without it, an
-        // agent crash (OOM / segfault) is invisible from the daemon
-        // log: each affected SSE subscriber sees a `session_died`
-        // frame and disconnects, the daemon's child-stderr forwarder
-        // emits whatever the child wrote before dying (often
-        // nothing on a SIGKILL / segfault), and operators can't tell
-        // from `qwen serve`'s own output that the agent process is
-        // gone. Log the OS-level signal/exitCode + how many sessions
-        // were affected so the line is the canonical "agent
-        // disappeared" indicator.
-        writeStderrLine(
-          `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, ${sessions.length} session(s) torn down)`,
-        );
+        // Operator breadcrumb for UNEXPECTED channel exits. Without
+        // this an agent crash (OOM / segfault) is invisible from the
+        // daemon log: each affected SSE subscriber sees a
+        // `session_died` frame and disconnects, the daemon's
+        // child-stderr forwarder emits whatever the child wrote before
+        // dying (often nothing on a SIGKILL / segfault), and operators
+        // can't tell from `qwen serve`'s own output that the agent
+        // process is gone.
+        //
+        // Suppressed during `shuttingDown` because the operator
+        // already saw "received SIGINT, draining..." from
+        // `runQwenServe`'s signal handler. The standalone
+        // killSession case (last session leaves, channel torn down
+        // but daemon stays up) still logs — there's no upstream
+        // context line in that flow, and the message confirms the
+        // cleanup actually ran.
+        if (!shuttingDown) {
+          writeStderrLine(
+            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, ${sessions.length} session(s) torn down)`,
+          );
+        }
         for (const sid of sessions) {
           const sessEntry = byId.get(sid);
           if (!sessEntry) continue;
@@ -1258,11 +1280,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           'initialize',
         );
       } catch (err) {
-        // Mark dying so concurrent `ensureChannel` callers spawn
-        // fresh instead of awaiting this in-flight promise's
-        // `channelInfo` (which we never assigned). The kill below
-        // triggers `channel.exited` → handler runs `aliveChannels
-        // .delete(info)` → entry leaves the alive set after OS reap.
+        // Mark the half-initialized channel as dying/unavailable, then
+        // kill it. Coalesced callers (`inFlightChannelSpawn` branch in
+        // `ensureChannel`) observe the same rejection on this promise
+        // and propagate it to their callers; the `inFlightSpawns`
+        // tracker is cleared in `spawnOrAttach`'s finally so a follow-
+        // up call retries cleanly. The `channel.exited` handler
+        // registered earlier removes `info` from `aliveChannels` once
+        // the OS reaps the child. `isDying` here is the cross-path
+        // invariant marker (matches `killSession` / `doSpawn`-
+        // newSession-failure / `shutdown`): "any channel in
+        // `aliveChannels` with `isDying === true` is mid-teardown."
         info.isDying = true;
         await channel.kill().catch(() => {});
         throw err;
@@ -2091,11 +2119,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // tanzhenxin BkUyD: iterate `aliveChannels` (the OS-level "still
       // alive" source of truth) — `channelInfo` only points at the
       // CURRENT attach target, missing any dying channel whose
-      // `channel.exited` hasn't fired yet. Pre-fix this iterated
-      // `channelInfo` alone; if a fresh spawn had already overwritten
-      // it during the prior channel's SIGTERM grace, the dying child
-      // received SIGTERM but no SIGKILL escalation when `process.exit(1)`
-      // fires and was orphaned.
+      // `channel.exited` hasn't fired yet. Without this, a fresh
+      // spawn overwriting `channelInfo` during the prior channel's
+      // SIGTERM grace would leave the dying child without SIGKILL
+      // escalation when `process.exit(1)` fires.
       shuttingDown = true;
       const channels = Array.from(aliveChannels);
       defaultEntry = undefined;

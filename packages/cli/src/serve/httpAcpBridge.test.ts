@@ -291,13 +291,11 @@ describe('createHttpAcpBridge', () => {
     expect(a.sessionId).toBe(SESS_A);
 
     // Cross-workspace POST throws before touching the channel.
-    await expect(
-      bridge.spawnOrAttach({ workspaceCwd: WS_B }),
-    ).rejects.toBeInstanceOf(WorkspaceMismatchError);
-    // The error carries both paths for the route's 400 body.
+    // Single `.catch` capture — assert instance + carried fields off
+    // the same caught value rather than firing the rejection twice.
     const err = await bridge
       .spawnOrAttach({ workspaceCwd: WS_B })
-      .catch((e: WorkspaceMismatchError) => e);
+      .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(WorkspaceMismatchError);
     expect((err as WorkspaceMismatchError).bound).toBe(WS_A);
     expect((err as WorkspaceMismatchError).requested).toBe(WS_B);

@@ -172,18 +172,16 @@ export async function runQwenServe(
     });
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`
-  // via `opts.workspace`. `canonicalizeWorkspace` is idempotent so
-  // server.ts's own canonicalize is a no-op, but if some future
-  // refactor ever makes it non-idempotent (caching, async I/O,
-  // etc.) the value the route advertises on `/capabilities` and the
-  // value the bridge enforces would diverge — landing clients in a
-  // "/capabilities says X, POST /session/X 400s with workspace_mismatch"
-  // contradiction. Pre-canonicalizing here removes that drift risk.
-  const app = createServeApp(
-    { ...opts, workspace: boundWorkspace },
-    () => actualPort,
-    { bridge },
-  );
+  // via `deps.boundWorkspace`. That field is the pre-canonicalized
+  // fast-path: createServeApp skips its own `canonicalizeWorkspace`
+  // call (which would issue a redundant `realpathSync.native`
+  // syscall — idempotent but unnecessary I/O at boot). Direct
+  // callers of createServeApp (tests / embeds) omit it and the
+  // server canonicalizes itself.
+  const app = createServeApp(opts, () => actualPort, {
+    bridge,
+    boundWorkspace,
+  });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
