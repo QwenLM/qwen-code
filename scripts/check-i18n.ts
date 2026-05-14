@@ -88,7 +88,7 @@ export function shouldWriteUnusedKeysJson(): boolean {
  *   - 打開 — colloquially common in Taiwan even if 開啟 is preferred for UI.
  *   - Bare 鏈 — valid in 區塊鏈 etc.; only the bigram 鏈接 is flagged.
  */
-const ZH_TW_FORBIDDEN_PATTERNS: ReadonlyArray<{
+const ZH_TW_FORBIDDEN_PATTERNS_RAW: ReadonlyArray<{
   pattern: string;
   preferred: string;
 }> = [
@@ -118,11 +118,34 @@ const ZH_TW_FORBIDDEN_PATTERNS: ReadonlyArray<{
   { pattern: '认', preferred: '認' },
 ];
 
+// Sorted longest-first so that more specific patterns (e.g. `历史`) are matched
+// before their constituent characters (`历`), avoiding duplicate findings on
+// the same translation value.
+const ZH_TW_FORBIDDEN_PATTERNS = [...ZH_TW_FORBIDDEN_PATTERNS_RAW].sort(
+  (a, b) => b.pattern.length - a.pattern.length,
+);
+
+/**
+ * Translation keys whose zh-TW value is allowed to contain an otherwise
+ * forbidden substring. Use this as an escape hatch when a legitimate
+ * translation needs a normally-banned character or word — add the key here
+ * with a comment explaining why, instead of weakening the global pattern list.
+ *
+ * Example:
+ *   'Open block explorer for {{address}}': '...區塊鏈瀏覽器...', // 區塊鏈 = blockchain
+ */
+const ZH_TW_ALLOWED_EXCEPTIONS: ReadonlySet<string> = new Set<string>([
+  // (empty — no legitimate exceptions today)
+]);
+
 /**
  * Walk every translation value and report any value containing a forbidden
  * substring. Iterating over the parsed dict (rather than the raw file)
  * lets us report the offending key, and avoids matching characters inside
  * file-level comments or JS syntax.
+ *
+ * Only the longest matching pattern per value is reported, to keep CI output
+ * focused on the most actionable fix.
  */
 export function findForbiddenZhTwPatterns(
   translations: TranslationDict,
@@ -131,12 +154,14 @@ export function findForbiddenZhTwPatterns(
     [];
 
   for (const [key, value] of Object.entries(translations)) {
+    if (ZH_TW_ALLOWED_EXCEPTIONS.has(key)) continue;
     const candidates = Array.isArray(value) ? value : [value];
     for (const candidate of candidates) {
       if (typeof candidate !== 'string') continue;
       for (const { pattern, preferred } of ZH_TW_FORBIDDEN_PATTERNS) {
         if (candidate.includes(pattern)) {
           findings.push({ key, pattern, preferred });
+          break;
         }
       }
     }

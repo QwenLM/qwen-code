@@ -409,6 +409,17 @@ describe('checkI18n', () => {
     expect(findings).toEqual([]);
   });
 
+  it('reports only the most specific pattern per value (no duplicate findings)', () => {
+    // `历史` (Simplified) overlaps with the single-char pattern `历`.
+    // We expect exactly one finding for the longer/more specific pattern.
+    const findings = findForbiddenZhTwPatterns({
+      History: '历史',
+    });
+    expect(findings).toEqual([
+      { key: 'History', pattern: '历史', preferred: '歷史' },
+    ]);
+  });
+
   it('detects the unused-keys JSON flag from argv or env', () => {
     const originalArgv = process.argv;
     const originalEnv = process.env['QWEN_CHECK_I18N_WRITE_UNUSED_KEYS'];
