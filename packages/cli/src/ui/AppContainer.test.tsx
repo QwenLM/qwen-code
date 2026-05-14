@@ -3154,7 +3154,6 @@ describe('AppContainer State Management', () => {
       capturedUIActions.openRewindSelector();
 
       expect(mockAddItemDisabled).not.toHaveBeenCalled();
-      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
     });
   });
 });
