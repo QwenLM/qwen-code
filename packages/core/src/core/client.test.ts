@@ -762,6 +762,32 @@ describe('Gemini Client (client.ts)', () => {
       expect(systemInstruction).toContain('Ctx2');
       expect(systemInstruction).not.toContain('Ctx1\n\n---\n\nCtx2');
     });
+
+    it('preserves existing system prompt suffixes when SessionStart additionalContext is applied', async () => {
+      vi.mocked(getCoreSystemPrompt).mockReturnValue(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule',
+      );
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Ctx1',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat(undefined, SessionStartSource.Startup);
+
+      expect(client.getChat()['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule\n\n---\n\nSessionStart additional context:\nCtx1',
+      );
+    });
   });
 
   describe('addHistory', () => {
@@ -1281,6 +1307,56 @@ describe('Gemini Client (client.ts)', () => {
       );
       expect(client.getChat()['generationConfig'].systemInstruction).toContain(
         'Compact hook context',
+      );
+    });
+
+    it('re-applies Compact SessionStart additionalContext after auto compaction event', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Auto compact hook context',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+      } as unknown as GeminiChat;
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-compact-hook',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(client.getChat().applySessionStartContext).toHaveBeenCalledWith(
+        'Auto compact hook context',
+        SessionStartSource.Compact,
       );
     });
 

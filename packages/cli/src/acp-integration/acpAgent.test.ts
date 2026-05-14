@@ -892,7 +892,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('fires SessionStart for subsequent ACP sessions when GeminiClient is already initialized', async () => {
+  it('does not directly re-fire SessionStart for subsequent ACP sessions when GeminiClient is already initialized', async () => {
     const innerConfig = await setupSessionMocks(
       'session-followup-session-start',
     );
@@ -933,12 +933,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
     expect(initialize).toHaveBeenCalledTimes(1);
-    expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);
-    expect(fireSessionStartEvent).toHaveBeenCalledWith(
-      'startup',
-      'test-model',
-      'default',
-    );
+    expect(fireSessionStartEvent).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

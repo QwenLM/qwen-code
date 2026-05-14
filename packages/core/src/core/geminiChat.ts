@@ -53,6 +53,7 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
+import type { SessionStartSource } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -384,6 +385,22 @@ export class InvalidStreamError extends Error {
  * The session maintains all the turns between user and model.
  */
 const SESSION_START_CONTEXT_DELIMITER = '\n\n---\n\n';
+const SESSION_START_CONTEXT_HEADER = 'SessionStart additional context';
+
+function buildSessionStartContextBlock(extraInstruction: string): string {
+  return `${SESSION_START_CONTEXT_DELIMITER}${SESSION_START_CONTEXT_HEADER}:\n${extraInstruction}`;
+}
+
+function stripTrailingSessionStartContextBlock(
+  systemInstruction: string,
+): string {
+  const marker = `${SESSION_START_CONTEXT_DELIMITER}${SESSION_START_CONTEXT_HEADER}:\n`;
+  const lastMarkerIndex = systemInstruction.lastIndexOf(marker);
+  if (lastMarkerIndex === -1) {
+    return systemInstruction;
+  }
+  return systemInstruction.slice(0, lastMarkerIndex);
+}
 
 export class GeminiChat {
   // A promise to represent the current state of the message being sent to the
@@ -527,11 +544,24 @@ export class GeminiChat {
     const current = this.generationConfig.systemInstruction;
     const baseInstruction =
       typeof current === 'string'
-        ? current.split(SESSION_START_CONTEXT_DELIMITER)[0]
+        ? stripTrailingSessionStartContextBlock(current)
         : undefined;
+    const contextBlock = buildSessionStartContextBlock(trimmed);
     this.generationConfig.systemInstruction = baseInstruction
-      ? `${baseInstruction}${SESSION_START_CONTEXT_DELIMITER}${trimmed}`
-      : trimmed;
+      ? `${baseInstruction}${contextBlock}`
+      : `${SESSION_START_CONTEXT_HEADER}:\n${trimmed}`;
+  }
+
+  async applySessionStartContext(
+    extraInstruction: string,
+    _source: SessionStartSource,
+  ): Promise<void> {
+    const trimmed = extraInstruction.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    this.setSessionStartContext(trimmed);
   }
 
   /**

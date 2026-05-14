@@ -20,8 +20,6 @@ import {
   type ConversationRecord,
   type DeviceAuthorizationData,
   SessionEndReason,
-  SessionStartSource,
-  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -799,23 +797,6 @@ class QwenAgent implements Agent {
 
     if (needsInitialize) {
       await geminiClient.initialize();
-    } else if (
-      !config.getDisableAllHooks() &&
-      config.hasHooksForEvent('SessionStart')
-    ) {
-      try {
-        await config
-          .getHookSystem()
-          ?.fireSessionStartEvent(
-            conversation
-              ? SessionStartSource.Resume
-              : SessionStartSource.Startup,
-            config.getModel() ?? '',
-            String(config.getApprovalMode()) as PermissionMode,
-          );
-      } catch (err) {
-        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
-      }
     }
 
     const session = new Session(

@@ -548,7 +548,10 @@ export class GeminiClient {
       );
 
       if (sessionStartAdditionalContext) {
-        this.chat.setSessionStartContext(sessionStartAdditionalContext);
+        await this.chat.applySessionStartContext(
+          sessionStartAdditionalContext,
+          sessionStartSource,
+        );
       }
 
       await this.setTools();
@@ -1296,6 +1299,22 @@ export class GeminiClient {
         // the previous IDE-context turn.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
+          const compactContext = await this.config
+            .getHookSystem()
+            ?.fireSessionStartEvent(
+              SessionStartSource.Compact,
+              this.config.getModel() ?? '',
+              String(this.config.getApprovalMode()) as PermissionMode,
+            );
+          const compactAdditionalContext = compactContext
+            ?.getAdditionalContext()
+            ?.trim();
+          if (compactAdditionalContext) {
+            await this.getChat().applySessionStartContext(
+              compactAdditionalContext,
+              SessionStartSource.Compact,
+            );
+          }
         }
 
         yield event;

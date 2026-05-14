@@ -201,7 +201,27 @@ describe('GeminiChat', async () => {
       isolatedChat.setSessionStartContext('Ctx2');
 
       expect(isolatedChat['generationConfig'].systemInstruction).toBe(
-        'Base instruction\n\n---\n\nCtx2',
+        'Base instruction\n\n---\n\nSessionStart additional context:\nCtx2',
+      );
+    });
+
+    it('preserves existing system prompt suffixes when replacing session-start context', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule',
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule\n\n---\n\nSessionStart additional context:\nCtx2',
       );
     });
   });
