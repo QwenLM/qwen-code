@@ -65,18 +65,47 @@ describe('GitWorktreeService.validateUserWorktreeSlug', () => {
   });
 
   it('reserves the `agent-` prefix for ephemeral agent worktrees', () => {
-    // A user-named `agent-1234567` would match
-    // AGENT_WORKTREE_SLUG_PATTERN and be silently swept after 30 days.
-    expect(
-      GitWorktreeService.validateUserWorktreeSlug('agent-1234567'),
-    ).toMatch(/reserved/i);
+    // User-chosen `agent-` slugs that DO NOT match
+    // AGENT_WORKTREE_SLUG_PATTERN (`agent-<7hex>`) are rejected so
+    // they cannot live alongside the ephemeral shape and confuse the
+    // sweep.
     expect(
       GitWorktreeService.validateUserWorktreeSlug('agent-feature'),
     ).toMatch(/reserved/i);
+    expect(
+      GitWorktreeService.validateUserWorktreeSlug('agent-1234567g'), // 8 chars, includes non-hex
+    ).toMatch(/reserved/i);
+    expect(
+      GitWorktreeService.validateUserWorktreeSlug('agent-12345678'), // 8 hex (too long)
+    ).toMatch(/reserved/i);
+    // Exact `agent-<7hex>` is the shape `generateAgentWorktreeSlug`
+    // produces — it must validate so AgentTool isolation can create
+    // its own slugs through the same code path.
+    expect(
+      GitWorktreeService.validateUserWorktreeSlug('agent-aabbccd'),
+    ).toBeNull();
+    expect(
+      GitWorktreeService.validateUserWorktreeSlug('agent-1234567'),
+    ).toBeNull();
     // The standalone word "agent" or a different prefix is fine.
     expect(GitWorktreeService.validateUserWorktreeSlug('agent')).toBeNull();
     expect(GitWorktreeService.validateUserWorktreeSlug('agentic')).toBeNull();
     expect(GitWorktreeService.validateUserWorktreeSlug('my-agent')).toBeNull();
+  });
+
+  it('round-trip: every generated agent slug passes user validation', async () => {
+    // Regression guard: round 5 added the prefix reservation but
+    // initially used `startsWith` instead of `!matches pattern`,
+    // which silently broke EVERY agent isolation invocation. This
+    // test pins the contract: anything `generateAgentWorktreeSlug`
+    // produces MUST round-trip through the user validator.
+    const { generateAgentWorktreeSlug } = await import(
+      '../services/gitWorktreeService.js'
+    );
+    for (let i = 0; i < 50; i++) {
+      const slug = generateAgentWorktreeSlug();
+      expect(GitWorktreeService.validateUserWorktreeSlug(slug)).toBeNull();
+    }
   });
 });
 
@@ -102,6 +131,47 @@ describe('worktreeBranchForSlug', () => {
     expect(worktreeBranchForSlug('agent-aabbccd')).toBe(
       `${WORKTREE_BRANCH_PREFIX}agent-aabbccd`,
     );
+  });
+});
+
+describe('EnterWorktreeTool.execute', () => {
+  // Real temp git repo fixtures so we exercise the actual git
+  // invocations without mocking the world.
+  it('refuses nested invocation from inside a worktree', async () => {
+    const fs = await import('node:fs/promises');
+    const pathMod = await import('node:path');
+    const os = await import('node:os');
+    const cwd = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'qwen-nested-'));
+    // Build a path that contains the nested-marker substring.
+    const nested = pathMod.join(cwd, '.qwen', 'worktrees', 'inner');
+    await fs.mkdir(nested, { recursive: true });
+    const cfg = {
+      getTargetDir: () => nested,
+      getSessionId: () => 'mock',
+    } as unknown as Config;
+    const tool = new EnterWorktreeTool(cfg);
+    const result = await tool
+      .build({ name: 'nope' })
+      .execute(new AbortController().signal);
+    expect(result.error?.message).toMatch(/already inside.*worktree/i);
+    await fs.rm(cwd, { recursive: true, force: true });
+  });
+
+  it('fails cleanly when cwd is not a git repository', async () => {
+    const fs = await import('node:fs/promises');
+    const pathMod = await import('node:path');
+    const os = await import('node:os');
+    const cwd = await fs.mkdtemp(pathMod.join(os.tmpdir(), 'qwen-no-git-'));
+    const cfg = {
+      getTargetDir: () => cwd,
+      getSessionId: () => 'mock',
+    } as unknown as Config;
+    const tool = new EnterWorktreeTool(cfg);
+    const result = await tool
+      .build({ name: 'doesnt-matter' })
+      .execute(new AbortController().signal);
+    expect(result.error?.message).toMatch(/not a git repository/i);
+    await fs.rm(cwd, { recursive: true, force: true });
   });
 });
 

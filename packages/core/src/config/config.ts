@@ -1258,39 +1258,40 @@ export class Config {
     if (!this.getBareMode()) {
       void (async () => {
         try {
-          // Cheap fast-bail BEFORE the git probe: 99% of users never
-          // touch worktrees, and a single `fs.access` saves spawning a
-          // git subprocess on every CLI start. The fallback location
-          // (in the unusual case where `targetDir` is not the repo
-          // root) is caught when `cleanupStaleAgentWorktrees` does its
-          // own `fs.access` against the resolved `worktreesDir`.
-          const localWorktreesDir = path.join(
-            this.targetDir,
-            '.qwen',
-            'worktrees',
-          );
-          try {
-            await fsPromises.access(localWorktreesDir);
-          } catch {
-            // No `.qwen/worktrees` under the current cwd. The repo
-            // root may differ (monorepo subdir launch), but
-            // `cleanupStaleAgentWorktrees` will fast-bail there too,
-            // so resolving the root for the no-worktrees case is
-            // wasted work.
-            return;
-          }
+          // Resolve the repo top-level FIRST. The previous code bailed
+          // on `fs.access(<targetDir>/.qwen/worktrees)` before resolving,
+          // so a monorepo subdir launch (where `targetDir` is the
+          // subdir, not the repo root) always early-returned and the
+          // sweep was permanently a no-op. Fast-bail still happens, just
+          // against the *correct* directory.
           const probe = new GitWorktreeService(this.targetDir);
           const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
-          const removed = await cleanupStaleAgentWorktrees(root);
-          if (removed > 0) {
-            // Promote to `info` so operators chasing a worktree leak in
-            // production can grep the logs and see the sweep actually
-            // ran. The cleanup helper itself uses `debug`-level
-            // per-entry logs, which are silent at default verbosity.
+          const worktreesDir = path.join(root, '.qwen', 'worktrees');
+          try {
+            await fsPromises.access(worktreesDir);
+          } catch {
+            // No worktrees directory at the repo root either; nothing
+            // to sweep. Log so operators can distinguish "sweep
+            // skipped (no worktrees)" from "sweep ran, found nothing"
+            // — the previous version was silent in both cases.
             this.debugLogger.info(
-              `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`,
+              `Stale worktree sweep skipped: ${worktreesDir} does not exist`,
             );
+            return;
           }
+          const removed = await cleanupStaleAgentWorktrees(root);
+          // Log unconditionally at `info` so operators chasing a
+          // worktree leak can distinguish the three cases that all
+          // looked identical before:
+          //   • sweep skipped (no worktrees dir) — handled in the
+          //     fast-bail branch above
+          //   • sweep ran, found nothing                ← this branch when removed === 0
+          //   • sweep ran, removed N stale worktrees   ← this branch when removed > 0
+          this.debugLogger.info(
+            removed > 0
+              ? `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`
+              : `Stale worktree sweep ran under ${root}: nothing to remove`,
+          );
         } catch (error: unknown) {
           // Promote sweep errors to `warn` for the same reason: a
           // permission failure / disk full / repo-corruption case

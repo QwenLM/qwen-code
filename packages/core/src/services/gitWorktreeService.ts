@@ -46,6 +46,37 @@ export async function writeWorktreeSessionMarker(
     sessionId,
     'utf8',
   );
+  // The marker lives inside the worktree dir so a subagent running
+  // `git add -A` inside it would otherwise add the session id to its
+  // first commit. Write a `.git/info/exclude` rule so the marker is
+  // ignored without requiring (or modifying) a tracked `.gitignore`.
+  // `.git` inside a worktree is actually a file pointing at
+  // `<repo>/.git/worktrees/<name>/`, so resolve `--git-dir` instead
+  // of joining naively.
+  try {
+    const wtGit = simpleGit(worktreePath);
+    const gitDir = (await wtGit.revparse(['--git-dir'])).trim();
+    const excludePath = path.isAbsolute(gitDir)
+      ? path.join(gitDir, 'info', 'exclude')
+      : path.join(worktreePath, gitDir, 'info', 'exclude');
+    await fs.mkdir(path.dirname(excludePath), { recursive: true });
+    let existing = '';
+    try {
+      existing = await fs.readFile(excludePath, 'utf8');
+    } catch {
+      // File missing — fall through to fresh write.
+    }
+    const rule = WORKTREE_SESSION_FILE;
+    if (!existing.split(/\r?\n/).includes(rule)) {
+      const sep = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+      await fs.writeFile(excludePath, `${existing}${sep}${rule}\n`, 'utf8');
+    }
+  } catch {
+    // Best-effort: if we can't write the exclude rule (read-only fs,
+    // unusual worktree layout), the marker is still functional —
+    // `git add -A` would just stage it. The ownership guard remains
+    // intact either way.
+  }
 }
 
 /**
@@ -57,14 +88,22 @@ export async function writeWorktreeSessionMarker(
 export async function readWorktreeSessionMarker(
   worktreePath: string,
 ): Promise<string | null> {
+  const markerPath = path.join(worktreePath, WORKTREE_SESSION_FILE);
   try {
-    const raw = await fs.readFile(
-      path.join(worktreePath, WORKTREE_SESSION_FILE),
-      'utf8',
-    );
+    const raw = await fs.readFile(markerPath, 'utf8');
     const trimmed = raw.trim();
     return trimmed.length > 0 ? trimmed : null;
-  } catch {
+  } catch (error) {
+    // Distinguish "marker missing" (legitimate — worktree predates the
+    // session-ownership guard) from "marker unreadable" (disk error,
+    // permission, corrupt NFS). Both still return `null`, but the
+    // unreadable case logs so an operator chasing a "wrong session
+    // bypassed the ownership guard" report has a breadcrumb.
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      debugLogger.warn(
+        `readWorktreeSessionMarker: cannot read ${markerPath}: ${error}`,
+      );
+    }
     return null;
   }
 }
@@ -1018,11 +1057,20 @@ export class GitWorktreeService {
       return 'Worktree name must not start with "." or "-" or contain "..".';
     }
     if (slug.startsWith(`${AGENT_WORKTREE_PREFIX}-`)) {
-      return (
-        `Worktree name must not start with "${AGENT_WORKTREE_PREFIX}-": that prefix ` +
-        `is reserved for ephemeral agent worktrees and is subject to ` +
-        `automatic cleanup after 30 days.`
-      );
+      // The exact `agent-<7hex>` slugs that `generateAgentWorktreeSlug`
+      // produces ARE allowed — those are the legitimate ephemeral
+      // shape that the cleanup sweep is built around. Only reject
+      // user-chosen names with the same prefix that don't match the
+      // canonical pattern (e.g. `agent-feature`, `agent-1234567890`):
+      // those would either get swept after 30 days or never (if not
+      // matching the regex), confusing the user either way.
+      if (!AGENT_WORKTREE_SLUG_PATTERN.test(slug)) {
+        return (
+          `Worktree name must not start with "${AGENT_WORKTREE_PREFIX}-": that prefix ` +
+          `is reserved for ephemeral agent worktrees and is subject to ` +
+          `automatic cleanup after 30 days.`
+        );
+      }
     }
     return null;
   }
@@ -1304,8 +1352,14 @@ export class GitWorktreeService {
     try {
       const wtGit = simpleGit(worktreePath);
       const status = await wtGit.status();
-      // `not_added` covers untracked; `staged`/`modified`/etc. cover the rest.
-      return !status.isClean();
+      // Defensive: `status.isClean()` reads several status arrays, but
+      // we OR with `conflicted.length` explicitly so future simple-git
+      // versions that change the bookkeeping cannot silently let a
+      // mid-merge worktree appear clean to the agent cleanup path
+      // (which would then delete it and lose the resolution work).
+      // `not_added` covers untracked; `staged`/`modified`/etc. cover
+      // the rest.
+      return !status.isClean() || status.conflicted.length > 0;
     } catch {
       return true;
     }

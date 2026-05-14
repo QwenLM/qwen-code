@@ -97,7 +97,17 @@ export async function cleanupStaleAgentWorktrees(
     try {
       const stats = await fs.stat(worktreePath);
       mtimeMs = stats.mtimeMs;
-    } catch {
+    } catch (error) {
+      // Permission error / unmounted FS / EIO → skip this entry but
+      // log so an operator can correlate accumulating disk usage with
+      // the stat failure that prevents reaping. ENOENT is the only
+      // truly silent case (the entry vanished between readdir and
+      // stat) and is also benign.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        debugLogger.warn(
+          `cleanupStaleAgentWorktrees: cannot stat ${worktreePath} — skipping: ${error}`,
+        );
+      }
       continue;
     }
     if (mtimeMs >= cutoffDate) continue;

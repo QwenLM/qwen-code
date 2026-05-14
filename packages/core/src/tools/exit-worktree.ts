@@ -15,6 +15,7 @@ import {
   worktreeBranchForSlug,
 } from '../services/gitWorktreeService.js';
 import * as fs from 'node:fs/promises';
+import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('EXIT_WORKTREE');
@@ -102,12 +103,25 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     const branch = worktreeBranchForSlug(this.params.name);
 
     // Confirm the worktree directory actually exists before doing anything.
+    // Distinguish ENOENT ("not found", legitimate) from any other I/O
+    // failure (permission, EIO, ENOTDIR) — the previous bare `catch`
+    // collapsed all of them into "Worktree not found" with no log,
+    // making it impossible to diagnose a real filesystem problem.
     let exists = false;
     try {
       const stat = await fs.stat(worktreePath);
       exists = stat.isDirectory();
-    } catch {
-      exists = false;
+    } catch (error) {
+      if (isNodeError(error) && error.code === 'ENOENT') {
+        exists = false;
+      } else {
+        debugLogger.warn(
+          `exit_worktree: cannot stat ${worktreePath}: ${error}`,
+        );
+        return errorResult(
+          `Cannot access worktree at ${worktreePath} (${error instanceof Error ? error.message : String(error)}).`,
+        );
+      }
     }
     if (!exists) {
       return errorResult(
@@ -193,8 +207,14 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     let hasUnmerged = true;
     try {
       hasUnmerged = await service.hasUnmergedWorktreeCommits(this.params.name);
-    } catch {
-      // Fall through; surfaced as the conservative "refuse" path below.
+    } catch (error) {
+      // Service-level helper logs its own failures, but the caller
+      // context is what an operator would grep for ("why did
+      // exit_worktree refuse?"). Add a second log here so the chain
+      // (caller → reason it asked → underlying git error) is intact.
+      debugLogger.warn(
+        `exit_worktree: hasUnmergedWorktreeCommits failed for ${branch}: ${error}`,
+      );
     }
     if (hasUnmerged) {
       return errorResult(

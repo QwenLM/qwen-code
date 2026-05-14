@@ -1330,6 +1330,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       if (this.params.isolation === 'worktree') {
         const cwd = this.config.getTargetDir();
+        // Refuse nested isolation. If the parent itself is already
+        // running inside a worktree (cwd contains `.qwen/worktrees/`),
+        // creating a sibling isolation worktree at the repo root
+        // would leave the model's mental map pointing at the outer
+        // worktree while the override aimed it at the inner one.
+        // Same guard `enter_worktree` uses.
+        if (/\.qwen[\\/]worktrees[\\/]/.test(cwd)) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent is already inside ` +
+              `a worktree (${cwd}). Nested isolation worktrees are not ` +
+              `supported — the model's inherited paths would still reference ` +
+              `the outer worktree.`,
+          );
+        }
         const probe = new GitWorktreeService(cwd);
         const gitCheck = await probe.checkGitAvailable();
         if (!gitCheck.available) {
