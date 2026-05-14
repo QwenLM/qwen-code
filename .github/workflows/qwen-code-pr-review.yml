@@ -16,7 +16,7 @@ on:
         required: true
         type: 'number'
       review_mode:
-        description: 'Run without posting comments, or publish review comments'
+        description: 'Run without posting comments, or publish a PR summary comment'
         required: true
         default: 'dry-run'
         type: 'choice'
@@ -61,7 +61,7 @@ jobs:
     permissions:
       checks: 'read'
       contents: 'read'
-      pull-requests: 'write'
+      pull-requests: 'read'
       issues: 'write'
       statuses: 'read'
     env:
@@ -164,7 +164,10 @@ jobs:
           # Pass the full PR URL so the skill can resolve owner/repo unambiguously.
           review_target="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/pull/${pr_number}"
           if [ "$review_mode" = "comment" ]; then
-            review_prompt="/review $review_target --comment"
+            # Do not pass /review --comment here: the bundled skill may submit
+            # an APPROVE review when no findings are found. This workflow is
+            # intentionally comment-only, so it posts the action summary below.
+            review_prompt="/review $review_target"
             should_comment="true"
           else
             review_prompt="/review $review_target"
@@ -302,6 +305,32 @@ jobs:
             printf 'Completed review for PR #%s without posting PR comments.\n' "$PR_NUMBER"
             printf '\nReview logs are available in this workflow run.\n'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Post review summary comment'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.pr.outputs.should_comment == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          REVIEW_SUMMARY: '${{ steps.review.outputs.summary }}'
+        run: |-
+          set -euo pipefail
+
+          {
+            printf '## Qwen Code Review\n\n'
+            if [ -n "${REVIEW_SUMMARY:-}" ]; then
+              printf '%s\n' "${REVIEW_SUMMARY:0:60000}"
+              if [ "${#REVIEW_SUMMARY}" -gt 60000 ]; then
+                printf '\n\n_Review summary was truncated. See the workflow logs for the full output._\n'
+              fi
+            else
+              printf '_Qwen Code review completed, but no summary was captured. See the workflow logs for details._\n'
+            fi
+          } > qwen-pr-review-summary-comment.md
+
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file qwen-pr-review-summary-comment.md
 
       - name: 'Post fallback comment on review failure'
         if: |-
