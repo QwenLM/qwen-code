@@ -1106,7 +1106,7 @@ print_final_instructions() {
     fi
 
     echo "Run: qwen"
-    echo "(Restart your terminal for PATH changes to take effect.)"
+    echo "(Open a new terminal for the PATH change to take effect.)"
 }
 
 main() {

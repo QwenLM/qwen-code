@@ -241,7 +241,7 @@ if /i "!METHOD!"=="standalone" (
     call :InstallStandalone
     if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
     call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
-    endlocal
+    endlocal & set "PATH=!INSTALL_BIN_DIR!;%PATH%"
     exit /b 0
 )
 
@@ -257,7 +257,7 @@ call :InstallStandalone
 set "STANDALONE_STATUS=!ERRORLEVEL!"
 if !STANDALONE_STATUS! EQU 0 (
     call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
-    endlocal
+    endlocal & set "PATH=!INSTALL_BIN_DIR!;%PATH%"
     exit /b 0
 )
 
@@ -1111,5 +1111,5 @@ if defined OTHER_QWENS (
 )
 
 echo Run: qwen
-echo ^(Restart your command prompt for PATH changes to take effect.^)
+echo qwen is ready to use in this terminal.
 exit /b 0
