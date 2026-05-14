@@ -83,7 +83,6 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showAutoAcceptIndicator: ApprovalMode.DEFAULT,
     messageQueue: [],
-    showQueuedMessageDisplay: true,
     constrainHeight: false,
     isInputActive: true,
     buffer: '',
@@ -113,6 +112,9 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     nightly: false,
     isTrustedFolder: true,
     taskStartTokens: 0,
+    streamingResponseLengthRef: { current: 0 },
+    isReceivingContent: false,
+    pendingGeminiHistoryItems: [],
     ...overrides,
   }) as UIState;
 

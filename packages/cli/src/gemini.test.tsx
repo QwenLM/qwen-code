@@ -279,7 +279,7 @@ describe('gemini.tsx main function', () => {
     vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
     vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
     vi.mocked(loadCliConfig).mockResolvedValue(configStub);
-    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue();
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
 
     try {
       await main();
@@ -493,11 +493,19 @@ describe('gemini.tsx main function kitty protocol', () => {
   let setRawModeSpy: MockInstance<
     (mode: boolean) => NodeJS.ReadStream & { fd: 0 }
   >;
+  let initialSigintListeners: NodeJS.SignalsListener[];
+  let initialSigtermListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
     // Set no relaunch in tests since process spawning causing issues in tests
     originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    initialSigintListeners = process.listeners(
+      'SIGINT',
+    ) as NodeJS.SignalsListener[];
+    initialSigtermListeners = process.listeners(
+      'SIGTERM',
+    ) as NodeJS.SignalsListener[];
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     if (!(process.stdin as any).setRawMode) {
@@ -517,12 +525,24 @@ describe('gemini.tsx main function kitty protocol', () => {
   });
 
   afterEach(() => {
+    for (const listener of process.listeners('SIGINT')) {
+      if (!initialSigintListeners.includes(listener)) {
+        process.removeListener('SIGINT', listener as NodeJS.SignalsListener);
+      }
+    }
+    for (const listener of process.listeners('SIGTERM')) {
+      if (!initialSigtermListeners.includes(listener)) {
+        process.removeListener('SIGTERM', listener as NodeJS.SignalsListener);
+      }
+    }
+
     // Restore original env variables
     if (originalEnvNoRelaunch !== undefined) {
       process.env['QWEN_CODE_NO_RELAUNCH'] = originalEnvNoRelaunch;
     } else {
       delete process.env['QWEN_CODE_NO_RELAUNCH'];
     }
+    vi.restoreAllMocks();
   });
 
   it('should call setRawMode and detectAndEnableKittyProtocol when isInteractive is true', async () => {
@@ -584,6 +604,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
       experimentalAcp: undefined,
@@ -595,10 +616,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       openaiLoggingDir: undefined,
       proxy: undefined,
       includeDirectories: undefined,
-      tavilyApiKey: undefined,
-      googleApiKey: undefined,
-      googleSearchEngineId: undefined,
-      webSearchDefault: undefined,
       screenReader: undefined,
       inputFormat: undefined,
       outputFormat: undefined,
@@ -620,6 +637,174 @@ describe('gemini.tsx main function kitty protocol', () => {
 
     expect(setRawModeSpy).toHaveBeenCalledWith(true);
     expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
+  });
+
+  it('should run cleanup before exiting on interactive SIGINT', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const processOnceSpy = vi.spyOn(process, 'once').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        signalHandlers.set(eventName, listener);
+      }
+      return process;
+    }) as typeof process.once);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      initialize: vi.fn(),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      getModelsConfig: () => ({
+        getCurrentAuthType: () => null,
+        getGenerationConfig: () => ({}),
+      }),
+      getProxy: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    await main();
+    signalHandlers.get('SIGINT')?.();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(setRawModeSpy).toHaveBeenCalledWith(false);
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    expect(processExitSpy).toHaveBeenCalledWith(130);
+
+    processOnceSpy.mockRestore();
+    processExitSpy.mockRestore();
+  });
+
+  it('rejects --json-schema when running in interactive (TUI) mode', async () => {
+    // The synthetic structured_output tool only terminates the run inside
+    // runNonInteractive. In TUI mode it's an inert tool that prints
+    // "accepted" and leaves the chat alive — silently stranding the run.
+    // gemini.tsx must reject this combination at runtime (parse-time
+    // gating can't catch the no-prompt-on-TTY case because stdin
+    // availability isn't probed yet at parse time).
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+
+    const callOrder: string[] = [];
+    const exitCodes: Array<string | number | null | undefined> = [];
+
+    mockWriteStderrLine.mockClear();
+    mockWriteStderrLine.mockImplementation(() => {
+      callOrder.push('writeStderrLine');
+    });
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockReset();
+    runExitCleanupMock.mockImplementation(async () => {
+      callOrder.push('runExitCleanup');
+    });
+    const processExitSpy = vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      callOrder.push('processExit');
+      exitCodes.push(code);
+      throw new MockProcessExitError(code);
+    }) as unknown as typeof process.exit);
+
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => true,
+      getJsonSchema: () => ({ type: 'object' }),
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      initialize: vi.fn(),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      shutdown: vi.fn(),
+    } as unknown as Config);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(parseArguments).mockResolvedValue({} as never);
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    }
+
+    // The headless-only message must reach stderr…
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema is a headless-only flag'),
+    );
+    // …runExitCleanup must run before exit so MCP subprocesses /
+    // telemetry exporters registered earlier get torn down…
+    expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    // …and exit must be 1, not 0.
+    expect(processExitSpy).toHaveBeenCalledWith(1);
+    // Order: stderr → cleanup → exit. A regression that swapped any of
+    // these (cleanup before stderr; exit without cleanup; exit 0
+    // instead of 1) would silently strand TUI users.
+    expect(callOrder).toEqual([
+      'writeStderrLine',
+      'runExitCleanup',
+      'processExit',
+    ]);
+    expect(exitCodes).toEqual([1]);
+
+    processExitSpy.mockRestore();
   });
 });
 
@@ -675,6 +860,7 @@ describe('startInteractiveUI', () => {
 
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
+    disableKittyProtocol: vi.fn(),
   }));
 
   vi.mock('./ui/utils/updateCheck.js', () => ({

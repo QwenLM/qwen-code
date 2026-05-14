@@ -13,8 +13,9 @@ export const memoryCommand: SlashCommand = {
   get description() {
     return t('Open the memory manager.');
   },
+  argumentHint: 'show|add|refresh',
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: async () => ({
     type: 'dialog',
     dialog: 'memory',

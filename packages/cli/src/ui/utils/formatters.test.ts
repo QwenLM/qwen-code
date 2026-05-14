@@ -154,6 +154,32 @@ describe('formatters', () => {
     it('should handle negative durations', () => {
       expect(formatDuration(-100)).toBe('0s');
     });
+
+    describe('with hideTrailingZeros', () => {
+      it('drops .0 suffix for whole seconds under a minute', () => {
+        expect(formatDuration(5000, { hideTrailingZeros: true })).toBe('5s');
+        expect(formatDuration(10000, { hideTrailingZeros: true })).toBe('10s');
+        expect(formatDuration(30000, { hideTrailingZeros: true })).toBe('30s');
+      });
+
+      it('keeps fractional seconds under a minute', () => {
+        expect(formatDuration(5500, { hideTrailingZeros: true })).toBe('5.5s');
+        expect(formatDuration(12345, { hideTrailingZeros: true })).toBe(
+          '12.3s',
+        );
+      });
+
+      it('does not affect ms-range output', () => {
+        expect(formatDuration(500, { hideTrailingZeros: true })).toBe('500ms');
+      });
+
+      it('does not affect multi-unit output', () => {
+        expect(formatDuration(123000, { hideTrailingZeros: true })).toBe(
+          '2m 3s',
+        );
+        expect(formatDuration(3600000, { hideTrailingZeros: true })).toBe('1h');
+      });
+    });
   });
 
   describe('formatTokenCount', () => {

@@ -11,7 +11,6 @@ tools:
   - NotebookRead
   - WebFetch
   - TodoWrite
-  - WebSearch
 modelConfig:
   model: qwen3-coder-plus
 ---

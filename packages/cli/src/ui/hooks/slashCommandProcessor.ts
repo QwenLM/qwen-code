@@ -25,6 +25,7 @@ import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
   IdeClient,
+  type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -38,13 +39,19 @@ import type {
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
+import { dynamicCommandLocalizationService } from '../../services/DynamicCommandLocalizationService.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
+import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
-import { isBtwCommand } from '../utils/commandUtils.js';
+import {
+  hasSlashCommandPathSeparator,
+  isBtwCommand,
+} from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import {
@@ -72,10 +79,12 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'reset',
   'new',
   'resume',
+  'delete',
+  'branch',
   'btw',
 ]);
 
-interface SlashCommandProcessorActions {
+export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
   openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
@@ -83,10 +92,14 @@ interface SlashCommandProcessorActions {
   openMemoryDialog: () => void;
   openSettingsDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openManageModelsDialog: () => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
-  openResumeDialog: () => void;
+  openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
+  handleResume: (sessionId: string) => void;
+  handleBranch: (name?: string) => Promise<void>;
+  openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
   dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
@@ -96,6 +109,8 @@ interface SlashCommandProcessorActions {
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
   openHooksDialog: () => void;
+  openRewindSelector: () => void;
+  openHelpDialog: () => void;
 }
 
 /**
@@ -117,14 +132,50 @@ export const useSlashCommandProcessor = (
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
   logger: Logger | null,
+  setSessionName?: (name: string | null) => void,
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const [recentCommands, setRecentCommands] = useState<
+    ReadonlyMap<string, RecentSlashCommand>
+  >(new Map());
   const [reloadTrigger, setReloadTrigger] = useState(0);
+  const commandReloadResolversRef = useRef<
+    Array<{ trigger: number; resolve: () => void }>
+  >([]);
 
-  const reloadCommands = useCallback(() => {
-    setReloadTrigger((v) => v + 1);
+  const resolveCommandReloads = useCallback((completedTrigger: number) => {
+    if (commandReloadResolversRef.current.length === 0) {
+      return;
+    }
+
+    const remaining: Array<{ trigger: number; resolve: () => void }> = [];
+    for (const request of commandReloadResolversRef.current) {
+      if (request.trigger <= completedTrigger) {
+        request.resolve();
+      } else {
+        remaining.push(request);
+      }
+    }
+    commandReloadResolversRef.current = remaining;
   }, []);
+
+  const reloadCommands = useCallback((): Promise<void> => {
+    if (!config) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      setReloadTrigger((v) => {
+        const nextTrigger = v + 1;
+        commandReloadResolversRef.current.push({
+          trigger: nextTrigger,
+          resolve,
+        });
+        return nextTrigger;
+      });
+    });
+  }, [config]);
   const [shellConfirmationRequest, setShellConfirmationRequest] =
     useState<null | {
       commands: string[];
@@ -257,7 +308,6 @@ export const useSlashCommandProcessor = (
   );
   const commandContext = useMemo(
     (): CommandContext => ({
-      executionMode: 'interactive',
       services: {
         config,
         settings,
@@ -271,6 +321,7 @@ export const useSlashCommandProcessor = (
           clearItems();
           clearScreen();
           refreshStatic();
+          setSessionName?.(null);
         },
         loadHistory,
         setDebugMessage: actions.setDebugMessage,
@@ -284,6 +335,7 @@ export const useSlashCommandProcessor = (
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
+        setSessionName: setSessionName ?? (() => {}),
         extensionsUpdateState,
         dispatchExtensionStateUpdate: actions.dispatchExtensionStateUpdate,
         addConfirmUpdateExtensionRequest:
@@ -294,6 +346,7 @@ export const useSlashCommandProcessor = (
         sessionShellAllowlist,
         startNewSession,
       },
+      executionMode: 'interactive' as const,
     }),
     [
       config,
@@ -316,6 +369,7 @@ export const useSlashCommandProcessor = (
       sessionShellAllowlist,
       setGeminiMdFileCount,
       reloadCommands,
+      setSessionName,
       extensionsUpdateState,
       isIdleRef,
     ],
@@ -343,6 +397,26 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
+  // SkillManager already rebuilds its own cache and notifies SkillTool
+  // (which re-runs `setTools()` so `<available_skills>` is fresh). The
+  // slash-command list is a separate consumer: SkillCommandLoader reads
+  // `listSkills()` once during CommandService.create(), so without this
+  // bridge a newly added SKILL.md never produces a `/<skill-name>` entry
+  // until restart. Bumping reloadTrigger re-runs the loader effect below
+  // and CommandService picks up the fresh skill list.
+  useEffect(() => {
+    if (!isConfigInitialized) {
+      return;
+    }
+    const skillManager = config?.getSkillManager();
+    if (!skillManager) {
+      return;
+    }
+    return skillManager.addChangeListener(() => {
+      reloadCommands();
+    });
+  }, [config, isConfigInitialized, reloadCommands]);
+
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
@@ -351,6 +425,7 @@ export const useSlashCommandProcessor = (
           new McpPromptLoader(config),
           new BuiltinCommandLoader(config),
           new BundledSkillLoader(config),
+          new SkillCommandLoader(config),
           new FileCommandLoader(config),
         ];
         const disabled = config?.getDisabledSlashCommands() ?? [];
@@ -359,12 +434,70 @@ export const useSlashCommandProcessor = (
           controller.signal,
           disabled.length > 0 ? new Set(disabled) : undefined,
         );
+        const localizedCommandService = CommandService.fromCommands(
+          await dynamicCommandLocalizationService.localizeCommands(
+            config,
+            commandService.getCommands(),
+            controller.signal,
+            settings.merged?.general?.dynamicCommandTranslation === true,
+          ),
+        );
         // Avoid overwriting newer results from a subsequent effect run
-        if (!controller.signal.aborted) {
-          setCommands(commandService.getCommandsForMode('interactive'));
+        if (controller.signal.aborted) {
+          return;
         }
+        // Register model-invocable commands provider so SkillTool can include
+        // bundled skills, file commands, and MCP prompts in its description.
+        if (config) {
+          config.setModelInvocableCommandsProvider(() =>
+            localizedCommandService.getModelInvocableCommands().map((cmd) => ({
+              name: cmd.name,
+              description: cmd.modelDescription ?? cmd.description,
+            })),
+          );
+          // Register executor so SkillTool can actually invoke model-invocable
+          // commands (e.g. MCP prompts) that are not file-based skills.
+          config.setModelInvocableCommandsExecutor(
+            async (name: string, args: string = '') => {
+              const commands =
+                localizedCommandService.getModelInvocableCommands();
+              const cmd = commands.find((c) => c.name === name);
+              if (!cmd?.action) return null;
+              // Build a minimal context; submit_prompt actions only need
+              // invocation + services.config, not UI state.
+              const minimalContext = {
+                executionMode: 'non_interactive' as const,
+                invocation: {
+                  raw: args ? `/${name} ${args}` : `/${name}`,
+                  name,
+                  args,
+                },
+                services: { config, settings, git: gitService, logger: null },
+              } as unknown as Parameters<typeof cmd.action>[0];
+              const result = await cmd.action(minimalContext, args);
+              if (!result || result.type !== 'submit_prompt') return null;
+              const content = result.content;
+              if (typeof content === 'string') return content;
+              if (Array.isArray(content)) {
+                return content
+                  .map((p) =>
+                    typeof p === 'string'
+                      ? p
+                      : ((p as { text?: string }).text ?? ''),
+                  )
+                  .join('');
+              }
+              return null;
+            },
+          );
+        }
+        setCommands(localizedCommandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
+      } finally {
+        if (!controller.signal.aborted) {
+          resolveCommandReloads(reloadTrigger);
+        }
       }
     };
 
@@ -373,7 +506,14 @@ export const useSlashCommandProcessor = (
     return () => {
       controller.abort();
     };
-  }, [config, reloadTrigger, isConfigInitialized]);
+  }, [
+    config,
+    reloadTrigger,
+    isConfigInitialized,
+    settings,
+    gitService,
+    resolveCommandReloads,
+  ]);
 
   const handleSlashCommand = useCallback(
     async (
@@ -387,6 +527,9 @@ export const useSlashCommandProcessor = (
 
       const trimmed = rawQuery.trim();
       if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
+        return false;
+      }
+      if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
         return false;
       }
 
@@ -430,6 +573,18 @@ export const useSlashCommandProcessor = (
 
       try {
         if (commandToExecute) {
+          if (!commandToExecute.hidden) {
+            setRecentCommands((previous) => {
+              const next = new Map(previous);
+              const existing = next.get(commandToExecute.name);
+              next.set(commandToExecute.name, {
+                name: commandToExecute.name,
+                usedAt: Date.now(),
+                count: (existing?.count ?? 0) + 1,
+              });
+              return next;
+            });
+          }
           if (commandToExecute.action) {
             const fullCommandContext: CommandContext = {
               ...commandContext,
@@ -537,6 +692,9 @@ export const useSlashCommandProcessor = (
                     case 'fast-model':
                       actions.openModelDialog({ fastModelMode: true });
                       return { type: 'handled' };
+                    case 'manage-models':
+                      actions.openManageModelsDialog();
+                      return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
                       return { type: 'handled' };
@@ -559,12 +717,32 @@ export const useSlashCommandProcessor = (
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'resume':
-                      actions.openResumeDialog();
+                      if (result.sessionId) {
+                        actions.handleResume(result.sessionId);
+                      } else {
+                        actions.openResumeDialog(result.matchedSessions);
+                      }
+                      return { type: 'handled' };
+                    case 'branch':
+                      // Must be awaited: `/branch` swaps core + UI session
+                      // state asynchronously, and a non-awaited call lets
+                      // this dispatcher return `handled` while the swap is
+                      // still in flight. A fast follow-up prompt could then
+                      // interleave with the swap and be recorded against
+                      // the wrong session.
+                      await actions.handleBranch(result.name);
+                      return { type: 'handled' };
+                    case 'delete':
+                      actions.openDeleteDialog();
                       return { type: 'handled' };
                     case 'extensions_manage':
                       actions.openExtensionsManagerDialog();
                       return { type: 'handled' };
+                    case 'rewind':
+                      actions.openRewindSelector();
+                      return { type: 'handled' };
                     case 'help':
+                      actions.openHelpDialog();
                       return { type: 'handled' };
                     default: {
                       const unhandled: never = result.dialog;
@@ -575,7 +753,6 @@ export const useSlashCommandProcessor = (
                   }
                 case 'load_history': {
                   config?.getGeminiClient()?.setHistory(result.clientHistory);
-                  config?.getGeminiClient()?.stripThoughtsFromHistory();
                   fullCommandContext.ui.clear();
                   result.history.forEach((item, index) => {
                     fullCommandContext.ui.addItem(item, index);
@@ -781,6 +958,7 @@ export const useSlashCommandProcessor = (
   return {
     handleSlashCommand,
     slashCommands: commands,
+    recentSlashCommands: recentCommands,
     pendingHistoryItems,
     btwItem,
     setBtwItem,

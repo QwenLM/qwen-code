@@ -54,7 +54,6 @@ describe('keyMatchers', () => {
       (isWindows ? key.meta : key.ctrl || key.meta) && key.name === 'v',
     [Command.TOGGLE_TOOL_DESCRIPTIONS]: (key: Key) =>
       key.ctrl && key.name === 't',
-    [Command.TOGGLE_VERBOSE_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_IDE_CONTEXT_DETAIL]: (key: Key) =>
       key.ctrl && key.name === 'g',
     [Command.QUIT]: (key: Key) => key.ctrl && key.name === 'c',
@@ -62,6 +61,9 @@ describe('keyMatchers', () => {
     [Command.SHOW_MORE_LINES]: (key: Key) => key.ctrl && key.name === 's',
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
     [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
+    [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
+    [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
+      key.ctrl && key.name === 'b',
     [Command.REVERSE_SEARCH]: (key: Key) => key.ctrl && key.name === 'r',
     [Command.SUBMIT_REVERSE_SEARCH]: (key: Key) =>
       key.name === 'return' && !key.ctrl,
@@ -236,11 +238,6 @@ describe('keyMatchers', () => {
       negative: [createKey('t'), createKey('s', { ctrl: true })],
     },
     {
-      command: Command.TOGGLE_VERBOSE_MODE,
-      positive: [createKey('o', { ctrl: true })],
-      negative: [createKey('o'), createKey('t', { ctrl: true })],
-    },
-    {
       command: Command.TOGGLE_IDE_CONTEXT_DETAIL,
       positive: [createKey('g', { ctrl: true })],
       negative: [createKey('g'), createKey('t', { ctrl: true })],
@@ -291,6 +288,27 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_SHELL_INPUT_FOCUS,
       positive: [createKey('f', { ctrl: true })],
       negative: [createKey('f')],
+    },
+    {
+      command: Command.TOGGLE_RENDER_MODE,
+      positive: [createKey('m', { meta: true })],
+      negative: [
+        createKey('m'),
+        createKey('m', { ctrl: true }),
+        createKey('', { sequence: 'µ' }),
+        createKey('', { sequence: 'µ', paste: true }),
+      ],
+    },
+    {
+      command: Command.PROMOTE_SHELL_TO_BACKGROUND,
+      positive: [createKey('b', { ctrl: true })],
+      // No bare `b`, no Ctrl+other, no meta+b — Ctrl is required so
+      // typing `b` mid-prompt isn't accidentally swallowed.
+      negative: [
+        createKey('b'),
+        createKey('b', { meta: true }),
+        createKey('a', { ctrl: true }),
+      ],
     },
   ];
 
@@ -382,24 +400,6 @@ describe('keyMatchers', () => {
       expect(matchers[Command.HOME](createKey('a', { ctrl: true }))).toBe(
         false,
       );
-    });
-  });
-
-  describe('TOGGLE_VERBOSE_MODE binding', () => {
-    it('matches Ctrl+O', () => {
-      expect(
-        keyMatchers[Command.TOGGLE_VERBOSE_MODE](
-          createKey('o', { ctrl: true }),
-        ),
-      ).toBe(true);
-    });
-
-    it('does not match plain O', () => {
-      expect(
-        keyMatchers[Command.TOGGLE_VERBOSE_MODE](
-          createKey('o', { ctrl: false }),
-        ),
-      ).toBe(false);
     });
   });
 });

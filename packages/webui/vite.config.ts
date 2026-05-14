@@ -7,10 +7,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import dts from 'vite-plugin-dts';
-import { resolve, dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolve } from 'path';
 
 /**
  * Vite configuration for @qwen-code/webui library
@@ -21,10 +18,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  * - UMD: dist/index.umd.js (for CDN usage)
  * - TypeScript declarations: dist/index.d.ts
  * - CSS: dist/styles.css (optional styles)
- *
- * The followup subpath (@qwen-code/webui/followup) is built separately
- * via vite.config.followup.ts so that the root entry stays free of
- * @qwen-code/qwen-code-core dependencies.
  */
 export default defineConfig({
   plugins: [

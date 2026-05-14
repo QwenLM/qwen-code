@@ -443,4 +443,126 @@ describe('SchemaValidator', () => {
       expect(SchemaValidator.validate(schema, params)).toBeNull();
     });
   });
+
+  describe('compileStrict', () => {
+    it('returns null for a simple valid schema', () => {
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { foo: { type: 'string' } },
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null for draft-2020-12 schemas', () => {
+      expect(
+        SchemaValidator.compileStrict({
+          $schema: 'https://json-schema.org/draft/2020-12/schema',
+          type: 'object',
+        }),
+      ).toBeNull();
+    });
+
+    it('returns null for empty object schema', () => {
+      expect(SchemaValidator.compileStrict({})).toBeNull();
+    });
+
+    it('returns an error string when type keyword has an illegal value', () => {
+      const err = SchemaValidator.compileStrict({ type: 42 });
+      expect(err).not.toBeNull();
+      expect(typeof err).toBe('string');
+    });
+
+    it('returns a descriptive error when schema is not an object', () => {
+      expect(SchemaValidator.compileStrict(null)).toMatch(/JSON object/);
+      expect(SchemaValidator.compileStrict(undefined)).toMatch(/JSON object/);
+      expect(SchemaValidator.compileStrict('a string')).toMatch(/JSON object/);
+    });
+
+    it('rejects arrays even though typeof === "object"', () => {
+      // Arrays satisfy `typeof === 'object'` but are not valid JSON Schema
+      // root values; the prior guard accepted them and let the misleading
+      // error surface from Ajv much later.
+      expect(SchemaValidator.compileStrict([])).toMatch(/JSON object/);
+      expect(SchemaValidator.compileStrict([{ type: 'string' }])).toMatch(
+        /JSON object/,
+      );
+    });
+
+    it('flags unknown keywords (typos) under strict mode', () => {
+      // The shared SchemaValidator.validate is intentionally lenient
+      // (`strictSchema: false`) so MCP-style custom keywords don't break
+      // runtime validation. compileStrict is the explicit user-supplied
+      // surface and should NOT swallow typos like `propertees`.
+      const err = SchemaValidator.compileStrict({
+        type: 'object',
+        propertees: { foo: { type: 'string' } },
+      });
+      expect(err).not.toBeNull();
+      expect(err).toMatch(/propert/i);
+    });
+
+    it('accepts type-union arrays under allowUnionTypes', () => {
+      // Strict mode rejects `type: ["a","b"]` by default; we opt in via
+      // allowUnionTypes because spec-valid type unions are common in
+      // real-world schemas (e.g. nullable fields). Without this, a
+      // schema like `{type:["object","null"]}` would have failed at
+      // CLI parse time even though it's valid JSON Schema.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { x: { type: ['string', 'number'] } },
+        }),
+      ).toBeNull();
+      expect(
+        SchemaValidator.compileStrict({ type: ['object', 'null'] }),
+      ).toBeNull();
+    });
+
+    it('accepts spec-valid schemas that Ajv `strict: true` would reject', () => {
+      // The previous `strict: true` setting enabled lint rules beyond
+      // JSON-Schema validity (strictRequired / strictTypes /
+      // validateFormats), which rejected real-world spec-valid schemas
+      // and broke `--json-schema` for legitimate users.
+
+      // strictRequired: required without listing in properties.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          required: ['answer'],
+        }),
+      ).toBeNull();
+
+      // strictTypes: nested const/enum without explicit type.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { mode: { enum: ['a', 'b'] } },
+        }),
+      ).toBeNull();
+
+      // validateFormats: unknown custom format string.
+      expect(
+        SchemaValidator.compileStrict({
+          type: 'object',
+          properties: { id: { type: 'string', format: 'snowflake-id' } },
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts the draft-2020-12 URI with a trailing `#` fragment', () => {
+      // Both `…/schema` and `…/schema#` reference the same meta-schema;
+      // exact-equality on the canonical URI rejected the trailing-`#`
+      // form, falling back to the draft-07 Ajv and surfacing as
+      // `no schema with key or ref ...`. Real schemas in the wild
+      // include the `#` because spec examples often do.
+      expect(
+        SchemaValidator.compileStrict({
+          $schema: 'https://json-schema.org/draft/2020-12/schema#',
+          type: 'object',
+          properties: { foo: { type: 'string' } },
+        }),
+      ).toBeNull();
+    });
+  });
 });

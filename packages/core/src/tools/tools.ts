@@ -204,6 +204,25 @@ export abstract class DeclarativeTool<
     readonly parameterSchema: unknown,
     readonly isOutputMarkdown: boolean = true,
     readonly canUpdateOutput: boolean = false,
+    /**
+     * When true, this tool is hidden from the initial function-declaration list
+     * sent to the model to save tokens. The model discovers it on-demand via the
+     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
+     * subsequent API requests. Mirrors the `shouldDefer` field described in
+     * Claude Code's tool framework.
+     */
+    readonly shouldDefer: boolean = false,
+    /**
+     * When true, this tool is always included in the function-declaration list
+     * even in contexts where deferral is the default. Used for meta tools like
+     * ToolSearch itself.
+     */
+    readonly alwaysLoad: boolean = false,
+    /**
+     * Optional space-separated keywords used by ToolSearch's keyword-match
+     * scoring. Complements the tool's name and description.
+     */
+    readonly searchHint?: string,
   ) {}
 
   get schema(): FunctionDeclaration {
@@ -389,6 +408,12 @@ export interface ToolResult {
   returnDisplay: ToolResultDisplay;
 
   /**
+   * Concrete filesystem paths discovered or touched during successful execution.
+   * Scheduler-side path activation consumes these in addition to input fields.
+   */
+  resultFilePaths?: string[];
+
+  /**
    * If this property is present, the tool call is considered a failure.
    */
   error?: {
@@ -499,6 +524,8 @@ export interface AgentResultDisplay {
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  /** Real-time output-token count during execution, accumulated across subagent rounds. */
+  tokenCount?: number;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -519,6 +546,9 @@ export interface AgentResultDisplay {
 
 export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
+  totalLines?: number;
+  totalBytes?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -550,6 +580,13 @@ export interface FileDiff {
   originalContent: string | null;
   newContent: string;
   diffStat?: DiffStat;
+  truncatedForSession?: boolean;
+  fileDiffLength?: number;
+  originalContentLength?: number;
+  newContentLength?: number;
+  fileDiffTruncated?: boolean;
+  originalContentTruncated?: boolean;
+  newContentTruncated?: boolean;
 }
 
 export interface DiffStat {
@@ -692,7 +729,7 @@ export interface ToolAskUserQuestionConfirmationDetails {
       label: string;
       description: string;
     }>;
-    multiSelect: boolean;
+    multiSelect?: boolean;
   }>;
   metadata?: {
     source?: string;

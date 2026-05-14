@@ -5,54 +5,31 @@
  */
 
 import type React from 'react';
-import { useCallback, useSyncExternalStore } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
+import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
+import { MCPHealthPill } from './mcp/MCPHealthPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
 import { useStatusLine } from '../hooks/useStatusLine.js';
+import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { t } from '../../i18n/index.js';
-
-/**
- * Returns true while any dream task for the current project is in
- * 'pending' or 'running' state. Uses MemoryManager's subscribe/notify
- * mechanism so there is zero polling overhead.
- */
-function useDreamRunning(projectRoot: string): boolean {
-  const config = useConfig();
-
-  const subscribe = useCallback(
-    (onStoreChange: () => void) =>
-      config.getMemoryManager().subscribe(onStoreChange),
-    [config],
-  );
-
-  const getSnapshot = useCallback(
-    () =>
-      config
-        .getMemoryManager()
-        .listTasksByType('dream', projectRoot)
-        .some((task) => task.status === 'pending' || task.status === 'running'),
-    [config, projectRoot],
-  );
-
-  return useSyncExternalStore(subscribe, getSnapshot);
-}
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
   const { lines: statusLineLines } = useStatusLine();
-  const dreamRunning = useDreamRunning(config.getProjectRoot());
+  const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -82,17 +59,33 @@ export const Footer: React.FC = () => {
   // occupies the footer, so the hint is redundant). Matches upstream behavior.
   const suppressHint = statusLineLines.length > 0;
 
-  // Left bottom row: high-priority messages > approval mode > hint.
+  // MCP init progress lives in this row (not a standalone component above the
+  // input) so the live area's height is constant in the default case, avoiding
+  // the residual-blank-line artifact left behind when a separate block unmounts.
+  // When a custom status line is active, the row shrinks by 1 on transition to
+  // ready — a one-time, small regression preferred over hiding init progress.
+  //
+  // `configInitMessage` is placed ahead of `showAutoAcceptIndicator` so users
+  // launched with YOLO / auto-accept-edits still see the ~1s startup progress;
+  // the approval-mode indicator takes over as soon as init finishes.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+  ) : uiState.rewindEscPending ? (
+    <Text color={theme.text.secondary}>
+      {t('Press Esc again to rewind conversation.')}
+    </Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
     <Text color={theme.text.secondary}>-- INSERT --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
+  ) : configInitMessage ? (
+    <Text color={theme.text.secondary}>
+      <GeminiSpinner /> {configInitMessage}
+    </Text>
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
@@ -113,12 +106,10 @@ export const Footer: React.FC = () => {
       node: <Text color={theme.status.warning}>Debug Mode</Text>,
     });
   }
-  if (dreamRunning) {
-    rightItems.push({
-      key: 'dream',
-      node: <Text color={theme.text.secondary}>{t('✦ dreaming')}</Text>,
-    });
-  }
+  // Dream tasks now surface via the BackgroundTasksPill (e.g. "1 dream")
+  // alongside the other background-task kinds. The previous `✦ dreaming`
+  // right-column indicator was removed to avoid two simultaneous signals
+  // for the same underlying state.
   if (promptTokenCount > 0 && contextWindowSize) {
     rightItems.push({
       key: 'context',
@@ -154,7 +145,11 @@ export const Footer: React.FC = () => {
               {line}
             </Text>
           ))}
-        <Text wrap="truncate">{leftBottomContent}</Text>
+        <Box flexDirection="row" flexShrink={1}>
+          <Text wrap="truncate">{leftBottomContent}</Text>
+          <BackgroundTasksPill />
+          <MCPHealthPill />
+        </Box>
       </Box>
 
       {/* Right Section — never compressed, aligns to top so multi-line

@@ -26,8 +26,10 @@ jobs:
           SOURCE_DIR="${AONE_CI_SOURCE}" \
           OSS_GROUP="${{envs.group}}" \
           OSS_PROJECT="${{envs.project}}" \
-          OSS_ACCESS_KEY_ID="${{secrets.DWCODE_OSS_ACCESS_KEY_ID}}" \
-          OSS_ACCESS_KEY_SECRET="${{secrets.DWCODE_OSS_ACCESS_KEY_SECRET}}" \
+          OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com" \
+          OSS_BUCKET="dataworks-notebook-cn-shanghai" \
+          OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
+          OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}" \
           bash "${AONE_CI_SOURCE}/.aoneci/scripts/upload-scripts.sh"
 
 traits:

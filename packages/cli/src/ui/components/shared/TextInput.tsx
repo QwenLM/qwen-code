@@ -22,7 +22,7 @@ export interface TextInputProps {
   onChange: (text: string) => void;
   onSubmit?: () => void;
   /** Called when Tab is pressed; if provided, prevents the default tab-insertion behaviour. */
-  onTab?: () => void;
+  onTab?: (key: Key) => void;
   /** Called when ↑ is pressed; if provided, prevents cursor-up in the buffer. */
   onUp?: () => void;
   /** Called when ↓ is pressed; if provided, prevents cursor-down in the buffer. */
@@ -33,6 +33,21 @@ export interface TextInputProps {
   validationErrors?: string[];
   inputWidth?: number;
   initialCursorOffset?: number;
+  ellipsizeOverflow?: boolean;
+}
+
+function ellipsizeMiddle(text: string, width: number): string {
+  if (width <= 0) return '';
+  if (stringWidth(text) <= width) return text;
+  if (width <= 3) return cpSlice(text, 0, width);
+
+  const available = width - 3;
+  const headLength = Math.ceil(available / 2);
+  const tailLength = Math.floor(available / 2);
+  return `${cpSlice(text, 0, headLength)}...${cpSlice(
+    text,
+    cpLen(text) - tailLength,
+  )}`;
 }
 
 export function TextInput({
@@ -48,6 +63,7 @@ export function TextInput({
   validationErrors = [],
   inputWidth = 80,
   initialCursorOffset,
+  ellipsizeOverflow = false,
 }: TextInputProps) {
   const allowMultiline = height > 1;
 
@@ -80,7 +96,7 @@ export function TextInput({
       // Tab completion: delegate to caller instead of inserting a tab character
       // During paste, let tab through as literal content (e.g. Excel tab-separated data)
       if (key.name === 'tab' && !key.paste) {
-        onTab?.();
+        onTab?.(key);
         return;
       }
 
@@ -162,6 +178,8 @@ export function TextInput({
               {chalk.inverse(placeholder.slice(0, 1))}
               <Text color={Colors.Gray}>{placeholder.slice(1)}</Text>
             </Text>
+          ) : ellipsizeOverflow && stringWidth(buffer.text) > inputWidth ? (
+            <Text>{ellipsizeMiddle(buffer.text, inputWidth)}</Text>
           ) : (
             linesToRender.map((lineText, visualIdxInRenderedSet) => {
               const cursorVisualRow = cursorVisualRowAbsolute - scrollVisualRow;

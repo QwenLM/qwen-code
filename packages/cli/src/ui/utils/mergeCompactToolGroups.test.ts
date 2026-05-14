@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mergeCompactToolGroups } from './mergeCompactToolGroups.js';
+import {
+  compactToggleHasVisualEffect,
+  mergeCompactToolGroups,
+} from './mergeCompactToolGroups.js';
 import type {
   HistoryItem,
   HistoryItemToolGroup,
@@ -203,6 +206,48 @@ describe('mergeCompactToolGroups', () => {
     // Group 2 with subagent pending confirmation stays separate
   });
 
+  it.each([
+    ['completed', 'completed'],
+    ['failed', 'failed'],
+    ['cancelled', 'cancelled'],
+  ] as const)(
+    'does NOT merge tool_group with terminal subagent (%s)',
+    (_label, status) => {
+      // Terminal task_execution groups must not be absorbed: their
+      // SubagentScrollbackSummary lands inline as the persistent
+      // record of the run's outcome, and the compact path can't
+      // surface it. Mirrors `hasTerminalSubagent` in
+      // `ToolGroupMessage.showCompact`.
+      const subagentResult = {
+        type: 'task_execution',
+        subagentName: 'test-agent',
+        taskDescription: 'test task',
+        status,
+      };
+      const items: HistoryItem[] = [
+        createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+        createToolGroup(2, [
+          createTool(
+            'c2',
+            'Agent',
+            status === 'failed' ? ToolCallStatus.Error : ToolCallStatus.Success,
+            subagentResult,
+          ),
+        ]),
+        createToolGroup(3, [createTool('c3', 'Shell', ToolCallStatus.Success)]),
+      ];
+      const merged = mergeCompactToolGroups(items);
+      // Three separate groups: terminal subagent stays its own batch
+      // so SubagentScrollbackSummary renders as a standalone entry.
+      expect(merged.length).toBe(3);
+      const ids = merged
+        .filter(isToolGroup)
+        .map((g) => g.id)
+        .sort();
+      expect(ids).toEqual([1, 2, 3]);
+    },
+  );
+
   it('does NOT merge focused executing shell', () => {
     const items: HistoryItem[] = [
       createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
@@ -343,6 +388,134 @@ describe('mergeCompactToolGroups', () => {
     expect(merged[3].type).toBe('tool_group');
   });
 
+  it('drops trailing tool_use_summary after a single absorbed tool_group', () => {
+    // Single-batch turn: one tool_group, then its summary arrives. The group
+    // is non-force-expanded (compact-mode candidate), so its callId is in
+    // absorbedCallIds — the summary is consumed by the compact header and
+    // dropped from merged output. Without this drop, mergedHistory.length
+    // would grow lock-step with history.length and MainContent's
+    // refreshStatic heuristic would never fire.
+    const items: HistoryItem[] = [
+      createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Ran shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+    ];
+
+    const merged = mergeCompactToolGroups(
+      items,
+      false,
+      undefined,
+      new Set(['c1']),
+    );
+
+    expect(merged.length).toBe(1);
+    expect(merged[0].id).toBe(1);
+    expect(merged[0].type).toBe('tool_group');
+  });
+
+  it('drops absorbed trailing tool_use_summary even when followed by visible non-mergeable items', () => {
+    const items: HistoryItem[] = [
+      createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Ran shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+      { type: 'user', id: 3, text: 'next prompt' },
+    ];
+
+    const merged = mergeCompactToolGroups(
+      items,
+      false,
+      undefined,
+      new Set(['c1']),
+    );
+
+    expect(merged.length).toBe(2);
+    expect(merged[0].type).toBe('tool_group');
+    expect(merged[1].type).toBe('user');
+  });
+
+  it('preserves tool_use_summary for force-expanded (non-absorbed) tool_group', () => {
+    // The errored tool_group is force-expanded: it renders through the full
+    // ToolGroupMessage path, ignoring `compactLabel`. Its callId is NOT in
+    // absorbedCallIds, so the summary must survive in merged output —
+    // HistoryItemDisplay then renders it as a standalone `● <label>` line,
+    // which is the only way the label reaches the screen for this group.
+    const items: HistoryItem[] = [
+      createToolGroup(1, [
+        createTool('c1', 'Shell', ToolCallStatus.Error, 'boom'),
+      ]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Tried shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+    ];
+
+    // Empty absorbedCallIds — the errored group's callId is not absorbed.
+    const merged = mergeCompactToolGroups(items, false, undefined, new Set());
+
+    expect(merged.length).toBe(2);
+    expect(merged[0].type).toBe('tool_group');
+    expect(merged[1].type).toBe('tool_use_summary');
+  });
+
+  it('preserves tool_use_summary when no absorbedCallIds set is provided (default)', () => {
+    // Default empty set — preserves all summaries. This is the safe default
+    // for callers that don't compute absorption (e.g., older test fixtures
+    // and any future callers outside MainContent).
+    const items: HistoryItem[] = [
+      createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Ran shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+    ];
+
+    const merged = mergeCompactToolGroups(items);
+
+    expect(merged.length).toBe(2);
+    expect(merged[0].type).toBe('tool_group');
+    expect(merged[1].type).toBe('tool_use_summary');
+  });
+
+  it('merges tool_groups separated by tool_use_summary (hidden in compact)', () => {
+    // Two mergeable batches separated by an absorbed summary — the summary
+    // is dropped during merge, the two groups concatenate.
+    const items: HistoryItem[] = [
+      createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
+      {
+        type: 'tool_use_summary',
+        id: 2,
+        summary: 'Ran first shell batch',
+        precedingToolUseIds: ['c1'],
+      },
+      createToolGroup(3, [createTool('c2', 'Shell', ToolCallStatus.Success)]),
+    ];
+
+    const merged = mergeCompactToolGroups(
+      items,
+      false,
+      undefined,
+      new Set(['c1', 'c2']),
+    );
+
+    expect(merged.length).toBe(1);
+    expect(merged[0].id).toBe(1);
+    if (isToolGroup(merged[0])) {
+      expect(merged[0].tools.map((t) => t.callId)).toEqual(['c1', 'c2']);
+    }
+  });
+
   it('preserves trailing gemini_thought after merged group', () => {
     const items: HistoryItem[] = [
       createToolGroup(1, [createTool('c1', 'Shell', ToolCallStatus.Success)]),
@@ -397,5 +570,47 @@ describe('mergeCompactToolGroups', () => {
     expect(merged[2].type).toBe('tool_group');
     expect(merged[3].type).toBe('tool_group');
     expect(merged[4].type).toBe('tool_group');
+  });
+});
+
+describe('compactToggleHasVisualEffect', () => {
+  it('returns false for empty history', () => {
+    expect(compactToggleHasVisualEffect([])).toBe(false);
+  });
+
+  it('returns false for plain user/info/error history (no tools, no thinking)', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'hi' },
+      { type: 'gemini', id: 2, text: 'hello' },
+      { type: 'info', id: 3, text: 'note' },
+      { type: 'error', id: 4, text: 'oops' },
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(false);
+  });
+
+  it('returns true when any tool_group is present', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'run' },
+      createToolGroup(2, [
+        createTool('c1', 'shell', ToolCallStatus.Success),
+      ]) as HistoryItem,
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(true);
+  });
+
+  it('returns true when any gemini_thought is present', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'q' },
+      { type: 'gemini_thought', id: 2, text: 'thinking…' },
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(true);
+  });
+
+  it('returns true when any gemini_thought_content is present', () => {
+    const history: HistoryItem[] = [
+      { type: 'user', id: 1, text: 'q' },
+      { type: 'gemini_thought_content', id: 2, text: 'inner' },
+    ];
+    expect(compactToggleHasVisualEffect(history)).toBe(true);
   });
 });

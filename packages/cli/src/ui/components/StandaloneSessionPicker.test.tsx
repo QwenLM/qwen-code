@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ReactNode } from 'react';
 import { render } from 'ink-testing-library';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import { SessionPicker } from './SessionPicker.js';
+import type { LoadedSettings } from '../../config/settings.js';
 import type {
+  Config,
   SessionListItem,
   ListSessionsResult,
 } from '@qwen-code/qwen-code-core';
@@ -20,6 +25,13 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     getGitBranch: vi.fn().mockReturnValue('main'),
   };
 });
+
+// Control byte sequences that ink-testing-library's stdin.write delivers as
+// modified key events. Pulled out so the tests don't bury invisible bytes
+// inside string literals.
+const CTRL_B = '';
+const ESC = '';
+const ARROW_DOWN = '[B';
 
 // Mock terminal size
 const mockTerminalSize = { columns: 80, rows: 24 };
@@ -181,7 +193,9 @@ describe('SessionPicker', () => {
   });
 
   describe('Branch Filtering', () => {
-    it('should filter by branch when B is pressed', async () => {
+    it('should filter by branch when Ctrl+B is pressed', async () => {
+      // Bare letter keys ('B', 'b', 'j', 'k', …) are reserved for the
+      // search query buffer. The branch toggle is Ctrl+B exclusively.
       const sessions = [
         createMockSession({
           sessionId: 's1',
@@ -224,8 +238,7 @@ describe('SessionPicker', () => {
       expect(output).toContain('Main branch');
       expect(output).toContain('Feature branch');
 
-      // Press B to filter by branch
-      stdin.write('B');
+      stdin.write(CTRL_B);
       await wait(50);
 
       output = lastFrame();
@@ -273,8 +286,7 @@ describe('SessionPicker', () => {
 
       await wait(100);
 
-      // Press B to filter by branch
-      stdin.write('B');
+      stdin.write(CTRL_B);
       await wait(50);
 
       const output = lastFrame();
@@ -325,52 +337,12 @@ describe('SessionPicker', () => {
       expect(output).toContain('First session');
 
       // Navigate down
-      stdin.write('\u001B[B'); // Down arrow
+      stdin.write(ARROW_DOWN); // Down arrow
       await wait(50);
 
       output = lastFrame();
       // Selection indicator should move
       expect(output).toBeDefined();
-    });
-
-    it('should navigate with vim keys (j/k)', async () => {
-      const sessions = [
-        createMockSession({
-          sessionId: 's1',
-          prompt: 'First',
-          messageCount: 1,
-        }),
-        createMockSession({
-          sessionId: 's2',
-          prompt: 'Second',
-          messageCount: 1,
-        }),
-      ];
-      const mockService = createMockSessionService(sessions);
-      const onSelect = vi.fn();
-      const onCancel = vi.fn();
-
-      const { stdin, unmount } = render(
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <SessionPicker
-            sessionService={mockService as never}
-            onSelect={onSelect}
-            onCancel={onCancel}
-          />
-        </KeypressProvider>,
-      );
-
-      await wait(100);
-
-      // Navigate with j (down)
-      stdin.write('j');
-      await wait(50);
-
-      // Navigate with k (up)
-      stdin.write('k');
-      await wait(50);
-
-      unmount();
     });
 
     it('should select session on Enter', async () => {
@@ -425,7 +397,7 @@ describe('SessionPicker', () => {
       await wait(100);
 
       // Press Escape to cancel
-      stdin.write('\u001B');
+      stdin.write(ESC);
       await wait(50);
 
       expect(onCancel).toHaveBeenCalled();
@@ -465,6 +437,47 @@ describe('SessionPicker', () => {
       expect(output).toContain('feature-branch');
     });
 
+    it('renders the metadata line cleanly when messageCount is undefined', async () => {
+      // `listSessions()` now omits `messageCount` for perf, so this is the
+      // default production shape. Pin the row's render contract: time and
+      // branch still show, and the line must not contain a stray "messages"
+      // word, the literal "undefined", or a dangling " · " from the missing
+      // count segment.
+      const sessions = [
+        createMockSession({
+          sessionId: 'lazy-count',
+          prompt: 'No count yet',
+          messageCount: undefined,
+          gitBranch: 'feature-branch',
+        }),
+      ];
+      const mockService = createMockSessionService(sessions);
+
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={mockService as never}
+            onSelect={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      await wait(100);
+
+      const output = lastFrame() ?? '';
+      expect(output).toContain('No count yet');
+      expect(output).toContain('feature-branch');
+      // Negative assertions guard the omit-count branch.
+      expect(output).not.toContain('messages');
+      expect(output).not.toContain('undefined');
+      // The metadata line should not contain a doubled separator. We isolate
+      // the row's metadata line (the one with the gitBranch) and check it.
+      const metaLine =
+        output.split('\n').find((l) => l.includes('feature-branch')) ?? '';
+      expect(metaLine).not.toMatch(/·\s*·/);
+    });
+
     it('should show header and footer', async () => {
       const sessions = [createMockSession({ messageCount: 1 })];
       const mockService = createMockSessionService(sessions);
@@ -487,6 +500,8 @@ describe('SessionPicker', () => {
       expect(output).toContain('Resume Session');
       expect(output).toContain('↑↓ to navigate');
       expect(output).toContain('Esc to cancel');
+      // The default footer points the user at typing to start a search.
+      expect(output).toContain('Type to search');
     });
 
     it('should show branch toggle hint when currentBranch is provided', async () => {
@@ -509,8 +524,8 @@ describe('SessionPicker', () => {
       await wait(100);
 
       const output = lastFrame();
-      expect(output).toContain('B');
-      expect(output).toContain('toggle branch');
+      expect(output).toContain('Ctrl+B');
+      expect(output).toContain('branch');
     });
 
     it('should truncate long prompts', async () => {
@@ -619,6 +634,247 @@ describe('SessionPicker', () => {
       expect(mockService.listSessions).toHaveBeenCalled();
 
       unmount();
+    });
+  });
+
+  describe('Preview Mode', () => {
+    // Mirror `StandaloneSessionPicker`'s runtime wrapping so the preview
+    // render tree (ToolGroupMessage, ToolMessage) can safely call
+    // `useConfig()` / `useSettings()` in tests. Without these, any test
+    // whose previewed session contains tool calls would crash.
+    const PREVIEW_CONFIG_STUB = {
+      getShouldUseNodePtyShell: () => false,
+      getIdeMode: () => false,
+      isTrustedFolder: () => false,
+      getToolRegistry: () => ({ getTool: () => undefined }),
+      getContentGenerator: () => ({ useSummarizedThinking: () => false }),
+    } as unknown as Config;
+    const PREVIEW_SETTINGS_STUB = {
+      merged: { ui: {} },
+    } as unknown as LoadedSettings;
+
+    function renderPicker(children: ReactNode) {
+      return render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <ConfigContext.Provider value={PREVIEW_CONFIG_STUB}>
+            <SettingsContext.Provider value={PREVIEW_SETTINGS_STUB}>
+              {children}
+            </SettingsContext.Provider>
+          </ConfigContext.Provider>
+        </KeypressProvider>,
+      );
+    }
+
+    function fakeResumedData(sessionId: string) {
+      return {
+        conversation: {
+          sessionId,
+          projectHash: 'h',
+          startTime: '2026-01-01T00:00:00.000Z',
+          lastUpdated: '2026-01-01T00:00:00.000Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId,
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              cwd: '/tmp',
+              version: 'test',
+              message: {
+                role: 'user',
+                parts: [{ text: 'USER-ASKED-THIS' }],
+              },
+            },
+            {
+              uuid: 'u2',
+              parentUuid: 'u1',
+              sessionId,
+              timestamp: '2026-01-01T00:00:01.000Z',
+              type: 'assistant',
+              cwd: '/tmp',
+              version: 'test',
+              message: {
+                role: 'model',
+                parts: [{ text: 'ASSISTANT-REPLIED' }],
+              },
+            },
+          ],
+        },
+        filePath: `/tmp/${sessionId}.jsonl`,
+        lastCompletedUuid: 'u2',
+      };
+    }
+
+    it('renders tool_group items without crashing (stub Providers mounted)', async () => {
+      // The previewed session contains a function call + tool_result, which
+      // produces a `tool_group` HistoryItem that exercises ToolGroupMessage
+      // and ToolMessage — the places that throw without stub Providers.
+      const toolSession = {
+        conversation: {
+          sessionId: 's1',
+          projectHash: 'h',
+          startTime: '2026-01-01T00:00:00.000Z',
+          lastUpdated: '2026-01-01T00:00:00.000Z',
+          messages: [
+            {
+              uuid: 'u1',
+              parentUuid: null,
+              sessionId: 's1',
+              timestamp: '2026-01-01T00:00:00.000Z',
+              type: 'user',
+              cwd: '/tmp',
+              version: 'test',
+              message: { role: 'user', parts: [{ text: 'list files' }] },
+            },
+            {
+              uuid: 'u2',
+              parentUuid: 'u1',
+              sessionId: 's1',
+              timestamp: '2026-01-01T00:00:01.000Z',
+              type: 'assistant',
+              cwd: '/tmp',
+              version: 'test',
+              message: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call-1',
+                      name: 'BashTool',
+                      args: { command: 'ls' },
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              uuid: 'u3',
+              parentUuid: 'u2',
+              sessionId: 's1',
+              timestamp: '2026-01-01T00:00:02.000Z',
+              type: 'tool_result',
+              cwd: '/tmp',
+              version: 'test',
+              toolCallResult: {
+                callId: 'call-1',
+                resultDisplay: 'a.txt\nb.txt',
+                status: 'success',
+              },
+            },
+          ],
+        },
+        filePath: '/tmp/s1.jsonl',
+        lastCompletedUuid: 'u3',
+      };
+
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'list files',
+          messageCount: 3,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(toolSession);
+
+      const { stdin, lastFrame } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+          enablePreview
+        />,
+      );
+
+      await wait(100);
+      stdin.write(' '); // Space → preview in list mode
+      await wait(150);
+      const frame = lastFrame() ?? '';
+      // Tool group renders with raw function name fallback (no registry).
+      expect(frame).toContain('BashTool');
+    });
+
+    it('Enter inside preview fires onSelect with previewed sessionId', async () => {
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'First',
+          messageCount: 2,
+        }),
+        createMockSession({
+          sessionId: 's2',
+          prompt: 'Second',
+          messageCount: 2,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
+      const onSelect = vi.fn();
+
+      const { stdin } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+          enablePreview
+        />,
+      );
+
+      await wait(100);
+      stdin.write(' '); // open preview on s1
+      await wait(150);
+      stdin.write('\r'); // Enter
+      await wait(50);
+      expect(onSelect).toHaveBeenCalledWith('s1');
+    });
+
+    it('without enablePreview, Space is a no-op and footer omits the hint', async () => {
+      // Regression: SessionPicker is also reused by the delete-session
+      // dialog, where `onSelect = handleDelete`. If preview were on by
+      // default, Space → preview → Enter would silently delete the session
+      // while the preview UI still says "Enter to resume". The default must
+      // stay opt-in.
+      const sessions = [
+        createMockSession({
+          sessionId: 's1',
+          prompt: 'Deletable session',
+          messageCount: 2,
+        }),
+      ];
+      const service = createMockSessionService(sessions);
+      service.loadSession.mockResolvedValue(fakeResumedData('s1'));
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame } = renderPicker(
+        <SessionPicker
+          sessionService={service as never}
+          onSelect={onSelect}
+          onCancel={vi.fn()}
+          // intentionally NO enablePreview — emulates the delete dialog
+        />,
+      );
+
+      await wait(100);
+      const beforeFrame = lastFrame() ?? '';
+      expect(beforeFrame).toContain('Deletable session');
+      // Hint must not appear, otherwise we are training users to press
+      // Space in destructive flows.
+      expect(beforeFrame).not.toContain('Space to preview');
+
+      stdin.write(' '); // Space — no-op when preview is disabled
+      await wait(150);
+      const afterFrame = lastFrame() ?? '';
+      // No preview body, still on the list.
+      expect(afterFrame).not.toContain('USER-ASKED-THIS');
+      expect(afterFrame).toContain('Deletable session');
+
+      // Enter must still call onSelect on the highlighted row (delete path
+      // unchanged), not be eaten by a phantom preview.
+      stdin.write('\r');
+      await wait(50);
+      expect(onSelect).toHaveBeenCalledWith('s1');
+      expect(service.loadSession).not.toHaveBeenCalled();
     });
   });
 });

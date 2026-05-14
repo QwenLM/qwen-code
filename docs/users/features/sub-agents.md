@@ -333,7 +333,6 @@ tools:
   - read_file
   - write_file
   - read_many_files
-  - web_search
 ---
 
 You are a technical documentation specialist.

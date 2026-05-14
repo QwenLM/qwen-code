@@ -123,8 +123,7 @@ export function extractTitle(text: string): string {
   return cleaned || 'Reply';
 }
 
-/** Full normalization pipeline: tables → chunks. */
+/** Full normalization pipeline: split into chunks. */
 export function normalizeDingTalkMarkdown(text: string): string[] {
-  const converted = convertTables(text);
-  return splitChunks(converted);
+  return splitChunks(text);
 }

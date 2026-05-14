@@ -9,7 +9,7 @@ import * as fsp from 'fs/promises';
 import * as path from 'path';
 import { randomUUID } from 'node:crypto';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
-import { Storage } from '@qwen-code/qwen-code-core/src/config/storage.js';
+import { Storage } from '@qwen-code/qwen-code-core';
 import type {
   ImageAttachment,
   SavedImageAttachment,

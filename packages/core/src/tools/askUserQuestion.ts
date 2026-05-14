@@ -33,7 +33,7 @@ export interface Question {
   question: string;
   header: string;
   options: QuestionOption[];
-  multiSelect: boolean;
+  multiSelect?: boolean;
 }
 
 export interface AskUserQuestionParams {
@@ -113,7 +113,7 @@ const askUserQuestionToolSchemaData: FunctionDeclaration = {
               type: 'boolean',
             },
           },
-          required: ['question', 'header', 'options', 'multiSelect'],
+          required: ['question', 'header', 'options'],
           additionalProperties: false,
         },
       },
@@ -279,6 +279,11 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         string,
         unknown
       >,
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — rarely needed; loaded on demand via ToolSearch
+      false, // alwaysLoad
+      'ask question user input clarify choose',
     );
   }
 
@@ -345,7 +350,10 @@ export class AskUserQuestionTool extends BaseDeclarativeTool<
         }
       }
 
-      if (typeof question.multiSelect !== 'boolean') {
+      if (
+        question.multiSelect !== undefined &&
+        typeof question.multiSelect !== 'boolean'
+      ) {
         return `Question ${i + 1}: "multiSelect" must be a boolean.`;
       }
     }

@@ -25,6 +25,7 @@ import type {
   SettingsSchema,
 } from '../packages/cli/src/config/settingsSchema.js';
 import { getSettingsSchema } from '../packages/cli/src/config/settingsSchema.js';
+import { SETTINGS_VERSION } from '../packages/cli/src/config/settings.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,6 +40,9 @@ interface JsonSchemaProperty {
   default?: unknown;
   additionalProperties?: boolean | JsonSchemaProperty;
   required?: string[];
+  oneOf?: JsonSchemaProperty[];
+  anyOf?: JsonSchemaProperty[];
+  allOf?: JsonSchemaProperty[];
 }
 
 function convertItemDefinitionToJsonSchema(
@@ -94,6 +98,18 @@ function convertItemDefinitionToJsonSchema(
 function convertSettingToJsonSchema(
   setting: SettingDefinition,
 ): JsonSchemaProperty {
+  // Escape hatch: a SettingDefinition can supply a verbatim JSON Schema
+  // fragment for cases the `type` field cannot express (most commonly
+  // unions). The description is carried forward from the SettingDefinition
+  // so we don't have to restate it in the override.
+  if (setting.jsonSchemaOverride) {
+    const override = { ...setting.jsonSchemaOverride } as JsonSchemaProperty;
+    if (setting.description && override.description === undefined) {
+      override.description = setting.description;
+    }
+    return override;
+  }
+
   const schema: JsonSchemaProperty = {};
 
   if (setting.description) {
@@ -146,7 +162,7 @@ function convertSettingToJsonSchema(
       break;
   }
 
-  // Add default value for simple types only
+  // Add default value for simple and object types
   if (setting.default !== undefined && setting.default !== null) {
     const defaultVal = setting.default;
     if (
@@ -157,7 +173,37 @@ function convertSettingToJsonSchema(
       schema.default = defaultVal;
     } else if (Array.isArray(defaultVal) && defaultVal.length > 0) {
       schema.default = defaultVal;
+    } else if (
+      typeof defaultVal === 'object' &&
+      !Array.isArray(defaultVal) &&
+      Object.keys(defaultVal).length > 0
+    ) {
+      // Non-empty plain object — publish so IDE editors can surface the
+      // default value (e.g. `{commit: true, pr: true}` for gitCoAuthor).
+      schema.default = defaultVal;
     }
+  }
+
+  // If the field accepts a legacy primitive shape (e.g. a boolean that was
+  // later expanded into an object), wrap with `anyOf` so existing values
+  // in users' settings.json don't trip the IDE schema validator while
+  // they wait for our migration to rewrite them on the next launch.
+  //
+  // Lift `description` and `default` to the outer (anyOf) level so IDE
+  // editors that surface schema-driven defaults / descriptions still see
+  // them — burying these behind `anyOf[N]` makes most validators ignore
+  // the `default`, which loses the "enabled by default" hint for any
+  // setting using `legacyTypes`.
+  if (setting.legacyTypes && setting.legacyTypes.length > 0) {
+    const description = schema.description;
+    const defaultVal = schema.default;
+    delete schema.description;
+    delete schema.default;
+    return {
+      ...(description ? { description } : {}),
+      ...(defaultVal !== undefined ? { default: defaultVal } : {}),
+      anyOf: [...setting.legacyTypes.map((t) => ({ type: t })), schema],
+    };
   }
 
   return schema;
@@ -180,11 +226,12 @@ function generateJsonSchema(
     );
   }
 
-  // Add $version property
+  // Add $version property — sourced from settings.ts so a SETTINGS_VERSION
+  // bump propagates here instead of needing a parallel manual edit.
   jsonSchema.properties!['$version'] = {
     type: 'number',
     description: 'Settings schema version for migration tracking.',
-    default: 3,
+    default: SETTINGS_VERSION,
   };
 
   return jsonSchema;

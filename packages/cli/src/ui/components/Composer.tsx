@@ -15,8 +15,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { StreamingState } from '../types.js';
-import { ConfigInitDisplay } from '../components/ConfigInitDisplay.js';
+import { StreamingState, type HistoryItemToolGroup } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
 
@@ -27,17 +26,40 @@ export const Composer = () => {
   const uiActions = useUIActions();
   const { vimEnabled } = useVimMode();
 
-  const { showAutoAcceptIndicator, sessionStats, taskStartTokens } = uiState;
+  const {
+    showAutoAcceptIndicator,
+    streamingResponseLengthRef,
+    isReceivingContent,
+  } = uiState;
 
-  const tokens = Object.values(sessionStats.metrics?.models ?? {}).reduce(
-    (acc, model) => ({
-      prompt: acc.prompt + (model.tokens?.prompt ?? 0),
-      candidates: acc.candidates + (model.tokens?.candidates ?? 0),
-    }),
-    { prompt: 0, candidates: 0 },
-  );
+  // Real-time token animation is performed inside LoadingIndicator itself, so
+  // the 100ms polling only re-renders that one component — keeping InputPrompt
+  // and Footer static avoids terminal flicker during streaming.
+  const isStreaming =
+    uiState.streamingState === StreamingState.Responding ||
+    uiState.streamingState === StreamingState.WaitingForConfirmation;
 
-  const taskTokens = tokens.candidates - taskStartTokens;
+  // Aggregate agent tool tokens from executing tool calls. Only changes when
+  // a subagent reports progress, so it doesn't drive the animation loop.
+  let agentTokens = 0;
+  for (const item of uiState.pendingGeminiHistoryItems ?? []) {
+    if (item.type === 'tool_group') {
+      const toolGroup = item as HistoryItemToolGroup;
+      for (const tool of toolGroup.tools) {
+        const display = tool.resultDisplay;
+        if (
+          typeof display === 'object' &&
+          display !== null &&
+          'type' in display &&
+          display.type === 'task_execution' &&
+          'tokenCount' in display &&
+          typeof display.tokenCount === 'number'
+        ) {
+          agentTokens += display.tokenCount;
+        }
+      }
+    }
+  }
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -74,15 +96,14 @@ export const Composer = () => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
-          candidatesTokens={taskTokens}
+          candidatesTokens={agentTokens}
+          streamingCharsRef={streamingResponseLengthRef}
+          isStreaming={isStreaming}
+          isReceivingContent={isReceivingContent}
         />
       )}
 
-      {!uiState.isConfigInitialized && <ConfigInitDisplay />}
-
-      {uiState.showQueuedMessageDisplay && (
-        <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
-      )}
+      <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
 
       {uiState.isFeedbackDialogOpen && <FeedbackDialog />}
 
@@ -97,6 +118,7 @@ export const Composer = () => {
           config={config}
           slashCommands={uiState.slashCommands}
           commandContext={uiState.commandContext}
+          recentSlashCommands={uiState.recentSlashCommands}
           shellModeActive={uiState.shellModeActive}
           setShellModeActive={uiActions.setShellModeActive}
           approvalMode={showAutoAcceptIndicator}
@@ -110,10 +132,7 @@ export const Composer = () => {
           placeholder={
             vimEnabled
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
-              : '  ' +
-                t(
-                  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"',
-                )
+              : '  ' + t('Type your message or @path/to/file')
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}

@@ -29,6 +29,8 @@ jobs:
       - name: 'Fetch upstream'
         run: |
           git remote add upstream https://github.com/QwenLM/qwen-code.git 2>/dev/null || true
+          # CI 默认 shallow clone，需要 unshallow 才能让 merge-base 找到共同祖先
+          git fetch --unshallow origin 2>/dev/null || true
           git fetch upstream main --tags
           echo "✅ upstream/main fetched: $(git rev-parse --short upstream/main)"
 

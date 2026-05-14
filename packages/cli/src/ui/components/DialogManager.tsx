@@ -11,16 +11,19 @@ import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
+import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
 import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
+import { ExternalAuthProgress } from './ExternalAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
 import { EditorSettingsDialog } from './EditorSettingsDialog.js';
 import { TrustDialog } from './TrustDialog.js';
 import { PermissionsDialog } from './PermissionsDialog.js';
 import { ModelDialog } from './ModelDialog.js';
+import { ManageModelsDialog } from './ManageModelsDialog.js';
 import { ArenaStartDialog } from './arena/ArenaStartDialog.js';
 import { ArenaSelectDialog } from './arena/ArenaSelectDialog.js';
 import { ArenaStopDialog } from './arena/ArenaStopDialog.js';
@@ -43,7 +46,12 @@ import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import { RewindSelector } from './RewindSelector.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { Help } from './Help.js';
+import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
+import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
+import { t } from '../../i18n/index.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -60,6 +68,7 @@ export const DialogManager = ({
 
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
   const { constrainHeight, terminalHeight, staticExtraHeight, mainAreaWidth } =
     uiState;
 
@@ -130,12 +139,11 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.codingPlanUpdateRequest) {
+  if (uiState.providerUpdateRequest) {
     return (
-      <ConsentPrompt
-        prompt={uiState.codingPlanUpdateRequest.prompt}
-        onConfirm={uiState.codingPlanUpdateRequest.onConfirm}
-        terminalWidth={terminalWidth}
+      <ProviderUpdatePrompt
+        entries={uiState.providerUpdateRequest.entries}
+        onConfirm={uiState.providerUpdateRequest.onConfirm}
       />
     );
   }
@@ -211,6 +219,14 @@ export const DialogManager = ({
       />
     );
   }
+  if (uiState.isManageModelsDialogOpen) {
+    return (
+      <ManageModelsDialog
+        config={config}
+        onClose={uiActions.closeManageModelsDialog}
+      />
+    );
+  }
   if (uiState.isSettingsDialogOpen) {
     return (
       <Box flexDirection="column">
@@ -240,6 +256,18 @@ export const DialogManager = ({
   }
   if (uiState.isMemoryDialogOpen) {
     return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
+  }
+  if (uiState.isHelpDialogOpen) {
+    return (
+      <Help
+        commands={uiState.slashCommands}
+        width={mainAreaWidth}
+        activeTab={uiState.activeHelpTab}
+        onTabChange={uiActions.setHelpTab}
+        onClose={uiActions.closeHelpDialog}
+        isInteractive
+      />
+    );
   }
   if (uiState.isApprovalModeDialogOpen) {
     const currentMode = config.getApprovalMode();
@@ -299,7 +327,7 @@ export const DialogManager = ({
     }
   }
 
-  if (uiState.isAuthDialogOpen || uiState.authError) {
+  if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
         <AuthDialog />
@@ -307,23 +335,40 @@ export const DialogManager = ({
     );
   }
 
-  if (uiState.isAuthenticating) {
+  if (uiState.auth.isAuthenticating) {
+    if (
+      uiState.auth.pendingAuthType === AuthType.USE_OPENAI &&
+      uiState.auth.externalAuthState
+    ) {
+      return (
+        <ExternalAuthProgress
+          title={uiState.auth.externalAuthState.title}
+          message={uiState.auth.externalAuthState.message}
+          detail={uiState.auth.externalAuthState.detail}
+          onCancel={() => {
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
+          }}
+        />
+      );
+    }
+
     // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
     // Qwen OAuth remains as a separate flow
-    if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
+    if (uiState.auth.pendingAuthType === AuthType.QWEN_OAUTH) {
       return (
         <QwenOAuthProgress
-          deviceAuth={uiState.qwenAuthState.deviceAuth || undefined}
-          authStatus={uiState.qwenAuthState.authStatus}
-          authMessage={uiState.qwenAuthState.authMessage}
+          deviceAuth={uiState.auth.qwenAuthState.deviceAuth || undefined}
+          authStatus={uiState.auth.qwenAuthState.authStatus}
+          authMessage={uiState.auth.qwenAuthState.authMessage}
           onTimeout={() => {
-            uiActions.onAuthError('Qwen OAuth authentication timed out.');
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.onAuthError('Qwen OAuth authentication timed out.');
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
           onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
         />
       );
@@ -379,6 +424,44 @@ export const DialogManager = ({
         currentBranch={uiState.branchName}
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
+        initialSessions={uiState.resumeMatchedSessions}
+        enablePreview
+      />
+    );
+  }
+
+  if (uiState.isDeleteDialogOpen) {
+    return (
+      <SessionPicker
+        sessionService={config.getSessionService()}
+        currentBranch={uiState.branchName}
+        onSelect={uiActions.handleDelete}
+        onCancel={uiActions.closeDeleteDialog}
+        title={t('Delete Session')}
+      />
+    );
+  }
+
+  if (uiState.isRewindSelectorOpen) {
+    return (
+      <RewindSelector
+        history={uiState.history}
+        onRewind={uiActions.handleRewindConfirm}
+        onCancel={uiActions.closeRewindSelector}
+      />
+    );
+  }
+
+  // Background tasks dialog — lowest priority so other dialogs
+  // (permissions, trust prompts, auth, etc.) always take precedence. The
+  // dialog is part of the shared dialogsVisible machinery (see
+  // AppContainer) so its visibility mutes the composer and the global
+  // Ctrl+C / Esc handlers route through `closeAnyOpenDialog`.
+  if (bgTasksDialogOpen) {
+    return (
+      <BackgroundTasksDialog
+        availableTerminalHeight={terminalHeight - staticExtraHeight}
+        terminalWidth={mainAreaWidth}
       />
     );
   }

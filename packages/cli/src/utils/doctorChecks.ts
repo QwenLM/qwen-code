@@ -8,6 +8,7 @@ import process from 'node:process';
 import os from 'node:os';
 import { getNpmVersion, getGitVersion } from './systemInfo.js';
 import { validateAuthMethod } from '../config/auth.js';
+import { findProviderByCredentials } from '../auth/allProviders.js';
 import type { CommandContext } from '../ui/commands/types.js';
 import type { DoctorCheckResult } from '../ui/types.js';
 import {
@@ -71,7 +72,8 @@ function checkPlatform(): DoctorCheckResult {
 }
 
 function checkAuth(context: CommandContext): DoctorCheckResult {
-  const authType = context.services.config?.getAuthType();
+  const config = context.services.config;
+  const authType = config?.getAuthType();
   if (!authType) {
     return {
       category: t('Authentication'),
@@ -82,10 +84,7 @@ function checkAuth(context: CommandContext): DoctorCheckResult {
     };
   }
 
-  const error = validateAuthMethod(
-    authType,
-    context.services.config ?? undefined,
-  );
+  const error = validateAuthMethod(authType, config ?? undefined);
   if (error) {
     return {
       category: t('Authentication'),
@@ -96,11 +95,44 @@ function checkAuth(context: CommandContext): DoctorCheckResult {
     };
   }
 
+  // Build enriched diagnostic information
+  const cgConfig =
+    typeof config?.getContentGeneratorConfig === 'function'
+      ? config.getContentGeneratorConfig()
+      : undefined;
+  const model = cgConfig?.model ?? config?.getModel();
+  const baseUrl = cgConfig?.baseUrl;
+  const envKey = cgConfig?.apiKeyEnvKey;
+
+  const provider = findProviderByCredentials(baseUrl, envKey);
+
+  const detailParts: string[] = [];
+  if (provider) {
+    detailParts.push(
+      t('Provider: {{provider}}', { provider: t(provider.label) }),
+    );
+  }
+  if (baseUrl) {
+    detailParts.push(t('Base URL: {{baseUrl}}', { baseUrl }));
+  }
+  if (model) {
+    detailParts.push(t('Model: {{model}}', { model }));
+  }
+  if (envKey) {
+    const hasKey = !!process.env[envKey];
+    detailParts.push(
+      hasKey
+        ? t('API key: configured ({{envKey}})', { envKey })
+        : t('API key: {{envKey}} not set', { envKey }),
+    );
+  }
+
   return {
     category: t('Authentication'),
     name: t('API key'),
     status: 'pass',
     message: t('configured ({{authType}})', { authType }),
+    detail: detailParts.length > 0 ? detailParts.join('\n') : undefined,
   };
 }
 

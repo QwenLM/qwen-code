@@ -18,6 +18,7 @@ import {
 } from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
+const MODEL_RESPONSE_TIMEOUT_MS = process.env['CI'] ? 30000 : 15000;
 
 /**
  * Factory function that creates a streaming input with a control point.
@@ -99,8 +100,8 @@ describe('System Control (E2E)', () => {
     it('should change model dynamically during streaming input', async () => {
       const resultWaiter = createResultWaiter(2);
       const { generator, resume } = createStreamingInputWithControlPoint(
-        'Tell me the model name.',
-        'Tell me the model name now again.',
+        'Reply with exactly FIRST.',
+        'Reply with exactly SECOND.',
         resultWaiter,
       );
 
@@ -157,7 +158,7 @@ describe('System Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout waiting for first response')),
-              15000,
+              MODEL_RESPONSE_TIMEOUT_MS,
             ),
           ),
         ]);
@@ -176,7 +177,7 @@ describe('System Control (E2E)', () => {
           new Promise((_, reject) =>
             setTimeout(
               () => reject(new Error('Timeout waiting for second response')),
-              10000,
+              MODEL_RESPONSE_TIMEOUT_MS,
             ),
           ),
         ]);
@@ -278,7 +279,10 @@ describe('System Control (E2E)', () => {
         await Promise.race([
           responsePromises[0],
           new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Timeout 1')), 10000),
+            setTimeout(
+              () => reject(new Error('Timeout 1')),
+              MODEL_RESPONSE_TIMEOUT_MS,
+            ),
           ),
         ]);
 
@@ -290,7 +294,10 @@ describe('System Control (E2E)', () => {
         await Promise.race([
           responsePromises[1],
           new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Timeout 2')), 10000),
+            setTimeout(
+              () => reject(new Error('Timeout 2')),
+              MODEL_RESPONSE_TIMEOUT_MS,
+            ),
           ),
         ]);
 
@@ -302,7 +309,10 @@ describe('System Control (E2E)', () => {
         await Promise.race([
           responsePromises[2],
           new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Timeout 3')), 10000),
+            setTimeout(
+              () => reject(new Error('Timeout 3')),
+              MODEL_RESPONSE_TIMEOUT_MS,
+            ),
           ),
         ]);
 

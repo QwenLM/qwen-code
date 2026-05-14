@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code-channel-telegram",
-  "version": "0.14.8",
+  "version": "0.15.10",
   "description": "Telegram channel adapter for Qwen Code",
   "type": "module",
   "publishConfig": {

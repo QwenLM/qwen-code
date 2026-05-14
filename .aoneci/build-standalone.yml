@@ -3,7 +3,6 @@ name: 构建 Qwen Code Standalone 包
 triggers:
   push:
     branches:
-      - main
       - feat/bindary-build
     paths:
       - "packages/**"
@@ -103,11 +102,13 @@ jobs:
           WORKSPACE_DIR="${{envs.workspace_dir}}" \
           OSS_GROUP="${{envs.group}}" \
           OSS_PROJECT="${{envs.project}}" \
+          OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com" \
+          OSS_BUCKET="dataworks-notebook-cn-shanghai" \
           SKIP_METADATA="${SKIP_METADATA}" \
           SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER}" \
           SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS}" \
-          OSS_ACCESS_KEY_ID="${{secrets.DWCODE_OSS_ACCESS_KEY_ID}}" \
-          OSS_ACCESS_KEY_SECRET="${{secrets.DWCODE_OSS_ACCESS_KEY_SECRET}}" \
+          OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
+          OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}" \
           bash "${AONE_CI_SOURCE}/.aoneci/scripts/upload-oss.sh"
 
       - name: export version
@@ -130,5 +131,5 @@ traits:
         - Branch: ${{git.branch}}
         - Commit: ${{git.commitId}}
         - Version: ${{jobs.build-standalone.outputs.version}}
-        - 一键部署: `curl -fsSL https://dw-vscode.oss-cn-hangzhou.aliyuncs.com/aone-release/alishu/qwen-code/deploy-qwen.sh | bash -s -- --version ${{jobs.build-standalone.outputs.version}}`
-        - 指定版本安装: `curl -fsSL https://dw-vscode.oss-cn-hangzhou.aliyuncs.com/aone-release/alishu/qwen-code/${{jobs.build-standalone.outputs.version}}/qwen-code-${{jobs.build-standalone.outputs.version}}-linux-amd64.tar.gz -o qwen-code.tar.gz && tar -xzf qwen-code.tar.gz`
+        - 一键部署: `curl -fsSL https://dataworks-notebook-cn-shanghai.oss-cn-shanghai.aliyuncs.com/public-datasets/aone-release/alishu/qwen-code/deploy-qwen.sh | bash -s -- --version ${{jobs.build-standalone.outputs.version}}`
+        - 指定版本安装: `curl -fsSL https://dataworks-notebook-cn-shanghai.oss-cn-shanghai.aliyuncs.com/public-datasets/aone-release/alishu/qwen-code/${{jobs.build-standalone.outputs.version}}/qwen-code-${{jobs.build-standalone.outputs.version}}-linux-amd64.tar.gz -o qwen-code.tar.gz && tar -xzf qwen-code.tar.gz`

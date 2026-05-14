@@ -187,14 +187,17 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
       return null;
     }
     for (const item of toolCall.content) {
+      const itemType = item['type'];
+      const itemContent = item['content'];
+
       if (
-        item.type === 'content' &&
-        typeof item.content === 'object' &&
-        item.content !== null
+        itemType === 'content' &&
+        typeof itemContent === 'object' &&
+        itemContent !== null
       ) {
-        const inner = item.content as { type?: string; text?: string };
-        if (inner.type === 'text' && typeof inner.text === 'string') {
-          return inner.text;
+        const inner = itemContent as Record<string, unknown>;
+        if (inner['type'] === 'text' && typeof inner['text'] === 'string') {
+          return inner['text'];
         }
       }
     }

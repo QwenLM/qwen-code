@@ -185,7 +185,7 @@ export const tipRegistry: ContextualTip[] = [
     priority: 50,
   },
 
-  // DataWorks usage examples
+  // DataWorks usage examples (priority 75 to show before qwen-code native tips)
   {
     id: 'dw-identity',
     content:
@@ -193,7 +193,7 @@ export const tipRegistry: ContextualTip[] = [
     trigger: 'startup',
     isRelevant: () => true,
     cooldownPrompts: 0,
-    priority: 60,
+    priority: 75,
   },
   {
     id: 'dw-analysis',
@@ -202,7 +202,7 @@ export const tipRegistry: ContextualTip[] = [
     trigger: 'startup',
     isRelevant: () => true,
     cooldownPrompts: 0,
-    priority: 60,
+    priority: 75,
   },
   {
     id: 'dw-governance',
@@ -211,7 +211,7 @@ export const tipRegistry: ContextualTip[] = [
     trigger: 'startup',
     isRelevant: () => true,
     cooldownPrompts: 0,
-    priority: 60,
+    priority: 75,
   },
   {
     id: 'dw-troubleshooting',
@@ -220,7 +220,7 @@ export const tipRegistry: ContextualTip[] = [
     trigger: 'startup',
     isRelevant: () => true,
     cooldownPrompts: 0,
-    priority: 60,
+    priority: 75,
   },
   {
     id: 'dw-fix',
@@ -229,6 +229,6 @@ export const tipRegistry: ContextualTip[] = [
     trigger: 'startup',
     isRelevant: () => true,
     cooldownPrompts: 0,
-    priority: 60,
+    priority: 75,
   },
 ];

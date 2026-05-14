@@ -9,7 +9,7 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames } from './tool-names.js';
-import { resolveAndValidatePath } from '../utils/paths.js';
+import { resolveAndValidatePath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
@@ -20,6 +20,88 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { PermissionDecision } from '../permissions/types.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
+const RIPGREP_FIELD_SEPARATOR = '';
+
+interface RipgrepJsonMatch {
+  type: 'match';
+  data: {
+    path: { text?: string; bytes?: string };
+    lines?: { text?: string };
+    line_number: number;
+  };
+}
+
+function isRipgrepJsonMatch(value: unknown): value is RipgrepJsonMatch {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as {
+    type?: unknown;
+    data?: {
+      path?: { text?: unknown; bytes?: unknown };
+      lines?: { text?: unknown };
+      line_number?: unknown;
+    };
+  };
+  return (
+    candidate.type === 'match' &&
+    (typeof candidate.data?.path?.text === 'string' ||
+      typeof candidate.data?.path?.bytes === 'string') &&
+    typeof candidate.data?.line_number === 'number'
+  );
+}
+
+function getRipgrepJsonPath(match: RipgrepJsonMatch): string | undefined {
+  if (match.data.path.text !== undefined) {
+    return match.data.path.text;
+  }
+  if (match.data.path.bytes !== undefined) {
+    return Buffer.from(match.data.path.bytes, 'base64').toString('utf8');
+  }
+  return undefined;
+}
+
+/**
+ * Per-process cache for `.qwenignore` discovery. The same directories show
+ * up across many Grep invocations in a typical session — without caching,
+ * each invocation pays 2-3 sync syscalls per searchPath. Bounded so a
+ * pathologically long session can't grow without limit.
+ *
+ * `dirIsDir`: searchPath → boolean (is the path itself a directory?)
+ * `qwenIgnore`: dir → string | null (cached `.qwenignore` path or null)
+ *
+ * **Known staleness window:** a `.qwenignore` created mid-session, or a
+ * searchPath whose type flips (dir→file or vice versa), will not be
+ * picked up until the entry rotates out of the FIFO (256 entries). Users
+ * rarely add ignore files mid-session; a process restart resets the cache.
+ */
+const dirIsDirCache = new Map<string, boolean>();
+const qwenIgnoreCache = new Map<string, string | null>();
+const RIPGREP_CACHE_MAX = 256;
+function trimCache<K, V>(m: Map<K, V>): void {
+  if (m.size <= RIPGREP_CACHE_MAX) return;
+  const oldest = m.keys().next().value;
+  if (oldest !== undefined) m.delete(oldest as K);
+}
+
+function toAbsoluteResultPath(filePath: string, searchPaths: string[]): string {
+  if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) {
+    return filePath;
+  }
+  for (const searchPath of searchPaths) {
+    const candidate = path.resolve(searchPath, filePath);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return path.resolve(searchPaths[0], filePath);
+}
+
+/**
+ * Test-only: clear ripGrep's module-level discovery caches between cases.
+ */
+export function _resetRipGrepCachesForTest(): void {
+  dirIsDirCache.clear();
+  qwenIgnoreCache.clear();
+}
 
 /**
  * Parameters for the GrepTool (Simplified)
@@ -101,12 +183,13 @@ class GrepToolInvocation extends BaseToolInvocation<
       }
 
       // Get raw ripgrep output
-      const rawOutput = await this.performRipgrepSearch({
-        pattern: this.params.pattern,
-        paths: searchPaths,
-        glob: this.params.glob,
-        signal,
-      });
+      const { stdout: rawOutput, truncated: truncatedBySystemLimit } =
+        await this.performRipgrepSearch({
+          pattern: this.params.pattern,
+          paths: searchPaths,
+          glob: this.params.glob,
+          signal,
+        });
 
       // Build search description
       const searchLocationDescription = this.params.path
@@ -125,29 +208,81 @@ class GrepToolInvocation extends BaseToolInvocation<
         return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
       }
 
-      // Split into lines and count total matches
-      let allLines = rawOutput.split('\n').filter((line) => line.trim());
+      interface RipgrepMatchLine {
+        rawLine: string;
+        filePath: string;
+        key: string;
+      }
+
+      let allLines = rawOutput
+        .split('\n')
+        .filter((line) => line.trim())
+        .flatMap((line): RipgrepMatchLine[] => {
+          if (line.startsWith('{')) {
+            if (!line.startsWith('{"type":"match"')) return [];
+            try {
+              const parsed = JSON.parse(line) as unknown;
+              if (!isRipgrepJsonMatch(parsed)) return [];
+              const filePath = getRipgrepJsonPath(parsed);
+              if (filePath === undefined) return [];
+              const lineNumber = String(parsed.data.line_number);
+              const content = parsed.data.lines?.text ?? '';
+              return [
+                {
+                  rawLine: `${filePath}:${lineNumber}:${content.replace(/\r?\n$/, '')}`,
+                  filePath,
+                  key: `${filePath}:${lineNumber}`,
+                },
+              ];
+            } catch {
+              return [];
+            }
+          }
+
+          const fields = line.split(RIPGREP_FIELD_SEPARATOR);
+          if (fields.length === 1) {
+            const firstColon = line.indexOf(':');
+            const secondColon =
+              firstColon === -1 ? -1 : line.indexOf(':', firstColon + 1);
+            if (firstColon === -1 || secondColon === -1) return [];
+            const filePath = line.substring(0, firstColon);
+            const lineNumber = line.substring(firstColon + 1, secondColon);
+            if (!/^[0-9]+$/.test(lineNumber)) return [];
+            return [
+              {
+                rawLine: line,
+                filePath,
+                key: `${filePath}:${lineNumber}`,
+              },
+            ];
+          }
+          if (fields.length !== 3) return [];
+          const [filePath, lineNumber, content] = fields;
+          return [
+            {
+              rawLine: `${filePath}:${lineNumber}:${content}`,
+              filePath,
+              key: `${filePath}:${lineNumber}`,
+            },
+          ];
+        });
 
       // Deduplicate lines from potentially overlapping workspace directories.
       // ripgrep reports the same file twice when given paths like /a and /a/sub.
       if (searchPaths.length > 1) {
         const seen = new Set<string>();
         allLines = allLines.filter((line) => {
-          // ripgrep output format: filepath:linenum:content
-          const firstColon = line.indexOf(':');
-          if (firstColon !== -1) {
-            const secondColon = line.indexOf(':', firstColon + 1);
-            if (secondColon !== -1) {
-              const key = line.substring(0, secondColon);
-              if (seen.has(key)) return false;
-              seen.add(key);
-            }
-          }
+          if (seen.has(line.key)) return false;
+          seen.add(line.key);
           return true;
         });
       }
 
       const totalMatches = allLines.length;
+      if (totalMatches === 0) {
+        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
+        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+      }
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
       // Build header early to calculate available space
@@ -171,21 +306,24 @@ class GrepToolInvocation extends BaseToolInvocation<
       let grepOutput = '';
       let truncatedByCharLimit = false;
       let includedLines = 0;
+      const visibleLines: RipgrepMatchLine[] = [];
       if (Number.isFinite(charLimit)) {
         const parts: string[] = [];
         let currentLength = 0;
 
         for (const line of linesToInclude) {
           const sep = includedLines > 0 ? 1 : 0;
-          includedLines++;
-
-          const projectedLength = currentLength + line.length + sep;
+          const projectedLength = currentLength + line.rawLine.length + sep;
           if (projectedLength <= charLimit) {
-            parts.push(line);
+            parts.push(line.rawLine);
+            visibleLines.push(line);
+            includedLines++;
             currentLength = projectedLength;
           } else {
             const remaining = Math.max(charLimit - currentLength - sep, 10);
-            parts.push(line.slice(0, remaining) + '...');
+            const partialLine = line.rawLine.slice(0, remaining);
+            parts.push(partialLine + '...');
+            visibleLines.push(line);
             truncatedByCharLimit = true;
             break;
           }
@@ -193,7 +331,8 @@ class GrepToolInvocation extends BaseToolInvocation<
 
         grepOutput = parts.join('\n');
       } else {
-        grepOutput = linesToInclude.join('\n');
+        grepOutput = linesToInclude.map((line) => line.rawLine).join('\n');
+        visibleLines.push(...linesToInclude);
         includedLines = linesToInclude.length;
       }
 
@@ -201,20 +340,37 @@ class GrepToolInvocation extends BaseToolInvocation<
       let llmContent = header + grepOutput;
 
       // Add truncation notice if needed
-      if (truncatedByLineLimit || truncatedByCharLimit) {
+      if (
+        truncatedByLineLimit ||
+        truncatedByCharLimit ||
+        truncatedBySystemLimit
+      ) {
         const omittedMatches = totalMatches - includedLines;
         llmContent += `\n---\n[${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
 
       // Build display message (show real count, not truncated)
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
-      if (truncatedByLineLimit || truncatedByCharLimit) {
+      if (
+        truncatedByLineLimit ||
+        truncatedByCharLimit ||
+        truncatedBySystemLimit
+      ) {
         displayMessage += ` (truncated)`;
       }
+
+      const resultFilePaths = Array.from(
+        new Set(
+          visibleLines.map((line) =>
+            toAbsoluteResultPath(line.filePath, searchPaths),
+          ),
+        ),
+      );
 
       return {
         llmContent: llmContent.trim(),
         returnDisplay: displayMessage,
+        resultFilePaths,
       };
     } catch (error) {
       debugLogger.error('Error during ripgrep search operation:', error);
@@ -231,13 +387,14 @@ class GrepToolInvocation extends BaseToolInvocation<
     paths: string[]; // Can be files or directories
     glob?: string;
     signal: AbortSignal;
-  }): Promise<string> {
+  }): Promise<{ stdout: string; truncated: boolean }> {
     const { pattern, paths, glob } = options;
 
     const rgArgs: string[] = [
-      '--line-number',
-      '--no-heading',
-      '--with-filename',
+      '--json',
+      '--no-messages',
+      '--path-separator',
+      '/',
       '--ignore-case',
       '--regexp',
       pattern,
@@ -253,15 +410,25 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Load .qwenignore from each workspace directory, not just the primary one
       const seenIgnoreFiles = new Set<string>();
       for (const searchPath of paths) {
-        const dir =
-          fs.existsSync(searchPath) && fs.statSync(searchPath).isDirectory()
-            ? searchPath
-            : path.dirname(searchPath);
-        const qwenIgnorePath = path.join(dir, '.qwenignore');
-        if (
-          !seenIgnoreFiles.has(qwenIgnorePath) &&
-          fs.existsSync(qwenIgnorePath)
-        ) {
+        let isDir = dirIsDirCache.get(searchPath);
+        if (isDir === undefined) {
+          try {
+            isDir = fs.statSync(searchPath).isDirectory();
+          } catch {
+            isDir = false;
+          }
+          dirIsDirCache.set(searchPath, isDir);
+          trimCache(dirIsDirCache);
+        }
+        const dir = isDir ? searchPath : path.dirname(searchPath);
+        let qwenIgnorePath = qwenIgnoreCache.get(dir);
+        if (qwenIgnorePath === undefined) {
+          const candidate = path.join(dir, '.qwenignore');
+          qwenIgnorePath = fs.existsSync(candidate) ? candidate : null;
+          qwenIgnoreCache.set(dir, qwenIgnorePath);
+          trimCache(qwenIgnoreCache);
+        }
+        if (qwenIgnorePath && !seenIgnoreFiles.has(qwenIgnorePath)) {
           rgArgs.push('--ignore-file', qwenIgnorePath);
           seenIgnoreFiles.add(qwenIgnorePath);
         }
@@ -282,7 +449,7 @@ class GrepToolInvocation extends BaseToolInvocation<
       throw result.error;
     }
 
-    return result.stdout;
+    return { stdout: result.stdout, truncated: result.truncated };
   }
 
   private getFileFilteringOptions(): FileFilteringOptions {
@@ -383,6 +550,7 @@ export class RipGrepTool extends BaseDeclarativeTool<
 
     // Only validate path if one is provided
     if (params.path) {
+      params.path = unescapePath(params.path.trim());
       try {
         resolveAndValidatePath(this.config, params.path, {
           allowFiles: true,

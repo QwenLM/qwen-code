@@ -109,6 +109,6 @@ export function buildWebSearchConfig(
 
   return {
     provider: providers,
-    default: defaultProvider,
+    default: defaultProvider ?? 'dashscope',
   };
 }

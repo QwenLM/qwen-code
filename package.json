@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code",
-  "version": "0.14.8",
+  "version": "0.15.10",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -9,7 +9,6 @@
     "packages/cli",
     "packages/core",
     "packages/sdk-typescript",
-    "packages/test-utils",
     "packages/vscode-ide-companion",
     "packages/web-templates",
     "packages/webui",
@@ -24,7 +23,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.8"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.15.10"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -49,6 +48,7 @@
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.threads.maxThreads 2 sdk-typescript",
+    "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
     "test:integration:cli:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests cli",
     "test:integration:cli:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests cli",
     "test:integration:interactive:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests interactive",
@@ -59,14 +59,19 @@
     "lint": "eslint . --ext .ts,.tsx && eslint integration-tests",
     "lint:fix": "eslint . --fix && eslint integration-tests --fix",
     "lint:ci": "eslint . --ext .ts,.tsx --max-warnings 0 && eslint integration-tests --max-warnings 0",
+    "lint:sdk:python": "python3 -m ruff check --config packages/sdk-python/pyproject.toml packages/sdk-python",
     "lint:all": "node scripts/lint.js",
     "format": "prettier --experimental-cli --write .",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck:sdk:python": "python3 -m mypy --config-file packages/sdk-python/pyproject.toml packages/sdk-python/src",
+    "smoke:sdk:python": "python3 packages/sdk-python/scripts/smoke_real.py",
+    "build:sdk:python": "python3 -m build packages/sdk-python",
     "check-i18n": "npm run check-i18n --workspace=packages/cli",
     "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci",
     "prepare": "husky && npm run build && npm run bundle",
     "prepare:package": "node scripts/prepare-package.js",
-    "prepare:cli-publish": "npm run bundle && node scripts/prepare-cli-for-publish.js",
+    "package:standalone": "node scripts/create-standalone-package.js",
+    "package:standalone:release": "node scripts/build-standalone-release.js",
     "release:version": "node scripts/version.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
@@ -80,12 +85,6 @@
       "wrap-ansi": "7.0.0"
     },
     "baseline-browser-mapping": "^2.9.19",
-    "@qwen-code/channel-base": "file:packages/channels/base",
-    "@qwen-code/channel-telegram": "file:packages/channels/telegram",
-    "@qwen-code/channel-weixin": "file:packages/channels/weixin",
-    "@qwen-code/channel-dingtalk": "file:packages/channels/dingtalk",
-    "@qwen-code/qwen-code-core": "file:packages/core",
-    "@qwen-code/web-templates": "file:packages/web-templates",
     "normalize-package-data": "^7.0.1"
   },
   "bin": {
@@ -155,5 +154,17 @@
     "*.{json,md}": [
       "prettier --write"
     ]
-  }
+  },
+  "description": "<div align=\"center\">",
+  "main": "esbuild.config.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/QwenLM/qwen-code/issues"
+  },
+  "homepage": "https://github.com/QwenLM/qwen-code#readme"
 }
