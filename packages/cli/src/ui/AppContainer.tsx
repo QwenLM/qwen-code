@@ -591,19 +591,25 @@ export const AppContainer = (props: AppContainerProps) => {
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
+  //
+  // refreshStatic() is fired from an effect (not inside the setState updater)
+  // so React.StrictMode's double-invoke of state updaters doesn't translate
+  // into two clearTerminal writes per model change. Side-effects belong in
+  // effects; the updater stays pure.
   useEffect(() => {
     const unsubscribe = config.onModelChange((model) => {
-      setCurrentModel((prev) => {
-        if (prev === model) {
-          return prev;
-        }
-        refreshStatic();
-        return model;
-      });
+      setCurrentModel(model);
     });
-
     return unsubscribe;
-  }, [config, refreshStatic]);
+  }, [config]);
+
+  const prevCurrentModelRef = useRef(currentModel);
+  useEffect(() => {
+    if (prevCurrentModelRef.current !== currentModel) {
+      prevCurrentModelRef.current = currentModel;
+      refreshStatic();
+    }
+  }, [currentModel, refreshStatic]);
 
   const {
     isThemeDialogOpen,
