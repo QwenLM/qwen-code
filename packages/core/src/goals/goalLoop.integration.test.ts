@@ -16,7 +16,7 @@
  *
  * Concretely we verify:
  *   - `registerGoalHook` wires a Function hook into the session's hook system
- *     under the `Stop` event with an empty matcher (so it matches any Stop).
+ *     under the `Stop` event with a wildcard matcher (so it matches any Stop).
  *   - When the hook callback runs and the judge says "not met", the response
  *     shape is `{continue:false, stopReason}` — which `client.ts:1342`'s
  *     `isBlockingDecision() || shouldStopExecution()` interprets as a
@@ -108,7 +108,7 @@ describe('/goal Stop hook integration', () => {
       .getSessionHooksManager()
       .getHooksForEvent(SESSION, HookEventName.Stop)[0];
     expect(sessionHook).toBeDefined();
-    expect(sessionHook.matcher).toBe('');
+    expect(sessionHook.matcher).toBe('*');
     // Function hook config — sanity check
     if (sessionHook.config.type !== 'function') {
       throw new Error(

@@ -34,8 +34,15 @@ const CLEAR_KEYWORDS = new Set([
 
 const MAX_GOAL_LENGTH = 4000;
 
+// Keep the surrounding `"…"` quote structure intact: collapse newlines so the
+// condition stays on one line, and downgrade embedded double-quotes to single
+// quotes so they don't visually close the wrapping quote.
+function sanitizeConditionForPrompt(condition: string): string {
+  return condition.replace(/[\r\n]+/g, ' ').replace(/"/g, "'");
+}
+
 const goalInstructionPrompt = (condition: string): string =>
-  `A session-scoped Stop hook is now active with condition: "${condition}". ` +
+  `A session-scoped Stop hook is now active with condition: "${sanitizeConditionForPrompt(condition)}". ` +
   `Briefly acknowledge the goal, then immediately start (or continue) working ` +
   `toward it — treat the condition itself as your directive and do not pause to ` +
   `ask the user what to do. The hook will block stopping until the condition ` +
