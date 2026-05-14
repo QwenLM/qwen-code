@@ -84,6 +84,8 @@ export default {
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
   'for help on Qwen Code': 'for help on Qwen Code',
   'show version info': 'show version info',
+  'show paths for current session files and logs':
+    'show paths for current session files and logs',
   'submit a bug report': 'submit a bug report',
   Status: 'Status',
 
