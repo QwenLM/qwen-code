@@ -54,6 +54,7 @@ import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import type { SessionStartSource } from '../hooks/types.js';
+import { getCustomSystemPrompt } from './prompts.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -542,14 +543,15 @@ export class GeminiChat {
     }
 
     const current = this.generationConfig.systemInstruction;
-    const baseInstruction =
-      typeof current === 'string'
-        ? stripTrailingSessionStartContextBlock(current)
-        : undefined;
+    let baseInstruction = '';
+    if (typeof current === 'string') {
+      baseInstruction = stripTrailingSessionStartContextBlock(current);
+    } else if (current) {
+      baseInstruction = getCustomSystemPrompt(current);
+      baseInstruction = stripTrailingSessionStartContextBlock(baseInstruction);
+    }
     const contextBlock = buildSessionStartContextBlock(trimmed);
-    this.generationConfig.systemInstruction = baseInstruction
-      ? `${baseInstruction}${contextBlock}`
-      : `${SESSION_START_CONTEXT_HEADER}:\n${trimmed}`;
+    this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
   }
 
   async applySessionStartContext(

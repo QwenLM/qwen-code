@@ -854,17 +854,39 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('first ACP session relies on initialize for SessionStart', async () => {
+  it('bootstraps ACP config without initializing Gemini chat', async () => {
+    await setupSessionMocks('session-bootstrap-skip');
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    expect(mockConfig.initialize).toHaveBeenCalledWith({
+      skipGeminiInitialization: true,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('first ACP session fires SessionStart only from the real session initialize path', async () => {
     const innerConfig = await setupSessionMocks(
       'session-no-direct-session-start',
     );
     const fireSessionStartEvent = vi.fn().mockResolvedValue(undefined);
-    const initialize = vi.fn().mockResolvedValue(undefined);
+    const initialize = vi.fn().mockImplementation(async () => {
+      await fireSessionStartEvent('startup', 'test-model', 'default');
+    });
     innerConfig.getHookSystem = vi.fn().mockReturnValue({
       fireSessionStartEvent,
     });
     innerConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
     innerConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+    innerConfig.getModel = vi.fn().mockReturnValue('test-model');
+    innerConfig.getApprovalMode = vi.fn().mockReturnValue('default');
     innerConfig.getGeminiClient = vi.fn().mockReturnValue({
       isInitialized: vi.fn().mockReturnValue(false),
       initialize,
@@ -885,8 +907,16 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
+    expect(mockConfig.initialize).toHaveBeenCalledWith({
+      skipGeminiInitialization: true,
+    });
     expect(initialize).toHaveBeenCalledTimes(1);
-    expect(fireSessionStartEvent).not.toHaveBeenCalled();
+    expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);
+    expect(fireSessionStartEvent).toHaveBeenCalledWith(
+      'startup',
+      'test-model',
+      'default',
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

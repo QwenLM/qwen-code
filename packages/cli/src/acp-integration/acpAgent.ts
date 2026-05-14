@@ -79,9 +79,10 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
-  // Initialize config to set up hookSystem (required for SessionStart/SessionEnd hooks)
-  // This is needed because gemini.tsx calls runAcpAgent without calling config.initialize()
-  await config.initialize();
+  // Initialize config to set up ACP bootstrap services (hooks, tools, MCP)
+  // without creating a chat session. The real per-session Config will own
+  // GeminiClient.initialize() and any SessionStart hook execution.
+  await config.initialize({ skipGeminiInitialization: true });
   // ACP forwards session messages straight to the model; under progressive
   // MCP availability `initialize()` returns before MCP servers settle, so
   // we wait here to keep the first session's tool surface consistent with

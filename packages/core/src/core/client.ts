@@ -218,6 +218,10 @@ export class GeminiClient {
   async initialize(sessionStartSource?: SessionStartSource) {
     this.lastPromptId = this.config.getSessionId();
 
+    if (this.isInitialized()) {
+      return;
+    }
+
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     if (resumedSessionData) {
@@ -238,7 +242,11 @@ export class GeminiClient {
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
-      await this.startChat(undefined, sessionStartSource);
+      if (sessionStartSource !== undefined) {
+        await this.startChat(undefined, sessionStartSource);
+      } else {
+        await this.startChat();
+      }
     }
   }
 
@@ -1299,21 +1307,33 @@ export class GeminiClient {
         // the previous IDE-context turn.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
-          const compactContext = await this.config
-            .getHookSystem()
-            ?.fireSessionStartEvent(
-              SessionStartSource.Compact,
-              this.config.getModel() ?? '',
-              String(this.config.getApprovalMode()) as PermissionMode,
-            );
-          const compactAdditionalContext = compactContext
-            ?.getAdditionalContext()
-            ?.trim();
-          if (compactAdditionalContext) {
-            await this.getChat().applySessionStartContext(
-              compactAdditionalContext,
-              SessionStartSource.Compact,
-            );
+          const hookSystem = this.config.getHookSystem();
+          const hooksEnabled = !this.config.getDisableAllHooks();
+          if (
+            hooksEnabled &&
+            hookSystem &&
+            this.config.hasHooksForEvent('SessionStart')
+          ) {
+            try {
+              const compactContext = await hookSystem.fireSessionStartEvent(
+                SessionStartSource.Compact,
+                this.config.getModel() ?? '',
+                String(this.config.getApprovalMode()) as PermissionMode,
+              );
+              const compactAdditionalContext = compactContext
+                ?.getAdditionalContext()
+                ?.trim();
+              if (compactAdditionalContext) {
+                await this.getChat().applySessionStartContext(
+                  compactAdditionalContext,
+                  SessionStartSource.Compact,
+                );
+              }
+            } catch (err) {
+              this.config
+                .getDebugLogger()
+                .warn(`SessionStart hook failed: ${err}`);
+            }
           }
         }
 

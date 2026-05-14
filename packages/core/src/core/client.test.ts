@@ -559,6 +559,62 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(resumedClient.getChat().getLastPromptTokenCount()).toBe(123_456);
     });
+
+    it('uses Startup SessionStart source for non-resumed initialize without explicit source', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Startup hook context',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      const freshClient = new GeminiClient(mockConfig);
+      await freshClient.initialize();
+
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Startup,
+        'test-model',
+        PermissionMode.Default,
+      );
+    });
+
+    it('is idempotent when initialize is called twice on the same session', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'Startup hook context',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      const freshClient = new GeminiClient(mockConfig);
+      await freshClient.initialize();
+      const firstChat = freshClient.getChat();
+      await freshClient.initialize(SessionStartSource.Resume);
+
+      expect(freshClient.getChat()).toBe(firstChat);
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(1);
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledWith(
+        SessionStartSource.Startup,
+        'test-model',
+        PermissionMode.Default,
+      );
+    });
   });
 
   describe('startChat — deferred tools', () => {
@@ -1358,6 +1414,146 @@ describe('Gemini Client (client.ts)', () => {
         'Auto compact hook context',
         SessionStartSource.Compact,
       );
+    });
+
+    it('skips Compact SessionStart hook after auto compaction when hooks are disabled', async () => {
+      const fireSessionStartEvent = vi.fn();
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireSessionStartEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+      } as unknown as GeminiChat;
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-compact-hooks-disabled',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(fireSessionStartEvent).not.toHaveBeenCalled();
+      expect(client.getChat().applySessionStartContext).not.toHaveBeenCalled();
+    });
+
+    it('skips Compact SessionStart hook after auto compaction when SessionStart is not registered', async () => {
+      const fireSessionStartEvent = vi.fn();
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireSessionStartEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+      } as unknown as GeminiChat;
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-compact-no-hook',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(fireSessionStartEvent).not.toHaveBeenCalled();
+      expect(client.getChat().applySessionStartContext).not.toHaveBeenCalled();
+    });
+
+    it('does not crash auto compaction when Compact SessionStart hook throws', async () => {
+      const fireSessionStartEvent = vi
+        .fn()
+        .mockRejectedValue(new Error('compact hook failed'));
+      const debugLogger = {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireSessionStartEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      vi.mocked(mockConfig.getDebugLogger).mockReturnValue(debugLogger);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        applySessionStartContext: vi.fn().mockResolvedValue(undefined),
+      } as unknown as GeminiChat;
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+          yield {
+            type: GeminiEventType.Finished,
+            value: undefined,
+          };
+        })(),
+      );
+
+      const seenEvents: GeminiEventType[] = [];
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-compact-throw',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const event of stream) {
+        seenEvents.push(event.type);
+      }
+
+      expect(seenEvents).toEqual([
+        GeminiEventType.ChatCompressed,
+        GeminiEventType.Finished,
+      ]);
+      expect(debugLogger.warn).toHaveBeenCalledWith(
+        'SessionStart hook failed: Error: compact hook failed',
+      );
+      expect(client.getChat().applySessionStartContext).not.toHaveBeenCalled();
     });
 
     it('does not flip forceFullIdeContext when compression NOOPs', async () => {

@@ -224,6 +224,28 @@ describe('GeminiChat', async () => {
         'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule\n\n---\n\nSessionStart additional context:\nCtx2',
       );
     });
+
+    it('preserves non-string systemInstruction content when applying session-start context', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {
+          systemInstruction: {
+            role: 'system',
+            parts: [{ text: 'Base content instruction' }],
+          },
+        },
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base content instruction\n\n---\n\nSessionStart additional context:\nCtx2',
+      );
+    });
   });
 
   describe('sendMessageStream', () => {
