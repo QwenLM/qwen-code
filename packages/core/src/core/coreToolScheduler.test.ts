@@ -123,8 +123,11 @@ function createMockToolSpan(
   });
 }
 
-vi.mock('../telemetry/index.js', () => ({
-  startToolSpan: vi.fn(
+vi.mock('../telemetry/index.js', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    startToolSpan: vi.fn(
     (name: string, attrs?: Record<string, string | number | boolean>) =>
       createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
   ),
@@ -164,7 +167,8 @@ vi.mock('../telemetry/index.js', () => ({
       }
     },
   ),
-}));
+  };
+});
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
