@@ -166,6 +166,7 @@ describe('runAcpAgent shutdown cleanup', () => {
     // Reset mockConfig after clearAllMocks
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -343,6 +344,7 @@ describe('runAcpAgent SessionEnd hooks', () => {
     };
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(mockHookSystem),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(true),
@@ -684,6 +686,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -744,6 +747,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   function makeInnerConfig() {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
@@ -759,6 +763,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getGeminiClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       setFileSystemService: vi.fn(),
@@ -1122,6 +1127,92 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('per-session newSession surfaces MCP failures to stderr (round-7 fix: was silent before)', async () => {
+    // Round-7 regression: `QwenAgent.initializeConfig()` (per-session ACP
+    // path) calls `waitForMcpReady()` but the round-4 fix only added the
+    // failure warning to the top-level `runAcpAgent` path. Per-session
+    // configs with failed MCP servers silently fell back to built-in
+    // tools with zero user-visible indication, despite the inline comment
+    // claiming "Same reasoning as the top-level runAcpAgent path."
+    const innerConfig = await setupSessionMocks('session-failed-mcp');
+    (
+      innerConfig as unknown as { getFailedMcpServerNames: () => string[] }
+    ).getFailedMcpServerNames = vi
+      .fn()
+      .mockReturnValue(['broken-server-a', 'broken-server-b']);
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // The warning must list both failed servers and mention "Warning:"
+    // exactly like the top-level path and the other non-interactive
+    // entry points (`gemini.tsx`, `session.ts`).
+    const matchingWrite = stderrWrite.mock.calls.find(
+      ([msg]) =>
+        typeof msg === 'string' &&
+        msg.includes('Warning: MCP server(s) failed to start') &&
+        msg.includes('broken-server-a') &&
+        msg.includes('broken-server-b'),
+    );
+    expect(matchingWrite).toBeDefined();
+
+    stderrWrite.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('per-session newSession is safe when Config lacks getFailedMcpServerNames (defensive typeof check)', async () => {
+    // Tests pass stubbed Configs without `getFailedMcpServerNames` — the
+    // round-7 fix uses `typeof config.getFailedMcpServerNames ===
+    // 'function'` so it must not throw, and must not write to stderr.
+    await setupSessionMocks('session-stubbed-config');
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).resolves.not.toThrow();
+    const surfacedWarning = stderrWrite.mock.calls.find(
+      ([msg]) =>
+        typeof msg === 'string' &&
+        msg.includes('Warning: MCP server(s) failed to start'),
+    );
+    expect(surfacedWarning).toBeUndefined();
+
+    stderrWrite.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('newSession with SSE MCP server and empty headers passes undefined for headers', async () => {
     await setupSessionMocks('session-sse-noheaders');
 
@@ -1206,6 +1297,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
     mockConfig = {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -1229,6 +1321,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
   ) {
     return {
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
       }),
@@ -1244,6 +1337,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       getGeminiClient: vi.fn().mockReturnValue({
         isInitialized: vi.fn().mockReturnValue(true),
         initialize: vi.fn().mockResolvedValue(undefined),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
       setFileSystemService: vi.fn(),

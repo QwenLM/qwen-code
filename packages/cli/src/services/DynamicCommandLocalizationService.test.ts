@@ -73,6 +73,15 @@ describe('DynamicCommandLocalizationService', () => {
     expect(localized[0]?.description).toBe('审查代码变更');
     expect(localized[0]?.modelDescription).toBe('Review code changes');
     expect(generateJson).toHaveBeenCalledTimes(1);
+    expect(generateJson).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'qwen-fast',
+        promptId: 'side-query:dynamic-command-localization',
+        config: expect.objectContaining({
+          thinkingConfig: { includeThoughts: false },
+        }),
+      }),
+    );
   });
 
   it('skips translation by default unless explicitly enabled', async () => {

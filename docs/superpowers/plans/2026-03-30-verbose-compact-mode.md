@@ -12,32 +12,33 @@
 
 ## File Map
 
-| File | Action | Responsibility |
-|------|--------|---------------|
-| `packages/cli/src/ui/contexts/VerboseModeContext.tsx` | **CREATE** | Context definition, `useVerboseMode` hook, `VerboseModeProvider` export |
-| `packages/cli/src/config/settingsSchema.ts` | modify | Add `ui.verboseMode: boolean` field |
-| `packages/cli/src/config/keyBindings.ts` | modify | Add `TOGGLE_VERBOSE_MODE` command + Ctrl+O binding |
-| `packages/cli/src/ui/AppContainer.tsx` | modify | State init, keypress handler, Provider mount |
-| `packages/cli/src/ui/components/HistoryItemDisplay.tsx` | modify | Hide `gemini_thought` / `gemini_thought_content` in compact mode |
-| `packages/cli/src/ui/components/messages/ToolMessage.tsx` | modify | Hide `resultDisplay` in compact mode via `effectiveDisplayRenderer` |
-| `packages/cli/src/ui/components/Footer.tsx` | modify | Show `verbose` label in right section when verbose mode active |
-| `packages/cli/src/i18n/locales/en.js` | modify | Add 4 i18n keys |
-| `packages/cli/src/i18n/locales/zh.js` | modify | Add 4 i18n keys (Chinese translations) |
-| `packages/cli/src/i18n/locales/de.js` | modify | Add 4 i18n keys (English placeholder) |
-| `packages/cli/src/i18n/locales/ja.js` | modify | Add 4 i18n keys (English placeholder) |
-| `packages/cli/src/i18n/locales/ru.js` | modify | Add 4 i18n keys (English placeholder) |
-| `packages/cli/src/i18n/locales/pt.js` | modify | Add 4 i18n keys (English placeholder) |
-| `docs/users/reference/keyboard-shortcuts.md` | modify | Update Ctrl+O description |
-| `packages/cli/src/ui/keyMatchers.test.ts` | modify | Add 2 test cases for TOGGLE_VERBOSE_MODE binding |
-| `packages/cli/src/ui/components/messages/ToolMessage.test.tsx` | modify | Update `renderWithContext` + add 2 verbose mode test cases |
-| `packages/cli/src/ui/components/HistoryItemDisplay.test.tsx` | modify | Add 2 test cases for thought visibility |
-| `packages/cli/src/ui/components/Footer.test.tsx` | modify | Add 2 test cases for verbose indicator |
+| File                                                           | Action     | Responsibility                                                          |
+| -------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------- |
+| `packages/cli/src/ui/contexts/VerboseModeContext.tsx`          | **CREATE** | Context definition, `useVerboseMode` hook, `VerboseModeProvider` export |
+| `packages/cli/src/config/settingsSchema.ts`                    | modify     | Add `ui.verboseMode: boolean` field                                     |
+| `packages/cli/src/config/keyBindings.ts`                       | modify     | Add `TOGGLE_VERBOSE_MODE` command + Ctrl+O binding                      |
+| `packages/cli/src/ui/AppContainer.tsx`                         | modify     | State init, keypress handler, Provider mount                            |
+| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`        | modify     | Hide `gemini_thought` / `gemini_thought_content` in compact mode        |
+| `packages/cli/src/ui/components/messages/ToolMessage.tsx`      | modify     | Hide `resultDisplay` in compact mode via `effectiveDisplayRenderer`     |
+| `packages/cli/src/ui/components/Footer.tsx`                    | modify     | Show `verbose` label in right section when verbose mode active          |
+| `packages/cli/src/i18n/locales/en.js`                          | modify     | Add 4 i18n keys                                                         |
+| `packages/cli/src/i18n/locales/zh.js`                          | modify     | Add 4 i18n keys (Chinese translations)                                  |
+| `packages/cli/src/i18n/locales/de.js`                          | modify     | Add 4 i18n keys (English placeholder)                                   |
+| `packages/cli/src/i18n/locales/ja.js`                          | modify     | Add 4 i18n keys (English placeholder)                                   |
+| `packages/cli/src/i18n/locales/ru.js`                          | modify     | Add 4 i18n keys (English placeholder)                                   |
+| `packages/cli/src/i18n/locales/pt.js`                          | modify     | Add 4 i18n keys (English placeholder)                                   |
+| `docs/users/reference/keyboard-shortcuts.md`                   | modify     | Update Ctrl+O description                                               |
+| `packages/cli/src/ui/keyMatchers.test.ts`                      | modify     | Add 2 test cases for TOGGLE_VERBOSE_MODE binding                        |
+| `packages/cli/src/ui/components/messages/ToolMessage.test.tsx` | modify     | Update `renderWithContext` + add 2 verbose mode test cases              |
+| `packages/cli/src/ui/components/HistoryItemDisplay.test.tsx`   | modify     | Add 2 test cases for thought visibility                                 |
+| `packages/cli/src/ui/components/Footer.test.tsx`               | modify     | Add 2 test cases for verbose indicator                                  |
 
 ---
 
 ## Task 1: Create VerboseModeContext
 
 **Files:**
+
 - Create: `packages/cli/src/ui/contexts/VerboseModeContext.tsx`
 
 - [ ] **Step 1: Create the context file**
@@ -85,6 +86,7 @@ git commit -m "feat: add VerboseModeContext for compact/verbose toggle"
 ## Task 2: Add Key Binding + Failing Test
 
 **Files:**
+
 - Modify: `packages/cli/src/config/keyBindings.ts`
 - Modify: `packages/cli/src/ui/keyMatchers.test.ts`
 
@@ -96,17 +98,13 @@ Open `packages/cli/src/ui/keyMatchers.test.ts` and add this `describe` block **b
 describe('TOGGLE_VERBOSE_MODE binding', () => {
   it('matches Ctrl+O', () => {
     expect(
-      keyMatchers[Command.TOGGLE_VERBOSE_MODE](
-        createKey('o', { ctrl: true }),
-      ),
+      keyMatchers[Command.TOGGLE_VERBOSE_MODE](createKey('o', { ctrl: true })),
     ).toBe(true);
   });
 
   it('does not match plain O', () => {
     expect(
-      keyMatchers[Command.TOGGLE_VERBOSE_MODE](
-        createKey('o', { ctrl: false }),
-      ),
+      keyMatchers[Command.TOGGLE_VERBOSE_MODE](createKey('o', { ctrl: false })),
     ).toBe(false);
   });
 });
@@ -172,6 +170,7 @@ git commit -m "feat: add TOGGLE_VERBOSE_MODE command and Ctrl+O key binding"
 ## Task 3: Add Settings Schema Field
 
 **Files:**
+
 - Modify: `packages/cli/src/config/settingsSchema.ts`
 
 - [ ] **Step 1: Add the verboseMode field**
@@ -220,6 +219,7 @@ git commit -m "feat: add ui.verboseMode setting to schema"
 ## Task 4: Update ToolMessage — Write Failing Test, Then Implement
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/messages/ToolMessage.test.tsx`
 - Modify: `packages/cli/src/ui/components/messages/ToolMessage.tsx`
 
@@ -357,6 +357,7 @@ git commit -m "feat: hide tool result display in compact mode"
 ## Task 5: Update HistoryItemDisplay — Write Failing Test, Then Implement
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/HistoryItemDisplay.test.tsx`
 - Modify: `packages/cli/src/ui/components/HistoryItemDisplay.tsx`
 
@@ -512,6 +513,7 @@ git commit -m "feat: hide thinking chain in compact mode"
 ## Task 6: Update AppContainer — State, Handler, Provider
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/AppContainer.tsx`
 
 - [ ] **Step 1: Add the VerboseModeProvider import**
@@ -527,16 +529,16 @@ import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
 Find the existing `showToolDescriptions` state (around line 963):
 
 ```typescript
-  const [showToolDescriptions, setShowToolDescriptions] =
-    useState<boolean>(false);
+const [showToolDescriptions, setShowToolDescriptions] =
+  useState<boolean>(false);
 ```
 
 Add the `verboseMode` state immediately after it:
 
 ```typescript
-  const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? false,
-  );
+const [verboseMode, setVerboseMode] = useState<boolean>(
+  settings.merged.ui?.verboseMode ?? false,
+);
 ```
 
 - [ ] **Step 3: Add the Ctrl+O keypress handler**
@@ -544,22 +546,20 @@ Add the `verboseMode` state immediately after it:
 Find the `if (keyMatchers[Command.TOGGLE_TOOL_DESCRIPTIONS](key)) {` block (around line 1327) and add the new handler as a new `if` block right after the closing `}` of that block (before the next `} else if`):
 
 ```typescript
-      if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
-        const newValue = !verboseMode;
-        setVerboseMode(newValue);
-        settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
-        historyManager.addItem(
-          {
-            type: MessageType.INFO,
-            text: newValue
-              ? t('Verbose mode on — showing full tool output and thinking')
-              : t(
-                  'Compact mode on — showing tool names and final responses only',
-                ),
-          },
-          Date.now(),
-        );
-      }
+if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
+  const newValue = !verboseMode;
+  setVerboseMode(newValue);
+  settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+  historyManager.addItem(
+    {
+      type: MessageType.INFO,
+      text: newValue
+        ? t('Verbose mode on — showing full tool output and thinking')
+        : t('Compact mode on — showing tool names and final responses only'),
+    },
+    Date.now(),
+  );
+}
 ```
 
 - [ ] **Step 4: Add verboseMode to the useCallback dependency array**
@@ -579,19 +579,19 @@ Find the dependency array of `handleGlobalKeypress` (the `useCallback` that cont
 Find the JSX return (around line 1800). Locate this block:
 
 ```tsx
-            <ShellFocusContext.Provider value={isFocused}>
-              <App />
-            </ShellFocusContext.Provider>
+<ShellFocusContext.Provider value={isFocused}>
+  <App />
+</ShellFocusContext.Provider>
 ```
 
 Replace it with:
 
 ```tsx
-            <VerboseModeProvider value={{ verboseMode }}>
-              <ShellFocusContext.Provider value={isFocused}>
-                <App />
-              </ShellFocusContext.Provider>
-            </VerboseModeProvider>
+<VerboseModeProvider value={{ verboseMode }}>
+  <ShellFocusContext.Provider value={isFocused}>
+    <App />
+  </ShellFocusContext.Provider>
+</VerboseModeProvider>
 ```
 
 - [ ] **Step 6: Run TypeScript check**
@@ -622,6 +622,7 @@ git commit -m "feat: wire VerboseModeContext into AppContainer with Ctrl+O toggl
 ## Task 7: Update Footer — Write Failing Test, Then Implement
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/Footer.test.tsx`
 - Modify: `packages/cli/src/ui/components/Footer.tsx`
 
@@ -690,7 +691,7 @@ import { useVerboseMode } from '../contexts/VerboseModeContext.js';
 Inside the `Footer` component function, add the hook call after the existing `const { vimEnabled, vimMode } = useVimMode();` line:
 
 ```typescript
-  const { verboseMode } = useVerboseMode();
+const { verboseMode } = useVerboseMode();
 ```
 
 Find the `rightItems` push block (the one for context usage, ending around line 94). After its closing `}` add:
@@ -724,6 +725,7 @@ git commit -m "feat: add verbose mode indicator to Footer"
 ## Task 8: Add i18n Keys
 
 **Files:**
+
 - Modify: `packages/cli/src/i18n/locales/en.js`
 - Modify: `packages/cli/src/i18n/locales/zh.js`
 - Modify: `packages/cli/src/i18n/locales/de.js`
@@ -785,6 +787,7 @@ git commit -m "feat: add i18n keys for verbose/compact mode messages"
 ## Task 9: Update Keyboard Shortcuts Documentation
 
 **Files:**
+
 - Modify: `docs/users/reference/keyboard-shortcuts.md`
 
 - [ ] **Step 1: Update the Ctrl+O entry**

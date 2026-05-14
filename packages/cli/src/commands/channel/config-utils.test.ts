@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { resolveEnvVars, parseChannelConfig } from './config-utils.js';
 
 // Mock the channel-registry so we don't pull in real plugins
@@ -136,5 +138,38 @@ describe('parseChannelConfig', () => {
       customField: 42,
     });
     expect((result as Record<string, unknown>)['customField']).toBe(42);
+  });
+
+  it('expands tilde in cwd (~/x → $HOME/x)', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~/xomo',
+    });
+    expect(result.cwd).toBe(path.join(os.homedir(), 'xomo'));
+  });
+
+  it('expands bare tilde (~) in cwd to home directory', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: '~',
+    });
+    expect(result.cwd).toBe(os.homedir());
+  });
+
+  it('resolves relative cwd against process.cwd', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: 'relative/dir',
+    });
+    expect(result.cwd).toBe(path.resolve('relative/dir'));
+  });
+
+  it('leaves absolute cwd unchanged', async () => {
+    const abs = path.resolve('/custom');
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      cwd: abs,
+    });
+    expect(result.cwd).toBe(abs);
   });
 });

@@ -26,10 +26,15 @@ const METRIC_COL_WIDTH = 28;
 // Sessions with three or more sources will exceed the panel — acceptable per
 // the design doc, which accepts the crowded layout for many-subagent cases.
 const MODEL_COL_WIDTH = 24;
+// Keep this in sync with the surrounding Box borderStyle and paddingX:
+// Ink's round border consumes 2 border columns plus 2 columns of horizontal
+// padding on each side.
+const PANEL_HORIZONTAL_CHROME_WIDTH = 6;
 
 interface StatRowProps {
   title: string;
   values: Array<string | React.ReactElement>;
+  modelColWidth: number;
   isSubtle?: boolean;
   isSection?: boolean;
 }
@@ -37,6 +42,7 @@ interface StatRowProps {
 const StatRow: React.FC<StatRowProps> = ({
   title,
   values,
+  modelColWidth,
   isSubtle = false,
   isSection = false,
 }) => (
@@ -50,7 +56,7 @@ const StatRow: React.FC<StatRowProps> = ({
       </Text>
     </Box>
     {values.map((value, index) => (
-      <Box width={MODEL_COL_WIDTH} key={index}>
+      <Box width={modelColWidth} key={index}>
         <Text color={theme.text.primary}>{value}</Text>
       </Box>
     ))}
@@ -94,6 +100,13 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
     ({ metrics }) => metrics.tokens.thoughts > 0,
   );
   const hasCached = entries.some(({ metrics }) => metrics.tokens.cached > 0);
+  const modelColWidth =
+    entries.length === 1 && width
+      ? Math.max(
+          MODEL_COL_WIDTH,
+          width - PANEL_HORIZONTAL_CHROME_WIDTH - METRIC_COL_WIDTH,
+        )
+      : MODEL_COL_WIDTH;
 
   const getModelName = (key: string): string => key.split('::')[0];
 
@@ -128,7 +141,7 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
           </Text>
         </Box>
         {entries.map(({ key, label }) => (
-          <Box width={MODEL_COL_WIDTH} key={key}>
+          <Box width={modelColWidth} key={key}>
             <Text bold color={theme.text.primary}>
               {label}
             </Text>
@@ -147,10 +160,16 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
       />
 
       {/* API Section */}
-      <StatRow title={t('API')} values={[]} isSection />
+      <StatRow
+        title={t('API')}
+        values={[]}
+        modelColWidth={modelColWidth}
+        isSection
+      />
       <StatRow
         title={t('Requests')}
         values={getModelValues((m) => m.api.totalRequests.toLocaleString())}
+        modelColWidth={modelColWidth}
       />
       <StatRow
         title={t('Errors')}
@@ -166,6 +185,7 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
             </Text>
           );
         })}
+        modelColWidth={modelColWidth}
       />
       <StatRow
         title={t('Avg Latency')}
@@ -173,12 +193,18 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
           const avgLatency = calculateAverageLatency(m);
           return formatDuration(avgLatency);
         })}
+        modelColWidth={modelColWidth}
       />
 
       <Box height={1} />
 
       {/* Tokens Section */}
-      <StatRow title={t('Tokens')} values={[]} isSection />
+      <StatRow
+        title={t('Tokens')}
+        values={[]}
+        modelColWidth={modelColWidth}
+        isSection
+      />
       <StatRow
         title={t('Total')}
         values={getModelValues((m) => (
@@ -186,11 +212,13 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
             {m.tokens.total.toLocaleString()}
           </Text>
         ))}
+        modelColWidth={modelColWidth}
       />
       <StatRow
         title={t('Prompt')}
         isSubtle
         values={getModelValues((m) => m.tokens.prompt.toLocaleString())}
+        modelColWidth={modelColWidth}
       />
       {hasCached && (
         <StatRow
@@ -204,6 +232,7 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
               </Text>
             );
           })}
+          modelColWidth={modelColWidth}
         />
       )}
       {hasThoughts && (
@@ -211,17 +240,24 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
           title={t('Thoughts')}
           isSubtle
           values={getModelValues((m) => m.tokens.thoughts.toLocaleString())}
+          modelColWidth={modelColWidth}
         />
       )}
       <StatRow
         title={t('Output')}
         isSubtle
         values={getModelValues((m) => m.tokens.candidates.toLocaleString())}
+        modelColWidth={modelColWidth}
       />
       {hasPricing && (
         <>
           <Box height={1} />
-          <StatRow title={t('Cost')} values={[]} isSection />
+          <StatRow
+            title={t('Cost')}
+            values={[]}
+            modelColWidth={modelColWidth}
+            isSection
+          />
           <StatRow
             title={t('Estimated')}
             values={entries.map(({ key, metrics }) => {
@@ -233,6 +269,7 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
               });
               return cost != null ? `$${cost.toFixed(4)}` : 'N/A';
             })}
+            modelColWidth={modelColWidth}
           />
         </>
       )}

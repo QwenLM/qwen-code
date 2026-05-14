@@ -7,7 +7,7 @@
 import { convert } from 'html-to-text';
 import type { Config } from '../config/config.js';
 import { fetchWithTimeout, isPrivateIp } from '../utils/fetch.js';
-import { getResponseText } from '../utils/partUtils.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   ToolCallConfirmationDetails,
@@ -18,7 +18,6 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger, type DebugLogger } from '../utils/debugLogger.js';
 
@@ -140,7 +139,6 @@ class WebFetchToolInvocation extends BaseToolInvocation<
         `[WebFetchTool] Content length: ${textContent.length} characters`,
       );
 
-      const geminiClient = this.config.getGeminiClient();
       const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
 
 I have fetched the content from ${this.params.url}. Please use the following content to answer the user's request.
@@ -153,17 +151,21 @@ ${textContent}
         `[WebFetchTool] Processing content with prompt: "${this.params.prompt}"`,
       );
 
-      const result = await geminiClient.generateContent(
-        [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
-        {
-          systemInstruction:
-            'Extract and summarize the requested information from the provided web content. ' +
-            'Be concise and accurate. Respond only with the requested information.',
-        },
-        signal,
-        this.config.getModel() || DEFAULT_QWEN_MODEL,
-      );
-      const resultText = getResponseText(result) || '';
+      const result = await runSideQuery(this.config, {
+        purpose: 'web-fetch',
+        // Pin to the main model — fast model loses too much fidelity on
+        // long, rich source material.
+        model: this.config.getModel(),
+        // Best-effort: the outer catch already converts processing failures
+        // into a tool error; retrying 7× just delays that fallback.
+        maxAttempts: 1,
+        contents: [{ role: 'user', parts: [{ text: fallbackPrompt }] }],
+        systemInstruction:
+          'Extract and summarize the requested information from the provided web content. ' +
+          'Be concise and accurate. Respond only with the requested information.',
+        abortSignal: signal,
+      });
+      const resultText = result.text || '';
 
       this.debugLogger.debug(
         `[WebFetchTool] Successfully processed content from ${this.params.url}`,

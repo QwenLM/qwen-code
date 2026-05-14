@@ -207,7 +207,7 @@ describe('debugLogger', () => {
 
     it('uses the session root span context for fallback trace context', async () => {
       const sessionRootContext = { root: true } as unknown as Context;
-      setSessionContext(sessionRootContext);
+      setSessionContext(sessionRootContext, 'test-session');
       vi.mocked(trace.getSpan).mockImplementation((ctx) =>
         ctx === sessionRootContext
           ? ({

@@ -17,6 +17,7 @@ import {
   AuthType,
   type AvailableModel,
   type Config,
+  resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
@@ -72,6 +73,25 @@ function formatUnavailableModelMessage(
 
   return (
     `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders or run /model to select an available model.'
+  );
+}
+
+function formatUnavailableFastModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  const availableModelIds = Array.from(
+    new Set(availableModels.map((model) => model.id)),
+  );
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+
+  return (
+    `Fast model '${modelName}' is not configured for any auth type.\n` +
     `${availableModelsLine}\n` +
     'Configure models in settings.modelProviders or run /model to select an available model.'
   );
@@ -174,17 +194,36 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      const availableModels = config.getAvailableModelsForAuthType(authType);
-      if (!availableModels.some((model) => model.id === modelName)) {
+      const selector = (() => {
+        try {
+          return resolveModelId(modelName);
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!selector) {
         return {
           type: 'message',
           messageType: 'error',
-          content: formatUnavailableModelMessage(
-            'Fast model',
-            modelName,
-            authType,
-            availableModels,
-          ),
+          content: formatUnavailableFastModelMessage(modelName, []),
+        };
+      }
+
+      const availableModels = selector.authType
+        ? config.getAvailableModelsForAuthType(selector.authType)
+        : config.getAllConfiguredModels();
+      if (!availableModels.some((model) => model.id === selector.modelId)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: selector.authType
+            ? formatUnavailableModelMessage(
+                'Fast model',
+                selector.modelId,
+                selector.authType,
+                availableModels,
+              )
+            : formatUnavailableFastModelMessage(modelName, availableModels),
         };
       }
 

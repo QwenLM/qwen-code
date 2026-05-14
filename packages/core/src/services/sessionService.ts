@@ -100,6 +100,15 @@ export interface ListSessionsResult {
 }
 
 /**
+ * Result of removing multiple sessions.
+ */
+export interface RemoveSessionsResult {
+  removed: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: Error }>;
+}
+
+/**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
  */
@@ -741,6 +750,48 @@ export class SessionService {
   }
 
   /**
+   * Removes multiple sessions in one call.
+   *
+   * Each session is processed independently — a failure on one does not
+   * abort the rest. Sessions that don't exist (or belong to a different
+   * project) are reported in {@link notFound}; thrown filesystem
+   * errors are surfaced per-id in {@link errors} so callers can decide
+   * whether to retry.
+   *
+   * @param sessionIds IDs to remove. Duplicates are de-duplicated.
+   * @returns Per-id outcomes: which were removed, which were not found,
+   *   and which threw an error.
+   */
+  async removeSessions(sessionIds: string[]): Promise<RemoveSessionsResult> {
+    const removed: string[] = [];
+    const notFound: string[] = [];
+    const errors: Array<{ sessionId: string; error: Error }> = [];
+
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    const results = await Promise.allSettled(
+      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+    );
+
+    for (let i = 0; i < results.length; i++) {
+      const sessionId = uniqueSessionIds[i];
+      if (sessionId === undefined) continue;
+
+      const result = results[i];
+      if (result.status === 'fulfilled') {
+        if (result.value) {
+          removed.push(sessionId);
+        } else {
+          notFound.push(sessionId);
+        }
+      } else {
+        errors.push({ sessionId, error: result.reason as Error });
+      }
+    }
+
+    return { removed, notFound, errors };
+  }
+
+  /**
    * Renames a session by appending a custom_title system record to its JSONL file.
    *
    * @param sessionId The session ID to rename
@@ -1229,7 +1280,7 @@ export function replayUiTelemetryFromConversation(
 /**
  * Returns the best available prompt token count for resuming telemetry.
  * Walks backward through messages and returns the first valid value:
- * - The latest assistant's non-zero usage (totalTokenCount ?? promptTokenCount).
+ * - The latest assistant's non-zero usage (promptTokenCount ?? totalTokenCount).
  * - The most recent chat compression checkpoint's newTokenCount.
  */
 export function getResumePromptTokenCount(
@@ -1240,7 +1291,7 @@ export function getResumePromptTokenCount(
 
     if (record.type === 'assistant') {
       const usage = record.usageMetadata;
-      const candidate = usage?.totalTokenCount ?? usage?.promptTokenCount;
+      const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
       if (candidate) {
         return candidate;
       }

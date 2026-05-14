@@ -338,6 +338,107 @@ describe('Logger', () => {
       logger2.close();
     });
 
+    it('updates lastLoggedUserEntry to the new entry when _updateLogFile skips a USER write (duplicate-skip)', async () => {
+      // Regression for PR #4023: when `_updateLogFile` detects another
+      // instance already wrote an identical row and returns null, the
+      // skipped write must still shift `lastLoggedUserEntry` to the
+      // new entry. Otherwise the tracker would lie about the most
+      // recent USER row and a subsequent cancel/auto-restore would
+      // delete an older, unrelated prompt.
+      //
+      // The natural race (max+1 colliding with an existing messageId)
+      // can't be triggered with sequential awaits because
+      // `_updateLogFile`'s snapshot is always max+1-strict. Drive the
+      // contract directly by mocking the private method to return null
+      // — the post-condition we care about is on `lastLoggedUserEntry`,
+      // not on the _readLogFile/writeFile machinery.
+      await logger.logMessage(MessageSenderType.USER, 'first');
+      const trackerAfterFirst = logger['lastLoggedUserEntry'];
+      expect(trackerAfterFirst?.message).toBe('first');
+
+      // Force the duplicate-skip path: _updateLogFile resolves to null.
+      const updateSpy = vi
+        .spyOn(
+          logger as unknown as { _updateLogFile: (e: LogEntry) => unknown },
+          '_updateLogFile',
+        )
+        .mockResolvedValueOnce(null);
+      vi.advanceTimersByTime(1000);
+      await logger.logMessage(MessageSenderType.USER, 'second');
+      expect(updateSpy).toHaveBeenCalled();
+
+      // Tracker MUST have advanced — point at the entry "second" so a
+      // follow-up undo targets that row, not the older "first".
+      const trackerAfterSkip = logger['lastLoggedUserEntry'];
+      expect(trackerAfterSkip).not.toBe(trackerAfterFirst);
+      expect(trackerAfterSkip?.message).toBe('second');
+      expect(trackerAfterSkip?.type).toBe(MessageSenderType.USER);
+    });
+
+    it('removeLastUserMessage targets the duplicate-skipped row, not the older USER', async () => {
+      // Identity contract: when `_updateLogFile` returns null on a USER
+      // write, the tracker advances to the new entry — and that 5-tuple
+      // must match the row that actually IS on disk so a follow-up
+      // `removeLastUserMessage()` deletes the duplicate-skipped row
+      // rather than wiping out the prior USER prompt.
+      //
+      // Set up by manually seeding disk with [first (msgId 0), second
+      // (msgId 1)] and stubbing `_updateLogFile` for the second call to
+      // mimic what the duplicate-skip branch does: align
+      // newEntryObject.messageId with the disk row (1) and return null.
+      await logger.logMessage(MessageSenderType.USER, 'first');
+      const firstOnDisk = (await readLogFile())[0]!;
+      expect(firstOnDisk.message).toBe('first');
+
+      vi.advanceTimersByTime(1000);
+      const secondTimestamp = new Date().toISOString();
+      const secondRow: LogEntry = {
+        sessionId: testSessionId,
+        messageId: 1,
+        timestamp: secondTimestamp,
+        type: MessageSenderType.USER,
+        message: 'second',
+      };
+      await fs.writeFile(
+        testLogFilePath,
+        JSON.stringify([firstOnDisk, secondRow], null, 2),
+        'utf-8',
+      );
+
+      // Drive the duplicate-skip branch: _updateLogFile mutates
+      // newEntryObject to match the disk row (messageId 1, same
+      // timestamp), then returns null. logMessage's
+      // `else if (type === USER)` branch will then assign
+      // lastLoggedUserEntry = newEntryObject — the same 5-tuple as
+      // secondRow.
+      vi.spyOn(
+        logger as unknown as {
+          _updateLogFile: (e: LogEntry) => Promise<LogEntry | null>;
+        },
+        '_updateLogFile',
+      ).mockImplementationOnce(async (entry: LogEntry) => {
+        entry.messageId = secondRow.messageId;
+        entry.timestamp = secondRow.timestamp;
+        return null;
+      });
+      await logger.logMessage(MessageSenderType.USER, 'second');
+
+      // Sanity: tracker points at the secondRow 5-tuple.
+      const tracker = logger['lastLoggedUserEntry'];
+      expect(tracker).toMatchObject({
+        messageId: secondRow.messageId,
+        timestamp: secondRow.timestamp,
+        message: 'second',
+      });
+
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(true);
+
+      // 'second' removed, 'first' untouched.
+      const after = await readLogFile();
+      expect(after.map((e) => e.message)).toEqual(['first']);
+    });
+
     it('should not throw, not increment messageId, and log error if writing to file fails', async () => {
       vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
       const initialMessageId = logger['messageId'];
@@ -699,6 +800,201 @@ describe('Logger', () => {
       expect(logger['logs']).toEqual([]);
       expect(logger['sessionId']).toBeUndefined();
       expect(logger['messageId']).toBe(0);
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+    });
+  });
+
+  describe('removeLastUserMessage', () => {
+    it('removes the most recently persisted USER entry from disk and cache', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'kept');
+      vi.advanceTimersByTime(1000);
+      await logger.logMessage(MessageSenderType.USER, 'cancelled');
+
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(true);
+
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['kept']);
+      const inMemory = await logger.getPreviousUserMessages();
+      expect(inMemory).toEqual(['kept']);
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+      // messageId rolled back so the next write reuses the freed slot.
+      expect(logger['messageId']).toBe(1);
+    });
+
+    it('is a no-op (returns false) when there is nothing to undo', async () => {
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+    });
+
+    it('is one-shot — a second call without a new logMessage is a no-op', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'one');
+      expect(await logger.removeLastUserMessage()).toBe(true);
+      expect(await logger.removeLastUserMessage()).toBe(false);
+      expect(await readLogFile()).toEqual([]);
+    });
+
+    it('only undoes USER entries (model_switch is left intact)', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'real prompt');
+      vi.advanceTimersByTime(1000);
+      await logger.logMessage(MessageSenderType.MODEL_SWITCH, 'qwen→qwen-max');
+
+      // The model-switch write does NOT update lastLoggedUserEntry, so undo
+      // still targets the earlier USER row.
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(true);
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['qwen→qwen-max']);
+    });
+
+    it('returns false when the tracked entry is no longer on disk', async () => {
+      await logger.logMessage(MessageSenderType.USER, 'one');
+      // External rotation — wipe the file, then ask the logger to undo.
+      await fs.writeFile(testLogFilePath, '[]', 'utf-8');
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+    });
+
+    it('returns false when the logger is uninitialized', async () => {
+      const fresh = new Logger(testSessionId, new Storage(process.cwd()));
+      // No initialize() call.
+      expect(await fresh.removeLastUserMessage()).toBe(false);
+    });
+
+    it('serializes against a concurrent logMessage so a fast resubmit is not clobbered', async () => {
+      // Race scenario flagged in PR review: cancel A → fire-and-forget
+      // removeLastUserMessage; user immediately submits B → logMessage
+      // appends B. Without serialization the two read/splice/write ops
+      // interleave: removeLast reads [..., A] (no B yet), logMessage reads
+      // [..., A] (no aware of removeLast in flight), logMessage writes
+      // [..., A, B], removeLast writes [...] (lost B). With the
+      // per-instance writeQueue, both ops serialize on the same Logger so
+      // removeLast sees B's write or B's logMessage sees the post-removal
+      // state — either way B survives.
+      await logger.logMessage(MessageSenderType.USER, 'A');
+
+      // Kick off both without awaiting the first.
+      const undoPromise = logger.removeLastUserMessage();
+      const resubmitPromise = logger.logMessage(MessageSenderType.USER, 'B');
+
+      const [undone] = await Promise.all([undoPromise, resubmitPromise]);
+      expect(undone).toBe(true);
+
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['B']);
+    });
+
+    it('clears the tracker when logMessage hits a transient write error', async () => {
+      // Regression: without clearing on failed write, a subsequent
+      // removeLastUserMessage would target the previous successful
+      // USER entry — silently deleting an unrelated row from disk.
+      await logger.logMessage(MessageSenderType.USER, 'kept');
+      vi.advanceTimersByTime(1000);
+
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      await logger.logMessage(MessageSenderType.USER, 'failed write');
+
+      expect(logger['lastLoggedUserEntry']).toBeNull();
+      // No entry to undo → no-op, "kept" stays on disk.
+      expect(await logger.removeLastUserMessage()).toBe(false);
+      const onDisk = await readLogFile();
+      expect(onDisk.map((e) => e.message)).toEqual(['kept']);
+    });
+
+    it('updates the in-memory logs cache synchronously so consumers see the removal without awaiting', async () => {
+      // Regression: AppContainer's `userMessages` effect calls
+      // `getPreviousUserMessages()` (which reads `this.logs`) on the
+      // same render that history truncation fires. Without sync
+      // optimistic removal, the effect would surface the cancelled
+      // prompt until the disk write completed and some unrelated
+      // future render forced the effect to re-run.
+      await logger.logMessage(MessageSenderType.USER, 'cancelled prompt');
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+
+      // Fire-and-forget the undo; do NOT await.
+      const undoPromise = logger.removeLastUserMessage();
+
+      // The very next read must already reflect the removal — that's
+      // what AppContainer's effect relies on.
+      expect(await logger.getPreviousUserMessages()).toEqual([]);
+
+      // Background disk reconciliation still completes successfully.
+      expect(await undoPromise).toBe(true);
+      expect(await readLogFile()).toEqual([]);
+    });
+
+    it('rolls back the optimistic in-memory removal when the disk write fails', async () => {
+      // Regression for the copilot review on #4023: removeLastUserMessage
+      // optimistically removes from `this.logs` BEFORE the disk write.
+      // If writeFile fails, the contract MUST hold: returning false has
+      // to mean the entry is still observable in-memory (otherwise
+      // callers see a `false` return AND a removed entry — the
+      // worst-of-both inconsistency the JSDoc forbids).
+      await logger.logMessage(MessageSenderType.USER, 'cancelled prompt');
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+
+      // In-memory state restored: the cancelled prompt is observable
+      // again (so AppContainer's userMessages effect doesn't show a
+      // false-removed state).
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+      // Tracker also restored so a follow-up retry can find the target.
+      expect(logger['lastLoggedUserEntry']).not.toBeNull();
+    });
+
+    it('rolls back the optimistic in-memory removal when the disk READ fails', async () => {
+      // Companion to the write-failure regression: if _readLogFile throws
+      // (filesystem permission change, mid-rotation, etc.) the
+      // restoreOptimistic path must run too — otherwise the same
+      // false-but-removed contract violation appears on the read leg.
+      await logger.logMessage(MessageSenderType.USER, 'cancelled prompt');
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+
+      vi.spyOn(fs, 'readFile').mockRejectedValueOnce(
+        new Error('Permission denied'),
+      );
+      const removed = await logger.removeLastUserMessage();
+      expect(removed).toBe(false);
+
+      // In-memory state restored: caller observes the entry again, so
+      // AppContainer's userMessages effect doesn't display a stale
+      // "removed but disk still has it" view.
+      expect(await logger.getPreviousUserMessages()).toEqual([
+        'cancelled prompt',
+      ]);
+      // Tracker also restored so a follow-up retry has a target.
+      expect(logger['lastLoggedUserEntry']).not.toBeNull();
+    });
+
+    it('preserves the USER undo target when a non-USER write (MODEL_SWITCH) fails', async () => {
+      // Regression: blanket-clearing the tracker in the catch branch
+      // would discard a still-valid undo target whenever an unrelated
+      // non-USER write hits a transient error. Only USER-write failures
+      // should invalidate the tracker.
+      await logger.logMessage(MessageSenderType.USER, 'still cancellable');
+      const trackedAfterUser = logger['lastLoggedUserEntry'];
+      expect(trackedAfterUser).not.toBeNull();
+
+      vi.spyOn(fs, 'writeFile').mockRejectedValueOnce(new Error('Disk full'));
+      await logger.logMessage(MessageSenderType.MODEL_SWITCH, 'qwen→qwen-max');
+
+      // Tracker is unchanged — the non-USER failure didn't shift which
+      // row was the most recent user prompt.
+      expect(logger['lastLoggedUserEntry']).toBe(trackedAfterUser);
+      expect(await logger.removeLastUserMessage()).toBe(true);
+      expect(await readLogFile()).toEqual([]);
     });
   });
 });

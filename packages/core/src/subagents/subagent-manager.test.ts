@@ -1397,6 +1397,40 @@ System prompt 3`);
         );
         expect(runtimeConfig.modelConfig.model).toBe('gpt-4');
       });
+
+      it('should resolve "fast" to Config.getFastModel() when one is configured', async () => {
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue('fast-model-id');
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          fastConfig,
+          mockConfig,
+        );
+
+        expect(runtimeConfig.modelConfig.model).toBe('fast-model-id');
+      });
+
+      it('should leave modelConfig empty for "fast" when getFastModel returns undefined', async () => {
+        // Mirrors the unset / invalid-for-authType cases — AgentCore then
+        // falls back to runtimeContext.getModel() (the parent model).
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(undefined);
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          fastConfig,
+          mockConfig,
+        );
+
+        expect(runtimeConfig.modelConfig).toEqual({});
+      });
+
+      it('should leave modelConfig empty for "fast" when no runtimeContext is provided', async () => {
+        const fastConfig: SubagentConfig = { ...validConfig, model: 'fast' };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(fastConfig);
+
+        expect(runtimeConfig.modelConfig).toEqual({});
+      });
     });
 
     describe('mergeConfigurations', () => {
@@ -1524,6 +1558,35 @@ System prompt 3`);
         expect(runtimeView).toBeDefined();
         expect(runtimeView!.contentGenerator).toBe(fakeGenerator);
         expect(runtimeView!.contentGeneratorConfig.model).toBe('custom-model');
+      });
+
+      it('should build a ContentGenerator with the resolved fastModel when model is "fast"', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue('fast-model-id');
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'fast-model-id',
+            authType: AuthType.USE_OPENAI,
+          }),
+          mockConfig,
+        );
+      });
+
+      it('should NOT build a new ContentGenerator for "fast" when getFastModel returns undefined', async () => {
+        const config = { ...agentConfig, model: 'fast' };
+        vi.spyOn(mockConfig, 'getFastModel').mockReturnValue(undefined);
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        // Falls back to inheriting the parent — no override, no runtimeView.
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+        const { runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(runtimeView).toBeUndefined();
       });
     });
   });

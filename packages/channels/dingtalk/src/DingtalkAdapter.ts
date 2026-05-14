@@ -202,14 +202,17 @@ export class DingtalkChannel extends ChannelBase {
     }
 
     try {
-      const resp = await fetch('https://api.dingtalk.com/v1.0/oauth2/accessToken', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          appKey: this.config.clientId,
-          appSecret: this.config.clientSecret,
-        }),
-      });
+      const resp = await fetch(
+        'https://api.dingtalk.com/v1.0/oauth2/accessToken',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            appKey: this.config.clientId,
+            appSecret: this.config.clientSecret,
+          }),
+        },
+      );
 
       if (!resp.ok) {
         const detail = await resp.text().catch(() => '');
@@ -219,7 +222,10 @@ export class DingtalkChannel extends ChannelBase {
         return undefined;
       }
 
-      const data = (await resp.json()) as { accessToken: string; expireIn: number };
+      const data = (await resp.json()) as {
+        accessToken: string;
+        expireIn: number;
+      };
       this.cachedToken = data.accessToken;
       this.tokenExpiry = Date.now() + (data.expireIn - 300) * 1000;
       return this.cachedToken;
@@ -266,14 +272,17 @@ export class DingtalkChannel extends ChannelBase {
     };
 
     try {
-      const resp = await fetch('https://api.dingtalk.com/v1.0/card/instances/createAndDeliver', {
-        method: 'POST',
-        headers: {
-          'x-acs-dingtalk-access-token': token,
-          'Content-Type': 'application/json',
+      const resp = await fetch(
+        'https://api.dingtalk.com/v1.0/card/instances/createAndDeliver',
+        {
+          method: 'POST',
+          headers: {
+            'x-acs-dingtalk-access-token': token,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body),
         },
-        body: JSON.stringify(body),
-      });
+      );
 
       if (!resp.ok) {
         const detail = await resp.text().catch(() => '');
@@ -343,7 +352,11 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   private get cardTemplateId(): string {
-    return ((this.config as unknown as Record<string, unknown>)['cardTemplateId'] as string) || DEFAULT_AI_CARD_TEMPLATE;
+    return (
+      ((this.config as unknown as Record<string, unknown>)[
+        'cardTemplateId'
+      ] as string) || DEFAULT_AI_CARD_TEMPLATE
+    );
   }
 
   private get hasCardTemplate(): boolean {
@@ -382,7 +395,11 @@ export class DingtalkChannel extends ChannelBase {
       setTimeout(async () => {
         try {
           const title = extractTitle(cs.accumulatedText);
-          const result = await this.createCard(chatId, title, cs.accumulatedText);
+          const result = await this.createCard(
+            chatId,
+            title,
+            cs.accumulatedText,
+          );
           if (result.success) {
             cs.outTrackId = result.outTrackId;
             cs.created = true;

@@ -10,7 +10,7 @@ import type { GeminiChat } from '../core/geminiChat.js';
 import { type ChatCompressionInfo, CompressionStatus } from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
-import { getResponseText } from '../utils/partUtils.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import type { PermissionMode } from '../hooks/types.js';
@@ -19,6 +19,12 @@ import {
   PreCompactTrigger,
   PostCompactTrigger,
 } from '../hooks/types.js';
+import {
+  DEFAULT_IMAGE_TOKEN_ESTIMATE,
+  estimateContentChars,
+  resolveSlimmingConfig,
+  slimCompactionInput,
+} from './compactionInputSlimming.js';
 
 /**
  * Threshold for compression token count as a fraction of the model's token limit.
@@ -114,12 +120,28 @@ export function findCompressSplitPoint(
   contents: Content[],
   fraction: number,
   retainCount = TOOL_ROUND_RETAIN_COUNT,
+  precomputedCharCounts?: number[],
 ): number {
   if (fraction <= 0 || fraction >= 1) {
     throw new Error('Fraction must be between 0 and 1');
   }
 
-  const charCounts = contents.map((content) => JSON.stringify(content).length);
+  // Slimming-aware char estimator: base64 payloads in inlineData
+  // would otherwise dominate the split. The caller can pre-compute and
+  // pass `precomputedCharCounts` to avoid a redundant walk when the
+  // surrounding compress() loop also needs the values.
+  //
+  // NOTE on the fallback: when `precomputedCharCounts` is omitted, we
+  // use `DEFAULT_IMAGE_TOKEN_ESTIMATE` rather than the user's resolved
+  // setting / env override. The only production caller is `compress()`,
+  // which always passes precomputed counts, so the fallback is a
+  // test-friendly default — not a behavior path users can influence.
+  // Production callers MUST pass `precomputedCharCounts`.
+  const charCounts =
+    precomputedCharCounts ??
+    contents.map((content) =>
+      estimateContentChars(content, DEFAULT_IMAGE_TOKEN_ESTIMATE),
+    );
   const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
   const targetCharCount = totalCharCount * fraction;
 
@@ -189,9 +211,11 @@ export class ChatCompressionService {
       signal,
     } = opts;
     const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
+    const chatCompressionSettings = config.getChatCompression();
     const threshold =
-      config.getChatCompression()?.contextPercentageThreshold ??
+      chatCompressionSettings?.contextPercentageThreshold ??
       COMPRESSION_TOKEN_THRESHOLD;
+    const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
 
     // Cheap gates first — these don't need the curated history.
     if (threshold <= 0 || (hasFailedCompressionAttempt && !force)) {
@@ -268,9 +292,16 @@ export class ChatCompressionService {
       ? curatedHistory.slice(0, -1)
       : curatedHistory;
 
+    // Precompute charCounts once and share with the splitter + the
+    // MIN_COMPRESSION_FRACTION guard below, avoiding two extra walks.
+    const charCounts = historyForSplit.map((c) =>
+      estimateContentChars(c, slimmingConfig.imageTokenEstimate),
+    );
     const splitPoint = findCompressSplitPoint(
       historyForSplit,
       1 - COMPRESSION_PRESERVE_THRESHOLD,
+      TOOL_ROUND_RETAIN_COUNT,
+      charCounts,
     );
 
     const historyToCompress = historyForSplit.slice(0, splitPoint);
@@ -294,14 +325,9 @@ export class ChatCompressionService {
     // Guard: if historyToCompress is too small relative to the total history,
     // skip compression. This prevents futile API calls where the model receives
     // almost no context and generates a useless "summary" that inflates tokens.
-    const compressCharCount = historyToCompress.reduce(
-      (sum, c) => sum + JSON.stringify(c).length,
-      0,
-    );
-    const totalCharCount = historyForSplit.reduce(
-      (sum, c) => sum + JSON.stringify(c).length,
-      0,
-    );
+    let compressCharCount = 0;
+    for (let i = 0; i < splitPoint; i++) compressCharCount += charCounts[i]!;
+    const totalCharCount = charCounts.reduce((a, b) => a + b, 0);
     if (
       totalCharCount > 0 &&
       compressCharCount / totalCharCount < MIN_COMPRESSION_FRACTION
@@ -316,30 +342,45 @@ export class ChatCompressionService {
       };
     }
 
-    const summaryResponse = await config.getContentGenerator().generateContent(
-      {
-        model,
-        contents: [
-          ...historyToCompress,
-          {
-            role: 'user',
-            parts: [
-              {
-                text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
-              },
-            ],
-          },
-        ],
-        config: {
-          systemInstruction: getCompressionPrompt(),
-          ...(signal ? { abortSignal: signal } : {}),
+    // Slim the side-query; live history unchanged.
+    const slim = slimCompactionInput(historyToCompress);
+    if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] slimmed ${slim.stats.imagesStripped} image(s) ` +
+            `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
+        );
+    }
+
+    const summaryResult = await runSideQuery(config, {
+      purpose: 'chat-compression',
+      model,
+      // Best-effort: failures fall back to NOOP and the next turn re-triggers
+      // compression anyway, so don't burn 7 retries blocking the user mid-turn.
+      maxAttempts: 1,
+      systemInstruction: getCompressionPrompt(),
+      contents: [
+        ...slim.slimmedHistory,
+        {
+          role: 'user',
+          parts: [
+            {
+              text: 'First, reason in your scratchpad. Then, generate the <state_snapshot>.',
+            },
+          ],
         },
+      ],
+      // Compression quality drives every subsequent main turn — keep reasoning on.
+      config: {
+        thinkingConfig: { includeThoughts: true },
       },
+      abortSignal: signal ?? new AbortController().signal,
       promptId,
-    );
-    const summary = getResponseText(summaryResponse) ?? '';
+    });
+    const summary = summaryResult.text;
     const isSummaryEmpty = !summary || summary.trim().length === 0;
-    const compressionUsageMetadata = summaryResponse.usageMetadata;
+    const compressionUsageMetadata = summaryResult.usage;
     const compressionInputTokenCount =
       compressionUsageMetadata?.promptTokenCount;
     let compressionOutputTokenCount =

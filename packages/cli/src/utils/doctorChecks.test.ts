@@ -90,7 +90,7 @@ describe('runDoctorChecks', () => {
     expect(categories).toContain('Git');
   });
 
-  it('should pass Node.js version check for v20+', async () => {
+  it('should pass Node.js version check for v22+', async () => {
     const results = await runDoctorChecks(mockContext);
     const nodeCheck = results.find((r) => r.name === 'Node.js version');
     expect(nodeCheck).toBeDefined();

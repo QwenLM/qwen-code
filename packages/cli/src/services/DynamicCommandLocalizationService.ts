@@ -12,6 +12,7 @@ import {
   Storage,
   createDebugLogger,
   getErrorMessage,
+  runSideQuery,
 } from '@qwen-code/qwen-code-core';
 import {
   getCurrentLanguage,
@@ -374,7 +375,6 @@ export class DynamicCommandLocalizationService {
     items: TranslationItem[],
     signal: AbortSignal,
   ): Promise<Map<string, string>> {
-    const model = config.getFastModel() ?? config.getModel();
     const targetLanguageName = getLanguageNameForTranslationTarget(language);
     const translations = new Map<string, string>();
 
@@ -388,8 +388,8 @@ export class DynamicCommandLocalizationService {
 
       let response: Record<string, unknown>;
       try {
-        response = (await config.getBaseLlmClient().generateJson({
-          model,
+        response = await runSideQuery<Record<string, unknown>>(config, {
+          purpose: 'dynamic-command-localization',
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           schema: {
             type: 'object',
@@ -409,8 +409,7 @@ export class DynamicCommandLocalizationService {
             required: ['translations'],
           },
           abortSignal: signal,
-          promptId: 'dynamic_command_localization',
-        })) as Record<string, unknown>;
+        });
       } catch (error) {
         if (!signal.aborted) {
           debugLogger.warn(

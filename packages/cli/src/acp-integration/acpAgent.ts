@@ -84,6 +84,27 @@ export async function runAcpAgent(
   // Initialize config to set up hookSystem (required for SessionStart/SessionEnd hooks)
   // This is needed because gemini.tsx calls runAcpAgent without calling config.initialize()
   await config.initialize();
+  // ACP forwards session messages straight to the model; under progressive
+  // MCP availability `initialize()` returns before MCP servers settle, so
+  // we wait here to keep the first session's tool surface consistent with
+  // the legacy synchronous behavior.
+  await config.waitForMcpReady();
+  // Surface MCP failures to stderr. ACP's stdout is the protocol channel
+  // so info/log writes are already redirected to stderr below, but we
+  // emit this BEFORE that redirection takes effect to keep the message
+  // visible regardless of how the host process is wired.
+  // Defensive against tests that pass a stubbed Config without
+  // `getFailedMcpServerNames`.
+  const failedMcpServers =
+    typeof config.getFailedMcpServerNames === 'function'
+      ? config.getFailedMcpServerNames()
+      : [];
+  if (failedMcpServers.length > 0) {
+    process.stderr.write(
+      `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+        `Continuing with built-in tools and any servers that did connect.\n`,
+    );
+  }
 
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
@@ -673,6 +694,26 @@ class QwenAgent implements Agent {
       },
     );
     await config.initialize();
+    // Same reasoning as the top-level runAcpAgent path: ACP feeds session
+    // messages to the model immediately, so we cannot return a Config whose
+    // MCP discovery is still in flight.
+    await config.waitForMcpReady();
+    // Surface MCP failures to stderr — mirrors `runAcpAgent` (lines 95-107)
+    // and the other non-interactive entry points (`gemini.tsx`,
+    // `session.ts`). Without this, per-session ACP configs that lose MCP
+    // servers fall back to built-in-tools-only with no user-visible
+    // indication. Defensive against tests that pass a stubbed Config
+    // without `getFailedMcpServerNames`.
+    const failedMcpServers =
+      typeof config.getFailedMcpServerNames === 'function'
+        ? config.getFailedMcpServerNames()
+        : [];
+    if (failedMcpServers.length > 0) {
+      process.stderr.write(
+        `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+          `Continuing with built-in tools and any servers that did connect.\n`,
+      );
+    }
     return config;
   }
 

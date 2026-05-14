@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 [![License](https://img.shields.io/github/license/QwenLM/qwen-code.svg)](./LICENSE)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Downloads](https://img.shields.io/npm/dm/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 
 <a href="https://trendshift.io/repositories/15287" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15287" alt="QwenLM%2Fqwen-code | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
@@ -43,18 +43,13 @@ Qwen Code is an open-source AI agent for the terminal, optimized for Qwen series
 
 ### Quick Install (Recommended)
 
-The installer uses a standalone Qwen Code archive when one is available for
-your platform, so the default path does not require a preinstalled Node.js
-runtime. If a standalone archive is not available, it falls back to npm and then
-requires Node.js 20 or later with npm on PATH.
-
 #### Linux / macOS
 
 ```bash
 bash -c "$(curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh)"
 ```
 
-#### Windows
+#### Windows (Run as Administrator)
 
 Works in both Command Prompt and PowerShell:
 
@@ -62,18 +57,13 @@ Works in both Command Prompt and PowerShell:
 powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
-> **Note**: It's recommended to restart your terminal after installation if
-> `qwen` is not immediately available on PATH. For offline installation, download
-> a release archive such as `qwen-code-linux-x64.tar.gz` or
-> `qwen-code-win-x64.zip` plus `SHA256SUMS`, then run the installer with
-> `--archive PATH`.
+> **Note**: It's recommended to restart your terminal after installation to ensure environment variables take effect.
 
 ### Manual Installation
 
 #### Prerequisites
 
-Manual npm installation requires Node.js 20 or later. Download it from
-[nodejs.org](https://nodejs.org/en/download).
+Make sure you have Node.js 22 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
 
 #### NPM
 
@@ -438,12 +428,13 @@ and adjust it to the context length configured on your local server.
 
 ## Usage
 
-As an open-source terminal agent, you can use Qwen Code in four primary ways:
+As an open-source terminal agent, you can use Qwen Code in five primary ways:
 
 1. Interactive mode (terminal UI)
 2. Headless mode (scripts, CI)
 3. IDE integration (VS Code, Zed)
 4. SDKs (TypeScript, Python, Java)
+5. Daemon mode — `qwen serve` exposes ACP over HTTP+SSE so multiple clients share one agent (experimental)
 
 #### Interactive mode
 
@@ -470,6 +461,20 @@ Use Qwen Code inside your editor (VS Code, Zed, and JetBrains IDEs):
 - [Use in VS Code](https://qwenlm.github.io/qwen-code-docs/en/users/integration-vscode/)
 - [Use in Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/)
 - [Use in JetBrains IDEs](https://qwenlm.github.io/qwen-code-docs/en/users/integration-jetbrains/)
+
+#### Daemon mode (`qwen serve`, experimental)
+
+```bash
+cd your-project/
+qwen serve
+# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge)
+```
+
+Run Qwen Code as a local HTTP daemon so IDE plugins, web UIs, CI scripts and custom CLIs all share **one** agent session over HTTP+SSE — instead of each spawning their own subprocess. Loopback bind has no auth by default (set `QWEN_SERVER_TOKEN` to enable bearer auth even on loopback); remote binds (`--hostname 0.0.0.0`) **require** a token — boot refuses without one. See:
+
+- [Daemon mode user guide](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve)
+- [HTTP protocol reference](https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol)
+- [DaemonClient TypeScript quickstart](https://qwenlm.github.io/qwen-code-docs/en/developers/examples/daemon-client-quickstart)
 
 #### SDKs
 

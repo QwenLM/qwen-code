@@ -1,4 +1,5 @@
 import type { ChannelConfig } from '@qwen-code/channel-base';
+import { resolvePath } from '@qwen-code/channel-base';
 import * as path from 'node:path';
 import { getPlugin, supportedTypes } from './channel-registry.js';
 
@@ -73,7 +74,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
-    cwd: (rawConfig['cwd'] as string) || process.cwd(),
+    cwd: resolvePath((rawConfig['cwd'] as string) || process.cwd()),
     approvalMode: rawConfig['approvalMode'] as string | undefined,
     instructions: rawConfig['instructions'] as string | undefined,
     model: rawConfig['model'] as string | undefined,
