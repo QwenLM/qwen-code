@@ -71,6 +71,80 @@ export function shouldWriteUnusedKeysJson(): boolean {
   );
 }
 
+/**
+ * Substrings that should not appear in zh-TW (Taiwan Traditional Chinese) values.
+ *
+ * Three categories of regressions we want to catch automatically:
+ *   1. Variant Traditional characters that OpenCC s2t produces by default but
+ *      Taiwan does not use as primary forms (e.g. 爲, 啓).
+ *   2. Mainland-Chinese vocabulary whose characters are valid Traditional but
+ *      the word itself is not used in Taiwan (e.g. 服務器, 菜單, 鏈接).
+ *   3. Pure Simplified Chinese characters that would only appear if OpenCC
+ *      was not run at all (e.g. 为, 启, 链).
+ *
+ * Deliberately excluded to avoid false positives:
+ *   - 禁用 / 配置 / 設置 — standard in Taiwan.
+ *   - 文件 — contextual (can legitimately mean "document").
+ *   - 打開 — colloquially common in Taiwan even if 開啟 is preferred for UI.
+ *   - Bare 鏈 — valid in 區塊鏈 etc.; only the bigram 鏈接 is flagged.
+ */
+const ZH_TW_FORBIDDEN_PATTERNS: ReadonlyArray<{
+  pattern: string;
+  preferred: string;
+}> = [
+  // Variant Traditional characters from OpenCC s2t output
+  { pattern: '爲', preferred: '為' },
+  { pattern: '啓', preferred: '啟' },
+  // Mainland-Chinese vocabulary (valid Traditional chars, wrong word for Taiwan)
+  { pattern: '曆史', preferred: '歷史' },
+  { pattern: '鏈接', preferred: '連結' },
+  { pattern: '菜單', preferred: '選單' },
+  { pattern: '服務器', preferred: '伺服器' },
+  // Same Mainland vocabulary written in Simplified form
+  { pattern: '菜单', preferred: '選單' },
+  { pattern: '服务器', preferred: '伺服器' },
+  { pattern: '链接', preferred: '連結' },
+  { pattern: '历史', preferred: '歷史' },
+  // Pure Simplified characters (no ambiguity with valid Traditional usage)
+  { pattern: '为', preferred: '為' },
+  { pattern: '启', preferred: '啟' },
+  { pattern: '历', preferred: '歷' },
+  { pattern: '链', preferred: '鏈/連' },
+  { pattern: '选', preferred: '選' },
+  { pattern: '删', preferred: '刪' },
+  { pattern: '扩', preferred: '擴' },
+  { pattern: '设', preferred: '設' },
+  { pattern: '详', preferred: '詳' },
+  { pattern: '认', preferred: '認' },
+];
+
+/**
+ * Walk every translation value and report any value containing a forbidden
+ * substring. Iterating over the parsed dict (rather than the raw file)
+ * lets us report the offending key, and avoids matching characters inside
+ * file-level comments or JS syntax.
+ */
+export function findForbiddenZhTwPatterns(
+  translations: TranslationDict,
+): Array<{ key: string; pattern: string; preferred: string }> {
+  const findings: Array<{ key: string; pattern: string; preferred: string }> =
+    [];
+
+  for (const [key, value] of Object.entries(translations)) {
+    const candidates = Array.isArray(value) ? value : [value];
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue;
+      for (const { pattern, preferred } of ZH_TW_FORBIDDEN_PATTERNS) {
+        if (candidate.includes(pattern)) {
+          findings.push({ key, pattern, preferred });
+        }
+      }
+    }
+  }
+
+  return findings;
+}
+
 async function loadTranslationsFile(
   filePath: string,
 ): Promise<TranslationDict> {
@@ -429,6 +503,19 @@ export async function checkI18n(
     for (const key of untranslatedMustKeys) {
       errors.push(
         `Required translation still falls back to English in ${locale.code}.js: "${key}"`,
+      );
+    }
+  }
+
+  // Check zh-TW.js for Taiwan-vocabulary regressions (raw OpenCC output,
+  // Mainland-Chinese vocabulary, or Simplified characters slipping in).
+  const zhTWTranslations = localeTranslations.get('zh-TW');
+  if (zhTWTranslations) {
+    for (const { key, pattern, preferred } of findForbiddenZhTwPatterns(
+      zhTWTranslations,
+    )) {
+      errors.push(
+        `Non-Taiwan vocabulary in zh-TW.js at "${key}": "${pattern}" should be "${preferred}"`,
       );
     }
   }
