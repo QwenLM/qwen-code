@@ -21,6 +21,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { MessageType, type HistoryItemGoalStatus } from '../types.js';
 import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
+import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
 const CLEAR_KEYWORDS = new Set([
@@ -51,16 +52,6 @@ const goalInstructionPrompt = (condition: string): string =>
 
 const formatTurns = (n: number) => `${n} ${n === 1 ? 'turn' : 'turns'}`;
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
 function formatTerminalSummary(event: GoalTerminalEvent): string {
   // Mirrors GoalStatusMessage: empty-`/goal` after completion surfaces the
   // most recent terminal event, including the judge's `lastReason` (when
@@ -70,7 +61,7 @@ function formatTerminalSummary(event: GoalTerminalEvent): string {
   const stats: string[] = [];
   if (event.iterations > 0) stats.push(formatTurns(event.iterations));
   if (typeof event.durationMs === 'number')
-    stats.push(formatDuration(event.durationMs));
+    stats.push(formatDuration(event.durationMs, { hideTrailingZeros: true }));
   const subtitle = stats.length > 0 ? ` · ${stats.join(' · ')}` : '';
   const reason = event.lastReason?.trim();
   const reasonLine = reason ? `\nLast check: ${reason}` : '';

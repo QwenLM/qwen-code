@@ -7,6 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
+import { formatDuration } from '../../utils/formatters.js';
 import type { GoalStatusKind } from '../../types.js';
 
 interface GoalStatusMessageProps {
@@ -18,16 +19,6 @@ interface GoalStatusMessageProps {
 }
 
 const pluralTurns = (n: number) => (n === 1 ? 'turn' : 'turns');
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
 
 export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
   kind,
@@ -99,7 +90,7 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
     stats.push(`${iterations} ${pluralTurns(iterations)}`);
   }
   if (typeof durationMs === 'number') {
-    stats.push(formatDuration(durationMs));
+    stats.push(formatDuration(durationMs, { hideTrailingZeros: true }));
   }
   const subtitle = stats.length > 0 ? stats.join(' · ') : null;
 
