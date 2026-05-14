@@ -1362,6 +1362,38 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
         const wtService =
           projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+
+        // Refuse isolation when the parent has uncommitted changes.
+        // `git worktree add -b <branch> <path> <base>` checks out the
+        // base branch's tip — uncommitted edits in the parent's
+        // working tree do NOT propagate to the new worktree. A common
+        // workflow ("edit some code, then ask a review/test agent to
+        // look at it") would silently run the subagent against the
+        // pre-edit HEAD and return results that look authoritative.
+        // Refusing forces the user to commit / stash first; the
+        // alternative (overlaying dirty state à la Arena) is
+        // out of scope for Phase B.
+        let parentDirty = false;
+        try {
+          parentDirty = await wtService.hasWorktreeChanges(projectRoot);
+        } catch (error) {
+          debugLogger.warn(
+            `[Agent] hasWorktreeChanges failed at ${projectRoot}: ${error}`,
+          );
+          // Fail-closed: assume dirty so we refuse rather than
+          // silently launch a subagent against a possibly-stale tree.
+          parentDirty = true;
+        }
+        if (parentDirty) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent working tree at ` +
+              `${projectRoot} has uncommitted changes that would not ` +
+              `propagate into the isolated worktree. The subagent would ` +
+              `see the prior HEAD instead of your current state. Commit ` +
+              `or stash the changes, then call the agent again.`,
+          );
+        }
+
         const slug = generateAgentWorktreeSlug();
         // Anchor the isolation worktree to the parent's currently
         // checked-out branch. Without an explicit base,

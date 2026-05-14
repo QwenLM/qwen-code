@@ -4,8 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ToolResult } from './tools.js';
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import type {
+  ToolCallConfirmationDetails,
+  ToolConfirmationPayload,
+  ToolExecuteConfirmationDetails,
+  ToolResult,
+
+  ToolConfirmationOutcome} from './tools.js';
+import {
+  BaseDeclarativeTool,
+  BaseToolInvocation,
+  Kind
+} from './tools.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
@@ -84,6 +94,48 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     return this.params.action === 'remove' ? 'ask' : 'allow';
+  }
+
+  /**
+   * Override the framework's default `type: 'info'` confirmation for
+   * `action: 'remove'` so it is NOT silently auto-approved in
+   * `AUTO_EDIT` mode.
+   *
+   * Background: `permissionFlow.ts:isAutoEditApproved` auto-approves
+   * any tool whose `confirmationDetails.type` is `'edit'` or `'info'`
+   * when the session is in `AUTO_EDIT`. The base `BaseToolInvocation`
+   * returns `type: 'info'` by default, which means a `getDefaultPermission`
+   * of `'ask'` still gets bypassed in AUTO_EDIT — the data-loss path
+   * we explicitly closed for `DEFAULT` mode. Returning `type: 'exec'`
+   * (the same bucket `run_shell_command` lives in) keeps the
+   * confirmation prompt for AUTO_EDIT users too. `keep` falls through
+   * to the base info-type since it is non-destructive.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    if (this.params.action !== 'remove') {
+      return super.getConfirmationDetails(_abortSignal);
+    }
+    const projectRoot = this.config.getTargetDir();
+    const wtService = new GitWorktreeService(projectRoot);
+    const worktreePath = wtService.getUserWorktreePath(this.params.name);
+    const branch = worktreeBranchForSlug(this.params.name);
+    const command =
+      `git worktree remove ${worktreePath}` + ` && git branch -d ${branch}`;
+    const details: ToolExecuteConfirmationDetails = {
+      type: 'exec',
+      title: `Remove worktree "${this.params.name}"`,
+      command,
+      rootCommand: 'git',
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence handled by coreToolScheduler via PM rules.
+      },
+    };
+    return details;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {

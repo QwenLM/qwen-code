@@ -19,7 +19,11 @@ import {
   writeWorktreeSessionMarker,
 } from '../services/gitWorktreeService.js';
 
-function makeMockConfig(targetDir = '/tmp/mock-repo'): Config {
+function makeMockConfig(targetDir = process.cwd()): Config {
+  // Default to cwd because `GitWorktreeService` constructs `simpleGit`
+  // against the dir, which fails on a non-existent path. Tests that
+  // need a real isolated repo create their own temp dir and pass it
+  // explicitly.
   return {
     getTargetDir: vi.fn(() => targetDir),
     getSessionId: vi.fn(() => 'mock-session-id'),
@@ -93,6 +97,37 @@ describe('ExitWorktreeTool', () => {
       const tool = new ExitWorktreeTool(makeMockConfig());
       const inv = tool.build({ name: 'foo', action: 'keep' });
       expect(await inv.getDefaultPermission()).toBe('allow');
+    });
+  });
+
+  describe('confirmation type — round-7 AUTO_EDIT bypass guard', () => {
+    // Regression guard for the round-7 finding: `getDefaultPermission`
+    // returning 'ask' was insufficient because BaseToolInvocation's
+    // default `getConfirmationDetails` returned `type: 'info'`, which
+    // `permissionFlow.isAutoEditApproved(AUTO_EDIT, 'info')` silently
+    // approves. The override must return `type: 'exec'` for action=remove.
+    it("returns type 'exec' for action=remove (NOT auto-approved by AUTO_EDIT)", async () => {
+      const tool = new ExitWorktreeTool(makeMockConfig());
+      const inv = tool.build({ name: 'foo', action: 'remove' });
+      const details = await inv.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      expect(details.type).toBe('exec');
+      // Also verify the command field is populated, so the prompt UI
+      // shows the user what would actually run.
+      if (details.type === 'exec') {
+        expect(details.command).toContain('git worktree remove');
+        expect(details.command).toContain('git branch -d worktree-foo');
+      }
+    });
+
+    it("returns the base 'info' type for action=keep (non-destructive)", async () => {
+      const tool = new ExitWorktreeTool(makeMockConfig());
+      const inv = tool.build({ name: 'foo', action: 'keep' });
+      const details = await inv.getConfirmationDetails(
+        new AbortController().signal,
+      );
+      expect(details.type).toBe('info');
     });
   });
 
