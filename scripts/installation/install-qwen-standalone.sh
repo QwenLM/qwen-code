@@ -977,19 +977,61 @@ install_standalone() {
         archive_extension=$(archive_extension_for_target "${target}")
         archive_name="qwen-code-${target}.${archive_extension}"
 
+        local requested_mirror="${MIRROR}"
+        local requested_version_path=""
+        local github_fallback_base_url=""
+        if [[ -z "${BASE_URL}" && "${requested_mirror}" == "auto" ]]; then
+            requested_version_path=$(release_version_path)
+            github_fallback_base_url="$(github_base_url_for_version "${requested_version_path}")"
+        fi
+
         local base_url
         if ! base_url=$(standalone_base_url); then
-            if [[ "${METHOD}" == "detect" ]]; then
-                return 2
+            if [[ -n "${github_fallback_base_url}" ]]; then
+                log_warning "Aliyun standalone release metadata unavailable; retrying GitHub mirror."
+                base_url="${github_fallback_base_url}"
+                MIRROR="github"
+                github_fallback_base_url=""
+            else
+                if [[ "${METHOD}" == "detect" ]]; then
+                    return 2
+                fi
+                return 1
             fi
-            return 1
         fi
+        if [[ -n "${github_fallback_base_url}" && "${requested_version_path}" == "latest" ]]; then
+            local aliyun_release_base="https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/"
+            if [[ "${base_url}" == "${aliyun_release_base}"* ]]; then
+                local resolved_version_path="${base_url#"${aliyun_release_base}"}"
+                if [[ -n "${resolved_version_path}" && "${resolved_version_path}" != "latest" && "${resolved_version_path}" != */* ]]; then
+                    github_fallback_base_url="$(github_base_url_for_version "${resolved_version_path}")"
+                fi
+            fi
+        fi
+        if [[ "${base_url}" == "${github_fallback_base_url}" ]]; then
+            github_fallback_base_url=""
+        fi
+
         local archive_url="${base_url}/${archive_name}"
         checksum_source="${base_url}/SHA256SUMS"
 
         if [[ "${METHOD}" == "detect" ]] && ! url_exists "${archive_url}"; then
-            log_warning "Standalone archive not found: ${archive_name}"
-            return 2
+            if [[ -n "${github_fallback_base_url}" ]]; then
+                local github_archive_url="${github_fallback_base_url}/${archive_name}"
+                if url_exists "${github_archive_url}"; then
+                    log_warning "Aliyun standalone archive not found; retrying GitHub mirror."
+                    base_url="${github_fallback_base_url}"
+                    archive_url="${github_archive_url}"
+                    checksum_source="${base_url}/SHA256SUMS"
+                    github_fallback_base_url=""
+                else
+                    log_warning "Standalone archive not found: ${archive_name}"
+                    return 2
+                fi
+            else
+                log_warning "Standalone archive not found: ${archive_name}"
+                return 2
+            fi
         fi
 
         temp_dir=$(mktemp -d)
@@ -998,9 +1040,31 @@ install_standalone() {
 
         log_info "Downloading ${archive_url}"
         if ! download_file "${archive_url}" "${archive_path}"; then
-            rm -rf "${temp_dir}"
-            log_warning "Failed to download standalone archive."
-            return 2
+            if [[ -n "${github_fallback_base_url}" ]]; then
+                rm -f "${archive_path}"
+                archive_url="${github_fallback_base_url}/${archive_name}"
+                checksum_source="${github_fallback_base_url}/SHA256SUMS"
+                github_fallback_base_url=""
+                log_warning "Aliyun standalone archive download failed; retrying GitHub mirror."
+                log_info "Downloading ${archive_url}"
+                if download_file "${archive_url}" "${archive_path}"; then
+                    :
+                else
+                    rm -rf "${temp_dir}"
+                    log_warning "Failed to download standalone archive."
+                    if [[ "${METHOD}" == "detect" ]]; then
+                        return 2
+                    fi
+                    return 1
+                fi
+            else
+                rm -rf "${temp_dir}"
+                log_warning "Failed to download standalone archive."
+                if [[ "${METHOD}" == "detect" ]]; then
+                    return 2
+                fi
+                return 1
+            fi
         fi
     fi
 

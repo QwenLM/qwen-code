@@ -503,12 +503,14 @@ set "QWEN_RACE_OSS_URL="
 exit /b 0
 
 :StandaloneBaseUrl
+set "STANDALONE_VERSION_PATH="
 if not "!BASE_URL!"=="" (
     set "STANDALONE_BASE_URL=!BASE_URL!"
     exit /b 0
 )
 
 call :ReleaseVersionPath
+set "STANDALONE_VERSION_PATH=!VERSION_PATH!"
 
 if /i "!MIRROR!"=="auto" (
     call :GithubBaseUrlForVersion "!VERSION_PATH!"
@@ -537,6 +539,7 @@ if /i "!MIRROR!"=="auto" (
 if /i "!MIRROR!"=="aliyun" (
     call :ResolveAliyunVersionPath "!VERSION_PATH!"
     if !ERRORLEVEL! NEQ 0 exit /b 1
+    set "STANDALONE_VERSION_PATH=!RESOLVED_VERSION_PATH!"
     call :AliyunBaseUrlForVersion "!RESOLVED_VERSION_PATH!"
     set "STANDALONE_BASE_URL=!QWEN_OSS_BASE_URL!"
     set "QWEN_OSS_BASE_URL="
@@ -547,6 +550,14 @@ if /i "!MIRROR!"=="aliyun" (
 call :GithubBaseUrlForVersion "!VERSION_PATH!"
 set "STANDALONE_BASE_URL=!QWEN_GH_BASE_URL!"
 set "QWEN_GH_BASE_URL="
+exit /b 0
+
+:UseGithubFallbackBaseUrl
+set "STANDALONE_BASE_URL=!GITHUB_FALLBACK_BASE_URL!"
+set "ARCHIVE_URL=!STANDALONE_BASE_URL!/!ARCHIVE_NAME!"
+set "CHECKSUM_SOURCE=!STANDALONE_BASE_URL!/SHA256SUMS"
+set "GITHUB_FALLBACK_BASE_URL="
+set "MIRROR=github"
 exit /b 0
 
 :MaybeUpdateUserPath
@@ -725,19 +736,59 @@ if not "!ARCHIVE_PATH!"=="" (
     if !ERRORLEVEL! NEQ 0 exit /b 2
 
     set "ARCHIVE_NAME=qwen-code-win-x64.zip"
+    set "REQUESTED_MIRROR=!MIRROR!"
+    set "REQUESTED_VERSION_PATH="
+    set "GITHUB_FALLBACK_BASE_URL="
+    if "!BASE_URL!"=="" if /i "!REQUESTED_MIRROR!"=="auto" (
+        call :ReleaseVersionPath
+        set "REQUESTED_VERSION_PATH=!VERSION_PATH!"
+        call :GithubBaseUrlForVersion "!VERSION_PATH!"
+        set "GITHUB_FALLBACK_BASE_URL=!QWEN_GH_BASE_URL!"
+        set "QWEN_GH_BASE_URL="
+    )
+
     call :StandaloneBaseUrl
     if !ERRORLEVEL! NEQ 0 (
-        if /i "!METHOD!"=="detect" exit /b 2
-        exit /b 1
+        set "USE_GITHUB_FALLBACK=0"
+        if not "!GITHUB_FALLBACK_BASE_URL!"=="" if /i "!MIRROR!"=="aliyun" set "USE_GITHUB_FALLBACK=1"
+        if "!USE_GITHUB_FALLBACK!"=="1" (
+            echo WARNING: Aliyun standalone release metadata unavailable; retrying GitHub mirror.
+            call :UseGithubFallbackBaseUrl
+        ) else (
+            if /i "!METHOD!"=="detect" exit /b 2
+            exit /b 1
+        )
     )
+    if not "!GITHUB_FALLBACK_BASE_URL!"=="" if /i "!REQUESTED_VERSION_PATH!"=="latest" if /i "!MIRROR!"=="aliyun" if not "!STANDALONE_VERSION_PATH!"=="" (
+        call :GithubBaseUrlForVersion "!STANDALONE_VERSION_PATH!"
+        set "GITHUB_FALLBACK_BASE_URL=!QWEN_GH_BASE_URL!"
+        set "QWEN_GH_BASE_URL="
+    )
+    if /i "!STANDALONE_BASE_URL!"=="!GITHUB_FALLBACK_BASE_URL!" set "GITHUB_FALLBACK_BASE_URL="
     set "ARCHIVE_URL=!STANDALONE_BASE_URL!/!ARCHIVE_NAME!"
     set "CHECKSUM_SOURCE=!STANDALONE_BASE_URL!/SHA256SUMS"
 
     if /i "!METHOD!"=="detect" (
         call :UrlExists "!ARCHIVE_URL!"
         if !ERRORLEVEL! NEQ 0 (
-            echo WARNING: Standalone archive not found: !ARCHIVE_NAME!
-            exit /b 2
+            set "USE_GITHUB_FALLBACK=0"
+            if not "!GITHUB_FALLBACK_BASE_URL!"=="" set "USE_GITHUB_FALLBACK=1"
+            if "!USE_GITHUB_FALLBACK!"=="1" (
+                set "GITHUB_ARCHIVE_URL=!GITHUB_FALLBACK_BASE_URL!/!ARCHIVE_NAME!"
+                call :UrlExists "!GITHUB_ARCHIVE_URL!"
+                if !ERRORLEVEL! EQU 0 (
+                    echo WARNING: Aliyun standalone archive not found; retrying GitHub mirror.
+                    call :UseGithubFallbackBaseUrl
+                ) else (
+                    set "GITHUB_ARCHIVE_URL="
+                    echo WARNING: Standalone archive not found: !ARCHIVE_NAME!
+                    exit /b 2
+                )
+                set "GITHUB_ARCHIVE_URL="
+            ) else (
+                echo WARNING: Standalone archive not found: !ARCHIVE_NAME!
+                exit /b 2
+            )
         )
     )
 
@@ -747,10 +798,20 @@ if not "!ARCHIVE_PATH!"=="" (
 
     echo INFO: Downloading !ARCHIVE_URL!
     call :DownloadFile "!ARCHIVE_URL!" "!ARCHIVE_FILE!"
-    if !ERRORLEVEL! NEQ 0 (
+    set "DOWNLOAD_STATUS=!ERRORLEVEL!"
+    if not "!DOWNLOAD_STATUS!"=="0" if not "!GITHUB_FALLBACK_BASE_URL!"=="" (
+        if exist "!ARCHIVE_FILE!" del /F /Q "!ARCHIVE_FILE!" >nul 2>&1
+        echo WARNING: Aliyun standalone archive download failed; retrying GitHub mirror.
+        call :UseGithubFallbackBaseUrl
+        echo INFO: Downloading !ARCHIVE_URL!
+        call :DownloadFile "!ARCHIVE_URL!" "!ARCHIVE_FILE!"
+        set "DOWNLOAD_STATUS=!ERRORLEVEL!"
+    )
+    if not "!DOWNLOAD_STATUS!"=="0" (
         if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
         echo WARNING: Failed to download standalone archive.
-        exit /b 2
+        if /i "!METHOD!"=="detect" exit /b 2
+        exit /b 1
     )
 )
 

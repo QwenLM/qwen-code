@@ -142,6 +142,7 @@ describe('installation scripts', () => {
     expect(script).toContain('curl -fsIL -m "${timeout}"');
     expect(script).toContain('/latest/VERSION');
     expect(script).toContain('resolve_aliyun_version_path()');
+    expect(script).toContain('retrying GitHub mirror');
     expect(script).not.toContain('-print -quit');
   });
 
@@ -249,6 +250,8 @@ describe('installation scripts', () => {
     expect(script).toContain(':CreateTempFile');
     expect(script).toContain('/latest/VERSION');
     expect(script).toContain(':ResolveAliyunVersionPath');
+    expect(script).toContain(':UseGithubFallbackBaseUrl');
+    expect(script).toContain('retrying GitHub mirror');
     expect(script).not.toContain('%RANDOM%');
   });
 
@@ -1320,8 +1323,23 @@ describe('standalone release packaging', () => {
     expect(workflow).not.toContain(
       'upload_release_assets "releases/qwen-code/latest"',
     );
-    expect(workflow).toContain(
-      'upload_asset "${RUNNER_TEMP}/qwen-code-latest-version" "releases/qwen-code/latest/VERSION"',
+    const syncStepIndex = workflow.indexOf(
+      "name: 'Sync Release Assets to Aliyun OSS'",
+    );
+    const verifyStepIndex = workflow.indexOf(
+      "name: 'Verify Aliyun OSS Release Assets'",
+    );
+    const publishLatestStepIndex = workflow.indexOf(
+      "name: 'Publish Aliyun OSS Latest VERSION'",
+    );
+    expect(syncStepIndex).toBeGreaterThanOrEqual(0);
+    expect(verifyStepIndex).toBeGreaterThan(syncStepIndex);
+    expect(publishLatestStepIndex).toBeGreaterThan(verifyStepIndex);
+    expect(workflow.slice(syncStepIndex, verifyStepIndex)).not.toContain(
+      'releases/qwen-code/latest/VERSION',
+    );
+    expect(workflow.slice(publishLatestStepIndex)).toContain(
+      'releases/qwen-code/latest/VERSION',
     );
     expect(workflow).toContain('installation/install-qwen-standalone.sh');
     expect(workflow).toContain('installation/install-qwen-standalone.bat');
@@ -1545,6 +1563,134 @@ describe('Linux/macOS installer end-to-end', () => {
         expect(output).toContain(
           'Downloading https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v0.0.0-smoke/qwen-code-linux-x64.tar.gz',
         );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        if (createdDist) {
+          rmSync('dist', { recursive: true, force: true });
+        }
+      }
+    },
+    15000,
+  );
+
+  itOnUnix(
+    'tries GitHub before npm when auto-selected Aliyun archive is unavailable',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const checksumFile = path.join(path.dirname(archive), 'SHA256SUMS');
+        const fakeBin = path.join(tmpDir, 'bin');
+        const curlLog = path.join(tmpDir, 'curl-urls.log');
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+
+        mkdirSync(fakeBin, { recursive: true });
+        writeFileSync(
+          path.join(fakeBin, 'uname'),
+          [
+            '#!/usr/bin/env sh',
+            'case "$1" in',
+            '  -s) echo Linux ;;',
+            '  -m) echo x86_64 ;;',
+            '  *) /usr/bin/uname "$@" ;;',
+            'esac',
+            '',
+          ].join('\n'),
+        );
+        writeFileSync(
+          path.join(fakeBin, 'curl'),
+          [
+            '#!/usr/bin/env sh',
+            'url=',
+            'dest=',
+            'is_head=0',
+            'while [ "$#" -gt 0 ]; do',
+            '  case "$1" in',
+            '    -o) shift; dest="$1" ;;',
+            '    -*) case "$1" in *I*) is_head=1 ;; esac ;;',
+            '    http*) url="$1" ;;',
+            '  esac',
+            '  shift',
+            'done',
+            'printf "%s\\n" "$url" >> "$QWEN_FAKE_CURL_LOG"',
+            'if [ "$is_head" = "1" ]; then',
+            '  case "$url" in',
+            '    */releases/qwen-code/latest/VERSION)',
+            '      exit 0 ;;',
+            '    */releases/latest/download/SHA256SUMS)',
+            '      exit 22 ;;',
+            '    */releases/qwen-code/v0.0.0-smoke/qwen-code-linux-x64.tar.gz)',
+            '      exit 22 ;;',
+            '    */releases/download/v0.0.0-smoke/qwen-code-linux-x64.tar.gz)',
+            '      exit 0 ;;',
+            '    *)',
+            '      echo "unexpected HEAD url: $url" >&2',
+            '      exit 22 ;;',
+            '  esac',
+            'fi',
+            'case "$url" in',
+            '  */releases/qwen-code/latest/VERSION)',
+            '    printf "v0.0.0-smoke\\n" ;;',
+            '  */releases/download/v0.0.0-smoke/qwen-code-linux-x64.tar.gz)',
+            '    cp "$QWEN_FAKE_ARCHIVE" "$dest" ;;',
+            '  */releases/download/v0.0.0-smoke/SHA256SUMS)',
+            '    cp "$QWEN_FAKE_SHA256SUMS" "$dest" ;;',
+            '  *)',
+            '    echo "unexpected url: $url" >&2',
+            '    exit 22 ;;',
+            'esac',
+            '',
+          ].join('\n'),
+        );
+        chmodSync(path.join(fakeBin, 'uname'), 0o755);
+        chmodSync(path.join(fakeBin, 'curl'), 0o755);
+
+        const output = execFileSync(
+          'bash',
+          [
+            'scripts/installation/install-qwen-standalone.sh',
+            '--method',
+            'detect',
+            '--mirror',
+            'auto',
+            '--source',
+            'smoke',
+          ],
+          {
+            env: {
+              ...process.env,
+              HOME: home,
+              PATH: `${fakeBin}:${process.env.PATH}`,
+              QWEN_FAKE_ARCHIVE: archive,
+              QWEN_FAKE_SHA256SUMS: checksumFile,
+              QWEN_FAKE_CURL_LOG: curlLog,
+              QWEN_INSTALL_ROOT: installRoot,
+            },
+            stdio: 'pipe',
+          },
+        ).toString();
+
+        const curlUrls = readScript(curlLog);
+        expect(curlUrls).toContain('/releases/qwen-code/latest/VERSION');
+        expect(curlUrls).toContain(
+          '/releases/qwen-code/v0.0.0-smoke/qwen-code-linux-x64.tar.gz',
+        );
+        expect(curlUrls).toContain(
+          '/releases/download/v0.0.0-smoke/qwen-code-linux-x64.tar.gz',
+        );
+        expect(curlUrls).toContain(
+          '/releases/download/v0.0.0-smoke/SHA256SUMS',
+        );
+        expect(output).toContain(
+          'Aliyun standalone archive not found; retrying GitHub mirror.',
+        );
+        expect(output).toContain(
+          'Downloading https://github.com/QwenLM/qwen-code/releases/download/v0.0.0-smoke/qwen-code-linux-x64.tar.gz',
+        );
+        expect(output).not.toContain('Falling back to npm installation');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         if (createdDist) {
