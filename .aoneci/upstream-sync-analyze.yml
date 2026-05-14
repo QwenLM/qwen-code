@@ -59,67 +59,29 @@ jobs:
           head -20 sync-report.md
           echo "--- 报告共 $(wc -l < sync-report.md) 行 ---"
 
-      - name: '发送钉钉通知'
-        env:
-          DINGTALK_URL: ${{secrets['CI_DINGTALK_WEBHOOK_URL']}}
-          DINGTALK_SECRET: ${{secrets['CI_DINGTALK_WEBHOOK_SECRET']}}
+      - name: '准备通知'
+        id: notify
         run: |
-          if [ -z "$DINGTALK_URL" ]; then
-            echo "CI_DINGTALK_WEBHOOK_URL 未配置，跳过通知"
-            exit 0
+          TITLE="qwen-code upstream sync"
+          CONTENT="检查上游变更..."
+          if [ -f sync-report.md ]; then
+            FIRST=$(head -1 sync-report.md)
+            if echo "$FIRST" | grep -q "无新的 upstream"; then
+              TITLE="✅ Already Latest"
+              CONTENT="没有新的 upstream 提交"
+            else
+              NEW_COUNT=$(echo "$FIRST" | grep -oP '\d+' | head -1 || echo "?")
+              TITLE="📦 ${NEW_COUNT} new upstream commits"
+              CONTENT="$FIRST"
+            fi
           fi
-          if [ ! -f sync-report.md ]; then
-            echo "报告不存在，跳过通知"
-            exit 0
-          fi
-          echo "发送报告: $(wc -c < sync-report.md) bytes"
+          echo "$TITLE" > "${{outputs.title.path}}"
+          echo "$CONTENT" > "${{outputs.content.path}}"
 
-          DINGTALK_FILE=sync-report.md \
-          DINGTALK_TITLE="Upstream Sync Report" \
-          DINGTALK_MAX_LINES=60 \
-          node <<'NODESCRIPT'
-const crypto = require('crypto');
-const https = require('https');
-const fs = require('fs');
-
-const file = process.env.DINGTALK_FILE;
-const title = process.env.DINGTALK_TITLE || '';
-const maxLines = parseInt(process.env.DINGTALK_MAX_LINES) || 60;
-const secret = (process.env.DINGTALK_SECRET || '').trim();
-let webhookUrl = (process.env.DINGTALK_URL || '').trim();
-
-const raw = fs.readFileSync(file, 'utf8');
-const text = raw.split('\n').slice(0, maxLines).join('\n');
-console.log('[debug] file:', file, '| raw:', raw.length, 'chars | text:', text.length, 'chars');
-
-if (secret) {
-  const timestamp = String(Date.now());
-  const stringToSign = timestamp + '\n' + secret;
-  const hmac = crypto.createHmac('sha256', secret).update(stringToSign).digest('base64');
-  const sign = encodeURIComponent(hmac);
-  webhookUrl += '&timestamp=' + timestamp + '&sign=' + sign;
-  console.log('[debug] signed, timestamp:', timestamp);
-}
-
-const body = JSON.stringify({ msgtype: 'markdown', markdown: { title, text } });
-console.log('[debug] body length:', body.length);
-
-const parsed = new URL(webhookUrl);
-const req = https.request({
-  hostname: parsed.hostname,
-  path: parsed.pathname + parsed.search,
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
-}, (res) => {
-  let data = '';
-  res.on('data', (chunk) => data += chunk);
-  res.on('end', () => {
-    console.log('钉钉返回:', data);
-    const r = JSON.parse(data);
-    process.exit(r.errcode === 0 ? 0 : 1);
-  });
-});
-req.on('error', (e) => { console.error('请求失败:', e.message); process.exit(1); });
-req.write(body);
-req.end();
-NODESCRIPT
+      - uses: dingtalk-bot
+        inputs:
+          webhook: ${{secrets['CI_DINGTALK_WEBHOOK_URL']}}
+          msgtype: link
+          title: ${{steps.notify.outputs.title}}
+          content: ${{steps.notify.outputs.content}}
+          messageUrl: https://gitlab.alibaba-inc.com/alishu/qwen-code

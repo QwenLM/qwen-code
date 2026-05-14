@@ -1,10 +1,10 @@
 # .aoneci/workflows/npm-publish.yml
 # 发布 npm 包到 anpm
 #
-# 版本策略（自动根据分支判断）：
-#   - main 分支：x.y.z-dataworks.N + dist-tag=latest（正式版）
-#   - 其他分支：x.y.z-beta.N     + dist-tag=beta（预发布版）
-#   - auto_version 开启时自动查询 registry 递增 N
+# 版本策略：
+#   - main 分支 + release_mode=true：x.y.z-dataworks.N + dist-tag=latest（正式版）
+#   - 其他所有情况：              x.y.z-beta.N     + dist-tag=beta（预发布版）
+#   - 版本号自动查询 registry 递增 N
 #
 # 流程：
 #   1. npm ci          — 安装依赖
@@ -21,28 +21,16 @@
 
 name: 'NPM Publish'
 
-# release/* 分支的 push 与 MR 自动触发构建 beta 包；
-# 默认 dry-run，不会真实发布；需要真实发布时手动关闭 dry_run。
-# main 和其他分支仍仅支持手动触发，避免无意中发布线上包。
-triggers:
-  push:
-    branches:
-      - 'release/*'
-  merge_request:
-    branches:
-      - 'release/*'
+# 仅手动触发，避免误发布。在 Aone CI 平台手动选择分支和参数执行。
+# 默认 dry-run，真实发布需手动关闭。
 
 params:
   dry_run:
     description: '是否 dry-run（勾选=仅模拟，不勾选=真实发布）'
     type: boolean
     default: true
-  auto_version:
-    description: '是否自动递增 prerelease 版本号（true=自动，false=使用 package.json 中的版本）'
-    type: string
-    default: 'true'
   release_mode:
-    description: '非 main 分支强制发正式版（dataworks + latest）'
+    description: '正式版发布（仅 main 分支生效，开启后发布 dataworks + latest）'
     type: boolean
     default: false
 
@@ -95,20 +83,17 @@ jobs:
 
       - name: 'Publish packages'
         run: |
-          # main 分支 → tag=latest, pre_id=dataworks（正式版）
-          # 其他分支 → tag=beta,   pre_id=beta（预发布版）
-          if [ "${{git.branch}}" = "main" ] || [ "${{ params.release_mode }}" = "true" ]; then
+          # 仅 main 分支 + release_mode=true 才发正式版，其他一律 beta
+          if [ "${{git.branch}}" = "main" ] && [ "${{ params.release_mode }}" = "true" ]; then
             PUBLISH_TAG="latest"
             PUBLISH_PRE_ID="dataworks"
           else
             PUBLISH_TAG="beta"
             PUBLISH_PRE_ID="beta"
           fi
-          echo "Branch: ${{git.branch}} → tag=$PUBLISH_TAG, pre_id=$PUBLISH_PRE_ID"
-          ARGS="--token ${{ secrets.inner_npm_publish_token }} --tag $PUBLISH_TAG --pre-id $PUBLISH_PRE_ID"
-          DRY_RUN="${{ params.dry_run }}"
-          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
-          [ "${{ params.auto_version }}" = "true" ] && ARGS="$ARGS --auto-version"
+          echo "Branch: ${{git.branch}} release_mode=${{params.release_mode}} → tag=$PUBLISH_TAG, pre_id=$PUBLISH_PRE_ID"
+          ARGS="--token ${{ secrets.inner_npm_publish_token }} --tag $PUBLISH_TAG --pre-id $PUBLISH_PRE_ID --auto-version"
+          [ "${{ params.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
           node scripts/publish-packages.js $ARGS
 
       - name: 'Verify published CLI package'
@@ -130,26 +115,26 @@ jobs:
 
       # ── OSS Bundle 发布 ──
 
-      - name: 'Resolve version for OSS'
+      - name: 'Resolve version & OSS policy'
         run: |
-          # 从 publish 后的 package.json 读取实际发布版本
           VERSION=$(node -e "process.stdout.write(require('./package.json').version)")
-          echo "Resolved version for OSS: ${VERSION}"
           mkdir -p /workspace
           echo "${VERSION}" > /workspace/.resolved_version
           date -u +%Y-%m-%dT%H:%M:%SZ > /workspace/.build_time
-          if [ "${{git.branch}}" = "main" ] || [ "${{ params.release_mode }}" = "true" ]; then
+          if [ "${{git.branch}}" = "main" ] && [ "${{ params.release_mode }}" = "true" ]; then
             OSS_RELEASE_CHANNELS="dataworks"
-            OSS_LATEST_POINTER="update"
+            SKIP_LATEST_POINTER=""
           else
             OSS_RELEASE_CHANNELS="beta"
-            OSS_LATEST_POINTER="skip"
+            SKIP_LATEST_POINTER="1"
           fi
           {
             printf 'OSS_RELEASE_CHANNELS=%s\n' "${OSS_RELEASE_CHANNELS}"
-            printf 'OSS_LATEST_POINTER=%s\n' "${OSS_LATEST_POINTER}"
-          } > /workspace/.oss_channel.env
-          cat /workspace/.oss_channel.env
+            printf 'SKIP_LATEST_POINTER=%s\n' "${SKIP_LATEST_POINTER}"
+            printf 'SKIP_METADATA=%s\n' ""
+            printf 'SKIP_ROOT_SCRIPTS=%s\n' ""
+          } > /workspace/.oss_policy.env
+          echo "version=${VERSION} channel=${OSS_RELEASE_CHANNELS}"
 
       - name: 'Build bundle tarball'
         run: |
@@ -170,27 +155,12 @@ jobs:
 
       - name: 'Upload to OSS'
         run: |
-          # 跳过 dry-run 模式
           DRY_RUN="${{ params.dry_run }}"
           if [ "$DRY_RUN" = "true" ]; then
             echo "Skipped (dry-run mode)"
             exit 0
           fi
-          # 确定上传策略
-          POLICY_FILE="/workspace/.upload_policy.env"
-          bash .aoneci/scripts/upload-policy.sh "${{git.branch}}" > "${POLICY_FILE}"
-          cat "${POLICY_FILE}"
-          SKIP_METADATA="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_METADATA)"
-          SKIP_LATEST_POINTER="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_LATEST_POINTER)"
-          SKIP_ROOT_SCRIPTS="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_ROOT_SCRIPTS)"
-          CHANNEL_FILE="/workspace/.oss_channel.env"
-          OSS_RELEASE_CHANNELS="$(bash .aoneci/scripts/read-policy-value.sh "${CHANNEL_FILE}" OSS_RELEASE_CHANNELS)"
-          OSS_LATEST_POINTER="$(bash .aoneci/scripts/read-policy-value.sh "${CHANNEL_FILE}" OSS_LATEST_POINTER)"
-          if [ "${OSS_LATEST_POINTER}" = "update" ]; then
-            SKIP_LATEST_POINTER=""
-          elif [ "${OSS_LATEST_POINTER}" = "skip" ]; then
-            SKIP_LATEST_POINTER="1"
-          fi
+          set -a; source /workspace/.oss_policy.env; set +a
           ARTIFACT_DIR="/workspace/artifact" \
           ARCH="amd64" \
           SOURCE_DIR="." \
@@ -199,10 +169,10 @@ jobs:
           OSS_PROJECT="qwen-code" \
           OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com" \
           OSS_BUCKET="dataworks-notebook-cn-shanghai" \
-          SKIP_METADATA="${SKIP_METADATA}" \
-          SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER}" \
-          SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS}" \
-          OSS_RELEASE_CHANNELS="${OSS_RELEASE_CHANNELS}" \
+          SKIP_METADATA="${SKIP_METADATA:-}" \
+          SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER:-}" \
+          SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS:-}" \
+          OSS_RELEASE_CHANNELS="${OSS_RELEASE_CHANNELS:-}" \
           OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
           OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}" \
           bash .aoneci/scripts/upload-oss.sh

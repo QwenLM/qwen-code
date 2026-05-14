@@ -73,12 +73,7 @@ jobs:
           HELPER_SCRIPT="$STATE_DIR/upstream-sync-domain-auth.sh"
           cp "$SOURCE_DIR/.aoneci/scripts/upstream-sync-domain-auth.sh" "$HELPER_SCRIPT"
           chmod +x "$HELPER_SCRIPT"
-          echo "[auth-diag] AUTH_USERNAME=$([ -n \"${AUTH_USERNAME:-}\" ] && echo set || echo unset)"
-          echo "[auth-diag] PRIVATE_TOKEN=$([ -n \"${PRIVATE_TOKEN:-}\" ] && echo set || echo unset)"
-          echo "[auth-diag] LEGACY_GIT_TOKEN=$([ -n \"${LEGACY_GIT_TOKEN:-}\" ] && echo set || echo unset)"
-          echo "[auth-diag] REPO_PATH=${REPO_PATH:-(unset)}"
-          echo "[auth-diag] GIT_REPO_FULL_NAME=${GIT_REPO_FULL_NAME:-(unset)}"
-          echo "[auth-diag] SOURCE_BRANCH=${SOURCE_BRANCH:-(unset)}"
+          echo "[auth] token=$( [ -n \"${PRIVATE_TOKEN:-}${LEGACY_GIT_TOKEN:-}\" ] && echo set || echo unset ) repo=${GIT_REPO_FULL_NAME:-(unset)}"
           AUTH_USERNAME="${AUTH_USERNAME:-}" \
           PRIVATE_TOKEN="${PRIVATE_TOKEN:-}" \
           LEGACY_GIT_TOKEN="${LEGACY_GIT_TOKEN:-}" \
@@ -124,28 +119,8 @@ jobs:
           git fetch upstream main --tags
           git fetch origin "$TARGET_BRANCH" 2>/dev/null || true
 
-          # 诊断信息：展示本地和上游的最新状态
-          echo "============================================================"
-          echo "📋 诊断信息"
-          echo "============================================================"
-          echo "🏠 本地 HEAD:"
-          git log --oneline -1 HEAD
-          echo ""
-          echo "🌐 upstream/main 最新提交:"
-          git log --oneline -1 upstream/main
-          echo "   提交时间: $(git log -1 --format='%ci' upstream/main)"
-          echo "   提交者:   $(git log -1 --format='%an <%ae>' upstream/main)"
-          echo ""
-          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
-            echo "📌 origin/$TARGET_BRANCH 最新提交:"
-            git log --oneline -1 "origin/$TARGET_BRANCH"
-          else
-            echo "📌 origin/$TARGET_BRANCH: 不存在（将使用当前工作树作为回退基线）"
-          fi
-          echo "============================================================"
-          # 顺便更新 origin 上的镜像分支（供本地或其他用途）
+          echo "📋 upstream: $(git log --oneline -1 upstream/main) | local HEAD: $(git log --oneline -1 HEAD)"
           git push origin upstream/main:refs/heads/github-qwen-code-main --force 2>/dev/null || true
-          echo "✅ 已尝试更新 origin/github-qwen-code-main 镜像分支"
 
       - name: '检查是否有新变更'
         run: |
@@ -178,12 +153,11 @@ jobs:
             exit 0
           fi
           echo "$NEW_COMMITS" > "$NEW_COMMITS_FILE"
-          echo "📦 发现 $NEW_COMMITS 个新 upstream 提交，开始合并..."
-          echo "最近 5 个 upstream 提交:"
+          echo "📦 $NEW_COMMITS commits → merging"
           if [ -n "$MERGE_BASE" ]; then
-            git log --oneline "$MERGE_BASE..upstream/main" --no-merges | head -5
+            git log --oneline "$MERGE_BASE..upstream/main" --no-merges | head -3
           else
-            git log --oneline upstream/main --no-merges | head -5
+            git log --oneline upstream/main --no-merges | head -3
           fi
 
       - name: '创建 sync 分支并合并'
@@ -217,12 +191,7 @@ jobs:
               else
                 echo "clean" > "$CONFLICT_STATUS_FILE"
               fi
-              echo "============================================================"
-              echo "📋 复用现有 sync 分支"
-              echo "   状态: $(cat "$CONFLICT_STATUS_FILE")"
-              echo "   分支: $SYNC_BRANCH"
-              echo "   当前 HEAD: $(git log --oneline -1 HEAD)"
-              echo "============================================================"
+              echo "📋 reusing sync branch | status=$(cat "$CONFLICT_STATUS_FILE") | HEAD=$(git log --oneline -1 HEAD)"
               exit 0
             else
               # ── 情况 B：sync 分支已存在但 upstream/main 有新提交 → 增量合并 ──
@@ -288,11 +257,8 @@ jobs:
             fi
 
             if [ "$REVERTED_COUNT" -gt 0 ]; then
-              echo "❌ 合并后校验失败：检测到 $REVERTED_COUNT 个文件的 fork 定制被静默回退"
+              echo "❌ fork customization reverted in $REVERTED_COUNT file(s) — likely shallow clone issue"
               echo "$REVERTED_FILES" | head -20
-              echo ""
-              echo "可能原因：shallow clone 导致 merge-base 不准确"
-              echo "建议：确认 git fetch --unshallow 是否生效"
               abort_merge_if_active
               echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
               echo "$REVERTED_FILES" > "$CONFLICT_FILES_FILE"
@@ -374,14 +340,7 @@ jobs:
 
           echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
 
-          # 合并步骤完成后的诊断信息
-          echo "============================================================"
-          echo "📋 合并步骤完成"
-          echo "   状态: $(cat "$CONFLICT_STATUS_FILE")"
-          echo "   分支: $SYNC_BRANCH"
-          echo "   当前 HEAD: $(git log --oneline -1 HEAD)"
-          echo "   文件变更数: $(git diff --stat HEAD~1 HEAD 2>/dev/null | tail -1 || echo 'N/A')"
-          echo "============================================================"
+          echo "📋 merge done | status=$(cat "$CONFLICT_STATUS_FILE") | branch=$SYNC_BRANCH | HEAD=$(git log --oneline -1 HEAD)"
 
       - name: '检查 sync 分支发布状态'
         run: |
@@ -472,7 +431,7 @@ jobs:
 
             echo ""
             echo "### Review 要点"
-            echo "请运行 Fork 差异分析 CI 查看完整差异状态。"
+            echo "请查看每日 Upstream Sync 分析 CI 了解完整差异状态。"
           } > /tmp/mr-body.md
           MR_BODY=$(cat /tmp/mr-body.md)
           MR_URL=$(
