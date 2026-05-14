@@ -476,7 +476,7 @@ describe('languageCommand', () => {
         'output Chinese',
       );
 
-      // Verify setting was saved (rule file is updated on restart)
+      // Verify the setting was persisted.
       expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
         expect.anything(), // SettingScope.User
         'general.outputLanguage',
@@ -517,11 +517,52 @@ describe('languageCommand', () => {
       expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
       expect(getGeminiClient).toHaveBeenCalledTimes(1);
       expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
+      // Memory MUST be refreshed before the system instruction is rebuilt;
+      // otherwise the new instruction would be built from stale userMemory
+      // and the language switch would silently fail to take effect.
+      const memoryOrder = refreshHierarchicalMemory.mock.invocationCallOrder[0];
+      const instructionOrder =
+        refreshSystemInstruction.mock.invocationCallOrder[0];
+      expect(memoryOrder).toBeLessThan(instructionOrder);
       // The success message no longer asks the user to restart.
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
         content: expect.not.stringContaining('restart'),
+      });
+    });
+
+    it('should still report success when applying to the running session fails', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const refreshHierarchicalMemory = vi
+        .fn()
+        .mockRejectedValue(new Error('boom'));
+      (
+        mockContext.services as unknown as {
+          config: Record<string, unknown>;
+        }
+      ).config = {
+        getModel: vi.fn().mockReturnValue('test-model'),
+        refreshHierarchicalMemory,
+        // No getGeminiClient — refreshSystemInstruction must not be reached.
+      };
+
+      const result = await languageCommand.action(mockContext, 'output Korean');
+
+      // The setting was still persisted; the user-facing message reports
+      // success and does not surface the in-session refresh failure.
+      expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
+        expect.anything(),
+        'general.outputLanguage',
+        'Korean',
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('LLM output language set to'),
       });
     });
 
@@ -555,8 +596,7 @@ describe('languageCommand', () => {
       );
     });
 
-    it('should save setting without immediate rule file update', async () => {
-      // Even though rule file updates happen on restart, the setting should still be saved
+    it('should save the setting and report success on a valid argument', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
       }
@@ -887,7 +927,7 @@ describe('languageCommand', () => {
 
       const result = await outputSubcommand.action(mockContext, 'French');
 
-      // Verify setting was saved (rule file is updated on restart)
+      // Verify the setting was persisted.
       expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
         expect.anything(),
         'general.outputLanguage',
