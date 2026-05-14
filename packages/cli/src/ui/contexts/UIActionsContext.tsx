@@ -81,6 +81,8 @@ export interface UIActions {
   openHooksDialog: () => void;
   // Hooks dialog
   closeHooksDialog: () => void;
+  // Self-improve source dialog
+  closeSelfImproveSourceDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;

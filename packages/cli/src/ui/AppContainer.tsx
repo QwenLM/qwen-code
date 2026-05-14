@@ -1042,6 +1042,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
+  const [isSelfImproveSourceDialogOpen, setSelfImproveSourceDialogOpen] =
+    useState(false);
+  const openSelfImproveSourceDialog = useCallback(
+    () => setSelfImproveSourceDialogOpen(true),
+    [],
+  );
+  const closeSelfImproveSourceDialog = useCallback(
+    () => setSelfImproveSourceDialogOpen(false),
+    [],
+  );
 
   // Ref bridge: the guarded openRewindSelector callback is defined later
   // (after useDoublePress), but slashCommandActions needs it now. The ref
@@ -1088,6 +1098,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openSelfImproveSourceDialog,
       openResumeDialog,
       openRewindSelector: () => openRewindSelectorRef.current(),
       openDiffDialog,
@@ -1116,6 +1127,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openExtensionsManagerDialog,
       openMcpDialog,
       openHooksDialog,
+      openSelfImproveSourceDialog,
       openResumeDialog,
       handleResume,
       handleBranch,
@@ -2273,6 +2285,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isAgentsManagerDialogOpen ||
     isMcpDialogOpen ||
     isHooksDialogOpen ||
+    isSelfImproveSourceDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
@@ -3278,6 +3291,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isSelfImproveSourceDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3403,6 +3417,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isMcpDialogOpen,
       // Hooks dialog
       isHooksDialogOpen,
+      isSelfImproveSourceDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
@@ -3476,6 +3491,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeSelfImproveSourceDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -3552,6 +3568,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       // Hooks dialog
       closeHooksDialog,
+      closeSelfImproveSourceDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
