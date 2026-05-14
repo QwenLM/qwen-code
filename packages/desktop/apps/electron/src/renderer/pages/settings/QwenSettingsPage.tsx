@@ -6,6 +6,7 @@ import {
   Plus,
   RefreshCw,
   Save,
+  Settings2,
   Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -761,6 +762,7 @@ function McpServersTab({
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<McpDraft>(createEmptyMcpDraft);
+  const [showEditor, setShowEditor] = useState(false);
   const scopeOptions = useMemo(
     () => [
       { value: 'user', label: t('settings.qwen.scope.user') },
@@ -790,6 +792,7 @@ function McpServersTab({
     if (result) {
       setSnapshot(result);
       setDraft(createEmptyMcpDraft());
+      setShowEditor(false);
     }
   };
 
@@ -806,135 +809,22 @@ function McpServersTab({
   return (
     <>
       <SettingsSection
-        title={t('settings.qwen.mcp.addOrEditServer')}
-        description={t('settings.qwen.mcp.addOrEditServerDesc')}
-      >
-        <SettingsCard className="p-4 space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <SettingsSelect
-              label={t('settings.qwen.common.scope')}
-              value={draft.scope}
-              options={scopeOptions}
-              onValueChange={(scope) =>
-                setDraft((current) => ({
-                  ...current,
-                  scope: scope as QwenSettingsScope,
-                }))
-              }
-            />
-            <SettingsSelect
-              label={t('settings.qwen.mcp.transport')}
-              value={draft.transport}
-              options={TRANSPORT_OPTIONS}
-              onValueChange={(transport) =>
-                setDraft((current) => ({
-                  ...current,
-                  transport: transport as QwenMcpTransport,
-                }))
-              }
-            />
-            <SettingsInput
-              label={t('settings.qwen.common.name')}
-              value={draft.name}
-              onChange={(name) => setDraft((current) => ({ ...current, name }))}
-              placeholder="my-server"
-            />
-          </div>
-          <SettingsInput
-            label={
-              draft.transport === 'stdio'
-                ? t('settings.qwen.common.command')
-                : t('settings.qwen.common.url')
-            }
-            value={draft.commandOrUrl}
-            onChange={(commandOrUrl) =>
-              setDraft((current) => ({ ...current, commandOrUrl }))
-            }
-            placeholder={
-              draft.transport === 'stdio' ? 'node' : 'http://localhost:3000/mcp'
-            }
-          />
-          {draft.transport === 'stdio' ? (
-            <SettingsTextarea
-              label={t('settings.qwen.mcp.arguments')}
-              description={t('settings.qwen.mcp.oneArgumentPerLine')}
-              value={draft.args}
-              onChange={(args) => setDraft((current) => ({ ...current, args }))}
-              placeholder={'-m\nmy_mcp_server'}
-              rows={3}
-            />
-          ) : (
-            <SettingsTextarea
-              label={t('settings.qwen.common.headers')}
-              description={t('settings.qwen.common.oneKeyValuePerLine')}
-              value={draft.headers}
-              onChange={(headers) =>
-                setDraft((current) => ({ ...current, headers }))
-              }
-              placeholder="Authorization=Bearer ${TOKEN}"
-              rows={3}
-            />
-          )}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <SettingsInput
-              label={t('settings.qwen.common.timeout')}
-              value={draft.timeout}
-              onChange={(timeout) =>
-                setDraft((current) => ({ ...current, timeout }))
-              }
-              placeholder="15000"
-            />
-            <SettingsInput
-              label={t('settings.qwen.common.description')}
-              value={draft.description}
-              onChange={(description) =>
-                setDraft((current) => ({ ...current, description }))
-              }
-              placeholder="Internal tools"
-            />
-          </div>
-          {draft.transport === 'stdio' ? (
-            <SettingsTextarea
-              label={t('settings.qwen.common.environment')}
-              description={t('settings.qwen.common.oneKeyValuePerLine')}
-              value={draft.env}
-              onChange={(env) => setDraft((current) => ({ ...current, env }))}
-              placeholder="API_KEY=${API_KEY}"
-              rows={3}
-            />
-          ) : null}
-          <SettingsToggle
-            inCard={false}
-            label={t('settings.qwen.mcp.trustThisServer')}
-            description={t('settings.qwen.mcp.trustThisServerDesc')}
-            checked={draft.trust}
-            onCheckedChange={(trust) =>
-              setDraft((current) => ({ ...current, trust }))
-            }
-          />
-          <div className="flex justify-end gap-2">
-            <Button
-              variant="ghost"
-              onClick={() => setDraft(createEmptyMcpDraft())}
-            >
-              {t('common.clear')}
-            </Button>
-            <Button
-              onClick={() => void save()}
-              disabled={!draft.name.trim() || !draft.commandOrUrl.trim()}
-            >
-              <Plus className="w-4 h-4 mr-2" />
-              {t('settings.qwen.mcp.saveServer')}
-            </Button>
-          </div>
-        </SettingsCard>
-      </SettingsSection>
-
-      <SettingsSection
         title={t('settings.qwen.mcp.configuredServers')}
         description={t('settings.qwen.mcp.configuredServersDesc')}
       >
-        <div className="space-y-3">
+        <div className="flex justify-end gap-2">
+          <Button
+            size="sm"
+            onClick={() => {
+              setDraft(createEmptyMcpDraft());
+              setShowEditor(true);
+            }}
+          >
+            <Plus className="w-4 h-4" />
+            {t('settings.qwen.mcp.addServer')}
+          </Button>
+        </div>
+        <div className="mt-3 space-y-3">
           {entries.length === 0 ? (
             <EmptyState
               title={t('settings.qwen.mcp.noServersTitle')}
@@ -966,9 +856,13 @@ function McpServersTab({
                       <Button
                         size="sm"
                         variant="ghost"
-                        onClick={() => setDraft(serverToDraft(entry))}
+                        onClick={() => {
+                          setDraft(serverToDraft(entry));
+                          setShowEditor(true);
+                        }}
+                        aria-label={t('common.edit')}
                       >
-                        {t('common.edit')}
+                        <Settings2 className="w-4 h-4" />
                       </Button>
                       <Button
                         size="sm"
@@ -985,6 +879,142 @@ function McpServersTab({
           )}
         </div>
       </SettingsSection>
+
+      {showEditor ? (
+        <SettingsSection
+          title={t('settings.qwen.mcp.addOrEditServer')}
+          description={t('settings.qwen.mcp.addOrEditServerDesc')}
+        >
+          <SettingsCard className="p-4 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <SettingsSelect
+                label={t('settings.qwen.common.scope')}
+                value={draft.scope}
+                options={scopeOptions}
+                onValueChange={(scope) =>
+                  setDraft((current) => ({
+                    ...current,
+                    scope: scope as QwenSettingsScope,
+                  }))
+                }
+              />
+              <SettingsSelect
+                label={t('settings.qwen.mcp.transport')}
+                value={draft.transport}
+                options={TRANSPORT_OPTIONS}
+                onValueChange={(transport) =>
+                  setDraft((current) => ({
+                    ...current,
+                    transport: transport as QwenMcpTransport,
+                  }))
+                }
+              />
+              <SettingsInput
+                label={t('settings.qwen.common.name')}
+                value={draft.name}
+                onChange={(name) =>
+                  setDraft((current) => ({ ...current, name }))
+                }
+                placeholder="my-server"
+              />
+            </div>
+            <SettingsInput
+              label={
+                draft.transport === 'stdio'
+                  ? t('settings.qwen.common.command')
+                  : t('settings.qwen.common.url')
+              }
+              value={draft.commandOrUrl}
+              onChange={(commandOrUrl) =>
+                setDraft((current) => ({ ...current, commandOrUrl }))
+              }
+              placeholder={
+                draft.transport === 'stdio'
+                  ? 'node'
+                  : 'http://localhost:3000/mcp'
+              }
+            />
+            {draft.transport === 'stdio' ? (
+              <SettingsTextarea
+                label={t('settings.qwen.mcp.arguments')}
+                description={t('settings.qwen.mcp.oneArgumentPerLine')}
+                value={draft.args}
+                onChange={(args) =>
+                  setDraft((current) => ({ ...current, args }))
+                }
+                placeholder={'-m\nmy_mcp_server'}
+                rows={3}
+              />
+            ) : (
+              <SettingsTextarea
+                label={t('settings.qwen.common.headers')}
+                description={t('settings.qwen.common.oneKeyValuePerLine')}
+                value={draft.headers}
+                onChange={(headers) =>
+                  setDraft((current) => ({ ...current, headers }))
+                }
+                placeholder="Authorization=Bearer ${TOKEN}"
+                rows={3}
+              />
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <SettingsInput
+                label={t('settings.qwen.common.timeout')}
+                value={draft.timeout}
+                onChange={(timeout) =>
+                  setDraft((current) => ({ ...current, timeout }))
+                }
+                placeholder="15000"
+              />
+              <SettingsInput
+                label={t('settings.qwen.common.description')}
+                value={draft.description}
+                onChange={(description) =>
+                  setDraft((current) => ({ ...current, description }))
+                }
+                placeholder="Internal tools"
+              />
+            </div>
+            {draft.transport === 'stdio' ? (
+              <SettingsTextarea
+                label={t('settings.qwen.common.environment')}
+                description={t('settings.qwen.common.oneKeyValuePerLine')}
+                value={draft.env}
+                onChange={(env) => setDraft((current) => ({ ...current, env }))}
+                placeholder="API_KEY=${API_KEY}"
+                rows={3}
+              />
+            ) : null}
+            <SettingsToggle
+              inCard={false}
+              label={t('settings.qwen.mcp.trustThisServer')}
+              description={t('settings.qwen.mcp.trustThisServerDesc')}
+              checked={draft.trust}
+              onCheckedChange={(trust) =>
+                setDraft((current) => ({ ...current, trust }))
+              }
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setDraft(createEmptyMcpDraft());
+                  setShowEditor(false);
+                }}
+              >
+                {t('common.clear')}
+              </Button>
+              <Button
+                onClick={() => void save()}
+                disabled={!draft.name.trim() || !draft.commandOrUrl.trim()}
+              >
+                <Save className="w-4 h-4 mr-2" />
+                {t('settings.qwen.mcp.saveServer')}
+              </Button>
+            </div>
+          </SettingsCard>
+        </SettingsSection>
+      ) : null}
     </>
   );
 }
@@ -1006,6 +1036,7 @@ function HooksTab({
 }) {
   const { t } = useTranslation();
   const [draft, setDraft] = useState<HookDraft>(createEmptyHookDraft);
+  const [showEditor, setShowEditor] = useState(false);
   const scopeOptions = useMemo(
     () => [
       { value: 'user', label: t('settings.qwen.scope.user') },
@@ -1041,6 +1072,7 @@ function HooksTab({
     if (result) {
       setSnapshot(result);
       setDraft(createEmptyHookDraft());
+      setShowEditor(false);
     }
   };
 
@@ -1074,176 +1106,22 @@ function HooksTab({
       </SettingsSection>
 
       <SettingsSection
-        title={t('settings.qwen.hooks.addOrEditHook')}
-        description={t('settings.qwen.hooks.addOrEditHookDesc')}
-      >
-        <SettingsCard className="p-4 space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <SettingsSelect
-              label={t('settings.qwen.common.scope')}
-              value={draft.scope}
-              options={scopeOptions}
-              onValueChange={(scope) =>
-                setDraft((current) => ({
-                  ...current,
-                  scope: scope as QwenSettingsScope,
-                }))
-              }
-            />
-            <SettingsSelect
-              label={t('settings.qwen.hooks.event')}
-              value={draft.event}
-              options={HOOK_EVENT_OPTIONS}
-              onValueChange={(event) =>
-                setDraft((current) => ({
-                  ...current,
-                  event: event as QwenHookEvent,
-                }))
-              }
-            />
-            <SettingsSelect
-              label={t('settings.qwen.hooks.type')}
-              value={draft.type}
-              options={hookTypeOptions}
-              onValueChange={(type) =>
-                setDraft((current) => ({
-                  ...current,
-                  type: type as 'command' | 'http',
-                }))
-              }
-            />
-          </div>
-          <SettingsInput
-            label={t('settings.qwen.hooks.matcher')}
-            value={draft.matcher}
-            onChange={(matcher) =>
-              setDraft((current) => ({ ...current, matcher }))
-            }
-            placeholder="*"
-          />
-          <SettingsInput
-            label={
-              draft.type === 'command'
-                ? t('settings.qwen.common.command')
-                : t('settings.qwen.common.url')
-            }
-            value={draft.commandOrUrl}
-            onChange={(commandOrUrl) =>
-              setDraft((current) => ({ ...current, commandOrUrl }))
-            }
-            placeholder={
-              draft.type === 'command'
-                ? '$QWEN_PROJECT_DIR/.qwen/hooks/check.sh'
-                : 'http://127.0.0.1:8080/hook'
-            }
-          />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <SettingsInput
-              label={t('settings.qwen.common.name')}
-              value={draft.name}
-              onChange={(name) => setDraft((current) => ({ ...current, name }))}
-            />
-            <SettingsInput
-              label={t('settings.qwen.common.timeout')}
-              value={draft.timeout}
-              onChange={(timeout) =>
-                setDraft((current) => ({ ...current, timeout }))
-              }
-              placeholder="10000"
-            />
-          </div>
-          <SettingsInput
-            label={t('settings.qwen.common.description')}
-            value={draft.description}
-            onChange={(description) =>
-              setDraft((current) => ({ ...current, description }))
-            }
-          />
-          {draft.type === 'command' ? (
-            <SettingsTextarea
-              label={t('settings.qwen.common.environment')}
-              description={t('settings.qwen.common.oneKeyValuePerLine')}
-              value={draft.env}
-              onChange={(env) => setDraft((current) => ({ ...current, env }))}
-              rows={3}
-            />
-          ) : (
-            <>
-              <SettingsTextarea
-                label={t('settings.qwen.common.headers')}
-                description={t('settings.qwen.common.oneKeyValuePerLine')}
-                value={draft.headers}
-                onChange={(headers) =>
-                  setDraft((current) => ({ ...current, headers }))
-                }
-                rows={3}
-              />
-              <SettingsTextarea
-                label={t('settings.qwen.hooks.allowedEnvVars')}
-                description={t('settings.qwen.hooks.allowedEnvVarsDesc')}
-                value={draft.allowedEnvVars}
-                onChange={(allowedEnvVars) =>
-                  setDraft((current) => ({ ...current, allowedEnvVars }))
-                }
-                rows={3}
-              />
-            </>
-          )}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <SettingsToggle
-              inCard={false}
-              label={t('settings.qwen.hooks.sequential')}
-              description={t('settings.qwen.hooks.sequentialDesc')}
-              checked={draft.sequential}
-              onCheckedChange={(sequential) =>
-                setDraft((current) => ({ ...current, sequential }))
-              }
-            />
-            <SettingsToggle
-              inCard={false}
-              label={
-                draft.type === 'command'
-                  ? t('settings.qwen.hooks.async')
-                  : t('settings.qwen.hooks.once')
-              }
-              description={
-                draft.type === 'command'
-                  ? t('settings.qwen.hooks.asyncDesc')
-                  : t('settings.qwen.hooks.onceDesc')
-              }
-              checked={draft.type === 'command' ? draft.async : draft.once}
-              onCheckedChange={(checked) =>
-                setDraft((current) =>
-                  draft.type === 'command'
-                    ? { ...current, async: checked }
-                    : { ...current, once: checked },
-                )
-              }
-            />
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button
-              variant="ghost"
-              onClick={() => setDraft(createEmptyHookDraft())}
-            >
-              {t('common.clear')}
-            </Button>
-            <Button
-              onClick={() => void save()}
-              disabled={!draft.commandOrUrl.trim()}
-            >
-              <Save className="w-4 h-4 mr-2" />
-              {t('settings.qwen.hooks.saveHook')}
-            </Button>
-          </div>
-        </SettingsCard>
-      </SettingsSection>
-
-      <SettingsSection
         title={t('settings.qwen.hooks.configuredHooks')}
         description={t('settings.qwen.hooks.configuredHooksDesc')}
       >
-        <div className="space-y-3">
+        <div className="flex justify-end gap-2">
+          <Button
+            size="sm"
+            onClick={() => {
+              setDraft(createEmptyHookDraft());
+              setShowEditor(true);
+            }}
+          >
+            <Plus className="w-4 h-4" />
+            {t('settings.qwen.hooks.addHook')}
+          </Button>
+        </div>
+        <div className="mt-3 space-y-3">
           {entries.length === 0 ? (
             <EmptyState
               title={t('settings.qwen.hooks.noHooksTitle')}
@@ -1273,9 +1151,13 @@ function HooksTab({
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => setDraft(hookToDraft(entry))}
+                          onClick={() => {
+                            setDraft(hookToDraft(entry));
+                            setShowEditor(true);
+                          }}
+                          aria-label={t('common.edit')}
                         >
-                          {t('common.edit')}
+                          <Settings2 className="w-4 h-4" />
                         </Button>
                         <Button
                           size="sm"
@@ -1293,6 +1175,179 @@ function HooksTab({
           )}
         </div>
       </SettingsSection>
+
+      {showEditor ? (
+        <SettingsSection
+          title={t('settings.qwen.hooks.addOrEditHook')}
+          description={t('settings.qwen.hooks.addOrEditHookDesc')}
+        >
+          <SettingsCard className="p-4 space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <SettingsSelect
+                label={t('settings.qwen.common.scope')}
+                value={draft.scope}
+                options={scopeOptions}
+                onValueChange={(scope) =>
+                  setDraft((current) => ({
+                    ...current,
+                    scope: scope as QwenSettingsScope,
+                  }))
+                }
+              />
+              <SettingsSelect
+                label={t('settings.qwen.hooks.event')}
+                value={draft.event}
+                options={HOOK_EVENT_OPTIONS}
+                onValueChange={(event) =>
+                  setDraft((current) => ({
+                    ...current,
+                    event: event as QwenHookEvent,
+                  }))
+                }
+              />
+              <SettingsSelect
+                label={t('settings.qwen.hooks.type')}
+                value={draft.type}
+                options={hookTypeOptions}
+                onValueChange={(type) =>
+                  setDraft((current) => ({
+                    ...current,
+                    type: type as 'command' | 'http',
+                  }))
+                }
+              />
+            </div>
+            <SettingsInput
+              label={t('settings.qwen.hooks.matcher')}
+              value={draft.matcher}
+              onChange={(matcher) =>
+                setDraft((current) => ({ ...current, matcher }))
+              }
+              placeholder="*"
+            />
+            <SettingsInput
+              label={
+                draft.type === 'command'
+                  ? t('settings.qwen.common.command')
+                  : t('settings.qwen.common.url')
+              }
+              value={draft.commandOrUrl}
+              onChange={(commandOrUrl) =>
+                setDraft((current) => ({ ...current, commandOrUrl }))
+              }
+              placeholder={
+                draft.type === 'command'
+                  ? '$QWEN_PROJECT_DIR/.qwen/hooks/check.sh'
+                  : 'http://127.0.0.1:8080/hook'
+              }
+            />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <SettingsInput
+                label={t('settings.qwen.common.name')}
+                value={draft.name}
+                onChange={(name) =>
+                  setDraft((current) => ({ ...current, name }))
+                }
+              />
+              <SettingsInput
+                label={t('settings.qwen.common.timeout')}
+                value={draft.timeout}
+                onChange={(timeout) =>
+                  setDraft((current) => ({ ...current, timeout }))
+                }
+                placeholder="10000"
+              />
+            </div>
+            <SettingsInput
+              label={t('settings.qwen.common.description')}
+              value={draft.description}
+              onChange={(description) =>
+                setDraft((current) => ({ ...current, description }))
+              }
+            />
+            {draft.type === 'command' ? (
+              <SettingsTextarea
+                label={t('settings.qwen.common.environment')}
+                description={t('settings.qwen.common.oneKeyValuePerLine')}
+                value={draft.env}
+                onChange={(env) => setDraft((current) => ({ ...current, env }))}
+                rows={3}
+              />
+            ) : (
+              <>
+                <SettingsTextarea
+                  label={t('settings.qwen.common.headers')}
+                  description={t('settings.qwen.common.oneKeyValuePerLine')}
+                  value={draft.headers}
+                  onChange={(headers) =>
+                    setDraft((current) => ({ ...current, headers }))
+                  }
+                  rows={3}
+                />
+                <SettingsTextarea
+                  label={t('settings.qwen.hooks.allowedEnvVars')}
+                  description={t('settings.qwen.hooks.allowedEnvVarsDesc')}
+                  value={draft.allowedEnvVars}
+                  onChange={(allowedEnvVars) =>
+                    setDraft((current) => ({ ...current, allowedEnvVars }))
+                  }
+                  rows={3}
+                />
+              </>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <SettingsToggle
+                inCard={false}
+                label={t('settings.qwen.hooks.sequential')}
+                description={t('settings.qwen.hooks.sequentialDesc')}
+                checked={draft.sequential}
+                onCheckedChange={(sequential) =>
+                  setDraft((current) => ({ ...current, sequential }))
+                }
+              />
+              <SettingsToggle
+                inCard={false}
+                label={
+                  draft.type === 'command'
+                    ? t('settings.qwen.hooks.async')
+                    : t('settings.qwen.hooks.once')
+                }
+                description={
+                  draft.type === 'command'
+                    ? t('settings.qwen.hooks.asyncDesc')
+                    : t('settings.qwen.hooks.onceDesc')
+                }
+                checked={draft.type === 'command' ? draft.async : draft.once}
+                onCheckedChange={(checked) =>
+                  setDraft((current) =>
+                    draft.type === 'command'
+                      ? { ...current, async: checked }
+                      : { ...current, once: checked },
+                  )
+                }
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setDraft(createEmptyHookDraft());
+                  setShowEditor(false);
+                }}
+              >
+                {t('common.clear')}
+              </Button>
+              <Button
+                onClick={() => void save()}
+                disabled={!draft.commandOrUrl.trim()}
+              >
+                <Save className="w-4 h-4 mr-2" />
+                {t('settings.qwen.hooks.saveHook')}
+              </Button>
+            </div>
+          </SettingsCard>
+        </SettingsSection>
+      ) : null}
     </>
   );
 }
