@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { historyCommand } from './historyCommand.js';
 import { MessageType, type HistoryItem } from '../types.js';
-import type { SlashCommandContext } from './types.js';
+import type { CommandContext } from './types.js';
 
 describe('historyCommand', () => {
   let mockHistory: HistoryItem[];
@@ -15,7 +15,7 @@ describe('historyCommand', () => {
   let mockAddItem: ReturnType<typeof vi.fn>;
   let mockRefreshStatic: ReturnType<typeof vi.fn>;
   let mockSettings: { setValue: ReturnType<typeof vi.fn> };
-  let mockContext: SlashCommandContext;
+  let mockContext: CommandContext;
 
   beforeEach(() => {
     mockHistory = [
@@ -41,7 +41,7 @@ describe('historyCommand', () => {
       services: {
         settings: mockSettings,
       },
-    } as unknown as SlashCommandContext;
+    } as unknown as CommandContext;
   });
 
   it('collapses a fresh session: marks items suppressed and adds summary', async () => {
@@ -185,7 +185,7 @@ describe('historyCommand', () => {
   });
 
   it('returns usage error for unknown subcommand', async () => {
-    const result = await historyCommand.action(mockContext, 'unknown');
+    const result = await historyCommand.action!(mockContext, 'unknown');
 
     expect(result).toEqual({
       type: 'message',
