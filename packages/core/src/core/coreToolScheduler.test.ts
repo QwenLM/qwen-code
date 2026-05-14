@@ -123,47 +123,42 @@ function createMockToolSpan(
   });
 }
 
-vi.mock('../telemetry/index.js', async (importOriginal) => {
-  const actual = await importOriginal<Record<string, unknown>>();
-  return {
-    ...actual,
-    startToolSpan: vi.fn(
-      (name: string, attrs?: Record<string, string | number | boolean>) =>
-        createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
-    ),
-    endToolSpan: vi.fn(
-      (
-        span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
-        metadata?: { success?: boolean; error?: string },
-      ) => {
-        if (metadata) {
-          const status =
-            metadata.success !== false
-              ? { code: 1 }
-              : { code: 2, message: metadata.error ?? 'tool error' };
-          span.statusCalls.push(status);
-        }
-        span.ended = true;
-      },
-    ),
-    runInToolSpanContext: vi.fn(<T>(_span: unknown, fn: () => T): T => fn()),
-    startToolExecutionSpan: vi.fn(() =>
-      createMockToolSpan('tool.execution', {}),
-    ),
-    endToolExecutionSpan: vi.fn(
-      (
-        span: ReturnType<typeof createMockToolSpan>,
-        _metadata?: { success?: boolean; error?: string },
-      ) => {
-        try {
-          span.end();
-        } catch {
-          // best-effort
-        }
-      },
-    ),
-  };
-});
+vi.mock('../telemetry/session-tracing.js', () => ({
+  startToolSpan: vi.fn(
+    (name: string, attrs?: Record<string, string | number | boolean>) =>
+      createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
+  ),
+  endToolSpan: vi.fn(
+    (
+      span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
+      metadata?: { success?: boolean; error?: string },
+    ) => {
+      if (metadata) {
+        const status =
+          metadata.success !== false
+            ? { code: 1 }
+            : { code: 2, message: metadata.error ?? 'tool error' };
+        span.statusCalls.push(status);
+      }
+      span.ended = true;
+    },
+  ),
+  runInToolSpanContext: vi.fn(<T>(_span: unknown, fn: () => T): T => fn()),
+  startToolExecutionSpan: vi.fn(() => createMockToolSpan('tool.execution', {})),
+  endToolExecutionSpan: vi.fn(
+    (
+      span: ReturnType<typeof createMockToolSpan>,
+      _metadata?: { success?: boolean; error?: string },
+    ) => {
+      span.ended = true;
+    },
+  ),
+  startInteractionSpan: vi.fn(),
+  endInteractionSpan: vi.fn(),
+  startLLMRequestSpan: vi.fn(),
+  endLLMRequestSpan: vi.fn(),
+  clearSessionTracingForTesting: vi.fn(),
+}));
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
