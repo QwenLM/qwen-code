@@ -1087,6 +1087,15 @@ if defined PRE_INSTALL_QWENS_LIST (
     )
 )
 
+rem Persist the install bin to user PATH unless --no-modify-path is set.
+if not "!EXTRA_BIN!"=="" if /i not "!NO_MODIFY_PATH!"=="1" (
+    call :MaybeUpdateUserPath "!EXTRA_BIN!"
+    if !ERRORLEVEL! NEQ 0 (
+        echo WARNING: Failed to update user PATH. Add the directory manually:
+        echo   !EXTRA_BIN!
+    )
+)
+
 if defined OTHER_QWENS (
     echo.
     echo WARNING: Other 'qwen' executables exist on this system. Depending on
@@ -1096,31 +1105,11 @@ if defined OTHER_QWENS (
         if not "!OQ!"=="" echo WARNING:   !OQ!
     )
     echo.
-    if /i "!NO_MODIFY_PATH!"=="1" (
-        echo Skipped user PATH update because --no-modify-path is set.
-        echo To make this install win, add this to your user PATH manually:
-        echo   !EXTRA_BIN!
-    ) else (
-        call :MaybeUpdateUserPath "!EXTRA_BIN!"
-        if !ERRORLEVEL! NEQ 0 (
-            echo WARNING: Failed to update user PATH. Add the directory manually:
-            echo   !EXTRA_BIN!
-        )
-        echo.
-        echo If you prefer not to modify user PATH, rerun with --no-modify-path
-        echo and pick one of:
-        echo   - npm uninstall -g @qwen-code/qwen-code   ^(if the shadow is an npm install^)
-        echo   - invoke directly: "!INSTALLED_BIN!"
-    )
+    echo To make this install take priority, restart your command prompt.
+    echo Or invoke directly: "!INSTALLED_BIN!"
     exit /b 0
 )
 
-where qwen >nul 2>&1
-if %ERRORLEVEL% NEQ 0 (
-    echo Run: qwen
-    echo ^(Restart your command prompt for PATH changes to take effect.^)
-    if not "!EXTRA_BIN!"=="" echo Or now: "!EXTRA_BIN!\qwen.cmd"
-    exit /b 0
-)
 echo Run: qwen
+echo ^(Restart your command prompt for PATH changes to take effect.^)
 exit /b 0

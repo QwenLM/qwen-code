@@ -1083,6 +1083,10 @@ print_final_instructions() {
         echo "Location: ${installed_bin}"
     fi
 
+    if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then
+        maybe_update_shell_path "${install_bin_dir}"
+    fi
+
     if [[ -n "${other_qwens}" ]]; then
         echo ""
         log_warning "Other 'qwen' executables exist on this system. Depending on your"
@@ -1096,31 +1100,13 @@ print_final_instructions() {
         done
         IFS="${saved_ifs}"
         echo ""
-        if [[ "${NO_MODIFY_PATH:-0}" == "1" ]]; then
-            echo "Skipped shell rc update because --no-modify-path is set."
-            echo "To make this install win, manually add to your shell rc:"
-            echo "  export PATH=${quoted_install_bin_dir}:\$PATH"
-        else
-            maybe_update_shell_path "${install_bin_dir}"
-            echo ""
-            echo "If you prefer not to modify the shell rc, rerun with --no-modify-path"
-            echo "and pick one of:"
-            echo "  - npm uninstall -g @qwen-code/qwen-code   # if the shadow is an npm install"
-            echo "  - invoke directly: ${installed_bin}"
-        fi
-        return 0
-    fi
-
-    if ! command_exists qwen; then
-        echo "Run: qwen"
-        echo "(Restart your terminal for PATH changes to take effect.)"
-        if [[ -n "${install_bin_dir}" ]]; then
-            echo "Or now: export PATH=${quoted_install_bin_dir}:\$PATH && qwen"
-        fi
+        echo "To make this install take priority, restart your terminal."
+        echo "Or invoke directly: ${installed_bin}"
         return 0
     fi
 
     echo "Run: qwen"
+    echo "(Restart your terminal for PATH changes to take effect.)"
 }
 
 main() {
