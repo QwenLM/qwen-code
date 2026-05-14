@@ -236,7 +236,9 @@ jobs:
         if: |-
           steps.size.outputs.should_review == 'true'
         run: |-
-          cp .github/review-rules.md .qwen/review-rules.md
+          if [ -f .github/review-rules.md ]; then
+            cp .github/review-rules.md .qwen/review-rules.md
+          fi
 
       - name: 'Run Qwen Code Review'
         id: 'review'
