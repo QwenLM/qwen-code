@@ -105,7 +105,6 @@ function buildDefaultPromptId(purpose?: string): string {
 function resolveDefaultModel(config: Config, override?: string): string {
   return (
     override ??
-    config.getFastModelForSideQuery?.() ??
     config.getFastModel?.() ??
     config.getModel() ??
     DEFAULT_QWEN_MODEL

@@ -502,7 +502,16 @@ describe('BaseLlmClient', () => {
         getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
         getModel: vi.fn().mockReturnValue('main-model'),
         getFastModel: vi.fn().mockReturnValue(undefined),
-        getFastModelForSideQuery: vi.fn().mockReturnValue(undefined),
+        getAllConfiguredModels: vi.fn((authTypes?: AuthType[]) =>
+          authTypes?.includes(AuthType.QWEN_OAUTH)
+            ? []
+            : [
+                {
+                  id: fastModel,
+                  authType: AuthType.USE_ANTHROPIC,
+                },
+              ],
+        ),
         getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
       } as unknown as Mocked<Config>;
     });
@@ -514,6 +523,29 @@ describe('BaseLlmClient', () => {
 
       expect(resolved.contentGenerator).toBe(mockContentGenerator);
       expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
+      expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the active runtime generator when model matches the runtime view', async () => {
+      const runtimeContentGenerator = {
+        generateContent: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as Mocked<ContentGenerator>;
+      crossProviderConfig.getContentGenerator = vi
+        .fn()
+        .mockReturnValue(runtimeContentGenerator);
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-model',
+      });
+      vi.mocked(crossProviderConfig.getModel).mockReturnValue('runtime-model');
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      const resolved = await c.resolveForModel('runtime-model');
+
+      expect(resolved.contentGenerator).toBe(runtimeContentGenerator);
+      expect(resolved.retryAuthType).toBe(AuthType.USE_OPENAI);
       expect(getResolvedModel).not.toHaveBeenCalled();
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
@@ -681,9 +713,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('generateJson resolves fast selectors through the configured fast model', async () => {
-      crossProviderConfig.getFastModelForSideQuery.mockReturnValue(
-        'openai:shared-model',
-      );
+      crossProviderConfig.getFastModel.mockReturnValue('openai:shared-model');
       getResolvedModel.mockImplementation((authType: string, model: string) => {
         if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
           return {

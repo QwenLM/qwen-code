@@ -760,7 +760,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
-    it('keeps getFastModel current-auth-only for direct runtime callers', () => {
+    it('returns a bare fast model selector when the model is configured under another auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -786,11 +786,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('deepseek-v4-flash');
+      expect(config.getFastModel()).toBe('deepseek-v4-flash');
     });
 
-    it('returns an authType-qualified fast model selector for side queries', () => {
+    it('returns an authType-qualified fast model selector', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_ANTHROPIC,
@@ -816,11 +815,10 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBe('openai:shared-model');
+      expect(config.getFastModel()).toBe('openai:shared-model');
     });
 
-    it('returns a bare fast model for getFastModel when authType-qualified selector matches the current auth type', () => {
+    it('keeps authType-qualified selectors when the auth type matches the current auth type', () => {
       const config = new Config({
         ...baseParams,
         authType: AuthType.USE_OPENAI,
@@ -838,10 +836,7 @@ describe('Server Config (config.ts)', () => {
         },
       });
 
-      expect(config.getFastModel()).toBe('deepseek-v4-flash');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:deepseek-v4-flash',
-      );
+      expect(config.getFastModel()).toBe('openai:deepseek-v4-flash');
     });
 
     it('accepts runtime fast models for authType-qualified selectors', () => {
@@ -872,10 +867,7 @@ describe('Server Config (config.ts)', () => {
       });
       config.getModelsConfig().detectAndCaptureRuntimeModel();
 
-      expect(config.getFastModel()).toBe('runtime-fast-model');
-      expect(config.getFastModelForSideQuery()).toBe(
-        'openai:runtime-fast-model',
-      );
+      expect(config.getFastModel()).toBe('openai:runtime-fast-model');
     });
 
     it('returns undefined when the fast model is not configured for any auth type', () => {
@@ -897,7 +889,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when the fast model selector is malformed', () => {
@@ -919,7 +910,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('returns undefined when fastModel points back to the fast selector', () => {
@@ -941,7 +931,6 @@ describe('Server Config (config.ts)', () => {
       });
 
       expect(config.getFastModel()).toBeUndefined();
-      expect(config.getFastModelForSideQuery()).toBeUndefined();
     });
 
     it('should refresh auth when switching to model with different envKey', async () => {

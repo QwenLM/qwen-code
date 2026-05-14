@@ -504,6 +504,7 @@ describe('Gemini Client (client.ts)', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -4035,15 +4036,26 @@ Other open files:
         envKey: undefined,
       };
 
-      // resolveModelAcrossAuthTypes calls getResolvedModel multiple times:
-      // 1. main authType (QWEN_OAUTH) → undefined (miss)
-      // 2. secondary authType (USE_OPENAI) → mockResolvedModel (hit)
-      // 3. buildAgentContentGeneratorConfig calls getResolvedModel again
-      //    with the resolved authType → mockResolvedModel (hit)
-      const getResolvedModel = vi
-        .fn()
-        .mockReturnValueOnce(undefined)
-        .mockReturnValue(mockResolvedModel);
+      // The central model-id resolver can now identify the authType from the
+      // configured model list before BaseLlmClient asks ModelsConfig for the
+      // concrete provider settings.
+      vi.mocked(mockConfig.getAllConfiguredModels).mockImplementation(
+        (authTypes?: AuthType[]) =>
+          !authTypes || authTypes.includes(AuthType.USE_OPENAI)
+            ? [
+                {
+                  id: 'fast-model',
+                  label: 'Fast Model',
+                  authType: AuthType.USE_OPENAI,
+                },
+              ]
+            : [],
+      );
+      const getResolvedModel = vi.fn((authType: AuthType, model: string) =>
+        authType === AuthType.USE_OPENAI && model === 'fast-model'
+          ? mockResolvedModel
+          : undefined,
+      );
 
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModel,
@@ -4067,15 +4079,10 @@ Other open files:
         'fast-model',
       );
 
-      // First call uses main authType (QWEN_OAUTH) — misses
+      // The model-id resolver found the configured OpenAI owner, so
+      // ModelsConfig is queried directly with that authType.
       expect(getResolvedModel).toHaveBeenNthCalledWith(
         1,
-        AuthType.QWEN_OAUTH,
-        'fast-model',
-      );
-      // Second call falls through to secondary authType — hits
-      expect(getResolvedModel).toHaveBeenNthCalledWith(
-        2,
         AuthType.USE_OPENAI,
         'fast-model',
       );
