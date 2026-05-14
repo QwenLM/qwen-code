@@ -633,6 +633,7 @@ race_mirror_head() {
     local tmpdir
     tmpdir=$(mktemp -d -t qwen-mirror.XXXXXX 2>/dev/null) || tmpdir="/tmp/qwen-mirror.$$"
     mkdir -p "${tmpdir}" 2>/dev/null || true
+    register_temp_dir "${tmpdir}"
 
     (curl -fsIL -m "${timeout}" -o /dev/null "${oss_url}" >/dev/null 2>&1 && : > "${tmpdir}/aliyun") &
     local oss_pid=$!
