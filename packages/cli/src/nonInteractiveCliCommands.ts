@@ -15,7 +15,6 @@ import {
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
-import { dynamicCommandLocalizationService } from './services/DynamicCommandLocalizationService.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
 import { McpPromptLoader } from './services/McpPromptLoader.js';
 import { SkillCommandLoader } from './services/SkillCommandLoader.js';
@@ -227,18 +226,10 @@ export const handleSlashCommand = async (
     allLoaders,
     abortController.signal,
   );
-  const localizedCommandService = CommandService.fromCommands(
-    await dynamicCommandLocalizationService.localizeCommands(
-      config,
-      commandService.getCommands(),
-      abortController.signal,
-      settings.merged?.general?.dynamicCommandTranslation === true,
-    ),
-  );
   // Register model-invocable commands provider so SkillTool description stays
   // up-to-date in non-interactive / ACP mode.
   config.setModelInvocableCommandsProvider(() =>
-    localizedCommandService.getModelInvocableCommands().map((cmd) => ({
+    commandService.getModelInvocableCommands().map((cmd) => ({
       name: cmd.name,
       description: cmd.modelDescription ?? cmd.description,
     })),
@@ -247,7 +238,7 @@ export const handleSlashCommand = async (
   // (e.g. MCP prompts) that are not file-based skills.
   config.setModelInvocableCommandsExecutor(
     async (name: string, args: string = '') => {
-      const commands = localizedCommandService.getModelInvocableCommands();
+      const commands = commandService.getModelInvocableCommands();
       const cmd = commands.find((c) => c.name === name);
       if (!cmd?.action) return null;
       const minimalContext = {
@@ -273,8 +264,8 @@ export const handleSlashCommand = async (
       return null;
     },
   );
-  const allCommands = localizedCommandService.getCommands();
-  const filteredCommands = localizedCommandService
+  const allCommands = commandService.getCommands();
+  const filteredCommands = commandService
     .getCommandsForMode(executionMode)
     .filter((cmd) => !isDisabled(cmd));
 
@@ -382,7 +373,6 @@ export const getAvailableCommands = async (
   config: Config,
   abortSignal: AbortSignal,
   mode: ExecutionMode = 'acp',
-  settings?: LoadedSettings,
 ): Promise<SlashCommand[]> => {
   try {
     const loaders = [
@@ -401,15 +391,7 @@ export const getAvailableCommands = async (
         ? new Set(disabledSlashCommands)
         : undefined,
     );
-    const localizedCommandService = CommandService.fromCommands(
-      await dynamicCommandLocalizationService.localizeCommands(
-        config,
-        commandService.getCommands(),
-        abortSignal,
-        settings?.merged?.general?.dynamicCommandTranslation === true,
-      ),
-    );
-    return localizedCommandService.getCommandsForMode(mode) as SlashCommand[];
+    return commandService.getCommandsForMode(mode) as SlashCommand[];
   } catch (error) {
     // Handle errors gracefully - log and return empty array
     debugLogger.error('Error loading available commands:', error);

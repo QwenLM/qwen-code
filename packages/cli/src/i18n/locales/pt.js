@@ -1693,7 +1693,6 @@ export default {
   'Save a durable memory to the memory system.':
     'Salvar uma memória durável no sistema de memória.',
   prompts: 'Prompts (sugestões)',
-  'Manage dynamic translation cache': 'Gerenciar cache de tradução dinâmica',
   'Open MCP management dialog': 'Abrir diálogo de gerenciamento MCP',
   'Manage extension settings': 'Gerenciar configurações da extensão',
   'Manage Extensions': 'Gerenciar extensões',
@@ -1730,24 +1729,6 @@ export default {
   'update available': 'atualização disponível',
   'checking...': 'verificando...',
   'not updatable': 'não atualizável',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Retraduzir as descrições de comandos de barra dinâmicos carregados para o idioma atual da interface',
-  'Clear cached translations for the current UI language':
-    'Limpar traduções em cache para o idioma atual da interface',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Gerenciar tradução por IA para descrições dinâmicas de comandos slash',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Ativar tradução por IA para descrições dinâmicas de comandos slash',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Desativar tradução por IA para descrições dinâmicas de comandos slash',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Mostrar status da tradução por IA para descrições dinâmicas de comandos slash',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'A tradução por IA para descrições dinâmicas de comandos slash está {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'A tradução por IA para descrições dinâmicas de comandos slash agora está ativada.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'A tradução por IA para descrições dinâmicas de comandos slash agora está desativada.',
   'Ask a quick side question without affecting the main conversation':
     'Fazer uma pergunta rápida paralela sem afetar a conversa principal',
   'Manage Arena sessions': 'Gerenciar sessões da Arena',

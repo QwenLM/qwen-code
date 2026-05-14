@@ -1703,7 +1703,6 @@ export default {
   Tools: 'Инструменты',
   prompts: 'Подсказки',
   tools: 'инструменты',
-  'Manage dynamic translation cache': 'Управлять кешем динамического перевода',
   'Open MCP management dialog': 'Открыть диалог управления MCP',
   'Manage MCP servers': 'Управление MCP servers',
   'Manage extension settings': 'Управление настройками расширения',
@@ -1740,24 +1739,6 @@ export default {
   'update available': 'доступно обновление',
   'checking...': 'проверка...',
   'not updatable': 'обновление недоступно',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Перевести загруженные описания динамических слеш-команд для текущего языка интерфейса',
-  'Clear cached translations for the current UI language':
-    'Очистить кешированные переводы для текущего языка интерфейса',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Управлять AI-переводом описаний динамических слеш-команд',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Включить AI-перевод описаний динамических слеш-команд',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Отключить AI-перевод описаний динамических слеш-команд',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Показать статус AI-перевода описаний динамических слеш-команд',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'AI-перевод описаний динамических слеш-команд {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'AI-перевод описаний динамических слеш-команд теперь включен.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'AI-перевод описаний динамических слеш-команд теперь отключен.',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
   'Manage Arena sessions': 'Управлять сессиями Arena',

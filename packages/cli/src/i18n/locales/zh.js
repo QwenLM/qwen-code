@@ -1671,25 +1671,6 @@ export default {
   'Manage extension settings': '管理扩展设置',
 
   // === Core: added from PR #3328 ===
-  'Manage dynamic translation cache': '管理动态翻译缓存',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    '重新翻译当前 UI 语言的动态斜杠命令描述',
-  'Clear cached translations for the current UI language':
-    '清除当前 UI 语言的缓存翻译',
-  'Manage AI translation for dynamic slash command descriptions':
-    '管理动态斜杠命令描述的 AI 翻译',
-  'Enable AI translation for dynamic slash command descriptions':
-    '启用动态斜杠命令描述的 AI 翻译',
-  'Disable AI translation for dynamic slash command descriptions':
-    '禁用动态斜杠命令描述的 AI 翻译',
-  'Show AI translation status for dynamic slash command descriptions':
-    '显示动态斜杠命令描述的 AI 翻译状态',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    '动态斜杠命令描述的 AI 翻译处于{{status}}状态。',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    '动态斜杠命令描述的 AI 翻译现已启用。',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    '动态斜杠命令描述的 AI 翻译现已禁用。',
   'Background tasks': '后台任务',
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',

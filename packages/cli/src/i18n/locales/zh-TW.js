@@ -1479,25 +1479,6 @@ export default {
   'Loading suggestions...': '正在載入建議...',
   'Show per-item context usage breakdown.':
     '顯示每個項目的上下文使用情況細分。',
-  'Manage dynamic translation cache': '管理動態翻譯緩存',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    '重新翻譯當前 UI 語言的動態斜線命令描述',
-  'Clear cached translations for the current UI language':
-    '清除當前 UI 語言的快取翻譯',
-  'Manage AI translation for dynamic slash command descriptions':
-    '管理動態斜線命令描述的 AI 翻譯',
-  'Enable AI translation for dynamic slash command descriptions':
-    '啓用動態斜線命令描述的 AI 翻譯',
-  'Disable AI translation for dynamic slash command descriptions':
-    '禁用動態斜線命令描述的 AI 翻譯',
-  'Show AI translation status for dynamic slash command descriptions':
-    '顯示動態斜線命令描述的 AI 翻譯狀態',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    '動態斜線命令描述的 AI 翻譯處於{{status}}狀態。',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    '動態斜線命令描述的 AI 翻譯現已啓用。',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    '動態斜線命令描述的 AI 翻譯現已禁用。',
   'Manage extension settings': '管理擴展設置',
   'Background tasks': '背景任務',
   'No tasks currently running': '目前沒有正在執行的任務',

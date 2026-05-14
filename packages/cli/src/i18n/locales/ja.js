@@ -1331,24 +1331,6 @@ export default {
   'update available': '更新あり',
   'checking...': '確認中...',
   'not updatable': '更新不可',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    '現在の UI 言語の動的スラッシュコマンド説明を再翻訳',
-  'Clear cached translations for the current UI language':
-    '現在の UI 言語の翻訳キャッシュをクリア',
-  'Manage AI translation for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳を管理',
-  'Enable AI translation for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳を有効化',
-  'Disable AI translation for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳を無効化',
-  'Show AI translation status for dynamic slash command descriptions':
-    '動的スラッシュコマンド説明の AI 翻訳状態を表示',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    '動的スラッシュコマンド説明の AI 翻訳は{{status}}です。',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    '動的スラッシュコマンド説明の AI 翻訳を有効にしました。',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    '動的スラッシュコマンド説明の AI 翻訳を無効にしました。',
   'LLM output language set to {{lang}}':
     'LLM 出力言語を {{lang}} に設定しました',
   'Tool Approval Mode': 'ツール承認モード',
@@ -1408,7 +1390,6 @@ export default {
     'コンテキストウィンドウ使用量の内訳を表示します。項目ごとの内訳は "/context detail" を使用してください。',
   'Show per-item context usage breakdown.':
     '項目ごとのコンテキスト使用量の内訳を表示します。',
-  'Manage dynamic translation cache': '動的翻訳キャッシュを管理',
 
   // === Missing key backfill ===
   Status: 'ステータス',

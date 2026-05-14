@@ -812,25 +812,6 @@ export default {
   'Set LLM output language': 'Set LLM output language',
   'Usage: /language ui [{{options}}]': 'Usage: /language ui [{{options}}]',
   'Usage: /language output <language>': 'Usage: /language output <language>',
-  'Manage dynamic translation cache': 'Manage dynamic translation cache',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Re-translate currently loaded dynamic slash descriptions for the current UI language',
-  'Clear cached translations for the current UI language':
-    'Clear cached translations for the current UI language',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Manage AI translation for dynamic slash command descriptions',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Enable AI translation for dynamic slash command descriptions',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Disable AI translation for dynamic slash command descriptions',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Show AI translation status for dynamic slash command descriptions',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'AI translation for dynamic slash command descriptions is {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'AI translation for dynamic slash command descriptions is now enabled.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'AI translation for dynamic slash command descriptions is now disabled.',
   'Example: /language output 中文': 'Example: /language output 中文',
   'Example: /language output English': 'Example: /language output English',
   'Example: /language output 日本語': 'Example: /language output 日本語',

@@ -1789,25 +1789,6 @@ export default {
     "Les panneaux Arena sont en cours d'exécution dans tmux. Attachez avec : `{{command}}`",
   '[{{label}}] failed: {{error}}': '[{{label}}] a échoué : {{error}}',
   'Loading suggestions...': 'Chargement des suggestions...',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    "Retraduire les descriptions de commandes slash dynamiques chargées pour la langue d'interface actuelle",
-  'Clear cached translations for the current UI language':
-    "Effacer les traductions mises en cache pour la langue d'interface actuelle",
-  'Manage dynamic translation cache': 'Gérer le cache de traduction dynamique',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Gérer la traduction IA des descriptions dynamiques de commandes slash',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Activer la traduction IA des descriptions dynamiques de commandes slash',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Désactiver la traduction IA des descriptions dynamiques de commandes slash',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Afficher l’état de la traduction IA des descriptions dynamiques de commandes slash',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'La traduction IA des descriptions dynamiques de commandes slash est {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'La traduction IA des descriptions dynamiques de commandes slash est maintenant activée.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'La traduction IA des descriptions dynamiques de commandes slash est maintenant désactivée.',
   'Open the memory manager.': 'Ouvrir le gestionnaire de mémoire.',
   'Save a durable memory to the memory system.':
     'Enregistrer une mémoire durable dans le système de mémoire.',

@@ -1697,7 +1697,6 @@ export default {
   'Open MCP management dialog': 'MCP-Verwaltungsdialog öffnen',
   'Manage extension settings': 'Erweiterungseinstellungen verwalten',
   prompts: 'Eingabeaufforderungen',
-  'Manage dynamic translation cache': 'Dynamischen Übersetzungscache verwalten',
   'Manage Extensions': 'Erweiterungen verwalten',
   'Extension Details': 'Erweiterungsdetails',
   'View Extension': 'Erweiterung anzeigen',
@@ -1746,24 +1745,6 @@ export default {
   'update available': 'Update verfügbar',
   'checking...': 'wird geprüft...',
   'not updatable': 'nicht aktualisierbar',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Derzeit geladene dynamische Slash-Befehlsbeschreibungen für die aktuelle UI-Sprache neu übersetzen',
-  'Clear cached translations for the current UI language':
-    'Cache-Übersetzungen für die aktuelle UI-Sprache löschen',
-  'Manage AI translation for dynamic slash command descriptions':
-    'KI-Übersetzung für dynamische Slash-Befehlsbeschreibungen verwalten',
-  'Enable AI translation for dynamic slash command descriptions':
-    'KI-Übersetzung für dynamische Slash-Befehlsbeschreibungen aktivieren',
-  'Disable AI translation for dynamic slash command descriptions':
-    'KI-Übersetzung für dynamische Slash-Befehlsbeschreibungen deaktivieren',
-  'Show AI translation status for dynamic slash command descriptions':
-    'KI-Übersetzungsstatus für dynamische Slash-Befehlsbeschreibungen anzeigen',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'KI-Übersetzung für dynamische Slash-Befehlsbeschreibungen ist {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'KI-Übersetzung für dynamische Slash-Befehlsbeschreibungen ist jetzt aktiviert.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'KI-Übersetzung für dynamische Slash-Befehlsbeschreibungen ist jetzt deaktiviert.',
   'Ask a quick side question without affecting the main conversation':
     'Eine kurze Nebenfrage stellen, ohne die Hauptunterhaltung zu beeinflussen',
   'Manage Arena sessions': 'Arena-Sitzungen verwalten',
