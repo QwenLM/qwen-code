@@ -51,7 +51,10 @@ const vscodeMock = vi.hoisted(() => {
       activeTextEditor: undefined,
       showTextDocument: vi.fn(),
       tabGroups: {
-        all: [],
+        all: [] as Array<{
+          tabs: Array<{ input: unknown }>;
+          viewColumn: number;
+        }>,
       },
     },
   };
