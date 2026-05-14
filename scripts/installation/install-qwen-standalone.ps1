@@ -1,11 +1,12 @@
 # Qwen Code Windows hosted PowerShell entrypoint.
-# Pairs with install-qwen-standalone.bat: this shim downloads the .bat into TEMP and runs
-# it, so the documented one-liner can use the standard irm | iex pattern.
-# Note: irm (Invoke-RestMethod) and iwr (Invoke-WebRequest) both return the raw
-# text of a .ps1 file unchanged, so the one-liner works with either alias.
+# Pairs with install-qwen-standalone.bat: this shim downloads the .bat into TEMP,
+# verifies its checksum, and runs it with forwarded arguments.
 #
-# Usage:
-#   powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex"
+# PowerShell (runs in current session, qwen available immediately):
+#   irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1 | iex
+#
+# cmd.exe (runs in current session, qwen available immediately):
+#   curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.bat -o %TEMP%\install-qwen.bat && %TEMP%\install-qwen.bat
 #
 # To pin a specific release, set $env:QWEN_INSTALL_VERSION before invoking,
 # e.g. $env:QWEN_INSTALL_VERSION = 'vX.Y.Z'. This is equivalent to passing
