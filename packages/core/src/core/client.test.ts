@@ -44,6 +44,7 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import { runWithAgentDepth } from '../agents/runtime/agent-context.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -3152,6 +3153,32 @@ Other open files:
             temperature: 0.5,
           }),
           contents,
+        }),
+        'test-session-id',
+      );
+    });
+
+    it('adds agent_depth to request labels', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      await runWithAgentDepth(2, () =>
+        client.generateContent(
+          contents,
+          { labels: { existing: 'label' } },
+          abortSignal,
+          DEFAULT_QWEN_FLASH_MODEL,
+        ),
+      );
+
+      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: expect.objectContaining({
+            labels: {
+              existing: 'label',
+              agent_depth: '2',
+            },
+          }),
         }),
         'test-session-id',
       );

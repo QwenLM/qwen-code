@@ -46,7 +46,7 @@ import {
   ChatCompressionService,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
-import { getCurrentAgentDepth } from '../agents/runtime/agent-context.js';
+import { withAgentDepthLabel } from '../agents/runtime/agent-labels.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -171,20 +171,6 @@ const OUTPUT_RECOVERY_MESSAGE =
   'Output token limit hit. Resume directly — no apology, no recap of what ' +
   'you were doing. Pick up mid-thought if that is where the cut happened. ' +
   'Break remaining work into smaller pieces.';
-
-const AGENT_DEPTH_LABEL = 'agent_depth';
-
-function withAgentDepthLabel(
-  config: GenerateContentConfig,
-): GenerateContentConfig {
-  return {
-    ...config,
-    labels: {
-      ...(config.labels ?? {}),
-      [AGENT_DEPTH_LABEL]: getCurrentAgentDepth().toString(),
-    },
-  };
-}
 
 /**
  * Options for retrying on rate-limit throttling errors returned as stream content.

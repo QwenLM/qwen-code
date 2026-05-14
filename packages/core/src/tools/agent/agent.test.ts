@@ -37,6 +37,7 @@ import {
   runWithAgentDepth,
   runWithAgentExecutionMode,
 } from '../../agents/runtime/agent-context.js';
+import { runInForkContext } from './fork-subagent.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -541,6 +542,33 @@ describe('AgentTool', () => {
       expect(display.status).toBe('failed');
       expect(display.terminateReason).toBe(
         'Background agents cannot launch child agents',
+      );
+    });
+
+    it('rejects named agent launches from fork children', async () => {
+      vi.stubEnv('QWEN_AGENT_MAX_DEPTH', '2');
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await runInForkContext(() => invocation.execute());
+
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain(
+        'Cannot launch an agent from within an existing fork child',
+      );
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+      expect(display.subagentName).toBe('file-search');
+      expect(display.terminateReason).toBe(
+        'Nested agents are not allowed from fork children',
       );
     });
 

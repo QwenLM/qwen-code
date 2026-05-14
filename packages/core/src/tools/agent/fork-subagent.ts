@@ -16,11 +16,11 @@ export const FORK_AGENT = {
   level: 'session' as const,
 };
 
-// Recursive-fork guard. A fork child keeps the `agent` tool in its declarations
+// Nested-agent guard. A fork child keeps the `agent` tool in its declarations
 // for byte-identical cache parity with the parent, so tool-availability
 // stripping is no longer an option. Instead, mark the async frame as "inside a
 // fork subagent" via AsyncLocalStorage when dispatching; AgentTool.execute()
-// reads the marker and rejects nested fork calls.
+// reads the marker and rejects nested agent calls.
 //
 // Why ALS and not a history scan: the nested AgentTool's `this.config` is the
 // main process Config, so `getGeminiClient().getHistory()` returns the parent

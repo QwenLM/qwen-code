@@ -37,6 +37,7 @@ import {
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 import { t } from '../../../i18n/index.js';
+import { getActivityAgentDepth } from '../../utils/agentActivityUtils.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -49,13 +50,6 @@ const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
     ToolDisplayNames[key],
   ]),
 );
-
-function activityAgentDepth(activity: object): number | undefined {
-  if (!('agentDepth' in activity)) return undefined;
-  return typeof activity.agentDepth === 'number'
-    ? activity.agentDepth
-    : undefined;
-}
 
 function formatActivityLabel(
   name: string,
@@ -643,7 +637,11 @@ const AgentDetailBody: React.FC<{
             // broke alignment in some fonts.
             const prefix = isLast ? '> ' : '  ';
             const label = truncateToWidth(
-              formatActivityLabel(a.name, a.description, activityAgentDepth(a)),
+              formatActivityLabel(
+                a.name,
+                a.description,
+                getActivityAgentDepth(a),
+              ),
               Math.max(0, maxWidth - stringWidth(prefix)),
             );
             return (

@@ -883,7 +883,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // tools, and history exactly match the parent's and share its
       // DashScope cache prefix. A fork is a context-sharing extension of
       // the parent, not an isolated subagent, so the general subagent
-      // exclusion list does not apply. Recursive forks are blocked by the
+      // exclusion list does not apply. Nested agent calls are blocked by the
       // ALS-based `isInForkExecution()` guard.
       // However, we still exclude control-plane tools, and only preserve
       // agent when this child is still below the configured nesting limit.
@@ -1139,28 +1139,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const isFork = !this.params.subagent_type;
       let subagentConfig: SubagentConfig;
 
+      // A fork child is instructed to execute directly. Keep the runtime guard
+      // aligned with that contract for both implicit forks and named agents.
+      if (isInForkExecution()) {
+        return {
+          llmContent:
+            'Error: Cannot launch an agent from within an existing fork child. Please execute tasks directly.',
+          returnDisplay: {
+            type: 'task_execution' as const,
+            subagentName: this.params.subagent_type || FORK_AGENT.name,
+            agentDepth: childDepth,
+            taskDescription: this.params.description,
+            taskPrompt: this.params.prompt,
+            status: 'failed' as const,
+            terminateReason: 'Nested agents are not allowed from fork children',
+          },
+        };
+      }
+
       if (isFork) {
         subagentConfig = FORK_AGENT;
-
-        // Recursive-fork guard. A fork child's reasoning loop runs inside
-        // an AsyncLocalStorage frame set by `runInForkContext`; when its
-        // model calls the `agent` tool, this check fires before any history
-        // or config is touched.
-        if (isInForkExecution()) {
-          return {
-            llmContent:
-              'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: FORK_AGENT.name,
-              agentDepth: childDepth,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason: 'Recursive forking is not allowed',
-            },
-          };
-        }
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
           this.params.subagent_type!,
@@ -1497,10 +1495,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
 
         // Fire-and-forget: start the subagent without blocking the parent.
-        // For forks, wrap the body in runInForkContext so the recursive-fork
+        // For forks, wrap the body in runInForkContext so the nested-agent
         // guard in execute() fires if the fork child's model calls `agent`
-        // again — otherwise background forks bypass the ALS marker and can
-        // spawn nested implicit forks.
+        // again.
         const bgBody = async () => {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
