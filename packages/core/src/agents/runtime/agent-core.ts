@@ -1638,8 +1638,11 @@ Important Rules:
     const cachedTok = Number(usage.cachedContentTokenCount || 0);
     const totalTok = Number(usage.totalTokenCount || 0);
     // Context usage tracks prompt size; output isn't in history yet.
+    // Guard against malformed provider values (`Infinity`/`NaN`) so the
+    // downstream compaction math doesn't get poisoned — `Infinity` is
+    // truthy and would otherwise overwrite a valid prior reading.
     const contextTok = inTok || totalTok;
-    if (contextTok) {
+    if (isFinite(contextTok) && contextTok > 0) {
       this.lastPromptTokenCount = contextTok;
     }
     if (

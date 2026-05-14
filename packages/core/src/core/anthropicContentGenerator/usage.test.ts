@@ -91,6 +91,28 @@ describe('buildAnthropicUsageMetadata', () => {
     });
   });
 
+  it('sums all three buckets when a warm turn both reads and writes cache (real Anthropic mid-conversation)', () => {
+    // Mid-conversation turn on real Anthropic: the system+tools prefix is
+    // served from cache (cache_read) AND a new cache breakpoint extends
+    // the cached region further into the conversation (cache_creation > 0).
+    // input_tokens carries only the still-non-cached tail. All three buckets
+    // are mutually exclusive on real Anthropic so the prompt total is their
+    // sum, and `cachedContentTokenCount` reports the read portion only.
+    expect(
+      buildAnthropicUsageMetadata({
+        inputTokens: 2_500,
+        cacheReadTokens: 32_088,
+        cacheCreationTokens: 8_700,
+        outputTokens: 400,
+      }),
+    ).toEqual({
+      promptTokenCount: 43_288,
+      candidatesTokenCount: 400,
+      totalTokenCount: 43_688,
+      cachedContentTokenCount: 32_088,
+    });
+  });
+
   it('handles all-zero usage cleanly', () => {
     expect(
       buildAnthropicUsageMetadata({
