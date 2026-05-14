@@ -574,8 +574,9 @@ exit /b %PS_STATUS%
 :DownloadFile
 set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
-rem Suppress PowerShell's full-screen progress UI; the installer logs the URL.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
+rem Prefer curl.exe -# for a hash-mark progress bar (Windows 10+ includes it);
+rem fall back to Invoke-WebRequest (which shows its own progress bar).
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; if (Get-Command curl.exe -ErrorAction SilentlyContinue) { curl.exe -#fSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="

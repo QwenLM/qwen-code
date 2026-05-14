@@ -22,7 +22,18 @@
 # when testing a custom installer endpoint.
 
 $ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
+
+function Download-FileWithProgress {
+    param([string]$Url, [string]$OutFile)
+    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+        curl.exe -#fSLo $OutFile $Url
+        if ($LASTEXITCODE -ne 0) {
+            throw "curl.exe download failed (exit code $LASTEXITCODE)"
+        }
+        return
+    }
+    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
+}
 
 $qwenDefaultInstallerUrl = 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.bat'
 $qwenDefaultChecksumsUrl = 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/SHA256SUMS'
@@ -58,20 +69,14 @@ $qwenInstallerPath = Join-Path $env:TEMP $qwenInstallerName
 $qwenChecksumsPath = Join-Path $env:TEMP 'qwen-installation-SHA256SUMS'
 
 try {
-    Invoke-WebRequest -Uri $qwenInstallerUrl `
-        -OutFile $qwenInstallerPath `
-        -UseBasicParsing `
-        -MaximumRedirection 10
+    Download-FileWithProgress -Url $qwenInstallerUrl -OutFile $qwenInstallerPath
 } catch {
     Write-Error "Failed to download Qwen Code installer from ${qwenInstallerUrl}: $($_.Exception.Message)"
     exit 1
 }
 
 try {
-    Invoke-WebRequest -Uri $qwenChecksumsUrl `
-        -OutFile $qwenChecksumsPath `
-        -UseBasicParsing `
-        -MaximumRedirection 10
+    Download-FileWithProgress -Url $qwenChecksumsUrl -OutFile $qwenChecksumsPath
 } catch {
     Remove-Item -LiteralPath $qwenInstallerPath -Force -ErrorAction SilentlyContinue
     Write-Error "Failed to download Qwen Code installer checksums from ${qwenChecksumsUrl}: $($_.Exception.Message)"

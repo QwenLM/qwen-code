@@ -141,7 +141,7 @@ describe('installation scripts', () => {
     expect(script).not.toContain('node-v!NODE_VERSION!');
     expect(script).not.toContain('msiexec');
     expect(script).toContain('Invoke-WebRequest');
-    expect(script).toContain("$ProgressPreference = 'SilentlyContinue'");
+    expect(script).toContain('curl.exe -#fSLo');
     expect(script).not.toContain('PowerShell (Administrator)');
     expect(script).not.toContain('echo INFO: Installation source: %SOURCE%');
     expect(script).not.toMatch(/^\s*call\s+qwen\s*$/m);
@@ -204,7 +204,7 @@ describe('installation scripts', () => {
       'call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"',
     );
     expect(script).toContain(
-      "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; try",
+      "$ErrorActionPreference = 'Stop'; if (Get-Command curl.exe",
     );
     expect(script).toContain(
       '[Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13',
@@ -589,9 +589,8 @@ describe('standalone release packaging', () => {
     );
     expect(installPowerShellSource).toContain('install-qwen-standalone.bat');
     expect(installPowerShellSource).toContain('Invoke-WebRequest');
-    expect(installPowerShellSource).toContain(
-      "$ProgressPreference = 'SilentlyContinue'",
-    );
+    expect(installPowerShellSource).toContain('Download-FileWithProgress');
+    expect(installPowerShellSource).toContain('curl.exe -#fSLo');
     expect(installPowerShellSource).toContain('QWEN_INSTALL_VERSION');
     expect(installPowerShellSource).toContain('--version vX.Y.Z');
     expect(installPowerShellSource).toContain('SHA256SUMS');
