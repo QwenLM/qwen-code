@@ -640,29 +640,13 @@ download_file() {
     local url="$1"
     local destination="$2"
 
-    # Show progress only when stderr is a terminal (so CI / non-tty stays clean).
-    # `curl ... | bash` keeps stderr connected to the user's terminal even though
-    # stdin is a pipe, so progress shows correctly during normal usage.
-    local show_progress=0
-    if [ -t 2 ] && [ "${QWEN_INSTALL_QUIET:-0}" != "1" ]; then
-        show_progress=1
-    fi
-
     if command_exists curl; then
-        if [ "${show_progress}" = "1" ]; then
-            curl -fL --progress-bar --retry 2 "${url}" -o "${destination}"
-        else
-            curl -fsSL --retry 2 "${url}" -o "${destination}"
-        fi
+        curl -fsSL --retry 2 "${url}" -o "${destination}"
         return $?
     fi
 
     if command_exists wget; then
-        if [ "${show_progress}" = "1" ]; then
-            wget --show-progress --tries=3 "${url}" -O "${destination}" || return 1
-        else
-            wget -q --tries=3 "${url}" -O "${destination}" || return 1
-        fi
+        wget -q --tries=3 "${url}" -O "${destination}" || return 1
         return $?
     fi
 

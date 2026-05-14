@@ -23,16 +23,22 @@
 
 $ErrorActionPreference = 'Stop'
 
-function Download-FileWithProgress {
+function Download-File {
     param([string]$Url, [string]$OutFile)
-    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-        curl.exe -#fSLo $OutFile $Url
-        if ($LASTEXITCODE -ne 0) {
-            throw "curl.exe download failed (exit code $LASTEXITCODE)"
+    $prevProgressPreference = $global:ProgressPreference
+    $global:ProgressPreference = 'SilentlyContinue'
+    try {
+        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+            curl.exe -sSfLo $OutFile $Url
+            if ($LASTEXITCODE -ne 0) {
+                throw "curl.exe download failed (exit code $LASTEXITCODE)"
+            }
+            return
         }
-        return
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
+    } finally {
+        $global:ProgressPreference = $prevProgressPreference
     }
-    Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
 }
 
 $qwenDefaultInstallerUrl = 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.bat'
@@ -69,14 +75,14 @@ $qwenInstallerPath = Join-Path $env:TEMP $qwenInstallerName
 $qwenChecksumsPath = Join-Path $env:TEMP 'qwen-installation-SHA256SUMS'
 
 try {
-    Download-FileWithProgress -Url $qwenInstallerUrl -OutFile $qwenInstallerPath
+    Download-File -Url $qwenInstallerUrl -OutFile $qwenInstallerPath
 } catch {
     Write-Error "Failed to download Qwen Code installer from ${qwenInstallerUrl}: $($_.Exception.Message)"
     exit 1
 }
 
 try {
-    Download-FileWithProgress -Url $qwenChecksumsUrl -OutFile $qwenChecksumsPath
+    Download-File -Url $qwenChecksumsUrl -OutFile $qwenChecksumsPath
 } catch {
     Remove-Item -LiteralPath $qwenInstallerPath -Force -ErrorAction SilentlyContinue
     Write-Error "Failed to download Qwen Code installer checksums from ${qwenChecksumsUrl}: $($_.Exception.Message)"

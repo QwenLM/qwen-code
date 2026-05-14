@@ -589,8 +589,11 @@ describe('standalone release packaging', () => {
     );
     expect(installPowerShellSource).toContain('install-qwen-standalone.bat');
     expect(installPowerShellSource).toContain('Invoke-WebRequest');
-    expect(installPowerShellSource).toContain('Download-FileWithProgress');
-    expect(installPowerShellSource).toContain('curl.exe -#fSLo');
+    expect(installPowerShellSource).toContain('Download-File');
+    expect(installPowerShellSource).toContain('curl.exe -sSfLo');
+    expect(installPowerShellSource).toContain(
+      "$global:ProgressPreference = 'SilentlyContinue'",
+    );
     expect(installPowerShellSource).toContain('QWEN_INSTALL_VERSION');
     expect(installPowerShellSource).toContain('--version vX.Y.Z');
     expect(installPowerShellSource).toContain('SHA256SUMS');

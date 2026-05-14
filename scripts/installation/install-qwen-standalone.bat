@@ -731,7 +731,7 @@ if !ERRORLEVEL! NEQ 0 (
 )
 set "QWEN_ARCHIVE_FILE=!ARCHIVE_FILE!"
 set "QWEN_EXTRACT_DIR=!EXTRACT_DIR!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
 set "PS_STATUS=!ERRORLEVEL!"
 set "QWEN_ARCHIVE_FILE="
 set "QWEN_EXTRACT_DIR="
