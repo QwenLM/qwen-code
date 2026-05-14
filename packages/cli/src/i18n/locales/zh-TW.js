@@ -5,7 +5,9 @@
  */
 
 // Traditional Chinese (zh-TW) translations for Qwen Code CLI
-// Auto-generated: structure from en.js, values from zh-TW (manual) or opencc(zh.js s2t)
+// Bootstrapped from en.js structure with opencc(zh.js s2t),
+// then extensively hand-corrected for Taiwan vocabulary conventions.
+// This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
