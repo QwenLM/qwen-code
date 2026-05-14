@@ -41,9 +41,24 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ? baseUrl.slice(0, -1)
       : baseUrl;
 
-    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
+    // Parse the URL and check hostname instead of regex to avoid ReDoS on
+    // attacker-controlled baseUrl and to reject path-only matches like
+    // https://evil.example/dashscope.aliyuncs.com/...
+    let hostname: string | null = null;
+    try {
+      hostname = new URL(normalizedBaseUrl).hostname.toLowerCase();
+    } catch {
+      hostname = null;
+    }
+
+    // Matches: dashscope.aliyuncs.com, *.dashscope.aliyuncs.com,
+    // dashscope-intl.aliyuncs.com, or *.dashscope-intl.aliyuncs.com
     const isDashscopeOrigin =
-      /([\w-]+\.)?dashscope(-intl)?\.aliyuncs\.com/i.test(normalizedBaseUrl);
+      hostname !== null &&
+      (hostname === 'dashscope.aliyuncs.com' ||
+        hostname === 'dashscope-intl.aliyuncs.com' ||
+        hostname.endsWith('.dashscope.aliyuncs.com') ||
+        hostname.endsWith('.dashscope-intl.aliyuncs.com'));
 
     // Check if proxy is configured and matches
     const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
@@ -88,8 +103,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       maxRetries = DEFAULT_MAX_RETRIES,
     } = this.contentGeneratorConfig;
     const defaultHeaders = this.buildHeaders();
-    // Configure fetch options to ensure user-configured timeout works as expected
-    // bodyTimeout is always disabled (0) to let OpenAI SDK timeout control the request
+    // Configure fetch options for proxy support and timeout handling.
+    // With proxy, dispatcher timeouts are disabled so SDK timeout controls the
+    // request; without proxy, no custom dispatcher is installed.
     const runtimeOptions = buildRuntimeFetchOptions(
       'openai',
       this.cliConfig.getProxy(),

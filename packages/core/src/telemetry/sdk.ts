@@ -32,6 +32,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { createSessionRootContext } from './tracer.js';
 import { setSessionContext } from './session-context.js';
+import { endInteractionSpan } from './session-tracing.js';
 
 function createTelemetryDiagLogger(): DiagLogger {
   const debugLogger = createDebugLogger('OTEL');
@@ -289,7 +290,8 @@ export function initializeTelemetry(config: Config): void {
     sdk.start();
     debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
-    setSessionContext(createSessionRootContext(config.getSessionId()));
+    const sessionId = config.getSessionId();
+    setSessionContext(createSessionRootContext(sessionId), sessionId);
     initializeMetrics(config);
   } catch (error) {
     debugLogger.error('Error starting OpenTelemetry SDK:', error);
@@ -304,7 +306,7 @@ export function initializeTelemetry(config: Config): void {
 export function refreshSessionContext(sessionId: string): void {
   if (!telemetryInitialized) return;
   try {
-    setSessionContext(createSessionRootContext(sessionId));
+    setSessionContext(createSessionRootContext(sessionId), sessionId);
   } catch (error) {
     createDebugLogger('OTEL').warn('Failed to refresh session context:', error);
   }
@@ -317,6 +319,7 @@ export async function shutdownTelemetry(): Promise<void> {
   if (!telemetryInitialized || !sdk) {
     return;
   }
+  endInteractionSpan('cancelled');
   const currentSdk = sdk;
   const debugLogger = createDebugLogger('OTEL');
   telemetryShutdownPromise = (async () => {

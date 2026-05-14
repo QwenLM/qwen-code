@@ -95,9 +95,8 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
       ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
       : AbortSignal.timeout(1_000),
 
-    // Use the fast model for this background side-query to reduce latency and
-    // cost. Falls back to the main session model if no fast model is configured.
-    model: config.getFastModel(),
+    // Uses runSideQuery's default side-query model policy: fast model first,
+    // then main session model when no fast model is configured.
     systemInstruction: SELECT_MEMORIES_SYSTEM_PROMPT,
     config: {
       temperature: 0,

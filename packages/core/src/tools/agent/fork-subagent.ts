@@ -127,6 +127,29 @@ export function buildForkedMessages(
   return [fullAssistantMessage, toolResultMessage];
 }
 
+/**
+ * Notice injected into a subagent that has been spun up inside an isolated
+ * git worktree (via `AgentTool` `isolation: 'worktree'`). Tells the agent
+ * to confine all file operations to the worktree path and to re-read any
+ * file inherited from the parent's context before editing it.
+ *
+ * Mirrors claude-code's `buildWorktreeNotice` in
+ * `tools/AgentTool/forkSubagent.ts`.
+ */
+export function buildWorktreeNotice(
+  parentCwd: string,
+  worktreeCwd: string,
+): string {
+  return (
+    `You are operating in an isolated git worktree at ${worktreeCwd}. ` +
+    `The parent agent is in ${parentCwd}. Same repository, same relative file layout, separate working copy. ` +
+    `All your file edits, writes, and shell commands MUST target paths under ${worktreeCwd}. ` +
+    `When the inherited context references a path under ${parentCwd}, translate it to the corresponding path under ${worktreeCwd} before acting on it. ` +
+    `Re-read any file you intend to edit (the parent may have modified it after the snapshot in your context). ` +
+    `Your changes stay in this worktree and do not affect the parent's working tree.`
+  );
+}
+
 export function buildChildMessage(directive: string): string {
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.

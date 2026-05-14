@@ -86,13 +86,95 @@ describe('isPrintableSearchChar', () => {
   });
 });
 
+describe('isDeletionKey', () => {
+  it('recognises DEL byte (0x7F) as a deletion key', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+    });
+    expect(result.current.searchQuery).toBe('a');
+    // Raw DEL byte with no name — the Windows Backspace path
+    act(() => {
+      result.current.handleSearchKey(k({ name: '', sequence: '\x7f' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).toHaveBeenCalledTimes(1);
+  });
+
+  it('recognises BS byte (0x08) as a deletion key', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'x', sequence: 'x' }));
+    });
+    expect(result.current.searchQuery).toBe('x');
+    // Raw BS byte with no name — alternate Windows Backspace path
+    act(() => {
+      result.current.handleSearchKey(k({ name: '', sequence: '\b' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat DEL/BS byte as a printable char', () => {
+    expect(isPrintableSearchChar(k({ name: '', sequence: '\x7f' }))).toBe(
+      false,
+    );
+    expect(isPrintableSearchChar(k({ name: '', sequence: '\b' }))).toBe(false);
+  });
+
+  it('does not treat Ctrl+H (BS byte with ctrl) as a deletion key', () => {
+    // Ctrl+H delivers name:'h', ctrl:true, sequence:'\b' on many terminals.
+    // The byte fallback must not fire when a modifier is active.
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+    });
+    expect(result.current.searchQuery).toBe('a');
+    // Ctrl+H must be swallowed, not treated as Backspace
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: 'h', sequence: '\b', ctrl: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('a');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not treat Meta+BS byte as a deletion key', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'a', sequence: 'a' }));
+    });
+    expect(result.current.searchQuery).toBe('a');
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: '', sequence: '\x7f', meta: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('a');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+});
+
 describe('useSessionSearchInput', () => {
   // Each keystroke gets its own act() — terminal events arrive in
-  // separate render cycles, and the empty-query effect runs after
-  // each commit. Batching multiple keys into one act() collapses the
-  // intermediate states the effect needs to observe (so a never-saw-
-  // 'a' state can never satisfy the prev-non-empty → empty
-  // transition).
+  // separate render cycles, and the ref-backed setter fires
+  // onExitToList synchronously within the state updater when it
+  // detects a non-empty → empty transition. Batching multiple keys
+  // into one act() collapses the intermediate states the setter
+  // needs to observe.
 
   it('starts with an empty query', () => {
     const { result } = renderHook(() =>
@@ -102,7 +184,7 @@ describe('useSessionSearchInput', () => {
   });
 
   it('does not fire onExitToList on initial mount with the default empty query', () => {
-    // Pin the prev-ref guard: the effect must distinguish "started
+    // Pin the prev-ref guard: the setter must distinguish "started
     // empty" from "transitioned to empty". Without the guard, every
     // mount with a default-empty query would falsely call the parent
     // out of search mode before search ever started.
@@ -275,17 +357,104 @@ describe('useSessionSearchInput', () => {
     // arrives in list mode — covered here as a smoke test that the
     // setter (functional and direct) round-trips through the hook
     // independently of handleSearchKey.
+    const onExitToList = vi.fn();
     const { result } = renderHook(() =>
-      useSessionSearchInput({ onExitToList: vi.fn() }),
+      useSessionSearchInput({ onExitToList }),
     );
     act(() => {
       result.current.setSearchQuery('seed');
     });
     expect(result.current.searchQuery).toBe('seed');
+    // Seeding the query (empty → non-empty) must NOT trigger exit.
+    expect(onExitToList).not.toHaveBeenCalled();
 
     act(() => {
       result.current.setSearchQuery((q) => `${q}-more`);
     });
     expect(result.current.searchQuery).toBe('seed-more');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('fires onExitToList when setSearchQuery direct-empty is called on a non-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.setSearchQuery('seed');
+    });
+    expect(result.current.searchQuery).toBe('seed');
+    expect(onExitToList).not.toHaveBeenCalled();
+    act(() => {
+      result.current.setSearchQuery('');
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire onExitToList when setSearchQuery direct-empty is called on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.setSearchQuery('');
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Backspace is pressed on an already-empty query', () => {
+    // The prev !== '' guard must prevent a false exit when the user
+    // presses Backspace (or Delete) while the query is already empty.
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'backspace', sequence: '' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Esc is pressed on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(k({ name: 'escape', sequence: '' }));
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Ctrl+U is pressed on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: 'u', sequence: '', ctrl: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
+  });
+
+  it('does not fire onExitToList when Ctrl+L is pressed on an already-empty query', () => {
+    const onExitToList = vi.fn();
+    const { result } = renderHook(() =>
+      useSessionSearchInput({ onExitToList }),
+    );
+    act(() => {
+      result.current.handleSearchKey(
+        k({ name: 'l', sequence: '', ctrl: true }),
+      );
+    });
+    expect(result.current.searchQuery).toBe('');
+    expect(onExitToList).not.toHaveBeenCalled();
   });
 });

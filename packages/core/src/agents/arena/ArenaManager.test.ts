@@ -29,7 +29,19 @@ vi.mock('../index.js', async (importOriginal) => {
 
 // Mock GitWorktreeService to avoid real git operations.
 // The class mock includes static methods used by ArenaManager.
-vi.mock('../../services/gitWorktreeService.js', () => {
+//
+// Preserve every other export via `importActual` so unrelated
+// consumers of the module (e.g. `worktreeCleanup.ts` →
+// `AGENT_WORKTREE_SLUG_PATTERN`, `worktreeBranchForSlug`,
+// `generateAgentWorktreeSlug`, `WORKTREE_BRANCH_PREFIX`,
+// session-marker helpers) keep working. Without this, vitest replaces
+// the entire module surface and any static import of those constants
+// elsewhere in the dependency graph blows up at load time.
+vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../services/gitWorktreeService.js')
+    >();
   const MockClass = vi.fn().mockImplementation(() => ({
     checkGitAvailable: vi.fn().mockResolvedValue({ available: true }),
     isGitRepository: vi.fn().mockResolvedValue(true),
@@ -47,7 +59,7 @@ vi.mock('../../services/gitWorktreeService.js', () => {
   (MockClass as unknown as Record<string, unknown>)['getWorktreesDir'] = (
     sessionId: string,
   ) => path.join(os.tmpdir(), 'arena-mock', sessionId, 'worktrees');
-  return { GitWorktreeService: MockClass };
+  return { ...actual, GitWorktreeService: MockClass };
 });
 
 // Mock the Config class

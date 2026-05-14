@@ -183,6 +183,7 @@ describe('gemini.tsx main function', () => {
         getListExtensions: () => false,
         getMcpServers: () => ({}),
         initialize: vi.fn(),
+        waitForMcpReady: vi.fn().mockResolvedValue(undefined),
         getIdeMode: () => false,
         getExperimentalZedIntegration: () => false,
         getScreenReader: () => false,
@@ -261,6 +262,7 @@ describe('gemini.tsx main function', () => {
       getListExtensions: () => false,
       getMcpServers: () => ({}),
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
@@ -436,6 +438,7 @@ describe('gemini.tsx main function', () => {
       getListExtensions: () => false,
       getMcpServers: () => ({}),
       initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
@@ -475,9 +478,16 @@ describe('gemini.tsx main function', () => {
     }
 
     expect(runStreamJsonSpy).toHaveBeenCalledTimes(1);
-    const [configArg, inputArg] = runStreamJsonSpy.mock.calls[0];
+    const [configArg, inputArg, settingsArg] = runStreamJsonSpy.mock.calls[0];
     expect(configArg).toBe(validatedConfig);
     expect(inputArg).toBe('hello stream');
+    // Regression guard: PR-A's progressive-MCP refactor previously
+    // dropped the `settings` argument here, which silently fell back to
+    // `createMinimalSettings()` inside `runNonInteractiveStreamJson`.
+    // The parallel `runNonInteractive` path still received settings, so
+    // stream-json sessions lost any user-configured permission /
+    // approval / hook setup.
+    expect(settingsArg).toBeDefined();
 
     expect(validateAuthSpy).toHaveBeenCalledWith(
       undefined,
@@ -561,6 +571,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getListExtensions: () => false,
       getMcpServers: () => ({}),
       initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
@@ -669,6 +680,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getListExtensions: () => false,
       getMcpServers: () => ({}),
       initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,
@@ -754,6 +766,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getListExtensions: () => false,
       getMcpServers: () => ({}),
       initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
       getExperimentalZedIntegration: () => false,
       getScreenReader: () => false,

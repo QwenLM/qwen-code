@@ -4,13 +4,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import stringWidth from 'string-width';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
+import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<TableRenderer />', () => {
+  // Force OSC 8 detection off for every test in this file so cell rendering
+  // is deterministic regardless of the developer's terminal. Without this,
+  // running the suite from iTerm2 / WezTerm / Kitty leaks escape bytes into
+  // table output and any future strict assertion would flake.
+  const savedEnv = { ...process.env };
+  const savedIsTTY = process.stdout.isTTY;
+
+  beforeEach(() => {
+    process.env = { ...savedEnv };
+    for (const key of HYPERLINK_ENV_KEYS) {
+      delete process.env[key];
+    }
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: savedIsTTY,
+    });
+  });
+
   const renderTable = (
     headers: string[],
     rows: string[][],
@@ -598,6 +625,86 @@ describe('<TableRenderer />', () => {
     );
     expect(output).toContain('字段一');
     expect(output).toContain('很长的值一');
+  });
+
+  describe('OSC 8 markdown links in cells', () => {
+    function enableHyperlinks() {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        configurable: true,
+        value: true,
+      });
+      process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+    }
+
+    it('wraps a markdown link in a cell with an OSC 8 envelope', () => {
+      enableHyperlinks();
+      const url = 'https://example.com/long/path';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['Docs', `[here](${url})`]],
+        80,
+      );
+      expect(output).toContain(`\x1b]8;;${url}\x07`);
+      expect(output).toContain('\x1b]8;;\x07');
+      expect(output).toContain('here');
+      // Long URL must NOT be repeated as visible text inside the cell.
+      expect(output).not.toContain(`(${url})`);
+      // Column width math must strip the OSC 8 envelope (otherwise alignment
+      // breaks); the rendered table should still have uniform line widths.
+      expectAllLinesToHaveSameVisibleWidth(output);
+    });
+
+    it('falls back to legacy `label (url)` in cells on unsupported terminals', () => {
+      // isTTY=false from the suite-wide beforeEach disables hyperlinks.
+      const url = 'https://example.com/page';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['Docs', `[here](${url})`]],
+        80,
+      );
+      expect(output).not.toContain('\x1b]8');
+      expect(output).toContain('here');
+      expect(output).toContain(`(${url})`);
+    });
+
+    it('does not wrap dangerous schemes in cells', () => {
+      enableHyperlinks();
+      const url = 'javascript:alert(1)';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['Bad', `[click](${url})`]],
+        80,
+      );
+      expect(output).not.toContain('\x1b]8');
+      // The unsafe URL stays visible so the user can read what they would click.
+      expect(stripAnsi(output).replace(/\s+/g, ' ')).toContain(url);
+    });
+
+    it('keeps `(url)` suffix in cells when label looks like a mismatched URL', () => {
+      enableHyperlinks();
+      const target = 'https://attacker.com/phish';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['x', `[https://google.com](${target})`]],
+        80,
+      );
+      expect(output).toContain(`\x1b]8;;${target}\x07`);
+      // Real target stays visible next to the clickable label.
+      expect(stripAnsi(output)).toContain(`(${target})`);
+    });
+
+    it('sanitizes bidi controls in a cell label', () => {
+      enableHyperlinks();
+      const url = 'https://example.com/page';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['x', `[safe.com\u202emoc.live](${url})`]],
+        80,
+      );
+      expect(output).toContain(`\x1b]8;;${url}\x07`);
+      expect(output).not.toContain('\u202e');
+    });
   });
 
   // ─── Narrow-terminal vertical fallback ───

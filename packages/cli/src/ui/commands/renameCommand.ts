@@ -213,7 +213,9 @@ export const renameCommand: SlashCommand = {
       // the main model here because `--auto` is a deliberate opt-in to the
       // sentence-case fast-model flow, and surprising a user with a main-
       // model call would defeat the purpose.
-      if (!config.getFastModel()) {
+      const fastModel =
+        config.getFastModelForSideQuery?.() ?? config.getFastModel();
+      if (!fastModel) {
         return {
           type: 'message',
           messageType: 'error',

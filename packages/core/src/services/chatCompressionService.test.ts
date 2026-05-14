@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   ChatCompressionService,
   findCompressSplitPoint,
+  TOOL_ROUND_RETAIN_COUNT,
 } from './chatCompressionService.js';
 import type { Content } from '@google/genai';
 import { CompressionStatus } from '../core/turn.js';
@@ -271,6 +272,30 @@ describe('findCompressSplitPoint', () => {
     // fc, compress everything else. Pre-refactor returned lastSplitPoint=7.
     expect(findCompressSplitPoint(history, 0.99)).toBe(history.length - 1);
   });
+
+  it('honors precomputedCharCounts when provided', () => {
+    // Three messages of equal real length. If precomputedCharCounts
+    // claims the middle message is the heaviest, the split point should
+    // move past it.
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'a' }] },
+      { role: 'model', parts: [{ text: 'b' }] },
+      { role: 'user', parts: [{ text: 'c' }] },
+      { role: 'model', parts: [{ text: 'd' }] },
+      { role: 'user', parts: [{ text: 'e' }] },
+    ];
+    // Force the first three messages to dominate the budget so the
+    // splitter returns the index of the next user message (4).
+    const inflated = [1000, 1000, 1000, 1, 1];
+    expect(
+      findCompressSplitPoint(history, 0.7, TOOL_ROUND_RETAIN_COUNT, inflated),
+    ).toBe(4);
+    // Same history with even weights yields the standard split.
+    const even = [1, 1, 1, 1, 1];
+    expect(
+      findCompressSplitPoint(history, 0.7, TOOL_ROUND_RETAIN_COUNT, even),
+    ).toBe(4);
+  });
 });
 
 describe('findCompressSplitPoint — in-flight fallback', () => {
@@ -383,6 +408,7 @@ describe('ChatCompressionService', () => {
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
+        debug: vi.fn(),
       }),
     } as unknown as Config;
 
@@ -670,6 +696,57 @@ describe('ChatCompressionService', () => {
         abortSignal: abortController.signal,
       }),
     );
+  });
+
+  it('strips inline media from side-query contents during compaction', async () => {
+    // Wire-up test: a real compaction should call slimCompactionInput
+    // before runSideQuery, so the base64 payload never reaches the
+    // summary model.
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [
+          { text: 'context msg' },
+          { inlineData: { mimeType: 'image/png', data: 'AAAA'.repeat(2000) } },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'ack' }] },
+      { role: 'user', parts: [{ text: 'final fresh user message' }] },
+      { role: 'model', parts: [{ text: 'final model reply' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
+    vi.mocked(tokenLimit).mockReturnValue(1000);
+
+    const mockGenerateText = vi.fn().mockResolvedValue({
+      text: 'Summary',
+      usage: {
+        promptTokenCount: 200,
+        candidatesTokenCount: 50,
+        totalTokenCount: 250,
+      },
+    });
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateText,
+    } as unknown as BaseLlmClient);
+
+    await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    // Inspect the actual contents passed to the summary model.
+    const call = mockGenerateText.mock.calls[0]?.[0] as { contents: Content[] };
+    expect(call).toBeDefined();
+    const serialized = JSON.stringify(call.contents);
+    // No base64 image bytes leaked through.
+    expect(serialized).not.toContain('AAAAAAAA');
+    // Placeholder is present.
+    expect(serialized).toContain('[image: image/png]');
   });
 
   it('forwards model, maxAttempts, and thinkingConfig to runSideQuery', async () => {

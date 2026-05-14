@@ -16,6 +16,12 @@ import { LogToSpanProcessor } from './log-to-span-processor.js';
 import type { ReadableLogRecord } from '@opentelemetry/sdk-logs';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
 
+let mockCurrentSessionId: string | undefined = undefined;
+
+vi.mock('./session-context.js', () => ({
+  getCurrentSessionId: () => mockCurrentSessionId,
+}));
+
 interface ExportedSpan {
   name: string;
   kind: number;
@@ -34,6 +40,7 @@ describe('LogToSpanProcessor', () => {
 
   beforeEach(() => {
     exportedSpans = [];
+    mockCurrentSessionId = undefined;
     mockExporter = {
       export: vi.fn((spans, cb) => {
         exportedSpans.push(...spans);
@@ -707,5 +714,41 @@ describe('LogToSpanProcessor', () => {
     await processor.shutdown();
 
     expect(mockExporter.shutdown).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to getCurrentSessionId when log record has no session.id', async () => {
+    mockCurrentSessionId = 'session-from-context';
+    const logRecord = {
+      body: 'event without session attr',
+      hrTime: [1000, 0] as [number, number],
+      attributes: {},
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    // The traceId should be derived from the fallback session ID,
+    // not a random one.
+    const { deriveTraceId } = await import('./trace-id-utils.js');
+    expect(exportedSpans[0].spanContext().traceId).toBe(
+      deriveTraceId('session-from-context'),
+    );
+  });
+
+  it('prefers log record session.id over getCurrentSessionId', async () => {
+    mockCurrentSessionId = 'stale-session';
+    const logRecord = {
+      body: 'event with session attr',
+      hrTime: [1000, 0] as [number, number],
+      attributes: { 'session.id': 'fresh-session' },
+    } as unknown as ReadableLogRecord;
+
+    processor.onEmit(logRecord);
+    await processor.forceFlush();
+
+    const { deriveTraceId } = await import('./trace-id-utils.js');
+    expect(exportedSpans[0].spanContext().traceId).toBe(
+      deriveTraceId('fresh-session'),
+    );
   });
 });
