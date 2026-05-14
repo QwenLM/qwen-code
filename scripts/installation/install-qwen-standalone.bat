@@ -716,7 +716,7 @@ if !ERRORLEVEL! NEQ 0 (
 )
 set "QWEN_ARCHIVE_FILE=!ARCHIVE_FILE!"
 set "QWEN_EXTRACT_DIR=!EXTRACT_DIR!"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; Expand-Archive -LiteralPath $env:QWEN_ARCHIVE_FILE -DestinationPath $env:QWEN_EXTRACT_DIR -Force"
 set "PS_STATUS=!ERRORLEVEL!"
 set "QWEN_ARCHIVE_FILE="
 set "QWEN_EXTRACT_DIR="
@@ -950,9 +950,9 @@ if !PS_STATUS! EQU 0 exit /b 0
 
 rem Directory exists but is not a qwen-code standalone install.
 rem Back it up so the user doesn't lose data, then proceed.
-for /f "delims=" %%t in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMddTHHmmss'"') do set "BACKUP_TIMESTAMP=%%t"
+for /f "delims=" %%t in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMddTHHmmss"') do set "BACKUP_TIMESTAMP=%%t"
 set "BACKUP_DIR=!MANAGED_DIR!.backup.!BACKUP_TIMESTAMP!"
-if "!BACKUP_TIMESTAMP!"=="" for /f "delims=" %%s in ('powershell -NoProfile -Command "[int](Get-Date -UFormat %s)"') do set "BACKUP_DIR=!MANAGED_DIR!.backup.%%s"
+if "!BACKUP_TIMESTAMP!"=="" set "BACKUP_DIR=!MANAGED_DIR!.backup"
 echo WARNING: !MANAGED_DIR! exists but is not a Qwen Code standalone install.
 echo WARNING: Backing up to !BACKUP_DIR!
 move /Y "!MANAGED_DIR!" "!BACKUP_DIR!" >nul
