@@ -8,7 +8,8 @@ import { ndJsonStream, type Stream } from '@agentclientprotocol/sdk';
 
 /**
  * Create a paired in-memory NDJSON channel: two `Stream`s connected
- * back-to-back via two `TransformStream<Uint8Array, Uint8Array>` pairs.
+ * back-to-back via two `TransformStream<Uint8Array, Uint8Array>` instances
+ * (one per direction).
  * Whatever `clientStream.writable` writes appears on `agentStream.readable`,
  * and vice versa. Each side is a full ACP `Stream` (via SDK `ndJsonStream`)
  * so callers can hand them to `ClientSideConnection` / `AgentSideConnection`

@@ -109,10 +109,20 @@ describe('createInMemoryChannel', () => {
     // Client's own readable must NOT see it. Race a fresh read against
     // a short timeout — if the channel is correctly paired the read
     // never resolves on its own.
+    //
+    // The read promise stays pending while the timeout wins; releasing
+    // the reader's lock in `finally` then causes that pending read to
+    // reject per Web Streams spec. Attach a rejection handler so the
+    // post-`releaseLock` rejection doesn't surface as an unhandled
+    // rejection / flaky test signal — the rejection itself isn't a
+    // failure here, it's just the cleanup path settling.
     const reader = clientStream.readable.getReader();
     try {
       const winner = await Promise.race([
-        reader.read().then(() => 'leaked' as const),
+        reader.read().then(
+          () => 'leaked' as const,
+          () => null,
+        ),
         new Promise<'isolated'>((res) => setTimeout(() => res('isolated'), 50)),
       ]);
       expect(winner).toBe('isolated');
@@ -124,6 +134,8 @@ describe('createInMemoryChannel', () => {
   it('isolates agent→client direction (agent write does not echo to agent.readable)', async () => {
     // Symmetric counterpart of the previous test — closes the obvious
     // "wired one direction correctly but not the other" failure mode.
+    // Same `releaseLock`-causes-pending-read-to-reject handling as the
+    // previous test; see comment there.
     const { clientStream, agentStream } = createInMemoryChannel();
     await send(agentStream.writable, {
       jsonrpc: '2.0',
@@ -136,7 +148,10 @@ describe('createInMemoryChannel', () => {
     const reader = agentStream.readable.getReader();
     try {
       const winner = await Promise.race([
-        reader.read().then(() => 'leaked' as const),
+        reader.read().then(
+          () => 'leaked' as const,
+          () => null,
+        ),
         new Promise<'isolated'>((res) => setTimeout(() => res('isolated'), 50)),
       ]);
       expect(winner).toBe('isolated');
