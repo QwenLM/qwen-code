@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import { Config, ApprovalMode } from './config.js';
+import { Storage } from './storage.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
@@ -60,6 +61,7 @@ vi.mock('node:fs', async (importOriginal) => {
   const mocked = {
     ...actual,
     existsSync: vi.fn().mockReturnValue(true),
+    readdirSync: vi.fn().mockReturnValue([]),
     statSync: vi.fn().mockReturnValue({
       isDirectory: vi.fn().mockReturnValue(true),
     }),
@@ -1918,6 +1920,67 @@ describe('setApprovalMode with folder trust', () => {
       );
     });
 
+    it('should warn when configured plansDirectory hides a legacy plan file', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const currentPlansDir = path.join(targetDir, 'project-plans');
+      const legacyPlansDir = Storage.getPlansDir();
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (resolvedPath === currentPlansDir) {
+          return [];
+        }
+        if (resolvedPath === legacyPlansDir) {
+          return ['other-session.md'];
+        }
+        return [];
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          plansDirectory: './project-plans',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining(legacyPlansDir),
+        );
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining('plansDirectory is configured'),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should warn when configured plansDirectory has only some legacy plan files', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const currentPlansDir = path.join(targetDir, 'project-plans');
+      const legacyPlansDir = Storage.getPlansDir();
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (resolvedPath === currentPlansDir) {
+          return ['migrated-session.md'];
+        }
+        if (resolvedPath === legacyPlansDir) {
+          return ['migrated-session.md', 'hidden-session.md'];
+        }
+        return [];
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          plansDirectory: './project-plans',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining(legacyPlansDir),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
     it('should reject configured plansDirectory outside targetDir', () => {
       expect(
         () =>
@@ -1926,6 +1989,46 @@ describe('setApprovalMode with folder trust', () => {
             plansDirectory: '../project-plans',
           }),
       ).toThrow('plansDirectory must resolve within the project root');
+    });
+
+    it('should revalidate configured plansDirectory before plan I/O', () => {
+      const config = new Config({
+        ...baseParams,
+        plansDirectory: './project-plans',
+      });
+      vi.mocked(fs.mkdirSync).mockClear();
+      vi.mocked(fs.readFileSync).mockClear();
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const outsidePlansDir = path.resolve(
+        path.dirname(targetDir),
+        'outside-plans',
+      );
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir) {
+          return targetDir;
+        }
+        if (resolvedPath === plansDir) {
+          return outsidePlansDir;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(() => config.savePlan('# My Plan')).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(() => config.loadPlan()).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(fs.mkdirSync).not.toHaveBeenCalled();
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
+      }
     });
   });
 

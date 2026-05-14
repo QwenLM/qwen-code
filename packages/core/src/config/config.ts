@@ -784,6 +784,7 @@ export class Config {
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
   private readonly plansDir: string;
+  private readonly plansDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -810,6 +811,7 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
@@ -920,6 +922,7 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.warnings = params.warnings ?? [];
+    this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
@@ -2125,6 +2128,63 @@ export class Config {
     return this.plansDir;
   }
 
+  private assertPlansDirWithinTargetDir(): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      this.plansDir,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
+  private addLegacyPlanLocationWarning(): void {
+    try {
+      if (!this.plansDirectoryConfigured) {
+        return;
+      }
+
+      const legacyPlansDir = Storage.getPlansDir();
+      const legacyPlanFiles = this.getPlanFileNames(legacyPlansDir);
+      if (legacyPlanFiles.length === 0) {
+        return;
+      }
+
+      const configuredPlanFiles = new Set(this.getPlanFileNames(this.plansDir));
+      const hiddenLegacyPlanFiles = legacyPlanFiles.filter(
+        (fileName) => !configuredPlanFiles.has(fileName),
+      );
+      if (hiddenLegacyPlanFiles.length === 0) {
+        return;
+      }
+
+      this.warnings.push(
+        `Warning: Saved plan files exist at ${legacyPlansDir}, but ` +
+          `plansDirectory is configured to use ${this.plansDir}. Move ` +
+          `existing plan files to ${this.plansDir} if you want to keep ` +
+          `using them.`,
+      );
+    } catch (err: unknown) {
+      this.debugLogger.warn(
+        'Failed to check legacy plan directory migration warning:',
+        err,
+      );
+    }
+  }
+
+  private getPlanFileNames(plansDir: string): string[] {
+    try {
+      return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw err;
+    }
+  }
+
   /**
    * Returns the file path for this session's plan file.
    */
@@ -2136,6 +2196,7 @@ export class Config {
    * Saves a plan to disk for the current session.
    */
   savePlan(plan: string): void {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
@@ -2150,6 +2211,7 @@ export class Config {
    * Loads the plan for the current session, or returns undefined if none exists.
    */
   loadPlan(): string | undefined {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
     try {
       return fs.readFileSync(filePath, 'utf-8');

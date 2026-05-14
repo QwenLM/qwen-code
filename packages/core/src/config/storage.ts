@@ -181,6 +181,32 @@ export class Storage {
   }
 
   /**
+   * Resolves pathToResolve by realpathing its deepest existing ancestor and
+   * appending the not-yet-created remainder.
+   */
+  private static resolvePathThroughExistingAncestor(
+    pathToResolve: string,
+  ): string {
+    let candidate = pathToResolve;
+    while (true) {
+      try {
+        const realCandidate = fs.realpathSync(candidate);
+        const remainder = path.relative(candidate, pathToResolve);
+        return path.join(realCandidate, remainder);
+      } catch (err: unknown) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw err;
+        }
+        const parent = path.dirname(candidate);
+        if (parent === candidate) {
+          return pathToResolve;
+        }
+        candidate = parent;
+      }
+    }
+  }
+
+  /**
    * Checks whether {@link childPath} resides within {@link parentPath},
    * resolving symbolic links to prevent traversal bypass attacks.
    */
@@ -188,43 +214,8 @@ export class Storage {
     childPath: string,
     parentPath: string,
   ): boolean {
-    let realParent: string;
-    try {
-      realParent = fs.realpathSync(parentPath);
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        realParent = parentPath;
-      } else {
-        throw err;
-      }
-    }
-
-    let realChild: string;
-    try {
-      realChild = fs.realpathSync(childPath);
-    } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-        throw err;
-      }
-      // Path does not exist yet (e.g. the plans directory hasn't been
-      // created). Resolve the deepest existing parent to detect
-      // intermediate symlink components.
-      const childParent = path.dirname(childPath);
-      let realChildParent: string;
-      try {
-        realChildParent = fs.realpathSync(childParent);
-      } catch (innerErr: unknown) {
-        if ((innerErr as NodeJS.ErrnoException).code === 'ENOENT') {
-          // Even the parent doesn't exist — fall back to syntactic
-          // validation. A fully non-existent path under the project
-          // root is safe.
-          realChildParent = childParent;
-        } else {
-          throw innerErr;
-        }
-      }
-      realChild = path.join(realChildParent, path.basename(childPath));
-    }
+    const realParent = Storage.resolvePathThroughExistingAncestor(parentPath);
+    const realChild = Storage.resolvePathThroughExistingAncestor(childPath);
 
     const relativePath = path.relative(realParent, realChild);
     return (
@@ -233,8 +224,18 @@ export class Storage {
     );
   }
 
+  static assertPathWithinDirectory(
+    childPath: string,
+    parentPath: string,
+    errorMessage: string,
+  ): void {
+    if (!Storage.isPathWithinDirectory(childPath, parentPath)) {
+      throw new FatalConfigError(errorMessage);
+    }
+  }
+
   static getPlansDir(
-    projectRoot?: string,
+    projectRoot?: string | null,
     plansDirectory?: string | null,
   ): string {
     const configuredPlansDirectory = plansDirectory?.trim();
@@ -250,16 +251,11 @@ export class Storage {
         ? path.resolve(configuredPlansDirectory)
         : path.resolve(resolvedProjectRoot, configuredPlansDirectory);
 
-      if (
-        !Storage.isPathWithinDirectory(
-          resolvedPlansDirectory,
-          resolvedProjectRoot,
-        )
-      ) {
-        throw new FatalConfigError(
-          `plansDirectory must resolve within the project root.`,
-        );
-      }
+      Storage.assertPathWithinDirectory(
+        resolvedPlansDirectory,
+        resolvedProjectRoot,
+        `plansDirectory must resolve within the project root.`,
+      );
 
       return resolvedPlansDirectory;
     }
@@ -269,7 +265,7 @@ export class Storage {
 
   static getPlanFilePath(
     sessionId: string,
-    projectRoot?: string,
+    projectRoot?: string | null,
     plansDirectory?: string | null,
   ): string {
     return path.join(
