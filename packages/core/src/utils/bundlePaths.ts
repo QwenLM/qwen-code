@@ -8,24 +8,42 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
+ * Name of the directory under `dist/` that esbuild emits shared chunks into.
+ *
+ * Hardcoded here to match `esbuild.config.js`'s
+ * `chunkNames: 'chunks/[name]-[hash]'` setting. Exported so the linkage is
+ * visible at the build-config side too — `esbuild.config.js` imports this
+ * constant and substitutes it into the `chunkNames` pattern, so renaming
+ * here updates both sides in one commit.
+ *
+ * If you change this value, also re-check anything that filters or lists
+ * `dist/` entries (e.g. `scripts/prepare-package.js`,
+ * `scripts/create-standalone-package.js`,
+ * `vscode-ide-companion/scripts/copy-bundled-cli.js`).
+ */
+export const BUNDLE_CHUNK_DIR = 'chunks';
+
+/**
  * Resolves the on-disk directory a module should treat as a sibling of the
  * bundled `cli.js` entry, given the caller's `import.meta.url`.
  *
  * Why this exists: `esbuild.config.js` ships with `splitting: true` and
- * `chunkNames: 'chunks/[name]-[hash]'`, so modules that are hoisted into a
- * shared chunk live at `dist/chunks/<chunk>.js`. Any code that derives a path
- * from `import.meta.url` and joins a sibling asset (e.g. `bundled/`,
- * `vendor/`, `locales/`, `examples/`) would otherwise land in
- * `dist/chunks/<asset>` and miss the actual `dist/<asset>` location.
+ * `chunkNames: '<BUNDLE_CHUNK_DIR>/[name]-[hash]'`, so modules that are
+ * hoisted into a shared chunk live at `dist/<BUNDLE_CHUNK_DIR>/<chunk>.js`.
+ * Any code that derives a path from `import.meta.url` and joins a sibling
+ * asset (e.g. `bundled/`, `vendor/`, `locales/`, `examples/`) would
+ * otherwise land in `dist/<BUNDLE_CHUNK_DIR>/<asset>` and miss the actual
+ * `dist/<asset>` location.
  *
- * The fix is intentionally narrow: only strip the trailing path segment when
- * its basename is exactly `chunks`. In source / transpiled / non-split
- * builds the trailing segment is the source directory's own name, never
- * `chunks`, so this is a no-op there.
+ * The fix is intentionally narrow: only strip the trailing path segment
+ * when its basename matches `BUNDLE_CHUNK_DIR`. In source / transpiled /
+ * non-split builds the trailing segment is the source directory's own
+ * name, never that constant, so this is a no-op there.
  *
- * Centralising the check keeps the coupling to `esbuild.config.js`'s
- * `chunkNames` setting in one place — if that ever changes, only this helper
- * needs to be updated (rather than each call site).
+ * Centralising the check keeps the coupling to esbuild's `chunkNames`
+ * setting in one place — if that ever changes, only `BUNDLE_CHUNK_DIR`
+ * needs updating (and `esbuild.config.js` picks up the new value via the
+ * imported constant).
  *
  * @param importMetaUrl Pass `import.meta.url` from the caller. It must be
  *   evaluated at the caller's chunk so the resolution matches that chunk's
@@ -36,7 +54,7 @@ import { fileURLToPath } from 'node:url';
  */
 export function resolveBundleDir(importMetaUrl: string): string {
   const moduleDir = path.dirname(fileURLToPath(importMetaUrl));
-  return path.basename(moduleDir) === 'chunks'
+  return path.basename(moduleDir) === BUNDLE_CHUNK_DIR
     ? path.dirname(moduleDir)
     : moduleDir;
 }

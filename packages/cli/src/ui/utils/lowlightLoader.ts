@@ -24,18 +24,39 @@ export type Lowlight = {
 
 let lowlightInstance: Lowlight | null = null;
 let lowlightLoad: Promise<Lowlight> | null = null;
-// Latches once the dynamic import has failed permanently. Without this,
-// every React render of a code block would re-call `loadLowlight()` and
-// re-attempt `import('lowlight')` — wasting CPU and spamming debug logs on
-// every keystroke if the chunk file is permanently missing (corrupted
-// install). A single permanent latch is acceptable because the colorizer
-// already falls back to plain text on miss; recovery requires a fresh
-// process anyway.
-let lowlightFailed = false;
+// Tracks recent failures so callers can short-circuit without re-attempting
+// `import('lowlight')` on every render. Without this, every React render of
+// a code block would re-call `loadLowlight()` — wasting CPU and spamming
+// debug logs on every keystroke if the chunk file is permanently missing
+// (corrupted install).
+//
+// We don't latch permanently though: transient errors (EMFILE, antivirus
+// file lock, slow disk after wake-from-sleep) would otherwise leave syntax
+// highlighting off for the entire session. Instead we use a short cooldown
+// — subsequent calls within `LOWLIGHT_RETRY_COOLDOWN_MS` of the last failure
+// return the cached rejection immediately; the next call after the cooldown
+// retries the dynamic import. For a permanently broken install the chunk
+// import will keep failing every `LOWLIGHT_RETRY_COOLDOWN_MS`, which is
+// already orders of magnitude less work than the per-render hot loop the
+// cooldown is designed to prevent.
+const LOWLIGHT_RETRY_COOLDOWN_MS = 30_000;
+let lowlightLastFailureAt = 0;
 let lowlightError: Error | null = null;
 
 export function getLowlightInstance(): Lowlight | null {
   return lowlightInstance;
+}
+
+/**
+ * Returns true if a recent load attempt failed and we're still inside the
+ * cooldown window. Callers in render-hot paths can use this to skip both the
+ * `loadLowlight()` call and any duplicate failure-log it would emit.
+ */
+export function isLowlightCoolingDown(): boolean {
+  return (
+    lowlightLastFailureAt > 0 &&
+    Date.now() - lowlightLastFailureAt < LOWLIGHT_RETRY_COOLDOWN_MS
+  );
 }
 
 /**
@@ -46,12 +67,16 @@ export function getLowlightInstance(): Lowlight | null {
  *   2. `test-setup.ts` — awaits this once to keep snapshot tests
  *      deterministic without dragging more modules into the test graph.
  *
- * Once an import attempt fails the failure is latched (see `lowlightFailed`)
- * and subsequent calls return the same rejection without retrying.
+ * On import failure the rejection is cached for `LOWLIGHT_RETRY_COOLDOWN_MS`
+ * (see `isLowlightCoolingDown`); subsequent calls inside the cooldown return
+ * the cached rejection without retrying. After the cooldown, the next call
+ * will retry the dynamic import — this recovers from transient errors
+ * (EMFILE, antivirus locks) without losing the per-render short-circuit that
+ * protects against permanently-broken installs.
  */
 export function loadLowlight(): Promise<Lowlight> {
   if (lowlightInstance) return Promise.resolve(lowlightInstance);
-  if (lowlightFailed) {
+  if (isLowlightCoolingDown()) {
     return Promise.reject(
       lowlightError ?? new Error('lowlight import previously failed'),
     );
@@ -60,10 +85,12 @@ export function loadLowlight(): Promise<Lowlight> {
   lowlightLoad = import('lowlight')
     .then((mod) => {
       lowlightInstance = mod.createLowlight(mod.common) as Lowlight;
+      lowlightLastFailureAt = 0;
+      lowlightError = null;
       return lowlightInstance;
     })
     .catch((err) => {
-      lowlightFailed = true;
+      lowlightLastFailureAt = Date.now();
       lowlightError = err instanceof Error ? err : new Error(String(err));
       lowlightLoad = null;
       throw err;

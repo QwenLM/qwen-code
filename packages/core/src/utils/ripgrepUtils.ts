@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { resolveBundleDir } from './bundlePaths.js';
 import { fileExists } from './fileUtils.js';
@@ -61,6 +62,16 @@ function wslTimeout(): number {
 // lookups (here: the vendored ripgrep binary copied to `dist/vendor/`). See
 // `resolveBundleDir` for the rationale behind stripping a trailing `chunks/`
 // segment when this module is hoisted into a shared esbuild chunk.
+//
+// `__filename` is needed separately by `getBuiltinRipgrep` to decide whether
+// it's running from source / transpiled / bundled output (each requires a
+// different `..`-traversal count). It is NOT just `path.join(__dirname,
+// basename)` because in bundled mode esbuild rewrites every bare `__filename`
+// reference to `__qwen_filename` (the shim chunk's path), which would make
+// the heuristic always pick `levelsUp = 0` by accident; the explicit local
+// shadow keeps the lookup correct in source/transpiled/dev modes too, where
+// node ESM leaves `__filename` undefined.
+const __filename = fileURLToPath(import.meta.url);
 const __dirname = resolveBundleDir(import.meta.url);
 
 type Platform = 'darwin' | 'linux' | 'win32';
