@@ -673,14 +673,17 @@ export class FileMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      // Find the nearest editor group to the left or right of the chat webview
+      // Find the nearest editor group to the left or right of the chat webview.
+      // Fall back to ViewColumn.Beside when neither neighbor exists.
       const targetViewColumn =
-        findLeftGroupOfChatWebview() ?? findRightGroupOfChatWebview();
+        findLeftGroupOfChatWebview() ??
+        findRightGroupOfChatWebview() ??
+        vscode.ViewColumn.Beside;
 
       // Open as readonly document in the selected neighboring group and focus it (single click should be enough)
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, {
-        viewColumn: targetViewColumn ?? vscode.ViewColumn.Beside,
+        viewColumn: targetViewColumn,
         preview: false,
         preserveFocus: false,
       });
