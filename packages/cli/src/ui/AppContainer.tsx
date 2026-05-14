@@ -910,15 +910,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setCurrentModel(model);
     });
     return unsubscribe;
-  }, [config]);
-
-  const prevCurrentModelRef = useRef(currentModel);
-  useEffect(() => {
-    if (prevCurrentModelRef.current !== currentModel) {
-      prevCurrentModelRef.current = currentModel;
-      refreshStatic();
-    }
-  }, [currentModel, refreshStatic]);
+  }, [config, refreshStatic]);
 
   const {
     isThemeDialogOpen,
