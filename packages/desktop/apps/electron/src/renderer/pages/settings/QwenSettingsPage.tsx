@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   AlertCircle,
   Loader2,
@@ -43,8 +44,8 @@ import type {
 export type QwenSettingsTab = 'general' | 'mcpServers' | 'hooks' | 'extensions';
 
 type PageCopy = {
-  title: string;
-  description: string;
+  titleKey: string;
+  descriptionKey: string;
   slug: QwenSettingsTab;
 };
 
@@ -54,53 +55,26 @@ type RunQwenSettingsCommand = (
 
 const PAGE_COPY: Record<QwenSettingsTab, PageCopy> = {
   general: {
-    title: 'General',
-    description: 'Response language, approvals, updates, and file search.',
+    titleKey: 'settings.general.title',
+    descriptionKey: 'settings.general.description',
     slug: 'general',
   },
   mcpServers: {
-    title: 'MCP Servers',
-    description: 'Connect Qwen Code to local and remote MCP tools.',
+    titleKey: 'settings.mcpServers.title',
+    descriptionKey: 'settings.mcpServers.description',
     slug: 'mcpServers',
   },
   hooks: {
-    title: 'Hooks',
-    description:
-      'Run commands or HTTP calls at key Qwen Code lifecycle events.',
+    titleKey: 'settings.hooks.title',
+    descriptionKey: 'settings.hooks.description',
     slug: 'hooks',
   },
   extensions: {
-    title: 'Extensions',
-    description: 'Review installed extensions and configure their settings.',
+    titleKey: 'settings.extensions.title',
+    descriptionKey: 'settings.extensions.description',
     slug: 'extensions',
   },
 };
-
-const SCOPE_OPTIONS = [
-  { value: 'user', label: 'User' },
-  { value: 'workspace', label: 'Project' },
-];
-
-const OUTPUT_LANGUAGE_OPTIONS = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'en', label: 'English' },
-  { value: 'zh-Hans', label: 'Chinese (Simplified)' },
-  { value: 'ja', label: 'Japanese' },
-  { value: 'es', label: 'Spanish' },
-  { value: 'fr', label: 'French' },
-];
-
-const APPROVAL_MODE_OPTIONS = [
-  { value: 'plan', label: 'Plan' },
-  { value: 'default', label: 'Default' },
-  { value: 'auto-edit', label: 'Auto Edit' },
-  { value: 'yolo', label: 'YOLO' },
-];
-
-const FILE_ENCODING_OPTIONS = [
-  { value: 'utf-8', label: 'UTF-8' },
-  { value: 'utf-8-bom', label: 'UTF-8 with BOM' },
-];
 
 const TRANSPORT_OPTIONS: Array<{ value: QwenMcpTransport; label: string }> = [
   { value: 'http', label: 'HTTP' },
@@ -395,6 +369,7 @@ function draftToHook(draft: HookDraft): QwenHookDefinition {
 }
 
 export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
+  const { t } = useTranslation();
   const copy = PAGE_COPY[tab];
   const { activeSessionId } = useAppShellContext();
   const [snapshot, setSnapshot] = useState<QwenCoreSettingsSnapshot | null>(
@@ -455,19 +430,19 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
         });
         if (result) setSnapshot(result);
       } catch (saveError) {
-        toast.error('Failed to save setting', {
+        toast.error(t('settings.qwen.failedToSaveSetting'), {
           description:
             saveError instanceof Error ? saveError.message : String(saveError),
         });
       }
     },
-    [runCommand],
+    [runCommand, t],
   );
 
   return (
     <div className="h-full flex flex-col">
       <PanelHeader
-        title={copy.title}
+        title={t(copy.titleKey)}
         actions={<HeaderMenu route={routes.view.settings(copy.slug)} />}
       />
       <div className="flex-1 min-h-0 mask-fade-y">
@@ -475,8 +450,8 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
           <div className="px-5 py-7 max-w-3xl mx-auto">
             <div className="space-y-8">
               <SettingsSection
-                title={copy.title}
-                description={copy.description}
+                title={t(copy.titleKey)}
+                description={t(copy.descriptionKey)}
               >
                 {error ? (
                   <SettingsCard className="px-4 py-3 text-sm text-destructive flex gap-2">
@@ -492,13 +467,13 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
                 </div>
               ) : !activeSessionId ? (
                 <EmptyState
-                  title="Open a Qwen session to edit settings"
-                  description="These settings are read and written through Qwen ACP."
+                  title={t('settings.qwen.openSessionTitle')}
+                  description={t('settings.qwen.openSessionDesc')}
                 />
               ) : !snapshot ? (
                 <EmptyState
-                  title="Settings unavailable"
-                  description="Qwen ACP did not return settings."
+                  title={t('settings.qwen.settingsUnavailableTitle')}
+                  description={t('settings.qwen.settingsUnavailableDesc')}
                 />
               ) : tab === 'general' ? (
                 <GeneralTab snapshot={snapshot} onSave={saveSetting} />
@@ -527,7 +502,7 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
                 <div className="flex justify-end">
                   <Button variant="ghost" size="sm" onClick={() => void load()}>
                     <RefreshCw className="w-4 h-4 mr-2" />
-                    Refresh
+                    {t('settings.qwen.refresh')}
                   </Button>
                 </div>
               ) : null}
@@ -567,19 +542,48 @@ function GeneralTab({
     scope?: QwenSettingsScope,
   ) => Promise<void>;
 }) {
+  const { t } = useTranslation();
+  const outputLanguageOptions = useMemo(
+    () => [
+      { value: 'auto', label: t('settings.qwen.option.auto') },
+      { value: 'en', label: t('settings.qwen.language.english') },
+      { value: 'zh-Hans', label: t('settings.qwen.language.zhHans') },
+      { value: 'ja', label: t('settings.qwen.language.japanese') },
+      { value: 'es', label: t('settings.qwen.language.spanish') },
+      { value: 'fr', label: t('settings.qwen.language.french') },
+    ],
+    [t],
+  );
+  const approvalModeOptions = useMemo(
+    () => [
+      { value: 'plan', label: t('settings.qwen.approvalMode.plan') },
+      { value: 'default', label: t('settings.qwen.approvalMode.default') },
+      { value: 'auto-edit', label: t('settings.qwen.approvalMode.autoEdit') },
+      { value: 'yolo', label: t('settings.qwen.approvalMode.yolo') },
+    ],
+    [t],
+  );
+  const fileEncodingOptions = useMemo(
+    () => [
+      { value: 'utf-8', label: 'UTF-8' },
+      { value: 'utf-8-bom', label: t('settings.qwen.fileEncoding.utf8Bom') },
+    ],
+    [t],
+  );
+
   return (
     <>
       <SettingsSection
-        title="Response Language"
-        description="Control the language Qwen should prefer when answering."
+        title={t('settings.qwen.general.responseLanguage')}
+        description={t('settings.qwen.general.responseLanguageDesc')}
       >
         <SettingsCard>
           <SettingsSelect
             inCard
-            label="Output language"
-            description="Preferred language for Qwen responses."
+            label={t('settings.qwen.general.outputLanguage')}
+            description={t('settings.qwen.general.outputLanguageDesc')}
             value={stringValue(snapshot, 'general.outputLanguage', 'auto')}
-            options={OUTPUT_LANGUAGE_OPTIONS}
+            options={outputLanguageOptions}
             onValueChange={(value) =>
               void onSave('general.outputLanguage', value)
             }
@@ -588,37 +592,37 @@ function GeneralTab({
       </SettingsSection>
 
       <SettingsSection
-        title="Everyday Behavior"
-        description="Common preferences from Qwen Code settings."
+        title={t('settings.qwen.general.everydayBehavior')}
+        description={t('settings.qwen.general.everydayBehaviorDesc')}
       >
         <SettingsCard>
           <SettingsSelect
             inCard
-            label="Tool approval mode"
-            description="Default approval policy for tool requests."
+            label={t('settings.qwen.general.toolApprovalMode')}
+            description={t('settings.qwen.general.toolApprovalModeDesc')}
             value={stringValue(snapshot, 'tools.approvalMode', 'default')}
-            options={APPROVAL_MODE_OPTIONS}
+            options={approvalModeOptions}
             onValueChange={(value) => void onSave('tools.approvalMode', value)}
           />
           <SettingsToggle
-            label="Auto update"
-            description="Check for Qwen Code updates on startup."
+            label={t('settings.qwen.general.autoUpdate')}
+            description={t('settings.qwen.general.autoUpdateDesc')}
             checked={boolValue(snapshot, 'general.enableAutoUpdate', true)}
             onCheckedChange={(checked) =>
               void onSave('general.enableAutoUpdate', checked)
             }
           />
           <SettingsToggle
-            label="Session recap"
-            description="Show a short recap when returning after being away."
+            label={t('settings.qwen.general.sessionRecap')}
+            description={t('settings.qwen.general.sessionRecapDesc')}
             checked={boolValue(snapshot, 'general.showSessionRecap', false)}
             onCheckedChange={(checked) =>
               void onSave('general.showSessionRecap', checked)
             }
           />
           <NumberSetting
-            label="Recap threshold"
-            description="Minutes away before an automatic recap can appear."
+            label={t('settings.qwen.general.recapThreshold')}
+            description={t('settings.qwen.general.recapThresholdDesc')}
             value={numberValue(
               snapshot,
               'general.sessionRecapAwayThresholdMinutes',
@@ -630,16 +634,16 @@ function GeneralTab({
             }
           />
           <SettingsToggle
-            label="Commit attribution"
-            description="Add Qwen Code attribution to commits created through Qwen Code."
+            label={t('settings.qwen.general.commitAttribution')}
+            description={t('settings.qwen.general.commitAttributionDesc')}
             checked={boolValue(snapshot, 'general.gitCoAuthor.commit', true)}
             onCheckedChange={(checked) =>
               void onSave('general.gitCoAuthor.commit', checked)
             }
           />
           <SettingsToggle
-            label="PR attribution"
-            description="Add Qwen Code attribution to pull request descriptions."
+            label={t('settings.qwen.general.prAttribution')}
+            description={t('settings.qwen.general.prAttributionDesc')}
             checked={boolValue(snapshot, 'general.gitCoAuthor.pr', true)}
             onCheckedChange={(checked) =>
               void onSave('general.gitCoAuthor.pr', checked)
@@ -647,14 +651,14 @@ function GeneralTab({
           />
           <SettingsSelect
             inCard
-            label="Default file encoding"
-            description="Only change this when your project requires UTF-8 with BOM."
+            label={t('settings.qwen.general.defaultFileEncoding')}
+            description={t('settings.qwen.general.defaultFileEncodingDesc')}
             value={stringValue(
               snapshot,
               'general.defaultFileEncoding',
               'utf-8',
             )}
-            options={FILE_ENCODING_OPTIONS}
+            options={fileEncodingOptions}
             onValueChange={(value) =>
               void onSave('general.defaultFileEncoding', value)
             }
@@ -663,13 +667,13 @@ function GeneralTab({
       </SettingsSection>
 
       <SettingsSection
-        title="File Search"
-        description="High-impact context search defaults."
+        title={t('settings.qwen.general.fileSearch')}
+        description={t('settings.qwen.general.fileSearchDesc')}
       >
         <SettingsCard>
           <SettingsToggle
-            label="Respect .gitignore"
-            description="Exclude files ignored by Git when searching."
+            label={t('settings.qwen.general.respectGitIgnore')}
+            description={t('settings.qwen.general.respectGitIgnoreDesc')}
             checked={boolValue(
               snapshot,
               'context.fileFiltering.respectGitIgnore',
@@ -680,8 +684,8 @@ function GeneralTab({
             }
           />
           <SettingsToggle
-            label="Respect .qwenignore"
-            description="Exclude files listed in .qwenignore."
+            label={t('settings.qwen.general.respectQwenIgnore')}
+            description={t('settings.qwen.general.respectQwenIgnoreDesc')}
             checked={boolValue(
               snapshot,
               'context.fileFiltering.respectQwenIgnore',
@@ -692,8 +696,8 @@ function GeneralTab({
             }
           />
           <SettingsToggle
-            label="Fuzzy file search"
-            description="Improve file matching for @ mentions and search."
+            label={t('settings.qwen.general.fuzzyFileSearch')}
+            description={t('settings.qwen.general.fuzzyFileSearchDesc')}
             checked={boolValue(
               snapshot,
               'context.fileFiltering.enableFuzzySearch',
@@ -756,7 +760,15 @@ function McpServersTab({
   runCommand: RunQwenSettingsCommand;
   setSnapshot: (snapshot: QwenCoreSettingsSnapshot) => void;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState<McpDraft>(createEmptyMcpDraft);
+  const scopeOptions = useMemo(
+    () => [
+      { value: 'user', label: t('settings.qwen.scope.user') },
+      { value: 'workspace', label: t('settings.qwen.scope.project') },
+    ],
+    [t],
+  );
   const entries = useMemo(
     () => [...snapshot.user.mcpServers, ...snapshot.workspace.mcpServers],
     [snapshot],
@@ -789,15 +801,15 @@ function McpServersTab({
   return (
     <>
       <SettingsSection
-        title="Add or Edit Server"
-        description="Project servers apply only to this workspace. User servers apply everywhere."
+        title={t('settings.qwen.mcp.addOrEditServer')}
+        description={t('settings.qwen.mcp.addOrEditServerDesc')}
       >
         <SettingsCard className="p-4 space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <SettingsSelect
-              label="Scope"
+              label={t('settings.qwen.common.scope')}
               value={draft.scope}
-              options={SCOPE_OPTIONS}
+              options={scopeOptions}
               onValueChange={(scope) =>
                 setDraft((current) => ({
                   ...current,
@@ -806,7 +818,7 @@ function McpServersTab({
               }
             />
             <SettingsSelect
-              label="Transport"
+              label={t('settings.qwen.mcp.transport')}
               value={draft.transport}
               options={TRANSPORT_OPTIONS}
               onValueChange={(transport) =>
@@ -817,14 +829,18 @@ function McpServersTab({
               }
             />
             <SettingsInput
-              label="Name"
+              label={t('settings.qwen.common.name')}
               value={draft.name}
               onChange={(name) => setDraft((current) => ({ ...current, name }))}
               placeholder="my-server"
             />
           </div>
           <SettingsInput
-            label={draft.transport === 'stdio' ? 'Command' : 'URL'}
+            label={
+              draft.transport === 'stdio'
+                ? t('settings.qwen.common.command')
+                : t('settings.qwen.common.url')
+            }
             value={draft.commandOrUrl}
             onChange={(commandOrUrl) =>
               setDraft((current) => ({ ...current, commandOrUrl }))
@@ -835,8 +851,8 @@ function McpServersTab({
           />
           {draft.transport === 'stdio' ? (
             <SettingsTextarea
-              label="Arguments"
-              description="One argument per line."
+              label={t('settings.qwen.mcp.arguments')}
+              description={t('settings.qwen.mcp.oneArgumentPerLine')}
               value={draft.args}
               onChange={(args) => setDraft((current) => ({ ...current, args }))}
               placeholder={'-m\nmy_mcp_server'}
@@ -844,8 +860,8 @@ function McpServersTab({
             />
           ) : (
             <SettingsTextarea
-              label="Headers"
-              description="One KEY=value pair per line."
+              label={t('settings.qwen.common.headers')}
+              description={t('settings.qwen.common.oneKeyValuePerLine')}
               value={draft.headers}
               onChange={(headers) =>
                 setDraft((current) => ({ ...current, headers }))
@@ -856,7 +872,7 @@ function McpServersTab({
           )}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <SettingsInput
-              label="Timeout"
+              label={t('settings.qwen.common.timeout')}
               value={draft.timeout}
               onChange={(timeout) =>
                 setDraft((current) => ({ ...current, timeout }))
@@ -864,7 +880,7 @@ function McpServersTab({
               placeholder="15000"
             />
             <SettingsInput
-              label="Description"
+              label={t('settings.qwen.common.description')}
               value={draft.description}
               onChange={(description) =>
                 setDraft((current) => ({ ...current, description }))
@@ -874,8 +890,8 @@ function McpServersTab({
           </div>
           {draft.transport === 'stdio' ? (
             <SettingsTextarea
-              label="Environment"
-              description="One KEY=value pair per line."
+              label={t('settings.qwen.common.environment')}
+              description={t('settings.qwen.common.oneKeyValuePerLine')}
               value={draft.env}
               onChange={(env) => setDraft((current) => ({ ...current, env }))}
               placeholder="API_KEY=${API_KEY}"
@@ -884,8 +900,8 @@ function McpServersTab({
           ) : null}
           <SettingsToggle
             inCard={false}
-            label="Trust this server"
-            description="Skip confirmations for tools from this server."
+            label={t('settings.qwen.mcp.trustThisServer')}
+            description={t('settings.qwen.mcp.trustThisServerDesc')}
             checked={draft.trust}
             onCheckedChange={(trust) =>
               setDraft((current) => ({ ...current, trust }))
@@ -896,28 +912,28 @@ function McpServersTab({
               variant="ghost"
               onClick={() => setDraft(createEmptyMcpDraft())}
             >
-              Clear
+              {t('common.clear')}
             </Button>
             <Button
               onClick={() => void save()}
               disabled={!draft.name.trim() || !draft.commandOrUrl.trim()}
             >
               <Plus className="w-4 h-4 mr-2" />
-              Save Server
+              {t('settings.qwen.mcp.saveServer')}
             </Button>
           </div>
         </SettingsCard>
       </SettingsSection>
 
       <SettingsSection
-        title="Configured Servers"
-        description="Servers saved in User and Project Qwen settings."
+        title={t('settings.qwen.mcp.configuredServers')}
+        description={t('settings.qwen.mcp.configuredServersDesc')}
       >
         <div className="space-y-3">
           {entries.length === 0 ? (
             <EmptyState
-              title="No MCP servers configured"
-              description="Add an HTTP, SSE, or stdio server above."
+              title={t('settings.qwen.mcp.noServersTitle')}
+              description={t('settings.qwen.mcp.noServersDesc')}
             />
           ) : (
             entries.map((entry) => (
@@ -946,7 +962,7 @@ function McpServersTab({
                       variant="ghost"
                       onClick={() => setDraft(serverToDraft(entry))}
                     >
-                      Edit
+                      {t('common.edit')}
                     </Button>
                     <Button
                       size="sm"
@@ -981,7 +997,22 @@ function HooksTab({
     scope?: QwenSettingsScope,
   ) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState<HookDraft>(createEmptyHookDraft);
+  const scopeOptions = useMemo(
+    () => [
+      { value: 'user', label: t('settings.qwen.scope.user') },
+      { value: 'workspace', label: t('settings.qwen.scope.project') },
+    ],
+    [t],
+  );
+  const hookTypeOptions = useMemo(
+    () => [
+      { value: 'command', label: t('settings.qwen.common.command') },
+      { value: 'http', label: 'HTTP' },
+    ],
+    [t],
+  );
   const entries = useMemo(
     () => [...snapshot.user.hooks, ...snapshot.workspace.hooks],
     [snapshot],
@@ -1016,13 +1047,13 @@ function HooksTab({
   return (
     <>
       <SettingsSection
-        title="Hook Control"
-        description="Disable hooks without deleting configured hook definitions."
+        title={t('settings.qwen.hooks.hookControl')}
+        description={t('settings.qwen.hooks.hookControlDesc')}
       >
         <SettingsCard>
           <SettingsToggle
-            label="Disable all hooks"
-            description="Temporarily skip every configured hook."
+            label={t('settings.qwen.hooks.disableAllHooks')}
+            description={t('settings.qwen.hooks.disableAllHooksDesc')}
             checked={boolValue(snapshot, 'disableAllHooks', false)}
             onCheckedChange={(checked) =>
               void onSave('disableAllHooks', checked)
@@ -1032,15 +1063,15 @@ function HooksTab({
       </SettingsSection>
 
       <SettingsSection
-        title="Add or Edit Hook"
-        description="Command hooks receive JSON through stdin. HTTP hooks receive a POST body."
+        title={t('settings.qwen.hooks.addOrEditHook')}
+        description={t('settings.qwen.hooks.addOrEditHookDesc')}
       >
         <SettingsCard className="p-4 space-y-3">
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <SettingsSelect
-              label="Scope"
+              label={t('settings.qwen.common.scope')}
               value={draft.scope}
-              options={SCOPE_OPTIONS}
+              options={scopeOptions}
               onValueChange={(scope) =>
                 setDraft((current) => ({
                   ...current,
@@ -1049,7 +1080,7 @@ function HooksTab({
               }
             />
             <SettingsSelect
-              label="Event"
+              label={t('settings.qwen.hooks.event')}
               value={draft.event}
               options={HOOK_EVENT_OPTIONS}
               onValueChange={(event) =>
@@ -1060,12 +1091,9 @@ function HooksTab({
               }
             />
             <SettingsSelect
-              label="Type"
+              label={t('settings.qwen.hooks.type')}
               value={draft.type}
-              options={[
-                { value: 'command', label: 'Command' },
-                { value: 'http', label: 'HTTP' },
-              ]}
+              options={hookTypeOptions}
               onValueChange={(type) =>
                 setDraft((current) => ({
                   ...current,
@@ -1075,7 +1103,7 @@ function HooksTab({
             />
           </div>
           <SettingsInput
-            label="Matcher"
+            label={t('settings.qwen.hooks.matcher')}
             value={draft.matcher}
             onChange={(matcher) =>
               setDraft((current) => ({ ...current, matcher }))
@@ -1083,7 +1111,11 @@ function HooksTab({
             placeholder="*"
           />
           <SettingsInput
-            label={draft.type === 'command' ? 'Command' : 'URL'}
+            label={
+              draft.type === 'command'
+                ? t('settings.qwen.common.command')
+                : t('settings.qwen.common.url')
+            }
             value={draft.commandOrUrl}
             onChange={(commandOrUrl) =>
               setDraft((current) => ({ ...current, commandOrUrl }))
@@ -1096,12 +1128,12 @@ function HooksTab({
           />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <SettingsInput
-              label="Name"
+              label={t('settings.qwen.common.name')}
               value={draft.name}
               onChange={(name) => setDraft((current) => ({ ...current, name }))}
             />
             <SettingsInput
-              label="Timeout"
+              label={t('settings.qwen.common.timeout')}
               value={draft.timeout}
               onChange={(timeout) =>
                 setDraft((current) => ({ ...current, timeout }))
@@ -1110,7 +1142,7 @@ function HooksTab({
             />
           </div>
           <SettingsInput
-            label="Description"
+            label={t('settings.qwen.common.description')}
             value={draft.description}
             onChange={(description) =>
               setDraft((current) => ({ ...current, description }))
@@ -1118,8 +1150,8 @@ function HooksTab({
           />
           {draft.type === 'command' ? (
             <SettingsTextarea
-              label="Environment"
-              description="One KEY=value pair per line."
+              label={t('settings.qwen.common.environment')}
+              description={t('settings.qwen.common.oneKeyValuePerLine')}
               value={draft.env}
               onChange={(env) => setDraft((current) => ({ ...current, env }))}
               rows={3}
@@ -1127,8 +1159,8 @@ function HooksTab({
           ) : (
             <>
               <SettingsTextarea
-                label="Headers"
-                description="One KEY=value pair per line."
+                label={t('settings.qwen.common.headers')}
+                description={t('settings.qwen.common.oneKeyValuePerLine')}
                 value={draft.headers}
                 onChange={(headers) =>
                   setDraft((current) => ({ ...current, headers }))
@@ -1136,8 +1168,8 @@ function HooksTab({
                 rows={3}
               />
               <SettingsTextarea
-                label="Allowed env vars"
-                description="One variable name per line for URL/header interpolation."
+                label={t('settings.qwen.hooks.allowedEnvVars')}
+                description={t('settings.qwen.hooks.allowedEnvVarsDesc')}
                 value={draft.allowedEnvVars}
                 onChange={(allowedEnvVars) =>
                   setDraft((current) => ({ ...current, allowedEnvVars }))
@@ -1149,8 +1181,8 @@ function HooksTab({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <SettingsToggle
               inCard={false}
-              label="Sequential"
-              description="Run hooks in order."
+              label={t('settings.qwen.hooks.sequential')}
+              description={t('settings.qwen.hooks.sequentialDesc')}
               checked={draft.sequential}
               onCheckedChange={(sequential) =>
                 setDraft((current) => ({ ...current, sequential }))
@@ -1158,11 +1190,15 @@ function HooksTab({
             />
             <SettingsToggle
               inCard={false}
-              label={draft.type === 'command' ? 'Async' : 'Once'}
+              label={
+                draft.type === 'command'
+                  ? t('settings.qwen.hooks.async')
+                  : t('settings.qwen.hooks.once')
+              }
               description={
                 draft.type === 'command'
-                  ? 'Run without blocking the session.'
-                  : 'Run once per session.'
+                  ? t('settings.qwen.hooks.asyncDesc')
+                  : t('settings.qwen.hooks.onceDesc')
               }
               checked={draft.type === 'command' ? draft.async : draft.once}
               onCheckedChange={(checked) =>
@@ -1179,28 +1215,28 @@ function HooksTab({
               variant="ghost"
               onClick={() => setDraft(createEmptyHookDraft())}
             >
-              Clear
+              {t('common.clear')}
             </Button>
             <Button
               onClick={() => void save()}
               disabled={!draft.commandOrUrl.trim()}
             >
               <Save className="w-4 h-4 mr-2" />
-              Save Hook
+              {t('settings.qwen.hooks.saveHook')}
             </Button>
           </div>
         </SettingsCard>
       </SettingsSection>
 
       <SettingsSection
-        title="Configured Hooks"
-        description="User and Project hook definitions. Extension hooks are shown in Extensions."
+        title={t('settings.qwen.hooks.configuredHooks')}
+        description={t('settings.qwen.hooks.configuredHooksDesc')}
       >
         <div className="space-y-3">
           {entries.length === 0 ? (
             <EmptyState
-              title="No hooks configured"
-              description="Add a command or HTTP hook above."
+              title={t('settings.qwen.hooks.noHooksTitle')}
+              description={t('settings.qwen.hooks.noHooksDesc')}
             />
           ) : (
             entries.map((entry) => {
@@ -1227,7 +1263,7 @@ function HooksTab({
                         variant="ghost"
                         onClick={() => setDraft(hookToDraft(entry))}
                       >
-                        Edit
+                        {t('common.edit')}
                       </Button>
                       <Button
                         size="sm"
@@ -1257,16 +1293,17 @@ function ExtensionsTab({
   runCommand: RunQwenSettingsCommand;
   setSnapshot: (snapshot: QwenCoreSettingsSnapshot) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <SettingsSection
-      title="Installed Extensions"
-      description="Settings exposed by loaded Qwen Code extensions. Sensitive values are never displayed."
+      title={t('settings.qwen.extensions.installedExtensions')}
+      description={t('settings.qwen.extensions.installedExtensionsDesc')}
     >
       <div className="space-y-3">
         {snapshot.merged.extensions.length === 0 ? (
           <EmptyState
-            title="No extensions loaded"
-            description="Installed extensions will appear here when Qwen Code loads them."
+            title={t('settings.qwen.extensions.noExtensionsTitle')}
+            description={t('settings.qwen.extensions.noExtensionsDesc')}
           />
         ) : (
           snapshot.merged.extensions.map((extension) => (
@@ -1292,13 +1329,17 @@ function ExtensionCard({
   runCommand: RunQwenSettingsCommand;
   setSnapshot: (snapshot: QwenCoreSettingsSnapshot) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <SettingsCard className="px-4 py-3.5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="text-sm font-medium">{extension.name}</div>
           <div className="text-xs text-muted-foreground mt-0.5">
-            {extension.version} · {extension.isActive ? 'Active' : 'Inactive'}
+            {extension.version} ·{' '}
+            {extension.isActive
+              ? t('settings.qwen.extensions.active')
+              : t('settings.qwen.extensions.inactive')}
           </div>
           <div className="text-[11px] text-muted-foreground/70 mt-1 truncate font-mono">
             {extension.path}
@@ -1306,13 +1347,16 @@ function ExtensionCard({
         </div>
       </div>
       <div className="mt-3 text-xs text-muted-foreground">
-        {extension.commands.length} commands · {extension.skills.length} skills
-        · {extension.mcpServers.length} MCP servers
+        {t('settings.qwen.extensions.summary', {
+          commands: extension.commands.length,
+          skills: extension.skills.length,
+          mcpServers: extension.mcpServers.length,
+        })}
       </div>
       <div className="mt-3 divide-y divide-border/60">
         {extension.settings.length === 0 ? (
           <div className="py-3 text-xs text-muted-foreground">
-            No configurable settings.
+            {t('settings.qwen.extensions.noConfigurableSettings')}
           </div>
         ) : (
           extension.settings.map((setting) => (
@@ -1341,8 +1385,16 @@ function ExtensionSettingRow({
   runCommand: RunQwenSettingsCommand;
   setSnapshot: (snapshot: QwenCoreSettingsSnapshot) => void;
 }) {
+  const { t } = useTranslation();
   const [scope, setScope] = useState<QwenSettingsScope>(
     setting.effectiveScope ?? 'user',
+  );
+  const scopeOptions = useMemo(
+    () => [
+      { value: 'user', label: t('settings.qwen.scope.user') },
+      { value: 'workspace', label: t('settings.qwen.scope.project') },
+    ],
+    [t],
   );
   const [draft, setDraft] = useState(
     setting.sensitive ? '' : String(setting.effectiveValue ?? ''),
@@ -1378,7 +1430,7 @@ function ExtensionSettingRow({
         </div>
         <SettingsSelect
           value={scope}
-          options={SCOPE_OPTIONS}
+          options={scopeOptions}
           onValueChange={(value) => setScope(value as QwenSettingsScope)}
           className="w-32"
         />
@@ -1391,8 +1443,8 @@ function ExtensionSettingRow({
           placeholder={
             setting.sensitive &&
             (setting.hasUserValue || setting.hasWorkspaceValue)
-              ? 'Stored securely'
-              : 'Value'
+              ? t('settings.qwen.extensions.storedSecurely')
+              : t('settings.qwen.extensions.value')
           }
           className="h-8 bg-muted/50"
         />
