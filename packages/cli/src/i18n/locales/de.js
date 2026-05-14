@@ -126,7 +126,7 @@ export default {
     '{{count}} Datei(en) konnten nicht wiederhergestellt werden: {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Dateien können nicht wiederhergestellt werden: Dieser Turn wurde erstellt, bevor Datei-Checkpointing aktiviert war.',
-  'No files needed restoration.':
+  'No files needed to be restored.':
     'Keine Dateien mussten wiederhergestellt werden.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ navigieren · Enter auswählen · Esc zurück',

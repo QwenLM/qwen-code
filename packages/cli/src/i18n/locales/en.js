@@ -147,7 +147,7 @@ export default {
     'Failed to restore {{count}} file(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Cannot restore files: this turn was created before file checkpointing was enabled.',
-  'No files needed restoration.': 'No files needed restoration.',
+  'No files needed to be restored.': 'No files needed to be restored.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ to navigate · Enter to select · Esc to go back',
   '↑↓ to navigate · Enter to select · Esc to cancel':

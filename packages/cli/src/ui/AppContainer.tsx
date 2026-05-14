@@ -2035,7 +2035,7 @@ export const AppContainer = (props: AppContainerProps) => {
                   count: String(result.filesChanged.length),
                 });
               } else if (result.filesFailed.length === 0) {
-                fileRestoreMessage = t('No files needed restoration.');
+                fileRestoreMessage = t('No files needed to be restored.');
               }
               if (result.filesFailed.length > 0) {
                 hasRestoreFailure = true;

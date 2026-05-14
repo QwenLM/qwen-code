@@ -141,7 +141,7 @@ export default {
     '恢复 {{count}} 个文件失败：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     '无法恢复文件：该轮对话创建时尚未启用文件检查点功能。',
-  'No files needed restoration.': '没有文件需要恢复。',
+  'No files needed to be restored.': '没有文件需要恢复。',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ 导航 · Enter 选择 · Esc 返回',
   '↑↓ to navigate · Enter to select · Esc to cancel':

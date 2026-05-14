@@ -107,7 +107,7 @@ export default {
     '{{count}} 個のファイルの復元に失敗しました：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'ファイルを復元できません：このターンはファイルチェックポイントが有効になる前に作成されました。',
-  'No files needed restoration.': '復元が必要なファイルはありません。',
+  'No files needed to be restored.': '復元が必要なファイルはありません。',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ 移動 · Enter 選択 · Esc 戻る',
   '↑↓ to navigate · Enter to select · Esc to cancel':

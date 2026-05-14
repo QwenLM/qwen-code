@@ -428,7 +428,7 @@ export class FileHistoryService {
     debugLogger.debug(`FileHistory: Rewinding to snapshot for ${promptId}`);
     const result = await this.applySnapshot(targetSnapshot);
 
-    if (truncateHistory) {
+    if (truncateHistory && result.filesFailed.length === 0) {
       const targetIdx = this.state.snapshots.indexOf(targetSnapshot);
       if (targetIdx >= 0) {
         this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);

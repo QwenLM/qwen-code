@@ -150,7 +150,7 @@ export default {
     'Не удалось восстановить {{count}} файл(ов): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
     'Невозможно восстановить файлы: этот ход был создан до включения контрольных точек файлов.',
-  'No files needed restoration.': 'Файлы не нуждались в восстановлении.',
+  'No files needed to be restored.': 'Файлы не нуждались в восстановлении.',
   '↑↓ to navigate · Enter to select · Esc to go back':
     '↑↓ навигация · Enter выбор · Esc назад',
   '↑↓ to navigate · Enter to select · Esc to cancel':
