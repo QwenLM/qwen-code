@@ -57,6 +57,30 @@ export interface UseSessionPickerOptions {
    * safety rationale (preview's Enter forwards to onSelect).
    */
   enablePreview?: boolean;
+  /**
+   * Enable multi-select mode. Space toggles selection on the cursor item,
+   * Enter commits — invoking {@link onConfirmMulti} when one or more items
+   * are checked, falling back to {@link onSelect} (single-select) otherwise.
+   * Disabled by default.
+   */
+  enableMultiSelect?: boolean;
+  /**
+   * Receives the full set of checked session IDs when the user commits a
+   * multi-selection. Required when {@link enableMultiSelect} is true.
+   */
+  onConfirmMulti?: (sessionIds: string[]) => void;
+  /**
+   * Session IDs that cannot be checked in multi-select mode (e.g. the
+   * currently active session must not be deletable). They remain
+   * navigable but Space is a no-op on them and they never appear in the
+   * commit set.
+   *
+   * Only consulted when {@link enableMultiSelect} is true. In
+   * single-select mode this option is silently inert because there is
+   * no checkbox state to gate — the Space binding routes to preview (or
+   * nothing) rather than to `toggleChecked`.
+   */
+  disabledIds?: readonly string[];
 }
 
 export interface UseSessionPickerResult {
@@ -73,6 +97,19 @@ export interface UseSessionPickerResult {
   viewMode: 'list' | 'search' | 'preview';
   previewSessionId: string | null;
   exitPreview: () => void;
+  /**
+   * Set of session IDs the user has checked. Empty until the user toggles
+   * Space on at least one item; consumers should treat empty as "no
+   * multi-selection in progress" and fall back to single-select.
+   */
+  checkedIds: ReadonlySet<string>;
+  /** Toggle the checked state for a session id (no-op when disabled). */
+  toggleChecked: (sessionId: string) => void;
+  /**
+   * Memoized lookup for the `disabledIds` option. Exposed so render-side
+   * consumers can ask "is this row disabled?" without rebuilding the set.
+   */
+  disabledIdSet: ReadonlySet<string>;
   /** Free-text filter applied on top of branch filter. */
   searchQuery: string;
   /**
@@ -92,7 +129,28 @@ export function useSessionPicker({
   initialSessions,
   isActive = true,
   enablePreview = false,
+  enableMultiSelect = false,
+  onConfirmMulti,
+  disabledIds,
 }: UseSessionPickerOptions): UseSessionPickerResult {
+  // Both modes bind Space — they cannot coexist without a different chord.
+  // Fail loudly so a future caller doesn't silently lose preview when they
+  // turn on multi-select (or vice-versa).
+  if (enableMultiSelect && enablePreview) {
+    throw new Error(
+      'useSessionPicker: enableMultiSelect and enablePreview both bind Space; pick one or wire a different chord.',
+    );
+  }
+  // Without onConfirmMulti the Enter handler skips the multi-select branch
+  // and silently falls through to single-select on the cursor row — Space
+  // still toggles checkboxes and the footer reads "N selected", so the
+  // user thinks N items will be deleted but only 1 is. Refuse the config.
+  if (enableMultiSelect && !onConfirmMulti) {
+    throw new Error(
+      'useSessionPicker: enableMultiSelect requires onConfirmMulti.',
+    );
+  }
+
   const hasInitialSessions = initialSessions !== undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [sessionState, setSessionState] = useState<SessionState>(
@@ -111,6 +169,34 @@ export function useSessionPicker({
     'list',
   );
   const [previewSessionId, setPreviewSessionId] = useState<string | null>(null);
+
+  // Multi-select state. Empty until the user actively toggles Space; an
+  // empty set means "no multi-selection in progress" and the picker keeps
+  // its single-select semantics on Enter.
+  const [checkedIds, setCheckedIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+
+  const disabledIdSet = useMemo(
+    () => new Set(disabledIds ?? []),
+    [disabledIds],
+  );
+
+  const toggleChecked = useCallback(
+    (sessionId: string) => {
+      if (disabledIdSet.has(sessionId)) return;
+      setCheckedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(sessionId)) {
+          next.delete(sessionId);
+        } else {
+          next.add(sessionId);
+        }
+        return next;
+      });
+    },
+    [disabledIdSet],
+  );
 
   const exitPreview = useCallback(() => {
     setViewMode('list');
@@ -319,8 +405,35 @@ export function useSessionPicker({
           setViewMode('list');
           return;
         }
+        if (enableMultiSelect && checkedIds.size > 0 && onConfirmMulti) {
+          // Commit *every* checked id (minus disabled), not just the
+          // currently-filtered ones. If the user checked A-E and then
+          // typed a search matching only C-E, intersecting with the
+          // visible set would silently drop A and B — a partial-delete
+          // the user never asked for. Filter is a navigation aid; the
+          // commit set is whatever the user explicitly checked.
+          //
+          // Order by the full session list so the receiver can present
+          // "Deleted N sessions" feedback in display order, even for
+          // items that were filtered out at commit time.
+          const orderedIds = sessionState.sessions
+            .map((s) => s.sessionId)
+            .filter((id) => checkedIds.has(id) && !disabledIdSet.has(id));
+          if (orderedIds.length > 0) {
+            onConfirmMulti(orderedIds);
+            return;
+          }
+          // Commit set ended up empty — every checked id is disabled.
+          // Don't fall through to single-select on the cursor row, that
+          // would silently delete a different session than the one the
+          // footer's "N selected" hint promised.
+          return;
+        }
         const session = filteredSessions[selectedIndex];
-        if (session) {
+        // Disabled rows render dimmed with a "cannot delete" hint; honor
+        // that here so a stray Enter on the active session doesn't close
+        // the dialog and leave the receiver to bounce back with an error.
+        if (session && !disabledIdSet.has(session.sessionId)) {
           onSelect(session.sessionId);
         }
         return;
@@ -382,13 +495,23 @@ export function useSessionPicker({
         return;
       }
 
-      if (name === 'space' && enablePreview) {
-        const session = filteredSessions[selectedIndex];
-        if (session) {
-          setPreviewSessionId(session.sessionId);
-          setViewMode('preview');
+      if (name === 'space') {
+        // The constructor invariant ensures at most one of these is on.
+        if (enableMultiSelect) {
+          const session = filteredSessions[selectedIndex];
+          if (session) {
+            toggleChecked(session.sessionId);
+          }
+          return;
         }
-        return;
+        if (enablePreview) {
+          const session = filteredSessions[selectedIndex];
+          if (session) {
+            setPreviewSessionId(session.sessionId);
+            setViewMode('preview');
+          }
+          return;
+        }
       }
 
       if (ctrl && (name === 'b' || name === 'B')) {
@@ -431,6 +554,9 @@ export function useSessionPicker({
     viewMode,
     previewSessionId,
     exitPreview,
+    checkedIds,
+    toggleChecked,
+    disabledIdSet,
     searchQuery,
     isSearchActive: viewMode === 'search',
   };

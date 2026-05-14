@@ -375,7 +375,6 @@ export class DynamicCommandLocalizationService {
     items: TranslationItem[],
     signal: AbortSignal,
   ): Promise<Map<string, string>> {
-    const model = config.getFastModel() ?? config.getModel();
     const targetLanguageName = getLanguageNameForTranslationTarget(language);
     const translations = new Map<string, string>();
 
@@ -391,7 +390,6 @@ export class DynamicCommandLocalizationService {
       try {
         response = await runSideQuery<Record<string, unknown>>(config, {
           purpose: 'dynamic-command-localization',
-          model,
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
           schema: {
             type: 'object',

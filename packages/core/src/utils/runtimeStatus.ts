@@ -142,13 +142,7 @@ export async function readRuntimeStatus(
   let raw: string;
   try {
     raw = await fs.readFile(filePath, 'utf-8');
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') {
-      return null;
-    }
-    if (err instanceof Error && err.message.includes('utf-8')) {
-      return null;
-    }
+  } catch {
     return null;
   }
 
@@ -177,8 +171,8 @@ export async function readRuntimeStatus(
   const startedAt = obj['started_at'];
   const qwenVersion = obj['qwen_version'];
 
-  if (!isFiniteIntegerNotBool(schemaVersion)) return null;
-  if (!isFiniteIntegerNotBool(pid)) return null;
+  if (!isFiniteInteger(schemaVersion)) return null;
+  if (!isFiniteInteger(pid)) return null;
   if (typeof sessionId !== 'string') return null;
   if (typeof workDir !== 'string') return null;
   if (typeof hostname !== 'string') return null;
@@ -219,13 +213,8 @@ export async function clearRuntimeStatus(filePath: string): Promise<void> {
   }
 }
 
-function isFiniteIntegerNotBool(v: unknown): v is number {
-  return (
-    typeof v === 'number' &&
-    Number.isInteger(v) &&
-    Number.isFinite(v) &&
-    typeof v !== 'boolean'
-  );
+function isFiniteInteger(v: unknown): v is number {
+  return typeof v === 'number' && Number.isInteger(v);
 }
 
 async function renameWithRetry(

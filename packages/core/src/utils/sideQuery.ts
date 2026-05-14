@@ -20,9 +20,11 @@ export interface SideQueryJsonOptions<TResponse> {
   abortSignal: AbortSignal;
   /**
    * Override the model used for this query. Defaults to
-   * `config.getFastModel?.() ?? config.getModel()` — side queries run on the
-   * fast model when one is configured. Pass an explicit value to pin to the
-   * main model (e.g. long-form summarization in web-fetch).
+   * `config.getFastModelForSideQuery?.() ?? config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
+   * — side queries run on the fast model when one is configured, including
+   * fast models registered under a different authType than the main session.
+   * Pass an explicit value to pin to the main model (e.g. long-form
+   * summarization in web-fetch).
    */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;
@@ -61,9 +63,11 @@ export interface SideQueryTextOptions {
   abortSignal: AbortSignal;
   /**
    * Override the model used for this query. Defaults to
-   * `config.getFastModel?.() ?? config.getModel()` — side queries run on the
-   * fast model when one is configured. Pass an explicit value to pin to the
-   * main model (e.g. long-form summarization in web-fetch).
+   * `config.getFastModelForSideQuery?.() ?? config.getFastModel?.() ?? config.getModel() ?? DEFAULT_QWEN_MODEL`
+   * — side queries run on the fast model when one is configured, including
+   * fast models registered under a different authType than the main session.
+   * Pass an explicit value to pin to the main model (e.g. long-form
+   * summarization in web-fetch).
    */
   model?: string;
   systemInstruction?: string | Part | Part[] | Content;
@@ -101,6 +105,7 @@ function buildDefaultPromptId(purpose?: string): string {
 function resolveDefaultModel(config: Config, override?: string): string {
   return (
     override ??
+    config.getFastModelForSideQuery?.() ??
     config.getFastModel?.() ??
     config.getModel() ??
     DEFAULT_QWEN_MODEL

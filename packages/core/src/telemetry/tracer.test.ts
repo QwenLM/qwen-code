@@ -303,6 +303,70 @@ describe('withSpan', () => {
 
     expect(spans[0].attributes).toEqual({ tool_name: 'read', call_id: '123' });
   });
+
+  describe('autoOkOnSuccess option', () => {
+    it('does not auto-set OK when autoOkOnSuccess is false and callback resolves', async () => {
+      await withSpan('test.no-auto-ok', {}, async () => 42, {
+        autoOkOnSuccess: false,
+      });
+
+      expect(spans).toHaveLength(1);
+      expect(spans[0].statuses).toEqual([]);
+      expect(spans[0].ended).toBe(true);
+    });
+
+    it('still sets ERROR when callback throws and autoOkOnSuccess is false', async () => {
+      await expect(
+        withSpan(
+          'test.throw-no-auto',
+          {},
+          async () => {
+            throw new Error('fail');
+          },
+          { autoOkOnSuccess: false },
+        ),
+      ).rejects.toThrow('fail');
+
+      expect(spans).toHaveLength(1);
+      expect(spans[0].statuses).toEqual([
+        { code: SpanStatusCode.ERROR, message: 'Operation failed' },
+      ]);
+    });
+
+    it('preserves caller-set ERROR with autoOkOnSuccess false', async () => {
+      await withSpan(
+        'test.error-no-auto',
+        {},
+        async (span) => {
+          span.setStatus({
+            code: SpanStatusCode.ERROR,
+            message: 'hook denied',
+          });
+        },
+        { autoOkOnSuccess: false },
+      );
+
+      expect(spans).toHaveLength(1);
+      expect(spans[0].statuses).toEqual([
+        { code: SpanStatusCode.ERROR, message: 'hook denied' },
+      ]);
+    });
+
+    it('allows caller to set OK explicitly with autoOkOnSuccess false', async () => {
+      await withSpan(
+        'test.explicit-ok',
+        {},
+        async (span) => {
+          span.setStatus({ code: SpanStatusCode.OK });
+          return 'done';
+        },
+        { autoOkOnSuccess: false },
+      );
+
+      expect(spans).toHaveLength(1);
+      expect(spans[0].statuses).toEqual([{ code: SpanStatusCode.OK }]);
+    });
+  });
 });
 
 describe('startSpanWithContext', () => {
@@ -333,11 +397,102 @@ describe('createSessionRootContext', () => {
     expect(ctx.traceId).toBe(deriveTraceId('session-123'));
   });
 
-  it('uses TraceFlags.SAMPLED so children are recorded by default', () => {
-    const ctx = createSessionRootContext('session-123') as unknown as {
-      traceFlags: number;
-    };
-    expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+  it('uses TraceFlags.SAMPLED by default (no OTEL_TRACES_SAMPLER)', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    delete process.env['OTEL_TRACES_SAMPLER'];
+    try {
+      const ctx = createSessionRootContext('session-123') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
+  it('uses TraceFlags.NONE when a custom sampler is configured', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'traceidratio';
+    try {
+      const ctx = createSessionRootContext('session-456') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.NONE);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
+  it('uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=always_on', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'always_on';
+    try {
+      const ctx = createSessionRootContext('session-ao') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
+  it('uses TraceFlags.NONE when OTEL_TRACES_SAMPLER=always_off', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'always_off';
+    try {
+      const ctx = createSessionRootContext('session-aoff') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.NONE);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
+  it('uses TraceFlags.SAMPLED when OTEL_TRACES_SAMPLER=parentbased_always_on', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_always_on';
+    try {
+      const ctx = createSessionRootContext('session-789') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
+  it('uses TraceFlags.NONE when OTEL_TRACES_SAMPLER=parentbased_always_off', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_always_off';
+    try {
+      const ctx = createSessionRootContext('session-off') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.NONE);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
+  });
+
+  it('uses TraceFlags.SAMPLED for parentbased_traceidratio (parent flag gates children)', () => {
+    const original = process.env['OTEL_TRACES_SAMPLER'];
+    process.env['OTEL_TRACES_SAMPLER'] = 'parentbased_traceidratio';
+    try {
+      const ctx = createSessionRootContext('session-pb-ratio') as unknown as {
+        traceFlags: number;
+      };
+      expect(ctx.traceFlags).toBe(TraceFlags.SAMPLED);
+    } finally {
+      if (original !== undefined) process.env['OTEL_TRACES_SAMPLER'] = original;
+      else delete process.env['OTEL_TRACES_SAMPLER'];
+    }
   });
 
   it('generates a valid 16-char hex spanId', () => {
