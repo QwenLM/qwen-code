@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
+import { DWClient, TOPIC_ROBOT, TOPIC_CARD, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import { ChannelBase } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
@@ -73,6 +73,7 @@ interface CardSessionState {
   outTrackId: string;
   created: boolean;
   creating: boolean; // lock to prevent duplicate createCard calls
+  stopped: boolean; // user clicked stop — ignore further chunks
   accumulatedText: string;
   lastUpdateAt: number;
   pendingUpdateTimer?: ReturnType<typeof setTimeout>;
@@ -99,6 +100,12 @@ export class DingtalkChannel extends ChannelBase {
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
   private cardSessions: Map<string, CardSessionState> = new Map();
+  /** Map chatId → sender display name for the current request. */
+  private senderNames: Map<string, string> = new Map();
+  /** Reverse map outTrackId → chatId for card callback routing. */
+  private outTrackIdToChatId: Map<string, string> = new Map();
+  /** Map chatId → sessionId for cancel routing. */
+  private chatIdToSessionId: Map<string, string> = new Map();
   private tokenExpiry = 0;
   private cachedToken?: string;
 
@@ -132,6 +139,17 @@ export class DingtalkChannel extends ChannelBase {
           message: 'ok',
         });
         this.onMessage(msg);
+      },
+    );
+
+    this.client.registerCallbackListener(
+      TOPIC_CARD,
+      (msg: DWClientDownStream) => {
+        this.client.send(msg.headers.messageId, {
+          status: EventAck.SUCCESS,
+          message: 'ok',
+        });
+        this.onCardCallback(msg);
       },
     );
 
@@ -292,6 +310,7 @@ export class DingtalkChannel extends ChannelBase {
         return { outTrackId: '', success: false };
       }
 
+      this.outTrackIdToChatId.set(outTrackId, chatId);
       return { outTrackId, success: true };
     } catch (err) {
       process.stderr.write(
@@ -376,15 +395,21 @@ export class DingtalkChannel extends ChannelBase {
 
     let cardState = this.cardSessions.get(chatId);
     if (!cardState) {
+      const senderName = this.senderNames.get(chatId) || '';
+      const prefix = senderName ? `你好，${senderName}\n\n` : '';
       cardState = {
         outTrackId: '',
         created: false,
         creating: false,
-        accumulatedText: '',
+        stopped: false,
+        accumulatedText: prefix,
         lastUpdateAt: 0,
       };
       this.cardSessions.set(chatId, cardState);
     }
+
+    // If user clicked stop, ignore further chunks
+    if (cardState.stopped) return;
 
     cardState.accumulatedText += chunk;
 
@@ -430,6 +455,7 @@ export class DingtalkChannel extends ChannelBase {
 
       cardState.pendingUpdateTimer = setTimeout(async () => {
         cs.pendingUpdateTimer = undefined;
+        if (cs.stopped) return; // card already finalized by stop button
         cs.lastUpdateAt = Date.now();
         try {
           await this.streamingCard(cs.outTrackId, cs.accumulatedText);
@@ -449,8 +475,30 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     const cardState = this.cardSessions.get(chatId);
 
+    // If user already clicked stop, card is finalized — skip
+    if (cardState?.stopped) {
+      this.cleanupCard(chatId);
+      return;
+    }
+
+    const senderName = this.senderNames.get(chatId) || '';
+    const prefix = senderName ? `你好，${senderName}\n\n` : '';
+    const prefixedText = prefix + fullText;
+
     if (cardState?.pendingUpdateTimer) {
       clearTimeout(cardState.pendingUpdateTimer);
+    }
+
+    // Wait for in-flight card creation to finish before deciding what to do
+    if (cardState?.creating) {
+      await new Promise<void>((resolve) => {
+        const check = setInterval(() => {
+          if (!cardState.creating) {
+            clearInterval(check);
+            resolve();
+          }
+        }, 50);
+      });
     }
 
     if (cardState?.created) {
@@ -459,26 +507,26 @@ export class DingtalkChannel extends ChannelBase {
         `[DingTalk:${this.name}] Sending via interactive card (outTrackId=${cardState.outTrackId})\n`,
       );
       try {
-        await this.streamingCard(cardState.outTrackId, fullText, true);
+        await this.streamingCard(cardState.outTrackId, prefixedText, true);
       } catch {
         // ignore
       }
-      this.cardSessions.delete(chatId);
+      this.cleanupCard(chatId);
       return;
     }
 
     // Card not yet created (response finished before debounce timer fired).
     // Create the card, then immediately finalize it via streaming API.
     if (this.hasCardTemplate) {
-      const title = extractTitle(fullText);
-      const result = await this.createCard(chatId, title, fullText);
+      const title = extractTitle(prefixedText);
+      const result = await this.createCard(chatId, title, prefixedText);
       if (result.success) {
         // Finalize the card so it transitions from PROCESSING to FINISHED
-        await this.streamingCard(result.outTrackId, fullText, true);
+        await this.streamingCard(result.outTrackId, prefixedText, true);
         process.stderr.write(
           `[DingTalk:${this.name}] Sending via interactive card (created at complete, outTrackId=${result.outTrackId})\n`,
         );
-        this.cardSessions.delete(chatId);
+        this.cleanupCard(chatId);
         return;
       }
       process.stderr.write(
@@ -490,8 +538,8 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(
       `[DingTalk:${this.name}] Sending via actionCard webhook fallback\n`,
     );
-    this.cardSessions.delete(chatId);
-    await this.sendMessage(chatId, fullText);
+    this.cleanupCard(chatId);
+    await this.sendMessage(chatId, prefixedText);
   }
 
   private async emotionApi(
@@ -576,9 +624,10 @@ export class DingtalkChannel extends ChannelBase {
 
   protected override onPromptStart(
     chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
+    this.chatIdToSessionId.set(chatId, sessionId);
     if (!messageId || !this.isConversationId(chatId)) return;
     this.attachReaction(messageId, chatId).catch(() => {});
   }
@@ -812,6 +861,116 @@ export class DingtalkChannel extends ChannelBase {
     }
   }
 
+  /** Clean up all card-related state for a chatId. */
+  private cleanupCard(chatId: string): void {
+    const cardState = this.cardSessions.get(chatId);
+    if (cardState) {
+      if (cardState.pendingUpdateTimer) {
+        clearTimeout(cardState.pendingUpdateTimer);
+      }
+      this.outTrackIdToChatId.delete(cardState.outTrackId);
+      this.cardSessions.delete(chatId);
+    }
+    this.senderNames.delete(chatId);
+  }
+
+  /**
+   * Handle card callback events (e.g., stop button click from AI card template).
+   * Cancels the active prompt and finalizes the card with accumulated text.
+   */
+  private onCardCallback(downstream: DWClientDownStream): void {
+    try {
+      const data = typeof downstream.data === 'string'
+        ? JSON.parse(downstream.data)
+        : downstream.data;
+
+      process.stderr.write(
+        `[DingTalk:${this.name}] Card callback received: ${JSON.stringify(data)}\n`,
+      );
+
+      const outTrackId = data.outTrackId as string | undefined;
+      if (!outTrackId) return;
+
+      const chatId = this.outTrackIdToChatId.get(outTrackId);
+      if (!chatId) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] Card stop: no chatId for outTrackId=${outTrackId} (card already finalized?)\n`,
+        );
+        return;
+      }
+
+      const cardState = this.cardSessions.get(chatId);
+      if (!cardState?.created) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] Card stop: no active card session for chatId=${chatId} (created=${cardState?.created}, creating=${cardState?.creating})\n`,
+        );
+        return;
+      }
+
+      process.stderr.write(
+        `[DingTalk:${this.name}] Card stop button clicked (outTrackId=${outTrackId})\n`,
+      );
+
+      // Mark as stopped immediately to block further chunk updates
+      cardState.stopped = true;
+      if (cardState.pendingUpdateTimer) {
+        clearTimeout(cardState.pendingUpdateTimer);
+        cardState.pendingUpdateTimer = undefined;
+      }
+
+      // Find the sessionId for this chatId via the router
+      const sessionId = this.findSessionForChat(chatId);
+
+      const handleStop = async () => {
+        // Cancel the active prompt (does not destroy the session)
+        if (sessionId) {
+          const cancelled = await this.cancelCurrentPrompt(sessionId);
+          process.stderr.write(
+            `[DingTalk:${this.name}] cancelCurrentPrompt(${sessionId}) => ${cancelled}\n`,
+          );
+        } else {
+          process.stderr.write(
+            `[DingTalk:${this.name}] No sessionId found for chatId=${chatId}\n`,
+          );
+        }
+
+        // Finalize the card with whatever text has been accumulated so far
+        process.stderr.write(
+          `[DingTalk:${this.name}] Finalizing card with ${cardState.accumulatedText.length} chars\n`,
+        );
+        try {
+          const ok = await this.streamingCard(outTrackId, cardState.accumulatedText, true);
+          process.stderr.write(
+            `[DingTalk:${this.name}] streamingCard finalize => ${ok}\n`,
+          );
+        } catch (err) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] streamingCard finalize error: ${err}\n`,
+          );
+        }
+
+        this.cleanupCard(chatId);
+        process.stderr.write(
+          `[DingTalk:${this.name}] Card stop completed\n`,
+        );
+      };
+
+      handleStop().catch((err) => {
+        process.stderr.write(
+          `[DingTalk:${this.name}] card stop error: ${err}\n`,
+        );
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Failed to parse card callback: ${err}\n`,
+      );
+    }
+  }
+
+  private findSessionForChat(chatId: string): string | undefined {
+    return this.chatIdToSessionId.get(chatId);
+  }
+
   private onMessage(downstream: DWClientDownStream): void {
     try {
       const data: DingTalkMessageData =
@@ -859,6 +1018,11 @@ export class DingtalkChannel extends ChannelBase {
       const quoted = this.extractQuotedContext(data);
 
       const chatId = conversationId || sessionWebhook;
+
+      // Remember sender name for response prefix
+      if (data.senderNick) {
+        this.senderNames.set(chatId, data.senderNick);
+      }
 
       // After stripping the bot @mention, cleanText may legitimately be empty
       // (user pinged the bot with no other text). Don't fall back to the
