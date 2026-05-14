@@ -137,4 +137,36 @@ describe('selfImproveCommand', () => {
     );
     expect((result as { content: string }).content).toContain('Cadence: 30m');
   });
+
+  it('does not print undefined for legacy primitive run refs', async () => {
+    await selfImproveCommand.action?.(context, 'start --every 30m');
+    const activeRaw = await fs.readFile(
+      path.join(tempDir, '.qwen', 'self-improve', 'active.json'),
+      'utf8',
+    );
+    const active = JSON.parse(activeRaw) as { activeLoopId: string };
+    const statePath = path.join(
+      tempDir,
+      '.qwen',
+      'self-improve',
+      'loops',
+      active.activeLoopId,
+      'state.json',
+    );
+    const state = JSON.parse(await fs.readFile(statePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    state['status'] = 'completed_one_run';
+    state['currentRun'] = 1;
+    state['lastRun'] = '2026-05-15T02:02:00Z';
+    await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    const result = await selfImproveCommand.action?.(context, 'status');
+    const content = (result as { content: string }).content;
+    expect(content).toContain('Status: completed_one_run');
+    expect(content).toContain('Current run: 1');
+    expect(content).toContain('Last run: 2026-05-15T02:02:00Z');
+    expect(content).not.toContain('undefined');
+  });
 });

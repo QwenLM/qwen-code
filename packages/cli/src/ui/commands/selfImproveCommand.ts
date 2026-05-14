@@ -160,6 +160,38 @@ function describeSources(state: SelfImproveLoopState): string {
   return enabled.length === 0 ? 'none configured' : enabled.join(', ');
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function formatRunRef(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+
+  if (isRecord(value)) {
+    const runId = value['runId'];
+    const status = value['status'];
+    const runDoc = value['runDoc'];
+    const parts: string[] = [];
+    if (typeof runId === 'string' && runId.trim()) {
+      parts.push(runId);
+    }
+    if (typeof status === 'string' && status.trim()) {
+      parts.push(`(${status})`);
+    }
+    if (typeof runDoc === 'string' && runDoc.trim()) {
+      parts.push(`- ${runDoc}`);
+    }
+    return parts.length > 0 ? parts.join(' ') : JSON.stringify(value);
+  }
+
+  if (typeof value === 'string' && value.trim()) return value;
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  return null;
+}
+
 function buildTickPrompt(state: SelfImproveLoopState): string {
   const loopDir = getSelfImproveLoopDir(state.repoRoot, state.loopId);
   return `You are running one tick of the built-in /self-improve loop.
@@ -189,6 +221,18 @@ Hard rules:
 8. Update ${path.join(loopDir, 'summary.md')} and one markdown file under ${path.join(loopDir, 'runs')} for every attempted run.
 9. Update ${path.join(loopDir, 'state.json')} as you progress, including currentRun, lastRun, stopRequested, and status.
 10. If stopRequested is true when you read the state, do not start a new run; mark the loop stopped if appropriate and stop.
+
+State file schema rules:
+- status must be one of: "running", "stopping", "stopped", or "stale".
+- Keep status as "running" after a successful tick if the loop should continue.
+- currentRun and lastRun must be objects when present:
+  {
+    "runId": "001-short-slug",
+    "status": "implementing | testing | success | failed | blocked | cancelled",
+    "worktreePath": "/absolute/path/to/worktree",
+    "runDoc": "/absolute/path/to/run.md"
+  }
+- Do not write primitive values such as numbers or timestamps to currentRun or lastRun.
 
 Task selection guidance:
 - If GitHub issues are enabled, use gh to inspect open issues and prefer clear, unclaimed, locally verifiable bugs or small enhancements.
@@ -324,14 +368,10 @@ async function statusSelfImprove(config: Config): Promise<MessageActionReturn> {
     `Prompt: ${state.prompt || '(none)'}`,
     `Cron job: ${job ? job.id : 'none'}`,
   ];
-  if (state.currentRun) {
-    lines.push(
-      `Current run: ${state.currentRun.runId} (${state.currentRun.status})`,
-    );
-  }
-  if (state.lastRun) {
-    lines.push(`Last run: ${state.lastRun.runId} (${state.lastRun.status})`);
-  }
+  const currentRun = formatRunRef(state.currentRun);
+  if (currentRun) lines.push(`Current run: ${currentRun}`);
+  const lastRun = formatRunRef(state.lastRun);
+  if (lastRun) lines.push(`Last run: ${lastRun}`);
   return message('info', lines.join('\n'));
 }
 
