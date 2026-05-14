@@ -11,10 +11,12 @@ import { fileURLToPath } from 'node:url';
  * Name of the directory under `dist/` that esbuild emits shared chunks into.
  *
  * Hardcoded here to match `esbuild.config.js`'s
- * `chunkNames: 'chunks/[name]-[hash]'` setting. Exported so the linkage is
- * visible at the build-config side too — `esbuild.config.js` imports this
- * constant and substitutes it into the `chunkNames` pattern, so renaming
- * here updates both sides in one commit.
+ * `chunkNames: 'chunks/[name]-[hash]'` setting. The two files each define
+ * their own copy (esbuild.config.js runs before any TS compile step and so
+ * cannot import this module), so renaming here requires renaming the
+ * `BUNDLE_CHUNK_DIR` constant in `esbuild.config.js` in the same commit.
+ * The comment block in `esbuild.config.js` cross-references this file as
+ * the authoritative definition for runtime callers.
  *
  * If you change this value, also re-check anything that filters or lists
  * `dist/` entries (e.g. `scripts/prepare-package.js`,

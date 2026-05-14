@@ -84,7 +84,23 @@ export function loadLowlight(): Promise<Lowlight> {
   if (lowlightLoad) return lowlightLoad;
   lowlightLoad = import('lowlight')
     .then((mod) => {
-      lowlightInstance = mod.createLowlight(mod.common) as Lowlight;
+      const instance = mod.createLowlight(mod.common) as Partial<Lowlight>;
+      // Validate the runtime shape before casting. Without this, an upstream
+      // API rename would silently coerce the mismatched object: the resulting
+      // TypeError in `highlightAndRenderLine` is swallowed by its catch and
+      // every code block falls back to plain text with no log breadcrumb. A
+      // throw here routes the failure through the cooldown latch above, so
+      // the degraded state surfaces in the debug channel exactly once.
+      if (
+        typeof instance?.registered !== 'function' ||
+        typeof instance?.highlight !== 'function' ||
+        typeof instance?.highlightAuto !== 'function'
+      ) {
+        throw new Error(
+          'lowlight instance does not match expected API (registered/highlight/highlightAuto)',
+        );
+      }
+      lowlightInstance = instance as Lowlight;
       lowlightLastFailureAt = 0;
       lowlightError = null;
       return lowlightInstance;

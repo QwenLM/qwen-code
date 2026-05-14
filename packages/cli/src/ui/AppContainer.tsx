@@ -421,11 +421,13 @@ export const AppContainer = (props: AppContainerProps) => {
   // already falls back to plain text on miss.
   useEffect(() => {
     void loadLowlight().catch((err) => {
-      // The loader latches its failure permanently (see `lowlightFailed` in
-      // `lowlightLoader.ts`), so this catch only fires once per session. Log
-      // to the debug channel so a degraded syntax-highlight state (corrupted
-      // install, missing chunk) leaves a breadcrumb without spamming the
-      // user's TTY — `CodeColorizer` already falls back to plain text.
+      // The loader caches rejection with a cooldown (see
+      // `LOWLIGHT_RETRY_COOLDOWN_MS` / `lowlightLastFailureAt` in
+      // `lowlightLoader.ts`). This useEffect runs once on mount, so this
+      // catch fires at most once per session regardless. Log to the debug
+      // channel so a degraded syntax-highlight state (corrupted install,
+      // missing chunk) leaves a breadcrumb without spamming the user's
+      // TTY — `CodeColorizer` already falls back to plain text.
       debugLogger.warn(
         `Failed to load lowlight chunk; code blocks will render as plain text: ${err instanceof Error ? err.message : String(err)}`,
       );
