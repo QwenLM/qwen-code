@@ -67,6 +67,13 @@ jobs:
       OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
     steps:
+      - name: 'Checkout base branch'
+        uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' # v4.2.2
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'
+          ref: 'main'
+          fetch-depth: 0
+
       - name: 'Resolve PR context'
         id: 'pr'
         env:
@@ -130,11 +137,13 @@ jobs:
           additional_instructions="$(printf '%s' "$additional_instructions" | head -c 2048)"
 
           # Build the review prompt for qwen-code-action.
+          # Pass the full PR URL so the skill can resolve owner/repo unambiguously.
+          review_target="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/pull/${pr_number}"
           if [ "$review_mode" = "comment" ]; then
-            review_prompt="/review $pr_number --comment"
+            review_prompt="/review $review_target --comment"
             should_comment="true"
           else
-            review_prompt="/review $pr_number"
+            review_prompt="/review $review_target"
             should_comment="false"
           fi
 
@@ -220,11 +229,17 @@ jobs:
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 'Load CI review rules'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        run: |-
+          cp .github/review-rules.md .qwen/review-rules.md
+
       - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
           steps.size.outputs.should_review == 'true'
-        uses: QwenLM/qwen-code-action@main
+        uses: 'QwenLM/qwen-code-action@main'
         with:
           openai_api_key: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           openai_base_url: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
