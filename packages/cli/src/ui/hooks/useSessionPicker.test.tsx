@@ -275,5 +275,4 @@ describe('useSessionPicker multi-select state', () => {
     expect(onConfirmMulti).toHaveBeenCalledWith(['s2']);
     expect(onSelect).not.toHaveBeenCalled();
   });
-
 });

@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode } from './config.js';
+import { Config, ApprovalMode, MCPServerConfig } from './config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
@@ -467,6 +467,69 @@ describe('Server Config (config.ts)', () => {
           (call) => call[0],
         ),
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+    });
+
+    it('skips inline MCP discovery by default (progressive availability)', async () => {
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+
+      // Default path passes `skipDiscovery: true` to createToolRegistry,
+      // so the synchronous tool-registry construction must NOT invoke
+      // discoverAllTools. MCP is started in the background instead.
+      expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_CODE_LEGACY_MCP_BLOCKING=1 by running MCP discovery inline', async () => {
+      const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
+      try {
+        const config = new Config({ ...baseParams, checkpointing: false });
+        await config.initialize();
+
+        // Legacy escape hatch must call back into the synchronous discover
+        // path the cli relied on prior to PR-A.
+        expect(ToolRegistry.prototype.discoverAllTools).toHaveBeenCalledTimes(
+          1,
+        );
+      } finally {
+        if (originalLegacy === undefined) {
+          delete process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+        } else {
+          process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = originalLegacy;
+        }
+      }
+    });
+
+    it('waitForMcpReady resolves immediately when no MCP discovery was started', async () => {
+      // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
+      // is called but the registry mock returns no manager, so the discovery
+      // promise stays undefined and waitForMcpReady is a no-op.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+      await expect(config.waitForMcpReady()).resolves.toBeUndefined();
+    });
+
+    it('getFailedMcpServerNames returns an empty array when no MCP servers are configured', () => {
+      // The helper underpins the non-interactive "Warning: MCP server(s)
+      // failed to start" emission. Must be a no-op when there's nothing
+      // to warn about, otherwise --prompt runs with no MCP config would
+      // emit a spurious warning every time.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('getFailedMcpServerNames skips disabled servers', () => {
+      // A user-disabled server is not "failed" — the user explicitly
+      // turned it off. Treating it as failed would generate noise on
+      // every non-interactive run. Disablement is tracked via
+      // `excludedMcpServers` (see `isMcpServerDisabled`).
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: { off: new MCPServerConfig() },
+        excludedMcpServers: ['off'],
+      } as ConfigParameters);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
     });
   });
 

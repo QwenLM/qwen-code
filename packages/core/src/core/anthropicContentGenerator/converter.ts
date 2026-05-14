@@ -807,7 +807,14 @@ export class AnthropicContentConverter {
    * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(messages: Anthropic.MessageParam[]): void {
-    // Find the last user message to add cache_control
+    // Find the last user message to add cache_control. The Anthropic docs
+    // (https://docs.claude.com/en/docs/build-with-claude/prompt-caching)
+    // explicitly list both `text` and `tool_result` blocks as cacheable in
+    // `messages.content`. In agentic loops the last user message after
+    // turn 1 is typically a tool_result-only message, so accepting both
+    // types keeps the per-turn breakpoint moving forward as the
+    // conversation grows (otherwise the cacheable region collapses back
+    // to system+tools and turn-over-turn history never gets cached).
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i];
       if (msg.role === 'user') {
@@ -817,19 +824,18 @@ export class AnthropicContentConverter {
 
         if (content.length > 0) {
           const lastContent = content[content.length - 1];
-          // Only add cache_control if the last block is a non-empty text block
-          if (
-            typeof lastContent === 'object' &&
-            'type' in lastContent &&
-            lastContent.type === 'text' &&
-            'text' in lastContent &&
-            lastContent.text
-          ) {
-            lastContent.cache_control = {
-              type: 'ephemeral',
-            };
+          if (typeof lastContent === 'object' && 'type' in lastContent) {
+            const type = lastContent.type;
+            // Empty text blocks cannot be cached (per Anthropic docs).
+            const isEmptyText =
+              type === 'text' &&
+              (!('text' in lastContent) || !lastContent.text);
+            if ((type === 'text' || type === 'tool_result') && !isEmptyText) {
+              lastContent.cache_control = {
+                type: 'ephemeral',
+              };
+            }
           }
-          // If last block is not text or is empty, don't add cache_control
           msg.content = content;
         }
         break;

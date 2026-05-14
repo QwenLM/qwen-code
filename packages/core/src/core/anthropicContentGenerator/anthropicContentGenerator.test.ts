@@ -1048,6 +1048,32 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContent', () => {
+    it('redacts proxy credentials from request-time SDK errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockRejectedValue(
+        new Error('connect ECONNREFUSED token@proxy.local:8080'),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await expect(
+        generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters),
+      ).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+    });
+
     it('builds request with config sampling params (config overrides request) and thinking budget', async () => {
       const { AnthropicContentConverter } = await importConverter();
       const { AnthropicContentGenerator } = await importGenerator();
@@ -2112,6 +2138,68 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContentStream', () => {
+    it('redacts proxy credentials from stream creation errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockRejectedValue(
+        new Error('407 via http://user:pass@proxy.local'),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await expect(
+        generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters),
+      ).rejects.toThrow('407 via http://<redacted>@proxy.local');
+    });
+
+    it('redacts proxy credentials from stream iteration errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        [Symbol.asyncIterator]: () => ({
+          next: vi
+            .fn()
+            .mockRejectedValue(
+              new Error('connect ECONNREFUSED token@proxy.local:8080'),
+            ),
+        }),
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      await expect(async () => {
+        for await (const _ of stream) {
+          // consume stream
+        }
+      }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+    });
+
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(

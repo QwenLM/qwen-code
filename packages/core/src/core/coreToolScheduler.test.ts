@@ -88,7 +88,9 @@ vi.mock('../telemetry/tracer.js', () => ({
         setAttribute: (key: string, value: string | number | boolean) => void;
         end: () => void;
       }) => Promise<unknown>,
+      options?: { autoOkOnSuccess?: boolean },
     ) => {
+      const autoOkOnSuccess = options?.autoOkOnSuccess ?? true;
       const record: ToolSpanRecord = {
         name,
         attributes,
@@ -119,7 +121,7 @@ vi.mock('../telemetry/tracer.js', () => ({
 
       try {
         const result = await fn(span);
-        if (!statusSet) {
+        if (autoOkOnSuccess && !statusSet) {
           record.statusCalls.push({ code: 1 });
         }
         return result;
@@ -3273,7 +3275,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
-  it('marks cancellation as UNSET with a failure kind and no auto-OK', async () => {
+  it('leaves cancellation spans with no explicit status (autoOkOnSuccess: false)', async () => {
     const abortController = new AbortController();
     const { spanRecord, completedCalls } = await runSingleTool({
       abortController,
@@ -3287,12 +3289,14 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     expect(completedCalls[0].status).toBe('cancelled');
-    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
+    // autoOkOnSuccess: false prevents withSpan from auto-setting OK;
+    // setToolSpanCancelled only sets the failure_kind attribute, not a status.
+    expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
     expect(spanRecord.ended).toBe(true);
   });
 
-  it('sets cancellation status when span attribute recording fails', async () => {
+  it('sets cancellation attribute even when span attribute recording fails', async () => {
     const abortController = new AbortController();
     const { spanRecord, completedCalls } = await runSingleTool({
       abortController,
@@ -3307,7 +3311,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     expect(completedCalls[0].status).toBe('cancelled');
-    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.UNSET }]);
+    // No status set — autoOkOnSuccess: false, and setToolSpanCancelled
+    // only sets the attribute (which fails here, caught internally).
+    expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
   });
@@ -3327,8 +3333,22 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     expect(completedCalls[0].status).toBe('cancelled');
+    // setToolSpanCancelled no longer calls setStatus, so throwSpanSetStatus
+    // only affects the safeSetStatus(span, OK) in the success path (not hit).
+    // With autoOkOnSuccess: false, withSpan does not attempt setStatus either.
     expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('cancelled');
+    expect(spanRecord.ended).toBe(true);
+  });
+
+  it('does not crash when safeSetStatus throws on the success path', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      throwSpanSetStatus: true,
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(spanRecord.statusCalls).toEqual([]);
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
   });
 
