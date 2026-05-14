@@ -18,6 +18,7 @@ import {
   writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
+import { randomUUID } from 'node:crypto';
 import dns from 'node:dns';
 import os from 'node:os';
 import { basename } from 'node:path';
@@ -780,7 +781,7 @@ export async function main() {
       settings,
     );
 
-    const prompt_id = Math.random().toString(16).slice(2);
+    const prompt_id = randomUUID();
 
     if (inputFormat === InputFormat.STREAM_JSON) {
       const trimmedInput = (input ?? '').trim();
