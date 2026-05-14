@@ -58,14 +58,22 @@ async function judgeGoalWithTimeout(
   args: Parameters<typeof judgeGoal>[1],
 ): Promise<Awaited<ReturnType<typeof judgeGoal>>> {
   let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  // Abort the underlying judge API call when our own timeout fires. The hook
+  // context signal in `args.signal` is never aborted by the timeout path, so
+  // without this `judgeGoal`'s `generateContent` keeps running in the
+  // background — leaking one request per timeout that accumulates across
+  // goal-loop iterations.
+  const judgeController = new AbortController();
+  const linkedSignal = AbortSignal.any([args.signal, judgeController.signal]);
   try {
     return await Promise.race([
-      judgeGoal(config, args),
+      judgeGoal(config, { ...args, signal: linkedSignal }),
       new Promise<Awaited<ReturnType<typeof judgeGoal>>>((resolve) => {
         timeoutId = setTimeout(() => {
           debugLogger.debug(
             `Goal judge exceeded ${GOAL_JUDGE_TIMEOUT_MS}ms; defaulting to not-met`,
           );
+          judgeController.abort();
           resolve({ ok: false, reason: GOAL_JUDGE_TIMEOUT_REASON });
         }, GOAL_JUDGE_TIMEOUT_MS);
       }),

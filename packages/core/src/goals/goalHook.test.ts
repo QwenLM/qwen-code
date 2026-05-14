@@ -104,6 +104,45 @@ describe('createGoalStopHookCallback', () => {
     expect(updated?.lastReason).toBe('still missing tests');
   });
 
+  it('aborts the underlying judge call when the judge timeout fires', async () => {
+    vi.useFakeTimers();
+    try {
+      setActiveGoal('sess-1', {
+        condition: 'do x',
+        iterations: 0,
+        setAt: 100,
+        tokensAtStart: 0,
+        hookId: 'h1',
+      });
+      let capturedSignal: AbortSignal | undefined;
+      judgeMock.mockImplementation(
+        (_config: unknown, args: { signal: AbortSignal }) =>
+          new Promise(() => {
+            capturedSignal = args.signal;
+          }),
+      );
+
+      const cb = createGoalStopHookCallback({
+        config: {} as Config,
+        sessionId: 'sess-1',
+        condition: 'do x',
+      });
+      const pending = cb(stopInput(), undefined);
+      await vi.advanceTimersByTimeAsync(GOAL_JUDGE_TIMEOUT_MS);
+      const out = await pending;
+
+      expect(capturedSignal?.aborted).toBe(true);
+      expect(out).toMatchObject({ decision: 'block' });
+      expect(
+        typeof out === 'object' && out !== null && 'reason' in out
+          ? out.reason
+          : undefined,
+      ).toMatch(/timed out/i);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('clears and stops the loop when MAX_GOAL_ITERATIONS is reached', async () => {
     setActiveGoal('sess-1', {
       condition: 'do x',
