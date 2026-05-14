@@ -204,7 +204,10 @@ export function createServeApp(
     //
     // `safeBody` returns an `Object.create(null)` map, so
     // `'cwd' in body` reflects exactly "did the client send the
-    // key?" without prototype-chain confusion.
+    // key?" without prototype-chain confusion. The presence-check
+    // is safe as long as `PROTOTYPE_POLLUTION_KEYS` doesn't grow to
+    // include `cwd` — see the cross-reference in the const's JSDoc
+    // for what to do if that invariant ever has to break.
     const hasCwd = 'cwd' in body;
     if (hasCwd && typeof body['cwd'] !== 'string') {
       res
@@ -745,18 +748,39 @@ export function createServeApp(
 }
 
 /**
+ * Keys stripped by `safeBody` to defend against prototype-pollution
+ * — see BZ9uv/va/vs/wD/Bd1zz. Routes downstream of `safeBody` spread
+ * the filtered result into objects passed to the bridge / ACP SDK;
+ * without this scrub a client could set
+ * `{"__proto__": {"polluted": true}}` and pollute
+ * `Object.prototype` via downstream spreads.
+ *
+ * **Cross-reference for route maintainers:** the POST `/session`
+ * route distinguishes "absent" from "present" via `'cwd' in body`
+ * against `safeBody`'s output. The semantics rely on this set NOT
+ * overlapping with user-payload keys. If you ever add a key here
+ * that a route's presence-check cares about (highly unlikely — this
+ * set is the JS prototype-attack triple, plus a route would have
+ * to deliberately name a property after one of these), the
+ * presence-check needs to move to the pre-`safeBody` `req.body`
+ * (with its own pollution guard) or `safeBody` needs to return a
+ * separate "raw-keys" set alongside the filtered object.
+ */
+const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
+
+/**
  * Coerce `req.body` into a safe `Record<string, unknown>` for route
  * handlers. Replaces the 5-site copy-pasted preamble
  * `typeof req.body === 'object' && req.body !== null ? ... : {}`
  * (Bd10m).
  *
- * Also strips prototype-pollution keys (`__proto__`, `constructor`,
- * `prototype`) before returning — see BZ9uv/va/vs/wD/Bd1zz. Routes
- * downstream of this helper spread the result into objects passed to
- * the bridge / ACP SDK; without this scrub, a client could set
- * `{"__proto__": {"polluted": true}}` and pollute `Object.prototype`.
- * Uses an `Object.create(null)` target so the returned object itself
- * has no prototype either, blocking second-order spread-into-default-
+ * Strips the `PROTOTYPE_POLLUTION_KEYS` set before returning. Uses an
+ * `Object.create(null)` target so the returned object itself has no
+ * prototype either, blocking second-order spread-into-default-
  * prototype attacks.
  */
 function safeBody(req: import('express').Request): Record<string, unknown> {
@@ -766,9 +790,7 @@ function safeBody(req: import('express').Request): Record<string, unknown> {
   }
   const out = Object.create(null) as Record<string, unknown>;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-      continue;
-    }
+    if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
     out[key] = value;
   }
   return out;

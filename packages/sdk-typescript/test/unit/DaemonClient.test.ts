@@ -11,6 +11,11 @@ import {
   abortTimeout,
   composeAbortSignals,
 } from '../../src/daemon/DaemonClient.js';
+import {
+  DaemonCapabilityMissingError,
+  requireWorkspaceCwd,
+} from '../../src/daemon/types.js';
+import type { DaemonCapabilities } from '../../src/daemon/types.js';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -671,6 +676,59 @@ describe('DaemonClient', () => {
       // Generous tolerance — just checking the timer fires.
       expect(elapsed).toBeGreaterThanOrEqual(30);
       expect(elapsed).toBeLessThan(2000);
+    });
+  });
+
+  describe('requireWorkspaceCwd', () => {
+    // Helper: build a `DaemonCapabilities`-shaped envelope without
+    // having to spell out the unrelated fields on every call.
+    const caps = (overrides: Partial<DaemonCapabilities>): DaemonCapabilities =>
+      ({
+        v: 1,
+        mode: 'http-bridge',
+        features: [],
+        modelServices: [],
+        ...overrides,
+      }) as DaemonCapabilities;
+
+    it('returns the workspaceCwd when populated', () => {
+      expect(requireWorkspaceCwd(caps({ workspaceCwd: '/work/bound' }))).toBe(
+        '/work/bound',
+      );
+    });
+
+    it('throws DaemonCapabilityMissingError when the field is undefined (pre-§02 daemon)', () => {
+      // Pre-§02 daemons emit v=1 envelopes without `workspaceCwd`.
+      // The helper exists so SDK consumers get an actionable error
+      // instead of a downstream `Cannot read properties of undefined`.
+      expect(() => requireWorkspaceCwd(caps({}))).toThrow(
+        DaemonCapabilityMissingError,
+      );
+      const err = (() => {
+        try {
+          requireWorkspaceCwd(caps({}));
+          return null;
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(DaemonCapabilityMissingError);
+      expect((err as DaemonCapabilityMissingError).capability).toBe(
+        'workspaceCwd',
+      );
+      expect((err as DaemonCapabilityMissingError).message).toMatch(
+        /predates the feature|workspaceCwd/,
+      );
+    });
+
+    it('treats empty-string as missing (defensive)', () => {
+      // A daemon that erroneously sends `workspaceCwd: ""` would
+      // otherwise satisfy `typeof === 'string'` while still being
+      // useless to consumers. Treat it like a missing field so the
+      // call site lands in the same error branch.
+      expect(() => requireWorkspaceCwd(caps({ workspaceCwd: '' }))).toThrow(
+        DaemonCapabilityMissingError,
+      );
     });
   });
 });
