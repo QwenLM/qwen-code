@@ -143,6 +143,7 @@ export default {
   'Restored {{count}} file(s).': "S'han restaurat {{count}} fitxer(s).",
   'Failed to restore files: {{error}}':
     'Error en restaurar els fitxers: {{error}}',
+  'Rewind failed: {{error}}': 'Error en retrocedir: {{error}}',
   'Failed to restore {{count}} file(s): {{files}}':
     'Error en restaurar {{count}} fitxer(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

@@ -124,6 +124,7 @@ export default {
   'Restoring...': '正在恢復...',
   'Restored {{count}} file(s).': '已恢復 {{count}} 個檔案。',
   'Failed to restore files: {{error}}': '恢復檔案失敗：{{error}}',
+  'Rewind failed: {{error}}': '回退失敗：{{error}}',
   'Failed to restore {{count}} file(s): {{files}}':
     '恢復 {{count}} 個檔案失敗：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

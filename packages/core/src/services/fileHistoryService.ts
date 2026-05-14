@@ -97,6 +97,26 @@ function resolveBackupPath(backupFileName: string, sessionId: string): string {
   );
 }
 
+// Copy `src` to `dst`, creating the destination directory if it doesn't exist.
+// Returns 'src-missing' if the source file is gone (e.g. deleted between an
+// earlier `stat` and this call) so callers can distinguish that from a real
+// I/O failure instead of treating every ENOENT as a missing target dir.
+async function safeCopyFile(
+  src: string,
+  dst: string,
+): Promise<'ok' | 'src-missing'> {
+  try {
+    await copyFile(src, dst);
+    return 'ok';
+  } catch (e: unknown) {
+    if (!isENOENT(e)) throw e;
+    if (!(await pathExists(src))) return 'src-missing';
+    await mkdir(dirname(dst), { recursive: true });
+    await copyFile(src, dst);
+    return 'ok';
+  }
+}
+
 async function createBackup(
   filePath: string | null,
   version: number,
@@ -119,12 +139,9 @@ async function createBackup(
     throw e;
   }
 
-  try {
-    await copyFile(filePath, backupPath);
-  } catch (e: unknown) {
-    if (!isENOENT(e)) throw e;
-    await mkdir(dirname(backupPath), { recursive: true });
-    await copyFile(filePath, backupPath);
+  const result = await safeCopyFile(filePath, backupPath);
+  if (result === 'src-missing') {
+    return { backupFileName: null, version, backupTime: new Date() };
   }
 
   await chmod(backupPath, srcStats.mode);
@@ -150,12 +167,12 @@ async function restoreBackup(
     throw e;
   }
 
-  try {
-    await copyFile(backupPath, filePath);
-  } catch (e: unknown) {
-    if (!isENOENT(e)) throw e;
-    await mkdir(dirname(filePath), { recursive: true });
-    await copyFile(backupPath, filePath);
+  const result = await safeCopyFile(backupPath, filePath);
+  if (result === 'src-missing') {
+    debugLogger.error(
+      `FileHistory: Backup file disappeared during restore: ${backupPath}`,
+    );
+    return false;
   }
 
   await chmod(filePath, backupStats.mode);

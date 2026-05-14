@@ -146,6 +146,7 @@ export default {
   'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
   'Failed to restore files: {{error}}':
     'Не удалось восстановить файлы: {{error}}',
+  'Rewind failed: {{error}}': 'Сбой отката: {{error}}',
   'Failed to restore {{count}} file(s): {{files}}':
     'Не удалось восстановить {{count}} файл(ов): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

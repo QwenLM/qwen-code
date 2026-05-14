@@ -2118,6 +2118,16 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
         }
+      } catch (error) {
+        historyManager.addItem(
+          {
+            type: 'error',
+            text: t('Rewind failed: {{error}}', {
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          },
+          Date.now(),
+        );
       } finally {
         setIsRewindSelectorOpen(false);
       }

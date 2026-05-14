@@ -122,6 +122,7 @@ export default {
   'Restored {{count}} file(s).': '{{count}} Datei(en) wiederhergestellt.',
   'Failed to restore files: {{error}}':
     'Fehler beim Wiederherstellen der Dateien: {{error}}',
+  'Rewind failed: {{error}}': 'Zurückspulen fehlgeschlagen: {{error}}',
   'Failed to restore {{count}} file(s): {{files}}':
     '{{count}} Datei(en) konnten nicht wiederhergestellt werden: {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
