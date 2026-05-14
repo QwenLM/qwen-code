@@ -634,49 +634,6 @@ describe('Settings Loading and Merging', () => {
       expect(getSettingsWarnings(settings)).toEqual([]);
     });
 
-    it('should warn when ide mode is enabled', () => {
-      (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
-      );
-      const userSettingsContent = {
-        ide: { enabled: true },
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      const warnings = getSettingsWarnings(settings);
-      expect(warnings).toEqual(
-        expect.arrayContaining([expect.stringMatching(/IDE mode.*rewind/i)]),
-      );
-    });
-
-    it('should not warn when ide mode is disabled', () => {
-      (mockFsExistsSync as Mock).mockImplementation(
-        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
-      );
-      const userSettingsContent = {
-        ide: { enabled: false },
-      };
-      (fs.readFileSync as Mock).mockImplementation(
-        (p: fs.PathOrFileDescriptor) => {
-          if (p === USER_SETTINGS_PATH)
-            return JSON.stringify(userSettingsContent);
-          return '{}';
-        },
-      );
-
-      const settings = loadSettings(MOCK_WORKSPACE_DIR);
-
-      expect(getSettingsWarnings(settings)).toEqual([]);
-    });
-
     it('should rewrite allowedTools to tools.allowed during migration', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,

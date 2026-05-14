@@ -359,12 +359,6 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(warning);
   }
 
-  if (loadedSettings.merged.ide?.enabled) {
-    warningSet.add(
-      'IDE mode is enabled — /rewind is disabled (file edits cannot be reliably rolled back).',
-    );
-  }
-
   return [...warningSet];
 }
 
