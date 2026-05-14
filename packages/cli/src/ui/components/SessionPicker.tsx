@@ -88,7 +88,10 @@ function SessionListItemView({
   boldSelectedPrefix = true,
 }: SessionListItemViewProps): React.JSX.Element {
   const timeAgo = formatRelativeTime(session.mtime);
-  const messageText = formatMessageCount(session.messageCount);
+  const messageText =
+    typeof session.messageCount === 'number'
+      ? formatMessageCount(session.messageCount)
+      : '';
 
   const showUpIndicator = isFirst && showScrollUp;
   const showDownIndicator = isLast && showScrollDown;

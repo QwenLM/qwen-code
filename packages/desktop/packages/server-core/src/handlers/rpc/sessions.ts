@@ -444,6 +444,51 @@ export function registerSessionsHandlers(
             command.ruleType,
             command.rules,
           );
+        case 'getQwenCoreSettings':
+          return sessionManager.getSessionQwenCoreSettings(sessionId);
+        case 'setQwenCoreSetting':
+          return sessionManager.setSessionQwenCoreSetting(
+            sessionId,
+            command.scope,
+            command.key,
+            command.value,
+          );
+        case 'setQwenMcpServer':
+          return sessionManager.setSessionQwenMcpServer(
+            sessionId,
+            command.scope,
+            command.name,
+            command.server,
+          );
+        case 'removeQwenMcpServer':
+          return sessionManager.removeSessionQwenMcpServer(
+            sessionId,
+            command.scope,
+            command.name,
+          );
+        case 'setQwenHook':
+          return sessionManager.setSessionQwenHook(
+            sessionId,
+            command.scope,
+            command.event,
+            command.index,
+            command.hook,
+          );
+        case 'removeQwenHook':
+          return sessionManager.removeSessionQwenHook(
+            sessionId,
+            command.scope,
+            command.event,
+            command.index,
+          );
+        case 'setQwenExtensionSetting':
+          return sessionManager.setSessionQwenExtensionSetting(
+            sessionId,
+            command.extensionId,
+            command.settingKey,
+            command.scope,
+            command.value,
+          );
         case 'refreshAvailableCommands':
           log.info(
             `IPC: refreshAvailableCommands received for session ${sessionId}`,

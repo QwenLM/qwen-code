@@ -12,6 +12,7 @@ import {
   createDebugLogger,
   getAllGeminiMdFilenames,
   getAutoMemoryRoot,
+  getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCPServerConfig,
@@ -22,6 +23,9 @@ import {
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
+  ExtensionManager,
+  ExtensionSettingScope,
+  updateSetting,
   SessionStartSource,
   SessionEndReason,
   type PermissionMode,
@@ -78,6 +82,7 @@ import { Session } from './session/Session.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import { isWorkspaceTrusted } from '../config/trustedFolders.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -151,6 +156,139 @@ type QwenMemoryPaths = {
   autoMemoryDir: string;
 };
 
+type QwenSettingsScope = 'user' | 'workspace';
+type QwenSettingValue = string | number | boolean | string[] | undefined;
+type QwenMcpTransport = 'stdio' | 'http' | 'sse';
+type QwenHookEvent =
+  | 'UserPromptSubmit'
+  | 'Stop'
+  | 'Notification'
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'PostToolUseFailure'
+  | 'SessionStart'
+  | 'SessionEnd'
+  | 'PreCompact'
+  | 'SubagentStart'
+  | 'SubagentStop'
+  | 'PermissionRequest';
+
+type QwenCoreSettingKey =
+  | 'model.name'
+  | 'fastModel'
+  | 'general.outputLanguage'
+  | 'general.language'
+  | 'tools.approvalMode'
+  | 'general.vimMode'
+  | 'general.enableAutoUpdate'
+  | 'general.showSessionRecap'
+  | 'general.sessionRecapAwayThresholdMinutes'
+  | 'general.terminalBell'
+  | 'general.gitCoAuthor.commit'
+  | 'general.gitCoAuthor.pr'
+  | 'general.defaultFileEncoding'
+  | 'context.fileFiltering.respectGitIgnore'
+  | 'context.fileFiltering.respectQwenIgnore'
+  | 'context.fileFiltering.enableFuzzySearch'
+  | 'memory.enableManagedAutoMemory'
+  | 'memory.enableManagedAutoDream'
+  | 'memory.enableAutoSkill'
+  | 'disableAllHooks';
+
+type QwenMcpServerConfig = {
+  transport: QwenMcpTransport;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  httpUrl?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  timeout?: number;
+  trust?: boolean;
+  description?: string;
+  includeTools?: string[];
+  excludeTools?: string[];
+  extensionName?: string;
+};
+
+type QwenHookConfig = {
+  type: 'command' | 'http';
+  command?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  allowedEnvVars?: string[];
+  name?: string;
+  description?: string;
+  timeout?: number;
+  env?: Record<string, string>;
+  async?: boolean;
+  once?: boolean;
+  statusMessage?: string;
+  shell?: 'bash' | 'powershell';
+};
+
+type QwenHookDefinition = {
+  matcher?: string;
+  sequential?: boolean;
+  hooks: QwenHookConfig[];
+};
+
+const QWEN_CORE_SETTING_DEFINITIONS = {
+  'model.name': { type: 'string' },
+  fastModel: { type: 'string' },
+  'general.outputLanguage': { type: 'string' },
+  'general.language': { type: 'string' },
+  'tools.approvalMode': {
+    type: 'enum',
+    values: ['plan', 'default', 'auto-edit', 'yolo'],
+  },
+  'general.vimMode': { type: 'boolean' },
+  'general.enableAutoUpdate': { type: 'boolean' },
+  'general.showSessionRecap': { type: 'boolean' },
+  'general.sessionRecapAwayThresholdMinutes': { type: 'number', min: 1 },
+  'general.terminalBell': { type: 'boolean' },
+  'general.gitCoAuthor.commit': { type: 'boolean' },
+  'general.gitCoAuthor.pr': { type: 'boolean' },
+  'general.defaultFileEncoding': {
+    type: 'enum',
+    values: ['utf-8', 'utf-8-bom'],
+  },
+  'context.fileFiltering.respectGitIgnore': { type: 'boolean' },
+  'context.fileFiltering.respectQwenIgnore': { type: 'boolean' },
+  'context.fileFiltering.enableFuzzySearch': { type: 'boolean' },
+  'memory.enableManagedAutoMemory': { type: 'boolean' },
+  'memory.enableManagedAutoDream': { type: 'boolean' },
+  'memory.enableAutoSkill': { type: 'boolean' },
+  disableAllHooks: { type: 'boolean' },
+} as const satisfies Record<
+  QwenCoreSettingKey,
+  {
+    type: 'string' | 'number' | 'boolean' | 'enum';
+    min?: number;
+    values?: readonly string[];
+  }
+>;
+
+const QWEN_CORE_SETTING_KEYS = Object.keys(
+  QWEN_CORE_SETTING_DEFINITIONS,
+) as QwenCoreSettingKey[];
+
+const QWEN_HOOK_EVENTS: QwenHookEvent[] = [
+  'UserPromptSubmit',
+  'Stop',
+  'Notification',
+  'PreToolUse',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'SessionStart',
+  'SessionEnd',
+  'PreCompact',
+  'SubagentStart',
+  'SubagentStop',
+  'PermissionRequest',
+];
+
 const DEFAULT_QWEN_MEMORY_SETTINGS: QwenMemorySettings = {
   enableManagedAutoMemory: true,
   enableManagedAutoDream: false,
@@ -189,6 +327,419 @@ function toRecord(value: unknown): Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function getNestedSettingValue(
+  source: Record<string, unknown>,
+  key: QwenCoreSettingKey,
+): QwenSettingValue {
+  let current: unknown = source;
+  for (const segment of key.split('.')) {
+    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  if (
+    typeof current === 'string' ||
+    typeof current === 'number' ||
+    typeof current === 'boolean' ||
+    Array.isArray(current)
+  ) {
+    return current as QwenSettingValue;
+  }
+  return undefined;
+}
+
+function readCoreSettingValues(
+  source: Record<string, unknown>,
+): Partial<Record<QwenCoreSettingKey, QwenSettingValue>> {
+  const values: Partial<Record<QwenCoreSettingKey, QwenSettingValue>> = {};
+  for (const key of QWEN_CORE_SETTING_KEYS) {
+    const value = getNestedSettingValue(source, key);
+    if (value !== undefined) {
+      values[key] = value;
+    }
+  }
+  return values;
+}
+
+function normalizeCoreSettingValue(
+  key: QwenCoreSettingKey,
+  value: unknown,
+): QwenSettingValue {
+  const definition = QWEN_CORE_SETTING_DEFINITIONS[key];
+  switch (definition.type) {
+    case 'boolean':
+      if (typeof value !== 'boolean') {
+        throw RequestError.invalidParams(undefined, `${key} must be a boolean`);
+      }
+      return value;
+    case 'number':
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw RequestError.invalidParams(undefined, `${key} must be a number`);
+      }
+      if (definition.min !== undefined && value < definition.min) {
+        throw RequestError.invalidParams(
+          undefined,
+          `${key} must be at least ${definition.min}`,
+        );
+      }
+      return value;
+    case 'enum': {
+      const values = definition.values as readonly string[] | undefined;
+      if (typeof value !== 'string' || !values?.includes(value)) {
+        throw RequestError.invalidParams(
+          undefined,
+          `${key} must be one of ${values?.join(', ')}`,
+        );
+      }
+      return value;
+    }
+    case 'string':
+      if (value === undefined) return undefined;
+      if (typeof value !== 'string') {
+        throw RequestError.invalidParams(undefined, `${key} must be a string`);
+      }
+      return value.trim();
+    default:
+      throw RequestError.invalidParams(
+        undefined,
+        `${key} has an unsupported setting type`,
+      );
+  }
+}
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw RequestError.invalidParams(undefined, 'Expected an array of strings');
+  }
+  return value
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean);
+}
+
+function normalizeStringRecord(
+  value: unknown,
+): Record<string, string> | undefined {
+  if (value === undefined) return undefined;
+  const record = toRecord(value);
+  const result: Record<string, string> = {};
+  for (const [key, item] of Object.entries(record)) {
+    if (typeof item === 'string' && key.trim()) {
+      result[key.trim()] = item;
+    }
+  }
+  return result;
+}
+
+function normalizeOptionalNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const numberValue =
+    typeof value === 'number' ? value : Number.parseInt(String(value), 10);
+  if (!Number.isFinite(numberValue) || numberValue < 0) {
+    throw RequestError.invalidParams(undefined, 'Expected a positive number');
+  }
+  return numberValue;
+}
+
+function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
+  const input = toRecord(value);
+  const transport = input['transport'];
+  if (transport !== 'stdio' && transport !== 'http' && transport !== 'sse') {
+    throw RequestError.invalidParams(
+      undefined,
+      'MCP transport must be stdio, http, or sse',
+    );
+  }
+
+  const server: QwenMcpServerConfig = { transport };
+  const description = input['description'];
+  if (typeof description === 'string' && description.trim()) {
+    server.description = description.trim();
+  }
+  const cwd = input['cwd'];
+  if (typeof cwd === 'string' && cwd.trim()) server.cwd = cwd.trim();
+  const timeout = normalizeOptionalNumber(input['timeout']);
+  if (timeout !== undefined) server.timeout = timeout;
+  if (typeof input['trust'] === 'boolean') server.trust = input['trust'];
+  server.includeTools = normalizeStringArray(input['includeTools']);
+  server.excludeTools = normalizeStringArray(input['excludeTools']);
+
+  if (transport === 'stdio') {
+    const command = input['command'];
+    if (typeof command !== 'string' || !command.trim()) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Stdio MCP servers require a command',
+      );
+    }
+    server.command = command.trim();
+    server.args = normalizeStringArray(input['args']);
+    server.env = normalizeStringRecord(input['env']);
+    return server;
+  }
+
+  const urlKey = transport === 'http' ? 'httpUrl' : 'url';
+  const url = input[urlKey];
+  if (typeof url !== 'string' || !url.trim()) {
+    throw RequestError.invalidParams(
+      undefined,
+      `${transport.toUpperCase()} MCP servers require a URL`,
+    );
+  }
+  if (transport === 'http') server.httpUrl = url.trim();
+  else server.url = url.trim();
+  server.headers = normalizeStringRecord(input['headers']);
+  return server;
+}
+
+function toStoredMcpServerConfig(
+  server: QwenMcpServerConfig,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key of [
+    'timeout',
+    'trust',
+    'description',
+    'includeTools',
+    'excludeTools',
+  ] as const) {
+    if (server[key] !== undefined) result[key] = server[key];
+  }
+  if (server.transport === 'stdio') {
+    result['command'] = server.command;
+    if (server.args !== undefined) result['args'] = server.args;
+    if (server.cwd !== undefined) result['cwd'] = server.cwd;
+    if (server.env !== undefined) result['env'] = server.env;
+  } else if (server.transport === 'http') {
+    result['httpUrl'] = server.httpUrl;
+    if (server.headers !== undefined) result['headers'] = server.headers;
+  } else {
+    result['url'] = server.url;
+    if (server.headers !== undefined) result['headers'] = server.headers;
+  }
+  return result;
+}
+
+function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
+  const server = toRecord(value);
+  if (typeof server['httpUrl'] === 'string') {
+    return {
+      transport: 'http',
+      httpUrl: server['httpUrl'],
+      headers: normalizeStringRecord(server['headers']),
+      timeout: normalizeOptionalNumber(server['timeout']),
+      trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
+      description:
+        typeof server['description'] === 'string'
+          ? server['description']
+          : undefined,
+      includeTools: normalizeStringArray(server['includeTools']),
+      excludeTools: normalizeStringArray(server['excludeTools']),
+      extensionName:
+        typeof server['extensionName'] === 'string'
+          ? server['extensionName']
+          : undefined,
+    };
+  }
+  if (typeof server['url'] === 'string') {
+    return {
+      transport: 'sse',
+      url: server['url'],
+      headers: normalizeStringRecord(server['headers']),
+      timeout: normalizeOptionalNumber(server['timeout']),
+      trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
+      description:
+        typeof server['description'] === 'string'
+          ? server['description']
+          : undefined,
+      includeTools: normalizeStringArray(server['includeTools']),
+      excludeTools: normalizeStringArray(server['excludeTools']),
+      extensionName:
+        typeof server['extensionName'] === 'string'
+          ? server['extensionName']
+          : undefined,
+    };
+  }
+  if (typeof server['command'] === 'string') {
+    return {
+      transport: 'stdio',
+      command: server['command'],
+      args: normalizeStringArray(server['args']),
+      cwd: typeof server['cwd'] === 'string' ? server['cwd'] : undefined,
+      env: normalizeStringRecord(server['env']),
+      timeout: normalizeOptionalNumber(server['timeout']),
+      trust: typeof server['trust'] === 'boolean' ? server['trust'] : undefined,
+      description:
+        typeof server['description'] === 'string'
+          ? server['description']
+          : undefined,
+      includeTools: normalizeStringArray(server['includeTools']),
+      excludeTools: normalizeStringArray(server['excludeTools']),
+      extensionName:
+        typeof server['extensionName'] === 'string'
+          ? server['extensionName']
+          : undefined,
+    };
+  }
+  return undefined;
+}
+
+function readMcpServers(
+  source: Record<string, unknown>,
+  scope: QwenSettingsScope | 'extension',
+): Array<{
+  name: string;
+  scope: QwenSettingsScope | 'extension';
+  server: QwenMcpServerConfig;
+}> {
+  const servers = toRecord(source['mcpServers']);
+  return Object.entries(servers)
+    .map(([name, value]) => {
+      const server = toMcpServerConfig(value);
+      return server ? { name, scope, server } : undefined;
+    })
+    .filter(
+      (
+        entry,
+      ): entry is {
+        name: string;
+        scope: QwenSettingsScope | 'extension';
+        server: QwenMcpServerConfig;
+      } => !!entry,
+    );
+}
+
+function isHookEvent(value: unknown): value is QwenHookEvent {
+  return (
+    typeof value === 'string' &&
+    QWEN_HOOK_EVENTS.includes(value as QwenHookEvent)
+  );
+}
+
+function normalizeHookConfig(value: unknown): QwenHookConfig {
+  const input = toRecord(value);
+  const type = input['type'];
+  if (type !== 'command' && type !== 'http') {
+    throw RequestError.invalidParams(
+      undefined,
+      'Hook type must be command or http',
+    );
+  }
+  const config: QwenHookConfig = { type };
+  if (type === 'command') {
+    const command = input['command'];
+    if (typeof command !== 'string' || !command.trim()) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Command hooks require a command',
+      );
+    }
+    config.command = command.trim();
+    config.env = normalizeStringRecord(input['env']);
+    if (typeof input['async'] === 'boolean') config.async = input['async'];
+    const shell = input['shell'];
+    if (shell === 'bash' || shell === 'powershell') config.shell = shell;
+  } else {
+    const url = input['url'];
+    if (typeof url !== 'string' || !url.trim()) {
+      throw RequestError.invalidParams(undefined, 'HTTP hooks require a URL');
+    }
+    config.url = url.trim();
+    config.headers = normalizeStringRecord(input['headers']);
+    config.allowedEnvVars = normalizeStringArray(input['allowedEnvVars']);
+    if (typeof input['once'] === 'boolean') config.once = input['once'];
+  }
+  const timeout = normalizeOptionalNumber(input['timeout']);
+  if (timeout !== undefined) config.timeout = timeout;
+  for (const key of ['name', 'description', 'statusMessage'] as const) {
+    const item = input[key];
+    if (typeof item === 'string' && item.trim()) {
+      config[key] = item.trim();
+    }
+  }
+  return config;
+}
+
+function normalizeHookDefinition(value: unknown): QwenHookDefinition {
+  const input = toRecord(value);
+  const hooks = input['hooks'];
+  if (!Array.isArray(hooks) || hooks.length === 0) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Hook definition requires at least one hook',
+    );
+  }
+  const definition: QwenHookDefinition = {
+    hooks: hooks.map(normalizeHookConfig),
+  };
+  if (typeof input['matcher'] === 'string') {
+    definition.matcher = input['matcher'];
+  }
+  if (typeof input['sequential'] === 'boolean') {
+    definition.sequential = input['sequential'];
+  }
+  return definition;
+}
+
+function readHooks(
+  source: Record<string, unknown>,
+  scope: QwenSettingsScope | 'extension',
+  extensionName?: string,
+): Array<{
+  event: QwenHookEvent;
+  scope: QwenSettingsScope | 'extension';
+  index: number;
+  hook: QwenHookDefinition;
+  extensionName?: string;
+}> {
+  const hooksRoot = toRecord(source['hooks']);
+  const entries: Array<{
+    event: QwenHookEvent;
+    scope: QwenSettingsScope | 'extension';
+    index: number;
+    hook: QwenHookDefinition;
+    extensionName?: string;
+  }> = [];
+  for (const event of QWEN_HOOK_EVENTS) {
+    const eventHooks = hooksRoot[event];
+    if (!Array.isArray(eventHooks)) continue;
+    eventHooks.forEach((hookValue, index) => {
+      try {
+        entries.push({
+          event,
+          scope,
+          index,
+          hook: normalizeHookDefinition(hookValue),
+          extensionName,
+        });
+      } catch {
+        // Ignore malformed hook entries in the settings UI snapshot.
+      }
+    });
+  }
+  return entries;
+}
+
+function toSettingsScope(scope: unknown): SettingScope {
+  if (scope === 'workspace') return SettingScope.Workspace;
+  if (scope === 'user') return SettingScope.User;
+  throw RequestError.invalidParams(
+    undefined,
+    'scope must be user or workspace',
+  );
+}
+
+function readScopeSettings(
+  settings: LoadedSettings,
+  scope: QwenSettingsScope,
+): Record<string, unknown> {
+  return settings.forScope(toSettingsScope(scope)).settings as Record<
+    string,
+    unknown
+  >;
 }
 
 async function resolvePreferredMemoryFile(
@@ -638,6 +1189,115 @@ class QwenAgent implements Agent {
     };
   }
 
+  private async buildCoreSettings(
+    settings: LoadedSettings,
+    cwd: string,
+  ): Promise<Record<string, unknown>> {
+    const userSettings = settings.user.settings as Record<string, unknown>;
+    const workspaceSettings = settings.workspace.settings as Record<
+      string,
+      unknown
+    >;
+    const mergedSettings = settings.merged as Record<string, unknown>;
+
+    const extensionManager = new ExtensionManager({
+      workspaceDir: cwd,
+      isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+    });
+    await extensionManager.refreshCache();
+    const extensions = extensionManager.getLoadedExtensions();
+
+    const extensionEntries = await Promise.all(
+      extensions.map(async (extension) => {
+        const userEnv = await getScopedEnvContents(
+          extension.config,
+          extension.id,
+          ExtensionSettingScope.USER,
+        );
+        const workspaceEnv = await getScopedEnvContents(
+          extension.config,
+          extension.id,
+          ExtensionSettingScope.WORKSPACE,
+        );
+        const settingDefs = extension.settings ?? [];
+        return {
+          id: extension.id,
+          name: extension.name,
+          version: extension.version,
+          isActive: extension.isActive,
+          path: extension.path,
+          commands: extension.commands ?? [],
+          skills: (extension.skills ?? []).map((skill) => skill.name),
+          mcpServers: Object.keys(extension.config.mcpServers ?? {}),
+          settings: settingDefs.map((setting) => {
+            const userValue = userEnv[setting.envVar];
+            const workspaceValue = workspaceEnv[setting.envVar];
+            const hasWorkspaceValue = workspaceValue !== undefined;
+            const hasUserValue = userValue !== undefined;
+            const effectiveValue = hasWorkspaceValue
+              ? workspaceValue
+              : userValue;
+            const effectiveScope = hasWorkspaceValue
+              ? 'workspace'
+              : hasUserValue
+                ? 'user'
+                : undefined;
+            return {
+              name: setting.name,
+              description: setting.description,
+              envVar: setting.envVar,
+              sensitive: !!setting.sensitive,
+              userValue: setting.sensitive ? undefined : userValue,
+              workspaceValue: setting.sensitive ? undefined : workspaceValue,
+              effectiveValue: setting.sensitive ? undefined : effectiveValue,
+              effectiveScope,
+              hasUserValue,
+              hasWorkspaceValue,
+            };
+          }),
+        };
+      }),
+    );
+
+    const extensionMcpServers = extensions.flatMap((extension) =>
+      readMcpServers(
+        { mcpServers: extension.config.mcpServers ?? {} },
+        'extension',
+      ).map((entry) => ({
+        ...entry,
+        server: { ...entry.server, extensionName: extension.name },
+      })),
+    );
+    const extensionHooks = extensions.flatMap((extension) =>
+      readHooks({ hooks: extension.hooks ?? {} }, 'extension', extension.name),
+    );
+
+    return {
+      user: {
+        path: settings.user.path,
+        values: readCoreSettingValues(userSettings),
+        mcpServers: readMcpServers(userSettings, 'user'),
+        hooks: readHooks(userSettings, 'user'),
+      },
+      workspace: {
+        path: settings.workspace.path,
+        values: readCoreSettingValues(workspaceSettings),
+        mcpServers: readMcpServers(workspaceSettings, 'workspace'),
+        hooks: readHooks(workspaceSettings, 'workspace'),
+      },
+      merged: {
+        values: readCoreSettingValues(mergedSettings),
+        mcpServers: [
+          ...readMcpServers(mergedSettings, 'workspace'),
+          ...extensionMcpServers,
+        ],
+        hooks: [...readHooks(mergedSettings, 'workspace'), ...extensionHooks],
+      },
+      extensions: extensionEntries,
+      isTrusted: settings.isTrusted,
+    };
+  }
+
   private syncLivePermissionManagers(
     before: PermissionRuleSet,
     after: PermissionRuleSet,
@@ -831,6 +1491,161 @@ class QwenAgent implements Agent {
           baseUrl: cfg?.baseUrl ?? null,
           apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
         };
+      }
+      case 'qwen/settings/getCore': {
+        const settings = loadSettings(cwd);
+        this.settings = settings;
+        return this.buildCoreSettings(settings, cwd);
+      }
+      case 'qwen/settings/setCoreValue': {
+        const key = params['key'];
+        if (
+          typeof key !== 'string' ||
+          !QWEN_CORE_SETTING_KEYS.includes(key as QwenCoreSettingKey)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Unsupported Qwen setting key',
+          );
+        }
+        const settings = loadSettings(cwd);
+        settings.setValue(
+          toSettingsScope(params['scope']),
+          key,
+          normalizeCoreSettingValue(key as QwenCoreSettingKey, params['value']),
+        );
+        const updated = loadSettings(cwd);
+        this.settings = updated;
+        return this.buildCoreSettings(updated, cwd);
+      }
+      case 'qwen/settings/setMcpServer': {
+        const name = params['name'];
+        if (typeof name !== 'string' || !name.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'MCP server name is required',
+          );
+        }
+        const settings = loadSettings(cwd);
+        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const existing = readScopeSettings(settings, scope);
+        const mcpServers = {
+          ...toRecord(existing['mcpServers']),
+          [name.trim()]: toStoredMcpServerConfig(
+            normalizeMcpServerConfig(params['server']),
+          ),
+        };
+        settings.setValue(toSettingsScope(scope), 'mcpServers', mcpServers);
+        const updated = loadSettings(cwd);
+        this.settings = updated;
+        return this.buildCoreSettings(updated, cwd);
+      }
+      case 'qwen/settings/removeMcpServer': {
+        const name = params['name'];
+        if (typeof name !== 'string' || !name.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'MCP server name is required',
+          );
+        }
+        const settings = loadSettings(cwd);
+        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const existing = readScopeSettings(settings, scope);
+        const mcpServers = { ...toRecord(existing['mcpServers']) };
+        delete mcpServers[name.trim()];
+        settings.setValue(toSettingsScope(scope), 'mcpServers', mcpServers);
+        const updated = loadSettings(cwd);
+        this.settings = updated;
+        return this.buildCoreSettings(updated, cwd);
+      }
+      case 'qwen/settings/setHook': {
+        const event = params['event'];
+        if (!isHookEvent(event)) {
+          throw RequestError.invalidParams(undefined, 'Invalid hook event');
+        }
+        const settings = loadSettings(cwd);
+        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const existing = readScopeSettings(settings, scope);
+        const hooksRoot = { ...toRecord(existing['hooks']) };
+        const eventHooks = Array.isArray(hooksRoot[event])
+          ? [...(hooksRoot[event] as unknown[])]
+          : [];
+        const hook = normalizeHookDefinition(params['hook']);
+        const index = params['index'];
+        if (typeof index === 'number' && index >= 0) {
+          eventHooks[index] = hook;
+        } else {
+          eventHooks.push(hook);
+        }
+        hooksRoot[event] = eventHooks;
+        settings.setValue(toSettingsScope(scope), 'hooks', hooksRoot);
+        const updated = loadSettings(cwd);
+        this.settings = updated;
+        return this.buildCoreSettings(updated, cwd);
+      }
+      case 'qwen/settings/removeHook': {
+        const event = params['event'];
+        if (!isHookEvent(event)) {
+          throw RequestError.invalidParams(undefined, 'Invalid hook event');
+        }
+        const index = params['index'];
+        if (typeof index !== 'number' || index < 0) {
+          throw RequestError.invalidParams(undefined, 'Invalid hook index');
+        }
+        const settings = loadSettings(cwd);
+        const scope = params['scope'] === 'workspace' ? 'workspace' : 'user';
+        const existing = readScopeSettings(settings, scope);
+        const hooksRoot = { ...toRecord(existing['hooks']) };
+        const eventHooks = Array.isArray(hooksRoot[event])
+          ? [...(hooksRoot[event] as unknown[])]
+          : [];
+        eventHooks.splice(index, 1);
+        hooksRoot[event] = eventHooks;
+        settings.setValue(toSettingsScope(scope), 'hooks', hooksRoot);
+        const updated = loadSettings(cwd);
+        this.settings = updated;
+        return this.buildCoreSettings(updated, cwd);
+      }
+      case 'qwen/settings/setExtensionSetting': {
+        const extensionId = params['extensionId'];
+        const settingKey = params['settingKey'];
+        const value = params['value'];
+        if (typeof extensionId !== 'string' || !extensionId) {
+          throw RequestError.invalidParams(
+            undefined,
+            'extensionId is required',
+          );
+        }
+        if (typeof settingKey !== 'string' || !settingKey) {
+          throw RequestError.invalidParams(undefined, 'settingKey is required');
+        }
+        if (typeof value !== 'string') {
+          throw RequestError.invalidParams(undefined, 'value must be a string');
+        }
+        const settings = loadSettings(cwd);
+        const extensionManager = new ExtensionManager({
+          workspaceDir: cwd,
+          isWorkspaceTrusted: !!isWorkspaceTrusted(settings.merged),
+        });
+        await extensionManager.refreshCache();
+        const extension = extensionManager
+          .getLoadedExtensions()
+          .find((item) => item.id === extensionId || item.name === extensionId);
+        if (!extension) {
+          throw RequestError.invalidParams(undefined, 'Extension not found');
+        }
+        await updateSetting(
+          extension.config,
+          extension.id,
+          settingKey,
+          async () => value,
+          params['scope'] === 'workspace'
+            ? ExtensionSettingScope.WORKSPACE
+            : ExtensionSettingScope.USER,
+        );
+        const updated = loadSettings(cwd);
+        this.settings = updated;
+        return this.buildCoreSettings(updated, cwd);
       }
       case 'qwen/permissions/getSettings': {
         const settings = this.loadPermissionSettings(cwd);

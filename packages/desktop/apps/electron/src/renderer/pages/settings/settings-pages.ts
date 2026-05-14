@@ -11,44 +11,55 @@
  * 4. Add icon to SETTINGS_ICONS in components/icons/SettingsIcons.tsx
  */
 
-import type { ComponentType } from 'react'
-import type { SettingsSubpage } from '../../../shared/settings-registry'
+import type { ComponentType } from 'react';
+import type { SettingsSubpage } from '../../../shared/settings-registry';
 
-import AppSettingsPage from './AppSettingsPage'
-import AiSettingsPage from './AiSettingsPage'
-import MemorySettingsPage from './MemorySettingsPage'
-import AppearanceSettingsPage from './AppearanceSettingsPage'
-import InputSettingsPage from './InputSettingsPage'
-import WorkspaceSettingsPage from './WorkspaceSettingsPage'
-import PermissionsSettingsPage from './PermissionsSettingsPage'
-import LabelsSettingsPage from './LabelsSettingsPage'
-import MessagingSettingsPage from './MessagingSettingsPage'
-import ServerSettingsPage from './ServerSettingsPage'
-import ShortcutsPage from './ShortcutsPage'
-import PreferencesPage from './PreferencesPage'
+import AppSettingsPage from './AppSettingsPage';
+import AiSettingsPage from './AiSettingsPage';
+import GeneralSettingsPage from './GeneralSettingsPage';
+import McpServersSettingsPage from './McpServersSettingsPage';
+import HooksSettingsPage from './HooksSettingsPage';
+import ExtensionsSettingsPage from './ExtensionsSettingsPage';
+import MemorySettingsPage from './MemorySettingsPage';
+import AppearanceSettingsPage from './AppearanceSettingsPage';
+import InputSettingsPage from './InputSettingsPage';
+import WorkspaceSettingsPage from './WorkspaceSettingsPage';
+import PermissionsSettingsPage from './PermissionsSettingsPage';
+import LabelsSettingsPage from './LabelsSettingsPage';
+import MessagingSettingsPage from './MessagingSettingsPage';
+import ServerSettingsPage from './ServerSettingsPage';
+import ShortcutsPage from './ShortcutsPage';
+import PreferencesPage from './PreferencesPage';
 
 /**
  * Map of settings subpage IDs to their page components.
  * TypeScript will error if a page from SETTINGS_PAGES is missing here.
  */
-export const SETTINGS_PAGE_COMPONENTS: Record<SettingsSubpage, ComponentType> = {
-  app: AppSettingsPage,
-  ai: AiSettingsPage,
-  memory: MemorySettingsPage,
-  appearance: AppearanceSettingsPage,
-  input: InputSettingsPage,
-  workspace: WorkspaceSettingsPage,
-  permissions: PermissionsSettingsPage,
-  labels: LabelsSettingsPage,
-  messaging: MessagingSettingsPage,
-  server: ServerSettingsPage,
-  shortcuts: ShortcutsPage,
-  preferences: PreferencesPage,
-}
+export const SETTINGS_PAGE_COMPONENTS: Record<SettingsSubpage, ComponentType> =
+  {
+    app: AppSettingsPage,
+    ai: AiSettingsPage,
+    general: GeneralSettingsPage,
+    mcpServers: McpServersSettingsPage,
+    hooks: HooksSettingsPage,
+    extensions: ExtensionsSettingsPage,
+    memory: MemorySettingsPage,
+    appearance: AppearanceSettingsPage,
+    input: InputSettingsPage,
+    workspace: WorkspaceSettingsPage,
+    permissions: PermissionsSettingsPage,
+    labels: LabelsSettingsPage,
+    messaging: MessagingSettingsPage,
+    server: ServerSettingsPage,
+    shortcuts: ShortcutsPage,
+    preferences: PreferencesPage,
+  };
 
 /**
  * Get the component for a settings subpage
  */
-export function getSettingsPageComponent(subpage: SettingsSubpage): ComponentType {
-  return SETTINGS_PAGE_COMPONENTS[subpage]
+export function getSettingsPageComponent(
+  subpage: SettingsSubpage,
+): ComponentType {
+  return SETTINGS_PAGE_COMPONENTS[subpage];
 }

@@ -73,7 +73,14 @@ import type {
   PermissionResponseOptions,
   PermissionRuleType,
   PermissionSettingsScope,
+  QwenCoreSettingKey,
+  QwenCoreSettingsSnapshot,
+  QwenHookDefinition,
+  QwenHookEvent,
+  QwenMcpServerConfig,
   QwenPermissionSettings,
+  QwenSettingValue,
+  QwenSettingsScope,
 } from '../protocol/dto.ts';
 import type {
   QwenMemoryPaths,
@@ -1685,6 +1692,141 @@ export class QwenAgent extends BaseAgent {
     return result as unknown as QwenPermissionSettings;
   }
 
+  async getCoreSettings(): Promise<QwenCoreSettingsSnapshot> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/settings/getCore',
+      (connection) =>
+        connection.extMethod('qwen/settings/getCore', {
+          cwd: this.resolvedCwd(),
+        }),
+      10_000,
+    );
+    return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
+  async setCoreSetting(
+    scope: QwenSettingsScope,
+    key: QwenCoreSettingKey,
+    value: QwenSettingValue,
+  ): Promise<QwenCoreSettingsSnapshot> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/settings/setCoreValue',
+      (connection) =>
+        connection.extMethod('qwen/settings/setCoreValue', {
+          cwd: this.resolvedCwd(),
+          scope,
+          key,
+          value,
+        }),
+      10_000,
+    );
+    return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
+  async setMcpServer(
+    scope: QwenSettingsScope,
+    name: string,
+    server: QwenMcpServerConfig,
+  ): Promise<QwenCoreSettingsSnapshot> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/settings/setMcpServer',
+      (connection) =>
+        connection.extMethod('qwen/settings/setMcpServer', {
+          cwd: this.resolvedCwd(),
+          scope,
+          name,
+          server,
+        }),
+      10_000,
+    );
+    return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
+  async removeMcpServer(
+    scope: QwenSettingsScope,
+    name: string,
+  ): Promise<QwenCoreSettingsSnapshot> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/settings/removeMcpServer',
+      (connection) =>
+        connection.extMethod('qwen/settings/removeMcpServer', {
+          cwd: this.resolvedCwd(),
+          scope,
+          name,
+        }),
+      10_000,
+    );
+    return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
+  async setHook(
+    scope: QwenSettingsScope,
+    event: QwenHookEvent,
+    index: number | undefined,
+    hook: QwenHookDefinition,
+  ): Promise<QwenCoreSettingsSnapshot> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/settings/setHook',
+      (connection) =>
+        connection.extMethod('qwen/settings/setHook', {
+          cwd: this.resolvedCwd(),
+          scope,
+          event,
+          index,
+          hook,
+        }),
+      10_000,
+    );
+    return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
+  async removeHook(
+    scope: QwenSettingsScope,
+    event: QwenHookEvent,
+    index: number,
+  ): Promise<QwenCoreSettingsSnapshot> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/settings/removeHook',
+      (connection) =>
+        connection.extMethod('qwen/settings/removeHook', {
+          cwd: this.resolvedCwd(),
+          scope,
+          event,
+          index,
+        }),
+      10_000,
+    );
+    return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
+  async setExtensionSetting(
+    extensionId: string,
+    settingKey: string,
+    scope: QwenSettingsScope,
+    value: QwenSettingValue,
+  ): Promise<QwenCoreSettingsSnapshot> {
+    await this.ensureProcess();
+    const result = await this.callAcp(
+      'qwen/settings/setExtensionSetting',
+      (connection) =>
+        connection.extMethod('qwen/settings/setExtensionSetting', {
+          cwd: this.resolvedCwd(),
+          extensionId,
+          settingKey,
+          scope,
+          value,
+        }),
+      10_000,
+    );
+    return result as unknown as QwenCoreSettingsSnapshot;
+  }
+
   override setModel(model: string): void {
     if (!this.isKnownAvailableModel(model)) {
       this.debug(`Ignoring Qwen model switch for unavailable model: ${model}`);
@@ -1734,22 +1876,27 @@ export class QwenAgent extends BaseAgent {
         cwd: session.cwd,
         title: session.title,
         updatedAt: session.updatedAt,
-        startTime: typeof session._meta?.['startTime'] === 'string'
-          ? session._meta['startTime']
-          : undefined,
-        preview: typeof session._meta?.['preview'] === 'string'
-          ? session._meta['preview']
-          : undefined,
-        messageCount: typeof session._meta?.['messageCount'] === 'number'
-          ? session._meta['messageCount']
-          : undefined,
-        gitBranch: typeof session._meta?.['gitBranch'] === 'string'
-          ? session._meta['gitBranch']
-          : undefined,
-        titleSource: session._meta?.['titleSource'] === 'manual' ||
+        startTime:
+          typeof session._meta?.['startTime'] === 'string'
+            ? session._meta['startTime']
+            : undefined,
+        preview:
+          typeof session._meta?.['preview'] === 'string'
+            ? session._meta['preview']
+            : undefined,
+        messageCount:
+          typeof session._meta?.['messageCount'] === 'number'
+            ? session._meta['messageCount']
+            : undefined,
+        gitBranch:
+          typeof session._meta?.['gitBranch'] === 'string'
+            ? session._meta['gitBranch']
+            : undefined,
+        titleSource:
+          session._meta?.['titleSource'] === 'manual' ||
           session._meta?.['titleSource'] === 'auto'
-          ? session._meta['titleSource']
-          : undefined,
+            ? session._meta['titleSource']
+            : undefined,
       })),
     };
   }
@@ -3314,8 +3461,7 @@ export class QwenAgent extends BaseAgent {
 
           const toolName = normalizeToolName(functionName);
           const toolUseId =
-            asString(functionCall.id) ||
-            `qwen-transcript-tool-${++idCounter}`;
+            asString(functionCall.id) || `qwen-transcript-tool-${++idCounter}`;
           const rawInput = toRecord(functionCall.args);
           const toolMessage: Message = {
             id: nextId(),

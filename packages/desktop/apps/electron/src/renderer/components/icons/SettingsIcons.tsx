@@ -9,9 +9,9 @@
  * across the settings UI.
  */
 
-import type { SettingsSubpage } from '../../../shared/types'
+import type { SettingsSubpage } from '../../../shared/types';
 
-type IconProps = { className?: string }
+type IconProps = { className?: string };
 
 /** AI sparkles icon for AI settings */
 export const AiSettingsIcon = ({ className }: IconProps) => (
@@ -28,7 +28,7 @@ export const AiSettingsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Custom app settings icon (toggle switches) */
 export const AppSettingsIcon = ({ className }: IconProps) => (
@@ -43,7 +43,7 @@ export const AppSettingsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Palette icon for appearance settings */
 export const AppearanceIcon = ({ className }: IconProps) => (
@@ -58,7 +58,7 @@ export const AppearanceIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Keyboard icon for input settings */
 export const InputIcon = ({ className }: IconProps) => (
@@ -73,7 +73,7 @@ export const InputIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Memory icon for managed memory settings */
 export const MemorySettingsIcon = ({ className }: IconProps) => (
@@ -90,7 +90,7 @@ export const MemorySettingsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Custom workspace icon */
 export const WorkspaceIcon = ({ className }: IconProps) => (
@@ -107,7 +107,7 @@ export const WorkspaceIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Shield icon for permissions */
 export const PermissionsIcon = ({ className }: IconProps) => (
@@ -124,7 +124,7 @@ export const PermissionsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Tag icon for labels */
 export const LabelsIcon = ({ className }: IconProps) => (
@@ -141,7 +141,7 @@ export const LabelsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Keyboard icon for shortcuts */
 export const ShortcutsIcon = ({ className }: IconProps) => (
@@ -156,7 +156,7 @@ export const ShortcutsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Server/network icon for server settings */
 export const ServerSettingsIcon = ({ className }: IconProps) => (
@@ -173,7 +173,7 @@ export const ServerSettingsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** Message bubble icon for messaging settings */
 export const MessagingSettingsIcon = ({ className }: IconProps) => (
@@ -190,7 +190,7 @@ export const MessagingSettingsIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /** User icon for preferences */
 export const PreferencesIcon = ({ className }: IconProps) => (
@@ -207,15 +207,22 @@ export const PreferencesIcon = ({ className }: IconProps) => (
       fill="currentColor"
     />
   </svg>
-)
+);
 
 /**
  * Map of settings subpage IDs to their icon components.
  * Used by both AppMenu and SettingsNavigator for consistent icons.
  */
-export const SETTINGS_ICONS: Record<SettingsSubpage, React.ComponentType<IconProps>> = {
+export const SETTINGS_ICONS: Record<
+  SettingsSubpage,
+  React.ComponentType<IconProps>
+> = {
   app: AppSettingsIcon,
   ai: AiSettingsIcon,
+  general: AppSettingsIcon,
+  mcpServers: ServerSettingsIcon,
+  hooks: PermissionsIcon,
+  extensions: AiSettingsIcon,
   memory: MemorySettingsIcon,
   appearance: AppearanceIcon,
   input: InputIcon,
@@ -226,4 +233,4 @@ export const SETTINGS_ICONS: Record<SettingsSubpage, React.ComponentType<IconPro
   server: ServerSettingsIcon,
   shortcuts: ShortcutsIcon,
   preferences: PreferencesIcon,
-}
+};

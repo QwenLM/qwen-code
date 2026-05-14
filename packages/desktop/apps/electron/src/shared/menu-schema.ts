@@ -12,48 +12,48 @@
  * This avoids stale translations from module-level i18n.t() calls.
  */
 
-import { RPC_CHANNELS } from './types'
-import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
+import { RPC_CHANNELS } from './types';
+import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
 export interface MenuItemAction {
-  type: 'action'
-  id: string
-  labelKey: string              // i18n key — resolve with t() at render time
+  type: 'action';
+  id: string;
+  labelKey: string; // i18n key — resolve with t() at render time
   /** Link to the action registry (e.g., 'view.toggleSidebar').
    *  Enables future: derive display shortcuts from registry + propagate user overrides. */
-  actionId?: string
-  shortcut: string              // Electron accelerator: 'CmdOrCtrl+B'
-  shortcutDisplayMac: string    // Display on macOS: '⌘B'
-  shortcutDisplayOther: string  // Display on Windows/Linux: 'Ctrl+B'
-  ipcChannel: string
-  icon: string                  // Lucide icon name
+  actionId?: string;
+  shortcut: string; // Electron accelerator: 'CmdOrCtrl+B'
+  shortcutDisplayMac: string; // Display on macOS: '⌘B'
+  shortcutDisplayOther: string; // Display on Windows/Linux: 'Ctrl+B'
+  ipcChannel: string;
+  icon: string; // Lucide icon name
 }
 
 export interface MenuItemRole {
-  type: 'role'
-  role: string                  // Electron role: 'undo', 'copy', etc.
-  labelKey: string              // i18n key — resolve with t() at render time
-  shortcutDisplayMac?: string
-  shortcutDisplayOther?: string
-  icon: string
-  ipcChannel?: string           // Optional IPC for renderer to call
+  type: 'role';
+  role: string; // Electron role: 'undo', 'copy', etc.
+  labelKey: string; // i18n key — resolve with t() at render time
+  shortcutDisplayMac?: string;
+  shortcutDisplayOther?: string;
+  icon: string;
+  ipcChannel?: string; // Optional IPC for renderer to call
 }
 
 export interface MenuItemSeparator {
-  type: 'separator'
+  type: 'separator';
 }
 
-export type MenuItem = MenuItemAction | MenuItemRole | MenuItemSeparator
+export type MenuItem = MenuItemAction | MenuItemRole | MenuItemSeparator;
 
 export interface MenuSection {
-  id: string
-  labelKey: string              // i18n key — resolve with t() at render time
-  icon: string
-  items: MenuItem[]
+  id: string;
+  labelKey: string; // i18n key — resolve with t() at render time
+  icon: string;
+  items: MenuItem[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ export const EDIT_MENU: MenuSection = {
       ipcChannel: RPC_CHANNELS.menu.SELECT_ALL,
     },
   ],
-}
+};
 
 export const VIEW_MENU: MenuSection = {
   id: 'view',
@@ -180,7 +180,7 @@ export const VIEW_MENU: MenuSection = {
       icon: 'PanelLeft',
     },
   ],
-}
+};
 
 export const WINDOW_MENU: MenuSection = {
   id: 'window',
@@ -204,10 +204,10 @@ export const WINDOW_MENU: MenuSection = {
       ipcChannel: RPC_CHANNELS.menu.MAXIMIZE,
     },
   ],
-}
+};
 
 // All menu sections in order (for renderer)
-export const MENU_SECTIONS: MenuSection[] = [EDIT_MENU, VIEW_MENU, WINDOW_MENU]
+export const MENU_SECTIONS: MenuSection[] = [EDIT_MENU, VIEW_MENU, WINDOW_MENU];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Settings Menu Items
@@ -217,13 +217,17 @@ export const MENU_SECTIONS: MenuSection[] = [EDIT_MENU, VIEW_MENU, WINDOW_MENU]
  * Settings item definition
  * Used by both AppMenu (logo dropdown) and SettingsNavigator (sidebar panel)
  */
-import { SETTINGS_PAGES, isVisibleSettingsSubpage, type SettingsSubpage } from './settings-registry'
+import {
+  SETTINGS_PAGES,
+  isVisibleSettingsSubpage,
+  type SettingsSubpage,
+} from './settings-registry';
 
 export interface SettingsMenuItem {
-  id: SettingsSubpage
-  labelKey: string    // i18n key - resolve with t() at render time
-  icon: string        // Lucide icon name for AppMenu
-  descriptionKey: string // i18n key - resolve with t() at render time
+  id: SettingsSubpage;
+  labelKey: string; // i18n key - resolve with t() at render time
+  icon: string; // Lucide icon name for AppMenu
+  descriptionKey: string; // i18n key - resolve with t() at render time
 }
 
 /**
@@ -233,6 +237,10 @@ export interface SettingsMenuItem {
 const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
   app: 'ToggleRight',
   ai: 'Sparkles',
+  general: 'SlidersHorizontal',
+  mcpServers: 'ServerCog',
+  hooks: 'Workflow',
+  extensions: 'Blocks',
   memory: 'Brain',
   appearance: 'Palette',
   input: 'Keyboard',
@@ -243,21 +251,22 @@ const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
   server: 'Server',
   shortcuts: 'Keyboard',
   preferences: 'UserCircle',
-}
+};
 
 /**
  * All settings pages - derived from settings-registry (single source of truth)
  * Order is determined by SETTINGS_PAGES in settings-registry.ts
  */
-export const SETTINGS_ITEMS: SettingsMenuItem[] = SETTINGS_PAGES
-  .filter(page => isVisibleSettingsSubpage(page.id))
-  .filter(page => page.id !== 'server' || FEATURE_FLAGS.embeddedServer)
-  .map(page => ({
+export const SETTINGS_ITEMS: SettingsMenuItem[] = SETTINGS_PAGES.filter(
+  (page) => isVisibleSettingsSubpage(page.id),
+)
+  .filter((page) => page.id !== 'server' || FEATURE_FLAGS.embeddedServer)
+  .map((page) => ({
     id: page.id,
     labelKey: page.labelKey,
     icon: SETTINGS_ICONS[page.id],
     descriptionKey: page.descriptionKey,
-  }))
+  }));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -266,6 +275,11 @@ export const SETTINGS_ITEMS: SettingsMenuItem[] = SETTINGS_PAGES
 /**
  * Get the display shortcut for the current platform
  */
-export function getShortcutDisplay(item: MenuItemAction | MenuItemRole, isMac: boolean): string {
-  return isMac ? (item.shortcutDisplayMac ?? '') : (item.shortcutDisplayOther ?? '')
+export function getShortcutDisplay(
+  item: MenuItemAction | MenuItemRole,
+  isMac: boolean,
+): string {
+  return isMac
+    ? (item.shortcutDisplayMac ?? '')
+    : (item.shortcutDisplayOther ?? '');
 }
