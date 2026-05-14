@@ -14,6 +14,7 @@ interface PendingWrite {
 type StoredSessionWithHeaderOptions = StoredSession & {
   omitMessageDerivedHeaderFields?: boolean
   omitTranscriptDerivedHeaderFields?: boolean
+  preserveSessionTimestamps?: boolean
 }
 
 interface HeaderMetadataSignature {
@@ -112,7 +113,9 @@ class SessionPersistenceQueue {
         workspaceRootPath: toPortablePath(data.workspaceRootPath),
         workingDirectory: data.workingDirectory ? toPortablePath(data.workingDirectory) : undefined,
         sdkCwd: data.sdkCwd ? toPortablePath(data.sdkCwd) : undefined,
-        lastUsedAt: Date.now(),
+        lastUsedAt: headerOptionsSource.preserveSessionTimestamps
+          ? data.lastUsedAt
+          : Date.now(),
       }
 
       // Create JSONL content: header + messages (one per line)
@@ -122,6 +125,8 @@ class SessionPersistenceQueue {
           headerOptionsSource.omitMessageDerivedHeaderFields,
         omitTranscriptDerivedFields:
           headerOptionsSource.omitTranscriptDerivedHeaderFields,
+        preserveSessionTimestamps:
+          headerOptionsSource.preserveSessionTimestamps,
       })
       const localSig = getHeaderMetadataSignature(localHeader)
       const diskHeader = readSessionHeader(filePath)

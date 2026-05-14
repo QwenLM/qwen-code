@@ -25,11 +25,13 @@ const SESSION_PATH_TOKEN = '{{SESSION_PATH}}';
 type HeaderWriteOptions = {
   omitMessageDerivedFields?: boolean;
   omitTranscriptDerivedFields?: boolean;
+  preserveSessionTimestamps?: boolean;
 };
 
 type StoredSessionWithHeaderOptions = StoredSession & {
   omitMessageDerivedHeaderFields?: boolean;
   omitTranscriptDerivedHeaderFields?: boolean;
+  preserveSessionTimestamps?: boolean;
 };
 
 /**
@@ -169,6 +171,8 @@ export function writeSessionJsonl(sessionFile: string, session: StoredSession): 
       headerOptionsSource.omitMessageDerivedHeaderFields,
     omitTranscriptDerivedFields:
       headerOptionsSource.omitTranscriptDerivedHeaderFields,
+    preserveSessionTimestamps:
+      headerOptionsSource.preserveSessionTimestamps,
   });
   const sessionDir = dirname(sessionFile);
 
@@ -204,7 +208,7 @@ export function createSessionHeader(
     delete header.createdAt;
     delete header.lastUsedAt;
     delete header.lastMessageAt;
-  } else {
+  } else if (!options.preserveSessionTimestamps) {
     // Override lastUsedAt with current timestamp (save time, not original)
     header.lastUsedAt = Date.now();
   }

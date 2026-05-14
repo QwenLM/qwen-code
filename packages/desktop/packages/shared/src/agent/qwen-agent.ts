@@ -1733,6 +1733,10 @@ export class QwenAgent extends BaseAgent {
         sessionId: session.sessionId,
         cwd: session.cwd,
         title: session.title,
+        createdAt:
+          typeof session._meta?.createdAt === 'string'
+            ? session._meta.createdAt
+            : null,
         updatedAt: session.updatedAt,
       })),
     };
@@ -1831,29 +1835,12 @@ export class QwenAgent extends BaseAgent {
     const cwd = options.cwd || this.resolvedCwd();
     await this.ensureProcess();
 
-    const collector: HistoryCollector = { updates: [] };
-    this.historyCollectors.set(sessionId, collector);
-
-    try {
-      await this.callAcp(
-        'session/load',
-        (connection) =>
-          connection.loadSession({
-            sessionId,
-            cwd,
-            mcpServers: this.buildAcpMcpServers(),
-          }),
-        60_000,
-      );
-
-      const messages = this.buildHistoryMessages(
-        sessionId,
-        collector.updates,
-        cwd,
-      );
-      const availableCommandsSnapshot = this.extractAvailableCommandsSnapshot(
-        collector.updates,
-      );
+    const buildResultFromUpdates = (
+      updates: JsonRecord[],
+    ): BackendSessionMessagesResult => {
+      const messages = this.buildHistoryMessages(sessionId, updates, cwd);
+      const availableCommandsSnapshot =
+        this.extractAvailableCommandsSnapshot(updates);
       const mergedMessages = this.mergeSlashCommandInvocationMessages(
         sessionId,
         messages,
@@ -1874,6 +1861,48 @@ export class QwenAgent extends BaseAgent {
         messages: messagesWithTextElements,
         ...(availableCommandsSnapshot ?? {}),
       };
+    };
+
+    try {
+      const response = toRecord(
+        await this.callAcp(
+          'ext/qwen/session/loadUpdates',
+          (connection) =>
+            connection.extMethod('qwen/session/loadUpdates', {
+              sessionId,
+              cwd,
+            }),
+          30_000,
+        ),
+      );
+      const updates = Array.isArray(response.updates)
+        ? response.updates.filter(isRecord)
+        : undefined;
+      if (updates) {
+        return buildResultFromUpdates(updates);
+      }
+    } catch (error) {
+      this.debug(
+        `Qwen loadSessionMessages extension unavailable; falling back to session/load for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const collector: HistoryCollector = { updates: [] };
+    this.historyCollectors.set(sessionId, collector);
+
+    try {
+      await this.callAcp(
+        'session/load',
+        (connection) =>
+          connection.loadSession({
+            sessionId,
+            cwd,
+            mcpServers: this.buildAcpMcpServers(),
+          }),
+        60_000,
+      );
+
+      return buildResultFromUpdates(collector.updates);
     } finally {
       this.historyCollectors.delete(sessionId);
     }
@@ -2951,7 +2980,7 @@ export class QwenAgent extends BaseAgent {
     const nextId = () => `qwen-${sessionId}-${++idCounter}`;
     const timestampFor = (update: JsonRecord): number => {
       const meta = toRecord(update._meta);
-      const timestamp = asNumber(meta.timestamp);
+      const timestamp = asNumber(meta.timestamp) ?? asNumber(update.timestamp);
       if (timestamp != null) return timestamp;
       fallbackTimestamp += 1;
       return fallbackTimestamp;

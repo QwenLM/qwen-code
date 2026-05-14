@@ -100,6 +100,7 @@ describe('Qwen native history loading', () => {
     tempRoots.push(workspaceRoot, projectRoot)
 
     const sessionId = 'fd2803fd-1070-41da-b7c0-10d978f7128c'
+    const createdTimestamp = Date.parse('2026-04-26T09:58:00.000Z')
     const timestamp = Date.parse('2026-04-26T10:12:13.000Z')
     saveWorkspaceConfig(workspaceRoot, {
       id: 'workspace-qwen',
@@ -126,6 +127,7 @@ describe('Qwen native history loading', () => {
               sessionId,
               cwd: projectRoot,
               title: 'qwen native conversation',
+              createdAt: new Date(createdTimestamp).toISOString(),
               updatedAt: new Date(timestamp).toISOString(),
             }],
           }
@@ -148,9 +150,7 @@ describe('Qwen native history loading', () => {
     }).doRefreshExternalSessionsForWorkspace(workspace)
 
     const imported = loadSession(workspaceRoot, sessionId) as
-      | (ReturnType<typeof loadSession> & {
-          messageCount?: number
-        })
+      | ReturnType<typeof loadSession>
       | null
     expect(listCalls).toBe(1)
     expect(imported?.workspaceRootPath).toBe(workspaceRoot)
@@ -159,10 +159,9 @@ describe('Qwen native history loading', () => {
     expect(imported?.permissionMode).toBe('allow-all')
     expect(imported?.llmConnection).toBeUndefined()
     expect(imported?.connectionLocked).toBeUndefined()
-    expect(imported?.createdAt).toBeUndefined()
-    expect(imported?.lastUsedAt).toBeUndefined()
-    expect(imported?.lastMessageAt).toBeUndefined()
-    expect(imported?.messageCount).toBeUndefined()
+    expect(imported?.createdAt).toBe(createdTimestamp)
+    expect(imported?.lastUsedAt).toBe(timestamp)
+    expect(imported?.lastMessageAt).toBe(timestamp)
   })
 
   it('removes provider-native mirrors once a Craft session owns the same SDK session ID', async () => {
@@ -413,6 +412,69 @@ describe('Qwen native history loading', () => {
     expect(loadCalls).toBe(1)
     expect(loadSession(workspaceRoot, sessionId)).toBeNull()
     expect(manager.getSessions(workspace.id).some(session => session.id === sessionId)).toBe(false)
+  })
+
+  it('uses provider-loaded first prompt when listed Qwen title is localized new chat', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'))
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'))
+    tempRoots.push(workspaceRoot, projectRoot)
+
+    const sessionId = 'fce51ed2-6768-4f67-ac22-c168d0b234de'
+    const timestamp = Date.parse('2026-05-08T09:30:02.013Z')
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    })
+
+    const nativeMessages: Message[] = [
+      { id: 'qwen-user-1', role: 'user', content: 'Git merge main 是不是把 main 分支的改动合并过来？', timestamp },
+      { id: 'qwen-assistant-1', role: 'assistant', content: '是的。', timestamp: timestamp + 1_000 },
+    ]
+    const manager = new SessionManager({
+      createExternalSessionAgent: () => ({
+        listSessions: async () => ({
+          sessions: [{
+            sessionId,
+            cwd: projectRoot,
+            title: '新聊天',
+            createdAt: new Date(timestamp).toISOString(),
+            updatedAt: new Date(timestamp + 1_000).toISOString(),
+          }],
+        }),
+        loadSessionMessages: async () => nativeMessages,
+        destroy: () => {},
+        dispose: () => {},
+      } as unknown as AgentBackend),
+    })
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    }
+
+    await (manager as unknown as {
+      doRefreshExternalSessionsForWorkspace: (workspace: Workspace) => Promise<void>
+    }).doRefreshExternalSessionsForWorkspace(workspace)
+
+    const [imported] = manager.getSessions(workspace.id).filter(session => session.id === sessionId)
+    const persisted = loadSession(workspaceRoot, sessionId)
+
+    expect(imported?.name).toBe('Git merge main 是不是把 main 分支的改动合并过来？')
+    expect(imported?.lastMessageAt).toBe(timestamp + 1_000)
+    expect(imported?.messageCount).toBeUndefined()
+    expect(persisted?.name).toBe('Git merge main 是不是把 main 分支的改动合并过来？')
+    expect((persisted as ReturnType<typeof loadSession> & { messageCount?: number } | null)?.messageCount).toBeUndefined()
   })
 
   it('does not repeatedly reload empty Qwen canonical history for the same external timestamp', async () => {
@@ -697,9 +759,9 @@ describe('Qwen native history loading', () => {
         })
       | null
     expect(persisted?.messages).toHaveLength(0)
-    expect(persisted?.createdAt).toBeUndefined()
-    expect(persisted?.lastUsedAt).toBeUndefined()
-    expect(persisted?.lastMessageAt).toBeUndefined()
+    expect(persisted?.createdAt).toBe(invocationTimestamp)
+    expect(persisted?.lastUsedAt).toBe(resultTimestamp)
+    expect(persisted?.lastMessageAt).toBe(resultTimestamp)
     expect(persisted?.llmConnection).toBeUndefined()
     expect(persisted?.connectionLocked).toBeUndefined()
     expect(persisted?.messageCount).toBeUndefined()
@@ -908,7 +970,11 @@ describe('Qwen native history loading', () => {
       availableCommands: [{ name: 'project:fix', description: 'Run project fix' }],
       availableSkills: ['commit'],
     })
-    expect(loadSession(workspaceRoot, sessionId)?.messages).toHaveLength(0)
+    const persisted = loadSession(workspaceRoot, sessionId)
+    expect(persisted?.messages).toHaveLength(0)
+    expect(persisted?.createdAt).toBe(timestamp)
+    expect(persisted?.lastUsedAt).toBe(timestamp + 3)
+    expect(persisted?.lastMessageAt).toBe(timestamp + 3)
   })
 
   it('does not reload Qwen native history between repeated edits of the latest user message', async () => {

@@ -56,6 +56,7 @@ import type {
   SessionConfigOption,
   SessionInfo,
   SessionModeState,
+  SessionUpdate,
   SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse,
   SetSessionModelRequest,
@@ -75,6 +76,8 @@ import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
 import { Session } from './session/Session.js';
+import { HistoryReplayer } from './session/HistoryReplayer.js';
+import type { SessionContext } from './session/types.js';
 import { formatAcpModelId } from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
@@ -511,6 +514,9 @@ class QwenAgent implements Agent {
     });
 
     const sessions: SessionInfo[] = result.items.map((item) => ({
+      _meta: {
+        createdAt: item.startTime,
+      },
       cwd: item.cwd,
       sessionId: item.sessionId,
       title: item.customTitle || item.prompt || '(session)',
@@ -785,6 +791,56 @@ class QwenAgent implements Agent {
           success: true,
           historyBeforeRewind,
           ...session.rewindToTurn(targetTurnIndex as number),
+        };
+      }
+      case 'qwen/session/loadUpdates': {
+        const sessionId = params['sessionId'] as string;
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+
+        const sessionData = await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            return sessionService.loadSession(sessionId);
+          },
+        );
+        if (!sessionData?.conversation) {
+          return { updates: [] };
+        }
+
+        const updates: SessionUpdate[] = [];
+        const replayContext: SessionContext = {
+          sessionId,
+          config: this.config,
+          sendUpdate: async (update) => {
+            updates.push(update);
+          },
+        };
+        await new HistoryReplayer(replayContext).replay(
+          sessionData.conversation.messages,
+        );
+        const updatesWithTopLevelTimestamps = updates.map((update) => {
+          const record = update as Record<string, unknown>;
+          const meta = record['_meta'];
+          const timestamp =
+            meta && typeof meta === 'object' && !Array.isArray(meta)
+              ? (meta as Record<string, unknown>)['timestamp']
+              : undefined;
+          return typeof timestamp === 'number' || typeof timestamp === 'string'
+            ? { ...record, timestamp }
+            : record;
+        });
+
+        return {
+          updates: updatesWithTopLevelTimestamps,
+          startTime: sessionData.conversation.startTime,
+          lastUpdated: sessionData.conversation.lastUpdated,
         };
       }
       case 'restoreSessionHistory': {

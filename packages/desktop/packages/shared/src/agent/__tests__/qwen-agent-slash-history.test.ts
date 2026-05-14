@@ -58,6 +58,7 @@ type QwenAvailableCommandsInternals = {
   callAcp: <T>(
     method: string,
     execute: (connection: {
+      extMethod?: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
       loadSession?: (params: unknown) => Promise<unknown>;
       newSession?: (params: unknown) => Promise<unknown>;
     }) => Promise<T>,
@@ -944,6 +945,52 @@ describe('QwenAgent slash command history', () => {
     expect(result.messages.map(message => [message.role, message.content])).toEqual([
       ['user', 'hello'],
     ]);
+  });
+
+  it('loads Qwen history updates through ACP extension before session/load fallback', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.ensureProcess = async () => {};
+    const calledMethods: string[] = [];
+    internals.callAcp = async (method, execute) => {
+      calledMethods.push(method);
+      return execute({
+        extMethod: async (extMethod, params) => {
+          expect(extMethod).toBe('qwen/session/loadUpdates');
+          expect(params).toEqual({ sessionId: 'qwen-session', cwd });
+          return {
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'from extension' },
+                timestamp: 1_000,
+              },
+              {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'loaded' },
+                timestamp: 2_000,
+              },
+            ],
+          };
+        },
+        loadSession: async () => {
+          throw new Error('session/load should not be used');
+        },
+      });
+    };
+
+    const result = await agent.loadSessionMessages('qwen-session', { cwd });
+    agent.destroy();
+
+    expect(calledMethods).toEqual(['ext/qwen/session/loadUpdates']);
+    expect(result.messages.map(message => [message.role, message.content])).toEqual([
+      ['user', 'from extension'],
+      ['assistant', 'loaded'],
+    ]);
+    expect(result.messages.map(message => message.timestamp)).toEqual([1_000, 2_000]);
   });
 
   it('supplements Qwen history with transcript subagent telemetry', async () => {

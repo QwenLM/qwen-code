@@ -109,4 +109,31 @@ describe('session model persistence', () => {
     expect(header.lastMessageRole).toBeUndefined()
     expect(header.lastFinalMessageId).toBeUndefined()
   })
+
+  it('can preserve provider-native timestamps while omitting message-derived fields', () => {
+    const workspaceRoot = makeWorkspaceRoot()
+    const session = {
+      ...makeStoredSession(workspaceRoot),
+      createdAt: 11,
+      lastUsedAt: 22,
+      lastMessageAt: 22,
+      omitMessageDerivedHeaderFields: true,
+      preserveSessionTimestamps: true,
+    } as StoredSession & {
+      omitMessageDerivedHeaderFields: true
+      preserveSessionTimestamps: true
+    }
+    const sessionDir = join(workspaceRoot, 'sessions', session.id)
+    mkdirSync(sessionDir, { recursive: true })
+
+    const sessionFile = join(sessionDir, 'session.jsonl')
+    writeSessionJsonl(sessionFile, session)
+
+    const header = JSON.parse(readFileSync(sessionFile, 'utf-8').split('\n')[0]!)
+    expect(header.createdAt).toBe(11)
+    expect(header.lastUsedAt).toBe(22)
+    expect(header.lastMessageAt).toBe(22)
+    expect(header.messageCount).toBeUndefined()
+    expect(header.preview).toBeUndefined()
+  })
 })

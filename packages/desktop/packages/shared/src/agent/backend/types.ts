@@ -310,6 +310,7 @@ export interface BackendSessionInfo {
   sessionId: string;
   cwd: string;
   title?: string | null;
+  createdAt?: string | null;
   updatedAt?: string | null;
 }
 

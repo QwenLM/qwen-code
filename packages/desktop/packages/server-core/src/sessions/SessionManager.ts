@@ -177,6 +177,11 @@ const EXTERNAL_SESSION_LIST_SYNC_INTERVAL_MS = 5_000
 const EXTERNAL_SESSION_LIST_PAGE_SIZE = 100
 const EXTERNAL_SESSION_LIST_MAX_PAGES = 20
 const EXTERNAL_SESSION_PLACEHOLDER_TITLE = '(session)'
+const EXTERNAL_SESSION_PLACEHOLDER_TITLES = new Set([
+  EXTERNAL_SESSION_PLACEHOLDER_TITLE,
+  'New chat',
+  '新聊天',
+])
 
 function isSlashCommandMessage(message: string): boolean {
   return /^\/[A-Za-z][\w-]*(?:\s|$)/.test(message.trim())
@@ -1931,6 +1936,16 @@ export class SessionManager implements ISessionManager {
     return Number.isFinite(parsed) ? parsed : Date.now()
   }
 
+  private parseOptionalExternalSessionTimestamp(timestamp?: string | null): number | undefined {
+    if (!timestamp) return undefined
+    const parsed = Date.parse(timestamp)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+
+  private isExternalSessionPlaceholderTitle(title: string): boolean {
+    return EXTERNAL_SESSION_PLACEHOLDER_TITLES.has(title.trim())
+  }
+
   private hasNoRenderableLocalMessages(managed: ManagedSession): boolean {
     const loadedMessageCount = managed.messages.length
     const persistedMessageCount = managed.messageCount ?? loadedMessageCount
@@ -2047,7 +2062,9 @@ export class SessionManager implements ISessionManager {
       ) {
         managed.lastMessageRole = lastMessage.role
       }
-      managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, lastMessage.timestamp)
+      managed.lastUsedAt = this.isQwenCanonicalMessageSession(managed)
+        ? lastMessage.timestamp
+        : Math.max(managed.lastUsedAt ?? 0, lastMessage.timestamp)
     }
 
     const lastFinalAssistant = [...messages]
@@ -2070,14 +2087,15 @@ export class SessionManager implements ISessionManager {
     if (this.isExternalSessionDeletePending(workspace.id, info.sessionId)) return false
 
     const timestamp = this.parseExternalSessionTimestamp(info.updatedAt)
-    const title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE
+    const createdTimestamp = this.parseOptionalExternalSessionTimestamp(info.createdAt)
+    let title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE
     const managed = this.selectManagedSessionBySdkSessionId(workspace.id, info.sessionId)
     if (managed) {
       this.removeDuplicateExternalListedMirrors(workspace, managed, info.sessionId)
     }
     let inspectedResult: BackendSessionMessagesResult | undefined
 
-    if (title === EXTERNAL_SESSION_PLACEHOLDER_TITLE && this.shouldInspectExternalPlaceholderSession(managed)) {
+    if (this.isExternalSessionPlaceholderTitle(title) && this.shouldInspectExternalPlaceholderSession(managed)) {
       inspectedResult = await this.loadExternalListedMessages(info, loadMessages)
       const inspectedMessages = inspectedResult?.messages
 
@@ -2087,6 +2105,7 @@ export class SessionManager implements ISessionManager {
         }
         return !!managed && (managed.isProcessing || !this.hasNoRenderableLocalMessages(managed))
       }
+      title = this.extractMessagePreview(inspectedMessages) ?? title
     }
 
     if (managed) {
@@ -2094,11 +2113,20 @@ export class SessionManager implements ISessionManager {
       managed.workingDirectory = info.cwd
       managed.sdkCwd = info.cwd
       managed.name = title
-      managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, timestamp)
-      managed.lastMessageAt = Math.max(managed.lastMessageAt ?? 0, timestamp)
       if (!managed.llmConnection) managed.llmConnection = connectionSlug
       if (!managed.model && model) managed.model = model
       if (!managed.thinkingLevel) managed.thinkingLevel = defaultThinkingLevel
+      let shouldPersistManagedMetadata = false
+      if (connectionSlug === QWEN_CODE_CONNECTION_SLUG) {
+        managed.createdAt = createdTimestamp ?? managed.createdAt ?? timestamp
+        managed.lastUsedAt = timestamp
+        managed.lastMessageAt = timestamp
+        delete managed.messageCount
+        shouldPersistManagedMetadata = true
+      } else {
+        managed.lastUsedAt = Math.max(managed.lastUsedAt ?? 0, timestamp)
+        managed.lastMessageAt = Math.max(managed.lastMessageAt ?? 0, timestamp)
+      }
       this.applyAvailableCommandsFromMessagesResult(managed, inspectedResult, 'provider-native session inspection')
       const inspectedMessages = inspectedResult?.messages
       if (inspectedMessages?.length) {
@@ -2106,12 +2134,15 @@ export class SessionManager implements ISessionManager {
         this.markExternalMessagesLoadedThrough(managed)
         managed.messagesLoaded = true
         this.persistSession(managed)
+      } else if (shouldPersistManagedMetadata) {
+        this.persistSession(managed)
       }
       return true
     }
 
     const inspectedMessages = inspectedResult?.messages
     const lastInspectedMessage = inspectedMessages?.[inspectedMessages.length - 1]
+    const firstInspectedMessage = inspectedMessages?.[0]
     const shouldPersistInspectedMessages = connectionSlug !== QWEN_CODE_CONNECTION_SLUG
     const storedSession: StoredSession = {
       id: info.sessionId,
@@ -2120,7 +2151,7 @@ export class SessionManager implements ISessionManager {
       sdkCwd: info.cwd,
       workingDirectory: info.cwd,
       name: title,
-      createdAt: timestamp,
+      createdAt: firstInspectedMessage?.timestamp ?? createdTimestamp ?? timestamp,
       lastUsedAt: Math.max(timestamp, lastInspectedMessage?.timestamp ?? timestamp),
       lastMessageAt: lastInspectedMessage?.timestamp ?? timestamp,
       permissionMode: defaultPermissionMode,
@@ -2130,7 +2161,7 @@ export class SessionManager implements ISessionManager {
       ...(connectionSlug === QWEN_CODE_CONNECTION_SLUG
         ? {
             omitMessageDerivedHeaderFields: true,
-            omitTranscriptDerivedHeaderFields: true,
+            preserveSessionTimestamps: true,
           }
         : {}),
       tokenUsage: { ...DEFAULT_TOKEN_USAGE },
@@ -2211,12 +2242,14 @@ export class SessionManager implements ISessionManager {
         ...pickSessionFields(managed),
         workspaceRootPath: managed.workspace.rootPath,
         createdAt: managed.createdAt ?? Date.now(),
-        lastUsedAt: Date.now(),
+        lastUsedAt: usesQwenCanonicalMessages
+          ? (managed.lastUsedAt ?? managed.lastMessageAt ?? managed.createdAt ?? Date.now())
+          : Date.now(),
         messages: persistableMessages.map(messageToStored),
         ...(usesQwenCanonicalMessages
           ? {
               omitMessageDerivedHeaderFields: true,
-              omitTranscriptDerivedHeaderFields: true,
+              preserveSessionTimestamps: true,
             }
           : {}),
         tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
@@ -2673,6 +2706,9 @@ export class SessionManager implements ISessionManager {
       managed.transferredSessionSummaryApplied = storedSession.transferredSessionSummaryApplied
       const usesQwenCanonicalMessages = this.isQwenCanonicalMessageSession(managed)
       managed.messages = usesQwenCanonicalMessages ? [] : storedMessages
+      if (usesQwenCanonicalMessages) {
+        delete managed.messageCount
+      }
       sessionLog.debug(`Lazy-loaded ${managed.messages.length} messages for session ${managed.id}`)
 
       // Queue recovery: find orphaned queued messages from crash/restart and re-queue them
@@ -2710,7 +2746,7 @@ export class SessionManager implements ISessionManager {
       }
     }
     managed.messagesLoaded = true
-    if (loadedExternalMessages && !this.isQwenCanonicalMessageSession(managed)) {
+    if (loadedExternalMessages) {
       this.persistSession(managed)
       await this.flushSession(managed.id)
     }
@@ -2739,7 +2775,7 @@ export class SessionManager implements ISessionManager {
     if (externalLoadResult === 'loaded' || externalLoadResult === 'empty') {
       this.markExternalMessagesLoadedThrough(managed)
     }
-    if (externalLoadResult === 'loaded' && !this.isQwenCanonicalMessageSession(managed)) {
+    if (externalLoadResult === 'loaded') {
       this.persistSession(managed)
       await this.flushSession(managed.id)
     }
