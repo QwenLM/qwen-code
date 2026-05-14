@@ -487,6 +487,131 @@ describe('createHttpAcpBridge', () => {
     void shutdownPromise;
   });
 
+  it('killAllSync force-kills the channel during the initialize handshake (tanzhenxin cold-spawn-window)', async () => {
+    // tanzhenxin cold-spawn-window finding: the agent child exists
+    // from the moment `channelFactory(boundWorkspace)` returns, but
+    // pre-fix `aliveChannels.add(info)` ran only AFTER the
+    // `initialize` handshake completed (up to `initTimeoutMs`,
+    // default 10s). A double-Ctrl+C in that handshake window played
+    // out as: first SIGINT entered `shutdown()` and awaited the
+    // in-flight spawn; second SIGINT called `killAllSync()` against
+    // an empty `aliveChannels` (the channel hadn't been added yet)
+    // and `process.exit(1)` orphaned the child. The fix moves the
+    // add + the `channel.exited` handler registration BEFORE the
+    // `initialize` await; this test pins that the channel is
+    // reachable via `killAllSync` during the handshake.
+    const killSyncCalls: string[] = [];
+    const factory: ChannelFactory = async () => {
+      // Bespoke agent whose `initialize` never resolves — that's the
+      // handshake-hanging window the finding is about. A real agent
+      // can spend up to `initTimeoutMs` ms here before the bridge's
+      // `withTimeout` aborts it.
+      const ab = new TransformStream<Uint8Array, Uint8Array>();
+      const ba = new TransformStream<Uint8Array, Uint8Array>();
+      const clientStream = ndJsonStream(ab.writable, ba.readable);
+      const agentStream = ndJsonStream(ba.writable, ab.readable);
+      let resolveExited:
+        | ((
+            info?:
+              | {
+                  exitCode: number | null;
+                  signalCode: NodeJS.Signals | null;
+                }
+              | undefined,
+          ) => void)
+        | undefined;
+      const exited = new Promise<
+        | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+        | undefined
+      >((r) => {
+        resolveExited = r;
+      });
+      const stuckAgent: Agent = {
+        async initialize() {
+          // Hang forever — the bridge's `withTimeout` would normally
+          // bound this, but the test asserts behavior DURING the
+          // handshake, so we let it sit until killAllSync resolves
+          // `exited` and tears the channel down externally.
+          return new Promise<InitializeResponse>(() => {});
+        },
+        async newSession() {
+          throw new Error('newSession should not be reached');
+        },
+        async loadSession() {
+          throw new Error('loadSession should not be reached');
+        },
+        async authenticate() {
+          throw new Error('authenticate should not be reached');
+        },
+        async prompt() {
+          throw new Error('prompt should not be reached');
+        },
+        async cancel() {
+          /* no-op */
+        },
+        async setSessionMode() {
+          throw new Error('setSessionMode should not be reached');
+        },
+        async setSessionConfigOption() {
+          throw new Error('setSessionConfigOption should not be reached');
+        },
+      };
+      new AgentSideConnection(() => stuckAgent, agentStream);
+      return {
+        stream: clientStream,
+        exited,
+        kill: async () => {
+          resolveExited!(undefined);
+        },
+        killSync: () => {
+          killSyncCalls.push('called');
+          resolveExited!(undefined);
+        },
+      };
+    };
+    const bridge = makeBridge({
+      channelFactory: factory,
+      // Bump initializeTimeoutMs so it doesn't race with the
+      // killAllSync we fire below. We're NOT testing the timeout
+      // path — we're testing the cold-spawn window before it.
+      initializeTimeoutMs: 30_000,
+    });
+
+    // Kick off a spawn — `initialize` hangs forever in this fake,
+    // so the spawn promise never resolves naturally. Don't await
+    // (would block the test); `.catch` keeps the rejection from
+    // being unhandled when killAllSync eventually tears things down.
+    const spawnPromise = bridge
+      .spawnOrAttach({ workspaceCwd: WS_A })
+      .catch(() => undefined);
+
+    // Yield enough microtasks for `channelFactory` to return AND the
+    // bridge's `info` creation + `aliveChannels.add(info)` + the
+    // `channel.exited` handler registration to all run BEFORE the
+    // bridge enters `await initialize`. Pre-fix the alive-set add
+    // sat AFTER initialize, so any number of yields here would still
+    // find an empty set when killAllSync fires below.
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    // Operator double-Ctrl+C arrives during the handshake window.
+    bridge.killAllSync();
+
+    // Post-fix expectation: channel was added to `aliveChannels`
+    // BEFORE the `initialize` await, so killAllSync iterates a set
+    // containing it and fires killSync. Pre-fix this array would
+    // have been empty — and `process.exit(1)` after this would have
+    // orphaned the agent child.
+    expect(killSyncCalls).toEqual(['called']);
+
+    // Cleanup: spawnPromise resolves on its own once killSync's
+    // `resolveExited` propagates through the bridge's
+    // `channel.exited` handler and the IIFE's catch reaps the half-
+    // initialized channel.
+    void spawnPromise;
+  });
+
   it('killSession marks the channel dying so concurrent spawnOrAttach gets a fresh channel', async () => {
     // After the last session is killed, `channel.kill()` runs through
     // its SIGTERM grace window before SIGKILL — up to 10s in the real

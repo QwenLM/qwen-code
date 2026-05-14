@@ -1151,30 +1151,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
-      try {
-        await withTimeout(
-          connection.initialize({
-            protocolVersion: PROTOCOL_VERSION,
-            clientCapabilities: {
-              fs: { readTextFile: true, writeTextFile: true },
-            },
-            clientInfo: { name: 'qwen-serve-bridge', version: '0' },
-          }),
-          initTimeoutMs,
-          'initialize',
-        );
-      } catch (err) {
-        await channel.kill().catch(() => {});
-        throw err;
-      }
-
-      // Late-shutdown re-check: if shutdown flipped during `initialize`,
-      // tear this channel down rather than leak past `process.exit(0)`.
-      if (shuttingDown) {
-        await channel.kill().catch(() => {});
-        throw new Error('HttpAcpBridge is shutting down');
-      }
-
+      // tanzhenxin cold-spawn-window finding: the agent child exists
+      // from the moment `channelFactory(boundWorkspace)` returns, but
+      // pre-fix `aliveChannels.add(info)` ran only AFTER the
+      // `initialize` handshake completed (up to `initTimeoutMs`, default
+      // 10s). A double-Ctrl+C in that handshake window played out as:
+      // first SIGINT entered `shutdown()` and awaited the in-flight
+      // spawn; second SIGINT called `killAllSync()` against an empty
+      // `aliveChannels` (the channel hadn't been added yet) and
+      // `process.exit(1)` orphaned the child. Add to `aliveChannels`
+      // BEFORE the handshake await, and register the `channel.exited`
+      // handler immediately afterward so init-failure / child-crash /
+      // late-shutdown all clean up through the standard exit path
+      // instead of needing bespoke catches. `channelInfo` (the attach
+      // target) stays set only AFTER initialize succeeds — see further
+      // down — so callers don't attach to a still-handshaking channel.
       const info: ChannelInfo = {
         channel,
         connection,
@@ -1182,7 +1173,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         sessionIds: new Set(),
         isDying: false,
       };
-      channelInfo = info;
       aliveChannels.add(info);
 
       // One-time channel.exited cleanup. The child dying takes ALL
@@ -1190,6 +1180,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // first to be safe against concurrent killSession during
       // iteration), publish `session_died` on each session's bus,
       // remove from byId / defaultEntry / pending tables.
+      //
+      // Registered BEFORE the `initialize` await (tanzhenxin
+      // cold-spawn-window fix above) so init-failure / child-crash /
+      // late-shutdown all converge here. During handshake
+      // `sessionIds` is empty — the loop below no-ops, the stderr
+      // line still fires to tell operators "agent process gone
+      // during init", and `aliveChannels.delete(info)` clears the
+      // entry through the normal exit path.
       //
       // tanzhenxin BkUyD: drop from `aliveChannels` ONLY when the OS
       // process is actually gone. Async kill paths (`killSession`
@@ -1242,6 +1240,50 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
       });
 
+      // Initialize handshake. The channel is already in
+      // `aliveChannels` and the `channel.exited` handler above is
+      // registered, so failure paths (init throw, timeout, late
+      // shutdown) only need to mark dying + kill — the handler does
+      // the alive-set cleanup when the OS reaps the child.
+      try {
+        await withTimeout(
+          connection.initialize({
+            protocolVersion: PROTOCOL_VERSION,
+            clientCapabilities: {
+              fs: { readTextFile: true, writeTextFile: true },
+            },
+            clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+          }),
+          initTimeoutMs,
+          'initialize',
+        );
+      } catch (err) {
+        // Mark dying so concurrent `ensureChannel` callers spawn
+        // fresh instead of awaiting this in-flight promise's
+        // `channelInfo` (which we never assigned). The kill below
+        // triggers `channel.exited` → handler runs `aliveChannels
+        // .delete(info)` → entry leaves the alive set after OS reap.
+        info.isDying = true;
+        await channel.kill().catch(() => {});
+        throw err;
+      }
+
+      // Late-shutdown re-check: if shutdown flipped during the
+      // handshake, tear this channel down rather than leak past
+      // `process.exit(0)`. Same cleanup pattern as the init-failure
+      // path: mark dying + kill, let the exited handler reap.
+      if (shuttingDown) {
+        info.isDying = true;
+        await channel.kill().catch(() => {});
+        throw new Error('HttpAcpBridge is shutting down');
+      }
+
+      // Handshake succeeded — now publish the channel as the
+      // attach-available slot. `channelInfo` is assigned LAST so
+      // `ensureChannel`'s fast-path (`if (channelInfo && !.isDying)`)
+      // never returns a still-handshaking channel to a concurrent
+      // caller.
+      channelInfo = info;
       return info;
     })();
 
