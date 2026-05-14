@@ -29,6 +29,19 @@ import stripAnsi from 'strip-ansi';
 import chalk from 'chalk';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
+import {
+  useAgentViewActions,
+  useAgentViewState,
+} from '../contexts/AgentViewContext.js';
+import {
+  useBackgroundTaskViewActions,
+  useBackgroundTaskViewState,
+} from '../contexts/BackgroundTaskViewContext.js';
+
+const mockViewActions = vi.hoisted(() => ({
+  setAgentTabBarFocused: vi.fn(),
+  setBgPillFocused: vi.fn(),
+}));
 
 vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
@@ -43,6 +56,31 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
+  })),
+}));
+vi.mock('../contexts/AgentViewContext.js', () => ({
+  useAgentViewState: vi.fn(() => ({
+    activeView: 'main',
+    agents: new Map(),
+    agentShellFocused: false,
+    agentInputBufferText: '',
+    agentTabBarFocused: false,
+    agentApprovalModes: new Map(),
+  })),
+  useAgentViewActions: vi.fn(() => ({
+    setAgentTabBarFocused: mockViewActions.setAgentTabBarFocused,
+  })),
+}));
+vi.mock('../contexts/BackgroundTaskViewContext.js', () => ({
+  useBackgroundTaskViewState: vi.fn(() => ({
+    entries: [],
+    selectedIndex: 0,
+    dialogMode: 'closed',
+    dialogOpen: false,
+    pillFocused: false,
+  })),
+  useBackgroundTaskViewActions: vi.fn(() => ({
+    setPillFocused: mockViewActions.setBgPillFocused,
   })),
 }));
 
@@ -124,12 +162,56 @@ describe('InputPrompt', () => {
   const mockedUseShellHistory = vi.mocked(useShellHistory);
   const mockedUseCommandCompletion = vi.mocked(useCommandCompletion);
   const mockedUseInputHistory = vi.mocked(useInputHistory);
+  const mockedUseUIState = vi.mocked(useUIState);
+  const mockedUseUIActions = vi.mocked(useUIActions);
+  const mockedUseAgentViewState = vi.mocked(useAgentViewState);
+  const mockedUseAgentViewActions = vi.mocked(useAgentViewActions);
+  const mockedUseBackgroundTaskViewState = vi.mocked(
+    useBackgroundTaskViewState,
+  );
+  const mockedUseBackgroundTaskViewActions = vi.mocked(
+    useBackgroundTaskViewActions,
+  );
   const mockedUseReverseSearchCompletion = vi.mocked(
     useReverseSearchCompletion,
   );
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockViewActions.setAgentTabBarFocused.mockReset();
+    mockViewActions.setBgPillFocused.mockReset();
+
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingGeminiHistoryItems: [],
+    } as unknown as ReturnType<typeof useUIState>);
+    mockedUseUIActions.mockReturnValue({
+      handleRetryLastPrompt: vi.fn(),
+      temporaryCloseFeedbackDialog: vi.fn(),
+      popAllQueuedMessages: vi.fn(() => null),
+    } as unknown as ReturnType<typeof useUIActions>);
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+      agentShellFocused: false,
+      agentInputBufferText: '',
+      agentTabBarFocused: false,
+      agentApprovalModes: new Map(),
+    });
+    mockedUseAgentViewActions.mockReturnValue({
+      setAgentTabBarFocused: mockViewActions.setAgentTabBarFocused,
+    } as unknown as ReturnType<typeof useAgentViewActions>);
+    mockedUseBackgroundTaskViewState.mockReturnValue({
+      entries: [],
+      selectedIndex: 0,
+      dialogMode: 'closed',
+      dialogOpen: false,
+      pillFocused: false,
+    });
+    mockedUseBackgroundTaskViewActions.mockReturnValue({
+      setPillFocused: mockViewActions.setBgPillFocused,
+    } as unknown as ReturnType<typeof useBackgroundTaskViewActions>);
 
     mockCommandContext = createMockCommandContext();
 
@@ -451,6 +533,8 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.navigateUp).not.toHaveBeenCalled();
 
     // Ctrl+N should navigate history, not completion
+    // Two-step edge: pre-position cursor at end so Ctrl+N directly triggers history
+    mockBuffer.visualCursor = [0, '/mem'.length];
     stdin.write('\u000E'); // Ctrl+N
     await wait();
     expect(mockCommandCompletion.navigateDown).toHaveBeenCalledTimes(1);
@@ -3741,6 +3825,65 @@ describe('InputPrompt', () => {
       // Readline "previous-history" lands the cursor at the start of the
       // restored entry.
       expect(mockBuffer.moveToOffset).toHaveBeenCalledWith(0);
+      unmount();
+    });
+
+    it('Ctrl+P/N do not change input history while a tool confirmation owns navigation', async () => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [
+          {
+            type: 'tool_group',
+            tools: [
+              {
+                confirmationDetails: { type: 'ask_user_question' },
+              },
+            ],
+          },
+        ],
+      } as unknown as ReturnType<typeof useUIState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u0010'); // Ctrl+P
+      await wait();
+      stdin.write('\u000E'); // Ctrl+N
+      await wait();
+
+      expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('Ctrl+N falls through to the agent tab bar when there is no newer history', async () => {
+      mockInputHistory.navigateDown.mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u000E'); // Ctrl+N
+      await wait();
+
+      expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
       unmount();
     });
 

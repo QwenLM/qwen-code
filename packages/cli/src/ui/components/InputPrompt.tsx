@@ -143,6 +143,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Includes terminal entries — the pill stays open so users can reopen
   // the dialog to inspect final state after the last agent finishes.
   const hasBgAgents = bgEntries.length > 0;
+  const hasActiveToolConfirmation = useMemo(
+    () =>
+      Boolean(uiState.confirmationRequest) ||
+      (uiState.pendingGeminiHistoryItems ?? []).some(
+        (item) =>
+          item.type === 'tool_group' &&
+          item.tools.some((tool) => tool.confirmationDetails),
+      ),
+    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+  );
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
@@ -955,6 +965,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        if (
+          hasActiveToolConfirmation &&
+          (keyMatchers[Command.HISTORY_UP](key) ||
+            keyMatchers[Command.HISTORY_DOWN](key) ||
+            keyMatchers[Command.NAVIGATION_UP](key) ||
+            keyMatchers[Command.NAVIGATION_DOWN](key))
+        ) {
+          return true;
+        }
+
         // Pop all queued messages into input when pressing Up arrow at top of input
         if (
           !isAttachmentMode &&
@@ -1003,7 +1023,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             buffer.move('end');
             return true;
           }
-          inputHistory.navigateDown();
+          if (inputHistory.navigateDown()) {
+            return true;
+          }
+          if (hasAgents) {
+            setAgentTabBarFocused(true);
+            return true;
+          }
+          if (hasBgAgents) {
+            setBgPillFocused(true);
+            return true;
+          }
           return true;
         }
         // Handle arrow-up/down for history on single-line or at edges
@@ -1243,6 +1273,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgPillFocused,
       hasAgents,
       hasBgAgents,
+      hasActiveToolConfirmation,
       setAgentTabBarFocused,
       setBgPillFocused,
       followup,
