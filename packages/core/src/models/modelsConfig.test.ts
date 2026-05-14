@@ -326,6 +326,7 @@ describe('ModelsConfig', () => {
           name: 'Provider Model',
           baseUrl: 'https://provider.example.com/v1',
           envKey: 'PROVIDER_API_KEY',
+          providerType: 'dashscope',
           generationConfig: {
             samplingParams: { temperature: 0.1, max_tokens: 100 },
             timeout: 1000,
@@ -347,6 +348,7 @@ describe('ModelsConfig', () => {
     let gc = currentGenerationConfig(modelsConfig);
     expect(gc.model).toBe('provider-model');
     expect(gc.baseUrl).toBe('https://provider.example.com/v1');
+    expect(gc.providerType).toBe('dashscope');
     expect(gc.samplingParams?.temperature).toBe(0.1);
     expect(gc.samplingParams?.max_tokens).toBe(100);
     expect(gc.timeout).toBe(1000);
@@ -356,6 +358,7 @@ describe('ModelsConfig', () => {
     let sources = modelsConfig.getGenerationConfigSources();
     expect(sources['model']?.kind).toBe('modelProviders');
     expect(sources['baseUrl']?.kind).toBe('modelProviders');
+    expect(sources['providerType']?.kind).toBe('modelProviders');
     expect(sources['samplingParams']?.kind).toBe('modelProviders');
     expect(sources['timeout']?.kind).toBe('modelProviders');
     expect(sources['maxRetries']?.kind).toBe('modelProviders');
@@ -372,6 +375,7 @@ describe('ModelsConfig', () => {
     expect(gc.model).toBe('custom-model'); // Set by updateCredentials
     expect(gc.apiKey).toBe('manual-api-key'); // Set by updateCredentials
     expect(gc.baseUrl).toBeUndefined(); // Cleared (was from provider)
+    expect(gc.providerType).toBeUndefined(); // Cleared (was from provider)
     expect(gc.samplingParams).toBeUndefined(); // Cleared (was from provider)
     expect(gc.timeout).toBeUndefined(); // Cleared (was from provider)
     expect(gc.maxRetries).toBeUndefined(); // Cleared (was from provider)
@@ -381,6 +385,7 @@ describe('ModelsConfig', () => {
     expect(sources['model']?.kind).toBe('programmatic');
     expect(sources['apiKey']?.kind).toBe('programmatic');
     expect(sources['baseUrl']).toBeUndefined(); // Source cleared
+    expect(sources['providerType']).toBeUndefined(); // Source cleared
     expect(sources['samplingParams']).toBeUndefined(); // Source cleared
     expect(sources['timeout']).toBeUndefined(); // Source cleared
     expect(sources['maxRetries']).toBeUndefined(); // Source cleared

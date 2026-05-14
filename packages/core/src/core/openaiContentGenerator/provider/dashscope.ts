@@ -38,9 +38,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
   ): boolean {
-    const { authType, baseUrl } = contentGeneratorConfig;
+    const { authType, baseUrl, providerType } = contentGeneratorConfig;
 
     if (authType === AuthType.QWEN_OAUTH) return true;
+    if (providerType === 'dashscope') return true;
     if (!baseUrl) return true;
 
     const normalizedBaseUrl = baseUrl.endsWith('/')

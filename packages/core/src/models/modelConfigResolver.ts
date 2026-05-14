@@ -253,6 +253,16 @@ export function resolveModelConfig(
     sources['baseUrl'] = baseUrlResult.source;
   }
 
+  // ---- Provider Type ----
+  const providerType = modelProvider?.providerType;
+  if (authType && providerType) {
+    sources['providerType'] = modelProvidersSource(
+      authType,
+      modelProvider.id,
+      'providerType',
+    );
+  }
+
   // ---- API Key Env Key (for error messages) ----
   let apiKeyEnvKey: string | undefined;
   if (authType && modelProvider?.envKey) {
@@ -282,6 +292,7 @@ export function resolveModelConfig(
     apiKey: apiKeyResult?.value,
     apiKeyEnvKey,
     baseUrl: baseUrlResult?.value,
+    providerType,
     proxy,
     ...generationConfig,
   };

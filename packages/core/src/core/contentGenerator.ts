@@ -76,6 +76,9 @@ export type ContentGeneratorConfig = {
   apiKey?: string;
   apiKeyEnvKey?: string;
   baseUrl?: string;
+  // Explicit provider behavior for OpenAI-compatible endpoints whose hostname
+  // cannot identify the backing provider.
+  providerType?: 'dashscope';
   vertexai?: boolean;
   authType?: AuthType | undefined;
   enableOpenAILogging?: boolean;

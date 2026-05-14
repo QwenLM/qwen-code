@@ -114,6 +114,7 @@ describe('modelConfigResolver', () => {
             name: 'Provider Model',
             envKey: 'MY_CUSTOM_KEY',
             baseUrl: 'https://provider.example.com',
+            providerType: 'dashscope',
             generationConfig: {},
           },
         });
@@ -121,10 +122,12 @@ describe('modelConfigResolver', () => {
         expect(result.config.model).toBe('provider-model');
         expect(result.config.apiKey).toBe('provider-key');
         expect(result.config.baseUrl).toBe('https://provider.example.com');
+        expect(result.config.providerType).toBe('dashscope');
 
         expect(result.sources['model'].kind).toBe('modelProviders');
         expect(result.sources['apiKey'].kind).toBe('env');
         expect(result.sources['apiKey'].via?.kind).toBe('modelProviders');
+        expect(result.sources['providerType'].kind).toBe('modelProviders');
       });
 
       it('reads QWEN_MODEL as fallback for OPENAI_MODEL', () => {

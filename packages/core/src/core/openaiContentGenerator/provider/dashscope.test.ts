@@ -186,10 +186,22 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(true);
     });
 
-    it('should return false for bare alibaba-inc.com domain', () => {
+    it('should return true when providerType explicitly opts into DashScope', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://alibaba-inc.com/v1',
+        baseUrl: 'https://company.example.com/dashscope-compatible/v1',
+        providerType: 'dashscope',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return false for bare dw.alibaba-inc.com domain', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dw.alibaba-inc.com/v1',
       } as ContentGeneratorConfig;
 
       const result =
@@ -197,10 +209,10 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result).toBe(false);
     });
 
-    it('should return false for bare aliyun-inc.com domain', () => {
+    it('should return false for bare data.aliyun-inc.com domain', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
-        baseUrl: 'https://aliyun-inc.com/v1',
+        baseUrl: 'https://data.aliyun-inc.com/v1',
       } as ContentGeneratorConfig;
 
       const result =
