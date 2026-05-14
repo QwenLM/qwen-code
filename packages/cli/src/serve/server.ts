@@ -51,6 +51,22 @@ export interface ServeAppDeps {
  *   - `POST /session/:id/model`
  *   - `GET  /session/:id/events` (SSE)
  *   - `POST /permission/:requestId`
+ *
+ * **Workspace validation contract.** `createServeApp` itself does NOT
+ * verify that `opts.workspace` exists or is a directory — it
+ * canonicalizes via `canonicalizeWorkspace`, which falls back to
+ * `path.resolve` on ENOENT so the app boots even against a missing
+ * path. `runQwenServe` is the production entry point and DOES
+ * perform the `fs.statSync` + `isDirectory()` boot-loud check before
+ * calling this function. Tests inject synthetic paths (`/work/bound`
+ * etc.) on purpose: they want to exercise the route layer's
+ * canonicalization and `workspace_mismatch` translation without
+ * needing a real directory on disk. If a future entry point binds
+ * `createServeApp` directly to user input, it MUST replicate the
+ * `runQwenServe` validation (or call into a shared helper if one is
+ * extracted) — otherwise a non-existent `--workspace` would boot
+ * a "healthy"-looking daemon whose every spawn fails with cryptic
+ * child-process ENOENT.
  */
 export function createServeApp(
   opts: ServeOptions,

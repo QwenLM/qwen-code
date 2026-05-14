@@ -408,7 +408,13 @@ interface ChannelInfo {
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
   client: BridgeClient;
-  workspaceCwd: string;
+  // Note: pre-§02 a `workspaceCwd: string` field lived here so the
+  // `byWorkspaceChannel.get(entry.workspaceCwd)` lookup could route
+  // multi-workspace requests. Under "1 daemon = 1 workspace" the
+  // module-scope `boundWorkspace` is the single source of truth and
+  // every channel inherits it. Per-channel storage would suggest
+  // variance the model doesn't allow; dropping it makes the
+  // single-workspace invariant visible at the type level.
   /**
    * Live session ids multiplexed on this channel. Updated when
    * `doSpawn` registers a new session and when `killSession` /
@@ -1173,7 +1179,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         channel,
         connection,
         client,
-        workspaceCwd: boundWorkspace,
         sessionIds: new Set(),
         isDying: false,
       };
@@ -1200,6 +1205,19 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
         info.sessionIds.clear();
+        // Operator breadcrumb on the daemon side. Without it, an
+        // agent crash (OOM / segfault) is invisible from the daemon
+        // log: each affected SSE subscriber sees a `session_died`
+        // frame and disconnects, the daemon's child-stderr forwarder
+        // emits whatever the child wrote before dying (often
+        // nothing on a SIGKILL / segfault), and operators can't tell
+        // from `qwen serve`'s own output that the agent process is
+        // gone. Log the OS-level signal/exitCode + how many sessions
+        // were affected so the line is the canonical "agent
+        // disappeared" indicator.
+        writeStderrLine(
+          `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, ${sessions.length} session(s) torn down)`,
+        );
         for (const sid of sessions) {
           const sessEntry = byId.get(sid);
           if (!sessEntry) continue;
@@ -1497,7 +1515,19 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           `workspaceCwd must be an absolute path; got "${req.workspaceCwd}"`,
         );
       }
-      const workspaceKey = canonicalizeWorkspace(req.workspaceCwd);
+      // Fast-path the common §02 case: clients pre-flight `caps.workspaceCwd`
+      // and post back the exact same string, so the equality check
+      // saves a `realpathSync.native` syscall per spawnOrAttach. The
+      // omit-cwd path in `server.ts` also synthesizes `cwd =
+      // boundWorkspace` before calling here, so it hits this branch
+      // too. Falls through to the full canonicalize when the client
+      // sent a non-canonical alias (`/work/./bound`, mixed casing on
+      // case-insensitive FS, a symlinked aliased path, …) — that
+      // still needs the realpath to compare correctly.
+      const workspaceKey =
+        req.workspaceCwd === boundWorkspace
+          ? boundWorkspace
+          : canonicalizeWorkspace(req.workspaceCwd);
       // #3803 §02: reject cross-workspace requests at the daemon
       // boundary. The route layer catches `WorkspaceMismatchError`
       // and translates to 400 with `code: 'workspace_mismatch'`.
