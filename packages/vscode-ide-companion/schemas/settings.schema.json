@@ -424,6 +424,26 @@
           "type": "number",
           "default": -1
         },
+        "maxWallTimeSeconds": {
+          "description": "Run-level wall-clock budget for headless / unattended runs, in seconds. -1 means unlimited. Overridable per-invocation via --max-wall-time (which also accepts duration suffixes like 5m, 1h).",
+          "type": "number",
+          "default": -1
+        },
+        "maxToolCalls": {
+          "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure). -1 means unlimited. Overridable via --max-tool-calls.",
+          "type": "number",
+          "default": -1
+        },
+        "maxApiCalls": {
+          "description": "Cumulative model-stream-request budget for a run. -1 means unlimited. Overridable via --max-api-calls. Use alongside QWEN_CODE_UNATTENDED_RETRY to bound retry storms.",
+          "type": "number",
+          "default": -1
+        },
+        "maxTokens": {
+          "description": "Cumulative total-token budget for the run (input + output across every model call). -1 means unlimited. Overridable via --max-tokens. Distinct from sessionTokenLimit, which caps next-prompt context size.",
+          "type": "number",
+          "default": -1
+        },
         "chatCompression": {
           "description": "Chat compression settings.",
           "type": "object",
@@ -439,7 +459,7 @@
           "default": true
         },
         "skipLoopDetection": {
-          "description": "Disable all loop detection checks (streaming and LLM).",
+          "description": "Skip streaming loop detection. Defaults to true to avoid false-positive interruptions; set to false to re-enable as an unattended-run guardrail.",
           "type": "boolean",
           "default": true
         },
