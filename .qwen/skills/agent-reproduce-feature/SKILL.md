@@ -43,6 +43,8 @@ Record the selected adapter in the run notes or scenario:
 2. Select `codex` or `claude-code` as the reference agent and discover its local launch command.
 3. Inspect the target repo enough to identify the likely module boundaries and Qwen Code launch command before changing code.
 4. Run the nested reference agent against the feature with capture enabled:
+   - Local state capture via `scripts/capture_state.py` before and after the
+     scenario.
    - HTTP/body capture via `scripts/run_with_mitm.sh`.
    - Terminal capture via `scripts/run_tmux_capture.sh` when the feature is interactive or TUI-visible.
    - Headless/non-interactive execution when the feature has a stable command-line path.
@@ -50,7 +52,7 @@ Record the selected adapter in the run notes or scenario:
    - system/developer prompt deltas relevant to the feature
    - request body shape, including `messages`, `tools`, `functions`, schemas, tool choice, model settings
    - visible terminal states and command output
-   - file edits, exit status, and error paths
+   - local agent state changes, file edits, exit status, and error paths
 6. Implement the smallest compatible behavior in Qwen Code using its existing patterns.
 7. Add focused tests or a reproducible smoke command.
 8. Hand off to `$agent-reproduce-align` when implementation exists and parity needs iteration.
@@ -86,10 +88,36 @@ skills/agent-reproduce-feature/scripts/run_tmux_capture.sh \
 
 The mitm script sets common proxy and CA variables for Node, Python, and curl-based CLIs. If TLS fails, read the certificate notes in `references/capture-workflow.md` and fix trust before interpreting missing traffic as product behavior.
 
+Capture reference-agent state before and after a run:
+
+```sh
+skills/agent-reproduce-feature/scripts/capture_state.py \
+  snapshot .repro-runs/slash-command-baseline/state-before \
+  --agent codex
+
+# Run the reference scenario here.
+
+skills/agent-reproduce-feature/scripts/capture_state.py \
+  snapshot .repro-runs/slash-command-baseline/state-after \
+  --agent codex
+
+skills/agent-reproduce-feature/scripts/capture_state.py \
+  diff \
+  .repro-runs/slash-command-baseline/state-before \
+  .repro-runs/slash-command-baseline/state-after \
+  --out-dir .repro-runs/slash-command-baseline/state-diff
+```
+
+Use `--agent claude-code` to snapshot `~/.claude` instead of `~/.codex`.
+Use `--root PATH` only for a custom state directory or tests.
+
 ## Implementation Rules
 
 - Do not copy all captured prompt text into Qwen Code. Convert it into the minimum behavior, schema, or test needed.
 - Treat captured request bodies as sensitive local artifacts. Redact tokens before saving examples into docs, commits, issues, or PRs.
+- Treat state diffs as sensitive local artifacts too. The state tool redacts
+  common token shapes and omits content for sensitive paths, but review
+  `state-diff.md` before copying any excerpt into a tracked file.
 - Keep the first implementation narrow: one feature, one trigger path, one observable parity target.
 - Prefer compatibility tests that assert behavior over brittle tests that assert exact prompt wording.
 - If a captured schema reveals a stable public contract, encode that contract as a typed structure or fixture in Qwen Code.
@@ -97,6 +125,8 @@ The mitm script sets common proxy and CA variables for Node, Python, and curl-ba
 ## Done Criteria
 
 - A baseline reference-agent trace exists under `.repro-runs/` or an equivalent ignored/local path.
+- Reference-agent state changes are captured or explicitly marked as not
+  relevant for the scenario.
 - Qwen Code contains a focused implementation and at least one verification path.
 - Any user-visible command behavior is documented in Qwen Code if that repo already documents similar features.
 - The next parity step can be run by `$agent-reproduce-align` without re-discovering the setup.

@@ -7,15 +7,16 @@ This skill follows the nested-agent pattern described in "解决问题的原始�
 - Outer harness: the current agent session.
 - Reference program: a nested `codex`, `claude`, or `claude-code` command that demonstrates the feature.
 - Target program: Qwen Code in the current working directory unless the user explicitly provides another path.
-- Capture layer: `mitmdump` plus terminal transcript capture.
+- Capture layer: local state snapshots, `mitmdump`, and terminal transcript
+  capture.
 
 ## Reference Adapters
 
 Select one reference adapter before capture:
 
-| Adapter | Interactive command | Headless command |
-| --- | --- | --- |
-| `codex` | `codex` | `codex exec "<prompt>"` |
+| Adapter       | Interactive command       | Headless command                                       |
+| ------------- | ------------------------- | ------------------------------------------------------ |
+| `codex`       | `codex`                   | `codex exec "<prompt>"`                                |
 | `claude-code` | `claude` or `claude-code` | Discover locally; if unavailable, use tmux interaction |
 
 Do not assume Claude Code's exact non-interactive flags. Check `claude --help` or `claude-code --help` in the user's environment and record the command used.
@@ -35,6 +36,42 @@ Use tmux when:
 - you need to send multiple keystroke batches
 
 Use both when a feature has model calls and visible terminal state.
+
+## State Capture
+
+Run a state snapshot before and after the reference scenario:
+
+```sh
+skills/agent-reproduce-feature/scripts/capture_state.py \
+  snapshot OUT_DIR/state-before --agent codex
+
+skills/agent-reproduce-feature/scripts/capture_state.py \
+  snapshot OUT_DIR/state-after --agent codex
+
+skills/agent-reproduce-feature/scripts/capture_state.py \
+  diff OUT_DIR/state-before OUT_DIR/state-after \
+  --out-dir OUT_DIR/state-diff
+```
+
+Default state roots:
+
+| Adapter       | State root  |
+| ------------- | ----------- |
+| `codex`       | `~/.codex`  |
+| `claude-code` | `~/.claude` |
+
+Generated files:
+
+- `state-manifest.json`: file metadata plus redacted text for safe small text
+  files.
+- `state-diff.md`: model-readable summary of added, removed, and modified
+  files.
+- `state-diff.json`: machine-readable equivalent.
+
+The snapshot tool records symlinks but does not follow them. It emits only
+metadata, without content hashes, for paths that look like auth, token, session,
+history, cache, log, or credential files. Review the Markdown before putting
+any state diff into a tracked artifact.
 
 ## HTTP Capture
 
@@ -103,6 +140,13 @@ From terminal records:
 - error text and recoverable failure paths
 - whether the feature is synchronous, streaming, or backgrounded
 
+From state diffs:
+
+- added or modified config files
+- permission, MCP, memory, or preference stores touched by the scenario
+- state changes that explain later behavior but were not visible in HTTP or
+  terminal output
+
 ## Redaction
 
 Never commit raw traces. Before moving examples into docs or tests, remove:
@@ -112,3 +156,5 @@ Never commit raw traces. Before moving examples into docs or tests, remove:
 - unrelated prompt content
 - private repository names and issue content
 - full request bodies that are not needed for the feature contract
+- state diff content that could expose account, prompt, session, or credential
+  data
