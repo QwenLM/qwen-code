@@ -225,7 +225,7 @@ export class DiffManager {
     // Prefer opening the diff in the group to the left of the chat webview.
     // When that isn't available (e.g. chat is in the leftmost group), try the
     // group to the right so we reuse existing layout. Only fall back to
-    // ViewColumn.Beside when neither neighbour exists.
+    // ViewColumn.Beside when neither neighbor exists.
     const targetViewColumn =
       findLeftGroupOfChatWebview() ??
       findRightGroupOfChatWebview() ??
@@ -237,10 +237,7 @@ export class DiffManager {
       rightDocUri,
       diffTitle,
       {
-        // If a left-of-webview group was found, target it explicitly so the
-        // diff opens there while keeping focus on the webview. Otherwise, use
-        // the default "open to side" behavior.
-        viewColumn: targetViewColumn ?? vscode.ViewColumn.Beside,
+        viewColumn: targetViewColumn,
         preview: false,
         preserveFocus: true,
       },
