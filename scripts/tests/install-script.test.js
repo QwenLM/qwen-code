@@ -603,6 +603,35 @@ describe('standalone release packaging', () => {
     expect(installPowerShellSource).toContain('@args');
   });
 
+  it('PowerShell hosted entrypoint refreshes the current Windows shell', () => {
+    const installPowerShellSource = readScript(
+      'scripts/installation/install-qwen-standalone.ps1',
+    );
+    const installBatchSource = readScript(
+      'scripts/installation/install-qwen-standalone.bat',
+    );
+
+    expect(installPowerShellSource).toContain('Update-CurrentSessionPath');
+    expect(installPowerShellSource).toContain('Install-CurrentCmdPathShim');
+    expect(installPowerShellSource).toContain('Test-WritableDirectory');
+    expect(installPowerShellSource).toContain('Qwen Code current-session shim');
+    expect(installPowerShellSource).not.toContain('doskey.exe');
+    expect(installPowerShellSource).toContain(
+      'qwen is ready to use in this PowerShell session.',
+    );
+    expect(installPowerShellSource).toContain(
+      'Added qwen.cmd to a directory already on this cmd.exe PATH:',
+    );
+    expect(installPowerShellSource).toContain(
+      'Windows does not allow this PowerShell child process to update the parent cmd.exe PATH directly.',
+    );
+
+    expect(installBatchSource).toContain('QWEN_INSTALLER_PARENT_POWERSHELL');
+    expect(installBatchSource).toContain(
+      'Final PATH refresh is handled by the PowerShell entrypoint.',
+    );
+  });
+
   it('stages hosted installation assets with checksums', async () => {
     const {
       HOSTED_INSTALLATION_ASSET_NAMES,
