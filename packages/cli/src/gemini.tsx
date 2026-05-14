@@ -544,10 +544,13 @@ export async function main() {
         ];
       };
 
-      const sandboxArgs = injectSessionIdIntoArgs(
-        injectStdinIntoArgs(process.argv, stdinData),
-        partialConfig.getSessionId(),
-      );
+      const sessionId = partialConfig.getSessionId();
+      const sandboxArgs = sessionId
+        ? injectSessionIdIntoArgs(
+            injectStdinIntoArgs(process.argv, stdinData),
+            sessionId,
+          )
+        : injectStdinIntoArgs(process.argv, stdinData);
 
       await relaunchOnExitCode(() =>
         start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),

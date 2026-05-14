@@ -368,6 +368,66 @@ describe('gemini.tsx main function', () => {
     expect(sandboxArgs).toContain(sessionId);
   });
 
+  it('does not pass an empty session ID into the sandbox child process', async () => {
+    const originalArgv = process.argv;
+    process.argv = ['node', 'script.js', '--debug', '-p', 'hello'];
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { start_sandbox } = await import('./utils/sandbox.js');
+
+    vi.mocked(start_sandbox).mockClear();
+    vi.mocked(parseArguments).mockResolvedValue({
+      debug: true,
+      prompt: 'hello',
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue({
+      command: 'sandbox-exec',
+      image: '',
+    });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => '',
+    } as unknown as Config);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
+
+    expect(start_sandbox).toHaveBeenCalledOnce();
+    const sandboxArgs = vi.mocked(start_sandbox).mock.calls[0][3];
+    expect(sandboxArgs).not.toContain('--session-id');
+  });
+
   it('should log unhandled promise rejections and open debug console on first error', async () => {
     const processExitSpy = vi
       .spyOn(process, 'exit')
