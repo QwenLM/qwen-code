@@ -1,0 +1,535 @@
+# .aoneci/upstream-sync-merge.yml
+# 合并 upstream (QwenLM/qwen-code) 代码到内网仓库，执行验证，并创建 MR
+#
+# 所需 CI 变量（在 Aone CI 平台配置）：
+#   vars.username                           - 域账号用户名（优先，用于 HTTPS push / MR）
+#   secrets.privateToken                    - 域账号 private token（优先，用于 HTTPS push / MR）
+#   vars.repoPath                           - 仓库路径（可选，未配置时回退到 Aone/CI 环境变量）
+#   CI_AONE_CODE_PRIVATE_TOKEN_{employeeId} - 旧 token 变量（兼容回退）
+#   CI_QWEN_API_KEY                         - Qwen API Key（用于 LLM 辅助冲突解决，可选）
+#   CI_QWEN_BASE_URL                        - Qwen API Base URL（默认 DashScope，可选）
+#   CI_DINGTALK_WEBHOOK_URL                 - 钉钉机器人 webhook 地址（可选）
+#   CI_DINGTALK_WEBHOOK_SECRET              - 钉钉机器人加签密钥（可选）
+#
+# 触发方式：
+#   1. 手动推送到 feat/upstream-sync-automation 分支
+#   2. 在 Aone CI 平台手动触发
+
+name: Upstream Sync 合并
+
+triggers:
+  schedule:
+    - cron: '20 22 * * *' # 每天 23:00 执行
+  push:
+    branches: ['feat/upstream-sync-automation']
+
+strategy:
+  fast-fail: true
+
+traits:
+  - type: notification
+    properties:
+      when:
+        - success
+        - fail
+      types:
+        - dingtalk
+      users:
+        - ${{git.employeeId}}
+      content: |
+        ***
+        ${{jobs.merge.outputs.summary}}
+
+jobs:
+  merge:
+    name: '合并 upstream 并验证'
+    image: node:20
+    timeout: 30m
+    outputs:
+      summary: ${{steps.createMR.outputs.result}}
+    steps:
+      - uses: 'checkout'
+
+      - uses: 'setup-github-proxy'
+
+      - uses: 'setup-env'
+        inputs:
+          node-version: '20'
+
+      - name: '初始化当前仓库的 Git 上下文'
+        env:
+          AUTH_USERNAME: ${{vars.username}}
+          PRIVATE_TOKEN: ${{secrets.privateToken}}
+          LEGACY_GIT_TOKEN: ${{secrets['CI_AONE_CODE_PRIVATE_TOKEN_' + git.employeeId]}}
+          REPO_PATH: ${{vars.repoPath}}
+          GIT_REPO_FULL_NAME: ${{git.repo.fullName}}
+          SOURCE_BRANCH: ${{git.branch}}
+          GIT_USER_NAME: aone-ci-bot
+          GIT_USER_EMAIL: ci-bot@alibaba-inc.com
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          mkdir -p "$STATE_DIR"
+          HELPER_SCRIPT="$STATE_DIR/upstream-sync-domain-auth.sh"
+          cp "$SOURCE_DIR/.aoneci/scripts/upstream-sync-domain-auth.sh" "$HELPER_SCRIPT"
+          chmod +x "$HELPER_SCRIPT"
+          echo "[auth-diag] AUTH_USERNAME=$([ -n \"${AUTH_USERNAME:-}\" ] && echo set || echo unset)"
+          echo "[auth-diag] PRIVATE_TOKEN=$([ -n \"${PRIVATE_TOKEN:-}\" ] && echo set || echo unset)"
+          echo "[auth-diag] LEGACY_GIT_TOKEN=$([ -n \"${LEGACY_GIT_TOKEN:-}\" ] && echo set || echo unset)"
+          echo "[auth-diag] REPO_PATH=${REPO_PATH:-(unset)}"
+          echo "[auth-diag] GIT_REPO_FULL_NAME=${GIT_REPO_FULL_NAME:-(unset)}"
+          echo "[auth-diag] SOURCE_BRANCH=${SOURCE_BRANCH:-(unset)}"
+          AUTH_USERNAME="${AUTH_USERNAME:-}" \
+          PRIVATE_TOKEN="${PRIVATE_TOKEN:-}" \
+          LEGACY_GIT_TOKEN="${LEGACY_GIT_TOKEN:-}" \
+          REPO_PATH="${REPO_PATH:-}" \
+          GIT_REPO_FULL_NAME="${GIT_REPO_FULL_NAME:-}" \
+          SOURCE_BRANCH="${SOURCE_BRANCH:-}" \
+          GIT_USER_NAME="${GIT_USER_NAME:-aone-ci-bot}" \
+          GIT_USER_EMAIL="${GIT_USER_EMAIL:-ci-bot@alibaba-inc.com}" \
+          WORK_DIR="$SOURCE_DIR" \
+            bash "$HELPER_SCRIPT" prepare
+
+      - name: '配置 Git 身份'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          mkdir -p "$STATE_DIR"
+          CONFLICT_STATUS_FILE="$STATE_DIR/conflict-status"
+          CONFLICT_FILES_FILE="$STATE_DIR/conflict-files"
+          BRANCH_NAME_FILE="$STATE_DIR/branch-name"
+          NEW_COMMITS_FILE="$STATE_DIR/new-commits"
+          SKIP_PUSH_FILE="$STATE_DIR/skip-push"
+
+          git config user.name "aone-ci-bot"
+          git config user.email "ci-bot@alibaba-inc.com"
+
+          # 初始化状态文件，确保后续步骤即使前面步骤失败也能正常读取
+          echo "skip" > "$CONFLICT_STATUS_FILE"
+          echo "" > "$CONFLICT_FILES_FILE"
+          echo "" > "$BRANCH_NAME_FILE"
+          echo "0" > "$NEW_COMMITS_FILE"
+          echo "0" > "$SKIP_PUSH_FILE"
+
+      - name: 'Fetch upstream'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          TARGET_BRANCH="${CI_DEFAULT_BRANCH:-main}"
+
+          git remote add upstream https://github.com/QwenLM/qwen-code.git 2>/dev/null || true
+          # CI 默认 shallow clone，需要 unshallow 才能让 merge-base 找到共同祖先
+          git fetch --unshallow origin 2>/dev/null || true
+          git fetch upstream main --tags
+          git fetch origin "$TARGET_BRANCH" 2>/dev/null || true
+
+          # 诊断信息：展示本地和上游的最新状态
+          echo "============================================================"
+          echo "📋 诊断信息"
+          echo "============================================================"
+          echo "🏠 本地 HEAD:"
+          git log --oneline -1 HEAD
+          echo ""
+          echo "🌐 upstream/main 最新提交:"
+          git log --oneline -1 upstream/main
+          echo "   提交时间: $(git log -1 --format='%ci' upstream/main)"
+          echo "   提交者:   $(git log -1 --format='%an <%ae>' upstream/main)"
+          echo ""
+          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+            echo "📌 origin/$TARGET_BRANCH 最新提交:"
+            git log --oneline -1 "origin/$TARGET_BRANCH"
+          else
+            echo "📌 origin/$TARGET_BRANCH: 不存在（将使用当前工作树作为回退基线）"
+          fi
+          echo "============================================================"
+          # 顺便更新 origin 上的镜像分支（供本地或其他用途）
+          git push origin upstream/main:refs/heads/github-qwen-code-main --force 2>/dev/null || true
+          echo "✅ 已尝试更新 origin/github-qwen-code-main 镜像分支"
+
+      - name: '检查是否有新变更'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          NEW_COMMITS_FILE="$STATE_DIR/new-commits"
+          TARGET_BRANCH="${CI_DEFAULT_BRANCH:-main}"
+
+          # 用默认目标分支作为同步基准，而非 CI 触发分支的 HEAD
+          if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+            SYNC_REF="origin/$TARGET_BRANCH"
+          else
+            SYNC_REF="HEAD"
+          fi
+          echo "📌 对比基准: $SYNC_REF ($(git rev-parse --short $SYNC_REF))"
+
+          MERGE_BASE=$(git merge-base "$SYNC_REF" upstream/main 2>/dev/null || echo "")
+          if [ -z "$MERGE_BASE" ]; then
+            echo "⚠️ 无法计算 merge-base（$SYNC_REF 与 upstream/main 无共同祖先），视为全量同步"
+            # 用 cherry 精确统计对方独有的提交数，避免把整个 upstream 历史都算进去
+            NEW_COMMITS=$(git cherry "$SYNC_REF" upstream/main 2>/dev/null | grep -c '^+' || git rev-list --count "$SYNC_REF..upstream/main" 2>/dev/null || echo "unknown")
+          else
+            NEW_COMMITS=$(git log --oneline "$MERGE_BASE..upstream/main" --no-merges | wc -l | tr -d ' ')
+            echo "📊 merge-base: $(git rev-parse --short $MERGE_BASE) | upstream/main: $(git rev-parse --short upstream/main) | 新提交数: $NEW_COMMITS"
+          fi
+
+          if [ "$NEW_COMMITS" -eq "0" ]; then
+            echo "✅ 无新 upstream 提交，无需合并。"
+            exit 0
+          fi
+          echo "$NEW_COMMITS" > "$NEW_COMMITS_FILE"
+          echo "📦 发现 $NEW_COMMITS 个新 upstream 提交，开始合并..."
+          echo "最近 5 个 upstream 提交:"
+          if [ -n "$MERGE_BASE" ]; then
+            git log --oneline "$MERGE_BASE..upstream/main" --no-merges | head -5
+          else
+            git log --oneline upstream/main --no-merges | head -5
+          fi
+
+      - name: '创建 sync 分支并合并'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          mkdir -p "$STATE_DIR"
+          CONFLICT_STATUS_FILE="$STATE_DIR/conflict-status"
+          CONFLICT_FILES_FILE="$STATE_DIR/conflict-files"
+          BRANCH_NAME_FILE="$STATE_DIR/branch-name"
+          SKIP_PUSH_FILE="$STATE_DIR/skip-push"
+          TARGET_BRANCH="${CI_DEFAULT_BRANCH:-main}"
+
+          SYNC_BRANCH="sync/upstream-$(date +%Y%m%d)"
+          REMOTE_SYNC_REF="origin/$SYNC_BRANCH"
+
+          git fetch origin "$SYNC_BRANCH" 2>/dev/null || true
+          echo "0" > "$SKIP_PUSH_FILE"
+
+          if git show-ref --verify --quiet "refs/remotes/origin/$SYNC_BRANCH"; then
+            if git merge-base --is-ancestor upstream/main "$REMOTE_SYNC_REF"; then
+              # ── 情况 A：sync 分支已包含最新 upstream/main → 直接复用 ──
+              echo "♻️ 检测到远端已有当天 sync 分支且已包含最新 upstream/main，直接复用"
+              git checkout -B "$SYNC_BRANCH" "$REMOTE_SYNC_REF"
+              echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
+              echo "1" > "$SKIP_PUSH_FILE"
+              echo "" > "$CONFLICT_FILES_FILE"
+              if [ "$(git rev-parse "$REMOTE_SYNC_REF")" = "$(git rev-parse upstream/main)" ]; then
+                echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
+              else
+                echo "clean" > "$CONFLICT_STATUS_FILE"
+              fi
+              echo "============================================================"
+              echo "📋 复用现有 sync 分支"
+              echo "   状态: $(cat "$CONFLICT_STATUS_FILE")"
+              echo "   分支: $SYNC_BRANCH"
+              echo "   当前 HEAD: $(git log --oneline -1 HEAD)"
+              echo "============================================================"
+              exit 0
+            else
+              # ── 情况 B：sync 分支已存在但 upstream/main 有新提交 → 增量合并 ──
+              STALE_NEW_COUNT=$(git log --oneline "$REMOTE_SYNC_REF..upstream/main" --no-merges | wc -l | tr -d ' ')
+              echo "🔄 远端已有当天 sync 分支，但 upstream/main 有 $STALE_NEW_COUNT 个新提交"
+              echo "   将在现有 sync 分支上增量合并，保留已有评审上下文..."
+              echo "   现有 sync HEAD: $(git log --oneline -1 "$REMOTE_SYNC_REF")"
+              git checkout -B "$SYNC_BRANCH" "$REMOTE_SYNC_REF"
+            fi
+          else
+            # ── 情况 C：sync 分支不存在 → 从 target 分支新建 ──
+            echo "📦 创建新的 sync 分支（基于 $TARGET_BRANCH）"
+            if git show-ref --verify --quiet "refs/remotes/origin/$TARGET_BRANCH"; then
+              git checkout -B "$TARGET_BRANCH" "origin/$TARGET_BRANCH"
+            else
+              git checkout -B "$TARGET_BRANCH"
+            fi
+            git checkout -B "$SYNC_BRANCH"
+          fi
+
+          SYNC_CHECKPOINT=$(git rev-parse HEAD)
+          git tag "sync-checkpoint-$(date +%Y%m%d)" HEAD 2>/dev/null || true
+
+          # 计算 merge-base，用于合并后的 fork 定制校验
+          MERGE_BASE_REF=$(git merge-base HEAD upstream/main 2>/dev/null || echo "")
+          if [ -n "$MERGE_BASE_REF" ]; then
+            echo "📌 merge-base: $(git rev-parse --short $MERGE_BASE_REF)"
+          else
+            echo "⚠️ 无法计算 merge-base，合并后校验将跳过"
+          fi
+
+          # 状态文件：记录冲突信息供后续步骤使用
+          echo "clean" > "$CONFLICT_STATUS_FILE"
+          echo "" > "$CONFLICT_FILES_FILE"
+
+          # 辅助函数：安全中止 merge
+          abort_merge_if_active() {
+            if [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ]; then
+              git merge --abort
+            fi
+          }
+
+          # 尝试合并
+          MERGE_OUTPUT=""
+          MERGE_EXIT=0
+          MERGE_OUTPUT=$(git merge upstream/main --no-edit 2>&1) || MERGE_EXIT=$?
+
+          if [ "$MERGE_EXIT" -eq 0 ]; then
+            echo "✅ git merge 完成，无冲突标记"
+
+            # 合并后校验：检查 fork 定制是否被静默回退
+            # 原理：对比合并结果与 merge 前的 origin/main，
+            # 如果合并结果中丢失了 origin/main 独有的修改（即 merge 前有、merge 后没有），
+            # 说明 merge 错误地采用了 upstream 版本
+            FORK_PRE_MERGE_DIFF=$(git diff --name-only "$MERGE_BASE_REF" "$SYNC_CHECKPOINT" 2>/dev/null | wc -l | tr -d ' ')
+            FORK_POST_MERGE_DIFF=$(git diff --name-only "$MERGE_BASE_REF" HEAD 2>/dev/null | wc -l | tr -d ' ')
+            REVERTED_COUNT=0
+            if [ "$FORK_PRE_MERGE_DIFF" -gt 0 ] && [ "$FORK_POST_MERGE_DIFF" -lt "$FORK_PRE_MERGE_DIFF" ]; then
+              REVERTED_FILES=$(comm -23 \
+                <(git diff --name-only "$MERGE_BASE_REF" "$SYNC_CHECKPOINT" 2>/dev/null | sort) \
+                <(git diff --name-only "$MERGE_BASE_REF" HEAD 2>/dev/null | sort))
+              REVERTED_COUNT=$(echo "$REVERTED_FILES" | grep -c . || true)
+            fi
+
+            if [ "$REVERTED_COUNT" -gt 0 ]; then
+              echo "❌ 合并后校验失败：检测到 $REVERTED_COUNT 个文件的 fork 定制被静默回退"
+              echo "$REVERTED_FILES" | head -20
+              echo ""
+              echo "可能原因：shallow clone 导致 merge-base 不准确"
+              echo "建议：确认 git fetch --unshallow 是否生效"
+              abort_merge_if_active
+              echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
+              echo "$REVERTED_FILES" > "$CONFLICT_FILES_FILE"
+              # 中止合并，回到合并前状态
+              git reset --hard "$SYNC_CHECKPOINT"
+            else
+              echo "✅ 合并后校验通过：fork 定制完整保留"
+            fi
+          elif echo "$MERGE_OUTPUT" | grep -q "unrelated histories"; then
+            echo "⚠️ 检测到 unrelated histories，使用 --allow-unrelated-histories 重试"
+            MERGE_OUTPUT=$(git merge upstream/main --no-edit --allow-unrelated-histories 2>&1) || MERGE_EXIT=$?
+            if [ "$MERGE_EXIT" -eq 0 ]; then
+              echo "✅ 合并成功（allow-unrelated-histories）"
+              MERGE_EXIT=0
+            fi
+          fi
+
+          # 合并失败时，检查是否有文件冲突
+          if [ "$MERGE_EXIT" -ne 0 ]; then
+            CONFLICT_FILES=$(git diff --name-only --diff-filter=U)
+            CONFLICT_COUNT=$(echo "$CONFLICT_FILES" | grep -c . || true)
+
+            if [ "$CONFLICT_COUNT" -eq 0 ]; then
+              echo "❌ 合并失败但无文件冲突，可能是 git 错误:"
+              echo "$MERGE_OUTPUT"
+              abort_merge_if_active
+              exit 1
+            fi
+
+            echo "⚠️ 检测到 $CONFLICT_COUNT 个文件冲突"
+            echo "$CONFLICT_FILES"
+
+            # 尝试 LLM 辅助解决冲突
+            LLM_RESOLVED=false
+            QWEN_API_KEY="${{secrets['CI_QWEN_API_KEY']}}"
+            if [ -n "$QWEN_API_KEY" ]; then
+              echo "🤖 尝试 LLM 辅助冲突解决..."
+              # 使用内部 npm registry 上已发布的 CLI（冲突状态下无法 npm ci 构建本地 dist）
+              # 显式指定内部 registry，避免 npx 回退到 npmjs.org
+              INTERNAL_REGISTRY="https://registry.anpm.alibaba-inc.com/"
+              QWEN_BASE_URL="${{secrets['CI_QWEN_BASE_URL']}}"
+              QWEN_BASE_URL="${QWEN_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+              if OPENAI_API_KEY="$QWEN_API_KEY" OPENAI_BASE_URL="$QWEN_BASE_URL" \
+                npx --registry "$INTERNAL_REGISTRY" @alife/dataworks-qwen-code \
+                --auth-type openai \
+                --prompt "Read .qwen/upstream-sync-rules.yml for resolution rules. Resolve all git merge conflicts in the working tree following those rules. For each conflicted file, read both versions, apply the appropriate rule, write the resolved content, then run: git add -A" \
+                --yolo; then
+                REMAINING=$(git diff --name-only --diff-filter=U | grep -c . || true)
+                if [ "$REMAINING" -eq 0 ]; then
+                  echo "✅ LLM 成功解决所有冲突"
+                  LLM_RESOLVED=true
+                else
+                  echo "⚠️ LLM 解决了部分冲突，仍有 $REMAINING 个文件未解决"
+                fi
+              else
+                echo "⚠️ LLM 冲突解决执行失败"
+              fi
+            else
+              echo "⚠️ CI_QWEN_API_KEY 未配置，跳过 LLM 冲突解决"
+            fi
+
+            if [ "$LLM_RESOLVED" = "false" ]; then
+              # 方案 B：abort merge，基于 upstream/main 创建分支，让 GitLab MR 原生展示冲突
+              REMAINING_FILES=$(git diff --name-only --diff-filter=U)
+              echo "has_conflicts" > "$CONFLICT_STATUS_FILE"
+              echo "$REMAINING_FILES" > "$CONFLICT_FILES_FILE"
+              echo "📝 中止合并，改为基于 upstream/main 创建分支，由 GitLab MR 展示冲突"
+              abort_merge_if_active
+              # 切到 upstream/main 创建 sync 分支，MR target 仍为默认分支
+              git checkout -B "$SYNC_BRANCH" upstream/main
+            fi
+          fi
+
+          # 仅在无冲突时需要 commit（有冲突时分支已基于 upstream/main，无需额外 commit）
+          if [ "$(cat "$CONFLICT_STATUS_FILE")" = "clean" ]; then
+            git add -A
+            git diff --cached --quiet || git commit -m "chore: sync upstream $(date +%Y-%m-%d)"
+          fi
+
+          echo "$SYNC_BRANCH" > "$BRANCH_NAME_FILE"
+
+          # 合并步骤完成后的诊断信息
+          echo "============================================================"
+          echo "📋 合并步骤完成"
+          echo "   状态: $(cat "$CONFLICT_STATUS_FILE")"
+          echo "   分支: $SYNC_BRANCH"
+          echo "   当前 HEAD: $(git log --oneline -1 HEAD)"
+          echo "   文件变更数: $(git diff --stat HEAD~1 HEAD 2>/dev/null | tail -1 || echo 'N/A')"
+          echo "============================================================"
+
+      - name: '检查 sync 分支发布状态'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          CONFLICT_STATUS_FILE="$STATE_DIR/conflict-status"
+          BRANCH_NAME_FILE="$STATE_DIR/branch-name"
+          SKIP_PUSH_FILE="$STATE_DIR/skip-push"
+
+          SYNC_STATUS=$(cat "$CONFLICT_STATUS_FILE" 2>/dev/null || echo "skip")
+          SYNC_BRANCH=$(cat "$BRANCH_NAME_FILE" 2>/dev/null || echo "")
+          SKIP_PUSH=$(cat "$SKIP_PUSH_FILE" 2>/dev/null || echo "0")
+          echo "📋 推送步骤 | sync 状态: $SYNC_STATUS | 分支: $SYNC_BRANCH"
+          if [ "$SYNC_STATUS" = "skip" ] || [ -z "$SYNC_BRANCH" ]; then
+            echo "✅ 无需同步，跳过推送"
+            exit 0
+          fi
+          if [ "$SKIP_PUSH" = "1" ]; then
+            echo "✅ 远端已有可复用的 sync 分支，后续直接创建/复用 MR"
+            exit 0
+          fi
+          echo "✅ sync 分支已就绪，下一步统一执行推送和 MR 创建"
+
+      - id: createMR
+        name: '创建 Merge Request'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          CONFLICT_STATUS_FILE="$STATE_DIR/conflict-status"
+          BRANCH_NAME_FILE="$STATE_DIR/branch-name"
+          NEW_COMMITS_FILE="$STATE_DIR/new-commits"
+          CONFLICT_FILES_FILE="$STATE_DIR/conflict-files"
+          HELPER_SCRIPT="$STATE_DIR/upstream-sync-domain-auth.sh"
+          SKIP_PUSH_FILE="$STATE_DIR/skip-push"
+
+          SYNC_STATUS=$(cat "$CONFLICT_STATUS_FILE" 2>/dev/null || echo "skip")
+          SYNC_BRANCH=$(cat "$BRANCH_NAME_FILE" 2>/dev/null || echo "")
+          SKIP_PUSH=$(cat "$SKIP_PUSH_FILE" 2>/dev/null || echo "0")
+          echo "📋 创建 MR | sync 状态: $SYNC_STATUS | 分支: $SYNC_BRANCH"
+          if [ "$SYNC_STATUS" = "skip" ] || [ -z "$SYNC_BRANCH" ]; then
+            SUMMARY="✅ 无新 upstream 提交，无需同步"
+            echo "$SUMMARY"
+            echo "$SUMMARY" > "${{outputs.result.path}}"
+            exit 0
+          fi
+          TARGET_BRANCH="${CI_DEFAULT_BRANCH:-main}"
+          NEW_COMMITS=$(cat "$NEW_COMMITS_FILE" 2>/dev/null || echo "?")
+          echo "📊 target: $TARGET_BRANCH | 新提交: $NEW_COMMITS"
+          TODAY=$(date +%Y-%m-%d)
+          CONFLICT_STATUS="$SYNC_STATUS"
+          CONFLICT_FILES=$(cat "$CONFLICT_FILES_FILE" 2>/dev/null || echo "")
+
+          # 根据冲突状态生成不同的 MR 标题
+          if [ "$CONFLICT_STATUS" = "has_conflicts" ]; then
+            CONFLICT_COUNT=$(echo "$CONFLICT_FILES" | grep -c . || true)
+            MR_TITLE="⚠️ chore: upstream sync $TODAY ($NEW_COMMITS commits, $CONFLICT_COUNT conflicts)"
+          else
+            MR_TITLE="chore: upstream sync $TODAY ($NEW_COMMITS commits)"
+          fi
+
+          # 生成 MR 描述
+          {
+            echo "## Upstream Sync $TODAY"
+            echo ""
+            echo "### 概要"
+            echo "- 合并了 **$NEW_COMMITS** 个 upstream 提交"
+            echo "- 源: QwenLM/qwen-code main"
+            echo "- Sync 分支: \`$SYNC_BRANCH\`"
+
+            if [ "$CONFLICT_STATUS" = "has_conflicts" ]; then
+              echo ""
+              echo "### ⚠️ 未解决的冲突"
+              echo ""
+              echo "以下文件包含冲突标记（\`<<<<<<<\` / \`=======\` / \`>>>>>>>\`），需要人工解决："
+              echo ""
+              echo "$CONFLICT_FILES" | while read -r f; do
+                echo "- \`$f\`"
+              done
+              echo ""
+              echo "> **注意**: 验证步骤（build/typecheck/test/lint）已跳过，请在解决冲突后本地验证。"
+            else
+              echo ""
+              echo "### 验证"
+              echo "- ⏳ 验证将在 MR 创建后异步执行"
+            fi
+
+            echo ""
+            echo "### Review 要点"
+            echo "请运行 Fork 差异分析 CI 查看完整差异状态。"
+          } > /tmp/mr-body.md
+          MR_BODY=$(cat /tmp/mr-body.md)
+          MR_URL=$(
+            AUTH_USERNAME="${{vars.username}}" \
+            PRIVATE_TOKEN="${{secrets.privateToken}}" \
+            LEGACY_GIT_TOKEN="${{secrets['CI_AONE_CODE_PRIVATE_TOKEN_' + git.employeeId]}}" \
+            REPO_PATH="${{vars.repoPath}}" \
+            GIT_REPO_FULL_NAME="${{git.repo.fullName}}" \
+            SOURCE_BRANCH="$SYNC_BRANCH" \
+            TARGET_BRANCH="$TARGET_BRANCH" \
+            MR_TITLE="$MR_TITLE" \
+            MR_DESCRIPTION="$MR_BODY" \
+            SKIP_PUSH="$SKIP_PUSH" \
+            WORK_DIR="$SOURCE_DIR" \
+              bash "$HELPER_SCRIPT" publish
+          ) || {
+            echo "❌ sync 分支发布或 MR 创建失败"
+            exit 1
+          }
+          if [ -z "$MR_URL" ]; then
+            echo "❌ MR URL 为空，视为创建失败"
+            exit 1
+          fi
+
+          if [ "$CONFLICT_STATUS" = "has_conflicts" ]; then
+            CONFLICT_COUNT=$(echo "$CONFLICT_FILES" | grep -c . || true)
+            SUMMARY="⚠️ Upstream Sync $TODAY | $NEW_COMMITS 个提交 | $CONFLICT_COUNT 个冲突待人工解决 | MR: $MR_URL"
+          else
+            SUMMARY="✅ Upstream Sync $TODAY | $NEW_COMMITS 个提交 | MR: $MR_URL"
+          fi
+          echo "$SUMMARY"
+          echo "$SUMMARY" > "${{outputs.result.path}}"
+
+      - name: '安装依赖并验证（非阻塞）'
+        run: |
+          SOURCE_DIR="${AONE_CI_SOURCE:-.}"
+          cd "$SOURCE_DIR"
+          STATE_DIR="$(cd "$SOURCE_DIR/.." && pwd)/.aoneci-upstream-sync"
+          CONFLICT_STATUS_FILE="$STATE_DIR/conflict-status"
+
+          SYNC_STATUS=$(cat "$CONFLICT_STATUS_FILE" 2>/dev/null || echo "skip")
+          echo "📋 验证步骤 | sync 状态: $SYNC_STATUS"
+          if [ "$SYNC_STATUS" != "clean" ]; then
+            echo "⚠️ 状态为 $SYNC_STATUS，跳过验证"
+            exit 0
+          fi
+
+          echo "📦 安装依赖..."
+          if ! npm ci; then
+            echo "⚠️ npm ci 失败，跳过后续验证"
+            exit 0
+          fi
+          echo "✅ npm ci 完成"
+
+          if [ ! -f scripts/upstream-sync-verify.sh ]; then
+            echo "⚠️ scripts/upstream-sync-verify.sh 不存在，跳过验证"
+            exit 0
+          fi
+          echo "🔍 开始验证..."
+          bash scripts/upstream-sync-verify.sh && echo "✅ 验证通过" || echo "⚠️ 验证失败（不阻塞 MR）"

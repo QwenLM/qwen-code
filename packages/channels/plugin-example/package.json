@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/channel-plugin-example",
+  "name": "@alife/dataworks-qwen-code-channel-plugin-example",
   "version": "0.15.11",
   "private": true,
   "type": "module",

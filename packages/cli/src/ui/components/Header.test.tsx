@@ -36,15 +36,16 @@ describe('<Header />', () => {
   });
 
   it('renders the ASCII logo on wide terminal', () => {
+    useTerminalSizeMock.mockReturnValue({ columns: 150, rows: 24 });
     const { lastFrame } = render(<Header {...defaultProps} />);
-    expect(lastFrame()).toContain('██╔═══██╗');
+    expect(lastFrame()).toContain('██████╗');
   });
 
   it('hides the ASCII logo on narrow terminal', () => {
     useTerminalSizeMock.mockReturnValue({ columns: 60, rows: 24 });
     const { lastFrame } = render(<Header {...defaultProps} />);
-    expect(lastFrame()).not.toContain('██╔═══██╗');
-    expect(lastFrame()).toContain('>_ Qwen Code');
+    expect(lastFrame()).not.toContain('██████╗');
+    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
   });
 
   it('displays the version number', () => {
@@ -104,9 +105,10 @@ describe('<Header />', () => {
   it('renders plain text when NO_COLOR disables gradient colors', () => {
     process.env['NO_COLOR'] = '1';
 
+    useTerminalSizeMock.mockReturnValue({ columns: 150, rows: 24 });
     const { lastFrame } = render(<Header {...defaultProps} />);
 
-    expect(lastFrame()).toContain('██╔═══██╗');
+    expect(lastFrame()).toContain('██████╗');
   });
 
   it('renders the custom subtitle in place of the blank spacer row', () => {
@@ -119,7 +121,7 @@ describe('<Header />', () => {
     const frame = lastFrame() ?? '';
     expect(frame).toContain('Built-in DataWorks Official Skills');
     // Subtitle sits between the title and the auth line.
-    const titleIdx = frame.indexOf('>_ Qwen Code');
+    const titleIdx = frame.indexOf('>_ DataWorks DataAgent');
     const subtitleIdx = frame.indexOf('Built-in DataWorks Official Skills');
     const authIdx = frame.indexOf('Qwen OAuth');
     expect(titleIdx).toBeLessThan(subtitleIdx);
@@ -132,7 +134,7 @@ describe('<Header />', () => {
     // Title and auth still both render at their usual positions; the
     // spacer between them is just whitespace-padding, so we assert the
     // visible chrome the user sees.
-    expect(frame).toContain('>_ Qwen Code');
+    expect(frame).toContain('>_ DataWorks DataAgent');
     expect(frame).toContain('Qwen OAuth');
   });
 
@@ -141,7 +143,7 @@ describe('<Header />', () => {
       <Header {...defaultProps} customBannerTitle="Acme CLI" />,
     );
     expect(lastFrame()).toContain('Acme CLI');
-    expect(lastFrame()).not.toContain('>_ Qwen Code');
+    expect(lastFrame()).not.toContain('>_ DataWorks DataAgent');
     // version suffix is still appended
     expect(lastFrame()).toContain('v1.0.0');
   });
@@ -154,7 +156,7 @@ describe('<Header />', () => {
       />,
     );
     expect(lastFrame()).toContain('LARGE_LOGO');
-    expect(lastFrame()).not.toContain('██╔═══██╗');
+    expect(lastFrame()).not.toContain('██████╗');
   });
 
   it('falls back to the small tier when the large one does not fit', () => {
@@ -179,20 +181,20 @@ describe('<Header />', () => {
         customAsciiArt={{ small: 'X'.repeat(150), large: 'Y'.repeat(150) }}
       />,
     );
-    expect(lastFrame()).not.toContain('██╔═══██╗');
+    expect(lastFrame()).not.toContain('██████╗');
     expect(lastFrame()).not.toContain('X'.repeat(150));
     expect(lastFrame()).not.toContain('Y'.repeat(150));
     // Info panel still renders.
     expect(lastFrame()).toContain('Qwen OAuth');
   });
 
-  it('falls back to the default Qwen logo when no custom art was provided at all', () => {
+  it('falls back to the default logo when no custom art was provided at all', () => {
     useTerminalSizeMock.mockReturnValue({ columns: 60, rows: 24 });
     const { lastFrame } = render(<Header {...defaultProps} />);
-    // With no customAsciiArt, narrow widths still hide the QWEN logo, but a
+    // With no customAsciiArt, narrow widths still hide the default logo, but a
     // wide enough terminal would show it — the previous test already covers
     // the wide case. This one just confirms the no-custom-art path doesn't
     // incidentally hide the logo.
-    expect(lastFrame()).toContain('>_ Qwen Code');
+    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
   });
 });

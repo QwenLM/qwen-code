@@ -1,8 +1,11 @@
 {
-  "name": "@qwen-code/channel-weixin",
+  "name": "@alife/dataworks-qwen-code-channel-weixin",
   "version": "0.15.11",
   "description": "WeChat (Weixin) channel adapter for Qwen Code",
   "type": "module",
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

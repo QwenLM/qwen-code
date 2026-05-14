@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/webui",
+  "name": "@alife/dataworks-qwen-code-webui",
   "version": "0.15.11",
   "description": "Shared UI components for Qwen Code packages",
   "type": "module",
@@ -28,7 +28,8 @@
     "**/*.css"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.anpm.alibaba-inc.com"
   },
   "scripts": {
     "dev": "vite build --watch",

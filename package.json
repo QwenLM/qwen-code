@@ -1,12 +1,17 @@
 {
-  "name": "@qwen-code/qwen-code",
+  "name": "@alife/dataworks-qwen-code",
   "version": "0.15.11",
   "engines": {
     "node": ">=22.0.0"
   },
   "type": "module",
   "workspaces": [
-    "packages/*",
+    "packages/cli",
+    "packages/core",
+    "packages/sdk-typescript",
+    "packages/vscode-ide-companion",
+    "packages/web-templates",
+    "packages/webui",
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",
@@ -149,5 +154,17 @@
     "*.{json,md}": [
       "prettier --write"
     ]
-  }
+  },
+  "description": "<div align=\"center\">",
+  "main": "esbuild.config.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/QwenLM/qwen-code/issues"
+  },
+  "homepage": "https://github.com/QwenLM/qwen-code#readme"
 }

@@ -1,0 +1,208 @@
+# .aoneci/workflows/npm-publish.yml
+# 发布 npm 包到 anpm
+#
+# 版本策略（自动根据分支判断）：
+#   - main 分支：x.y.z-dataworks.N + dist-tag=latest（正式版）
+#   - 其他分支：x.y.z-beta.N     + dist-tag=beta（预发布版）
+#   - auto_version 开启时自动查询 registry 递增 N
+#
+# 流程：
+#   1. npm ci          — 安装依赖
+#   2. npm run build   — tsc 编译所有 workspace 包
+#   3. npm run bundle  — esbuild 首次打包 CLI（使用 package.json 原始版本）
+#   4. publish-packages.js:
+#      a. 写入 .npmrc 认证
+#      b. auto-version → 更新所有 package.json 版本号
+#      c. re-bundle    → 重新 esbuild 打包（使用新版本号，嵌入 CLI_VERSION）
+#      d. npm publish --workspaces → 发布所有非 private 包
+#   5. 打包 bundle tarball 并上传 OSS
+#      - latest 发布更新 latest/dataworks 指针
+#      - beta 发布更新 beta 指针
+
+name: 'NPM Publish'
+
+# release/* 分支的 push 与 MR 自动触发构建 beta 包；
+# 默认 dry-run，不会真实发布；需要真实发布时手动关闭 dry_run。
+# main 和其他分支仍仅支持手动触发，避免无意中发布线上包。
+triggers:
+  push:
+    branches:
+      - 'release/*'
+  merge_request:
+    branches:
+      - 'release/*'
+
+params:
+  dry_run:
+    description: '是否 dry-run（勾选=仅模拟，不勾选=真实发布）'
+    type: boolean
+    default: true
+  auto_version:
+    description: '是否自动递增 prerelease 版本号（true=自动，false=使用 package.json 中的版本）'
+    type: string
+    default: 'true'
+  release_mode:
+    description: '非 main 分支强制发正式版（dataworks + latest）'
+    type: boolean
+    default: false
+
+jobs:
+  npm-build-publish:
+    runs-on:
+      - 32-128Gi
+    name: 'Build & Publish'
+    image: alios-8u
+    steps:
+      - uses: checkout
+      - uses: setup-env
+        inputs:
+          node-version: '20'
+          tnpm-version: '10'
+          python-version: '3.10'
+          rust-toolchain-version: stable
+          tnpm-cache: true
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Build project (tsc)'
+        run: 'npm run build'
+
+      - name: 'Run tests'
+        run: |
+          # Root `npm run test` runs workspaces in parallel, which makes AoneCI
+          # failure logs hard to locate. Run publish checks sequentially so the
+          # first failing package is visible in the job output.
+          set -e
+          npm -w packages/cli run test -- \
+            --poolOptions.threads.minThreads=1 \
+            --poolOptions.threads.maxThreads=4 \
+            --hookTimeout=30000
+          npm -w packages/core run test
+          npm -w packages/sdk-typescript run test
+          npm -w packages/vscode-ide-companion run test
+
+      - name: 'Bundle CLI (esbuild)'
+        run: 'npm run bundle'
+
+      - name: 'Verify bundle'
+        run: |
+          echo "=== dist/cli.js ==="
+          ls -lh dist/cli.js
+          echo ""
+          echo "=== dist/ structure ==="
+          ls dist/
+
+      - name: 'Publish packages'
+        run: |
+          # main 分支 → tag=latest, pre_id=dataworks（正式版）
+          # 其他分支 → tag=beta,   pre_id=beta（预发布版）
+          if [ "${{git.branch}}" = "main" ] || [ "${{ params.release_mode }}" = "true" ]; then
+            PUBLISH_TAG="latest"
+            PUBLISH_PRE_ID="dataworks"
+          else
+            PUBLISH_TAG="beta"
+            PUBLISH_PRE_ID="beta"
+          fi
+          echo "Branch: ${{git.branch}} → tag=$PUBLISH_TAG, pre_id=$PUBLISH_PRE_ID"
+          ARGS="--token ${{ secrets.inner_npm_publish_token }} --tag $PUBLISH_TAG --pre-id $PUBLISH_PRE_ID"
+          DRY_RUN="${{ params.dry_run }}"
+          [ "$DRY_RUN" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ params.auto_version }}" = "true" ] && ARGS="$ARGS --auto-version"
+          node scripts/publish-packages.js $ARGS
+
+      - name: 'Verify published CLI package'
+        run: |
+          DRY_RUN="${{ params.dry_run }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Skipped (dry-run mode)"
+            exit 0
+          fi
+          sleep 5
+          echo "=== @alife/dataworks-qwen-code ==="
+          npm view @alife/dataworks-qwen-code --registry=https://registry.anpm.alibaba-inc.com/ --json 2>&1 | node -e "
+            const j = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+            const tags = j['dist-tags'] || {};
+            for (const [tag, ver] of Object.entries(tags)) {
+              console.log(tag + ':', ver);
+            }
+          " || echo "View failed"
+
+      # ── OSS Bundle 发布 ──
+
+      - name: 'Resolve version for OSS'
+        run: |
+          # 从 publish 后的 package.json 读取实际发布版本
+          VERSION=$(node -e "process.stdout.write(require('./package.json').version)")
+          echo "Resolved version for OSS: ${VERSION}"
+          mkdir -p /workspace
+          echo "${VERSION}" > /workspace/.resolved_version
+          date -u +%Y-%m-%dT%H:%M:%SZ > /workspace/.build_time
+          if [ "${{git.branch}}" = "main" ] || [ "${{ params.release_mode }}" = "true" ]; then
+            OSS_RELEASE_CHANNELS="dataworks"
+            OSS_LATEST_POINTER="update"
+          else
+            OSS_RELEASE_CHANNELS="beta"
+            OSS_LATEST_POINTER="skip"
+          fi
+          {
+            printf 'OSS_RELEASE_CHANNELS=%s\n' "${OSS_RELEASE_CHANNELS}"
+            printf 'OSS_LATEST_POINTER=%s\n' "${OSS_LATEST_POINTER}"
+          } > /workspace/.oss_channel.env
+          cat /workspace/.oss_channel.env
+
+      - name: 'Build bundle tarball'
+        run: |
+          # dist/ 已由 publish-packages.js 构建完成（含正确版本号）
+          # 直接打包为可部署的 tarball
+          ARCH="amd64"
+          WORKSPACE_DIR="/workspace"
+          SOURCE_DIR="."
+          bash .aoneci/scripts/build-standalone-ci.sh
+
+      - name: 'Prepare artifact'
+        run: |
+          ARTIFACT_DIR="/workspace/artifact" \
+          ARCH="amd64" \
+          WORKSPACE_DIR="/workspace" \
+          SOURCE_DIR="." \
+          bash .aoneci/scripts/prepare-artifact.sh
+
+      - name: 'Upload to OSS'
+        run: |
+          # 跳过 dry-run 模式
+          DRY_RUN="${{ params.dry_run }}"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Skipped (dry-run mode)"
+            exit 0
+          fi
+          # 确定上传策略
+          POLICY_FILE="/workspace/.upload_policy.env"
+          bash .aoneci/scripts/upload-policy.sh "${{git.branch}}" > "${POLICY_FILE}"
+          cat "${POLICY_FILE}"
+          SKIP_METADATA="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_METADATA)"
+          SKIP_LATEST_POINTER="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_LATEST_POINTER)"
+          SKIP_ROOT_SCRIPTS="$(bash .aoneci/scripts/read-policy-value.sh "${POLICY_FILE}" SKIP_ROOT_SCRIPTS)"
+          CHANNEL_FILE="/workspace/.oss_channel.env"
+          OSS_RELEASE_CHANNELS="$(bash .aoneci/scripts/read-policy-value.sh "${CHANNEL_FILE}" OSS_RELEASE_CHANNELS)"
+          OSS_LATEST_POINTER="$(bash .aoneci/scripts/read-policy-value.sh "${CHANNEL_FILE}" OSS_LATEST_POINTER)"
+          if [ "${OSS_LATEST_POINTER}" = "update" ]; then
+            SKIP_LATEST_POINTER=""
+          elif [ "${OSS_LATEST_POINTER}" = "skip" ]; then
+            SKIP_LATEST_POINTER="1"
+          fi
+          ARTIFACT_DIR="/workspace/artifact" \
+          ARCH="amd64" \
+          SOURCE_DIR="." \
+          WORKSPACE_DIR="/workspace" \
+          OSS_GROUP="alishu" \
+          OSS_PROJECT="qwen-code" \
+          OSS_ENDPOINT="https://oss-cn-shanghai.aliyuncs.com" \
+          OSS_BUCKET="dataworks-notebook-cn-shanghai" \
+          SKIP_METADATA="${SKIP_METADATA}" \
+          SKIP_LATEST_POINTER="${SKIP_LATEST_POINTER}" \
+          SKIP_ROOT_SCRIPTS="${SKIP_ROOT_SCRIPTS}" \
+          OSS_RELEASE_CHANNELS="${OSS_RELEASE_CHANNELS}" \
+          OSS_ACCESS_KEY_ID="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_ID}}" \
+          OSS_ACCESS_KEY_SECRET="${{secrets.DW_NOTEBOOK_OSS_ACCESS_KEY_SECRET}}" \
+          bash .aoneci/scripts/upload-oss.sh

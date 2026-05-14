@@ -1,5 +1,5 @@
 {
-  "name": "@qwen-code/qwen-code",
+  "name": "@alife/dataworks-qwen-code",
   "version": "0.15.11",
   "description": "Qwen Code",
   "repository": {
@@ -31,7 +31,8 @@
     "test": "vitest run",
     "test:ci": "vitest run",
     "typecheck": "tsc --noEmit",
-    "check-i18n": "tsx ../../scripts/check-i18n.ts"
+    "check-i18n": "tsx ../../scripts/check-i18n.ts",
+    "prepublishOnly": "node ../../scripts/prepare-cli-for-publish.js"
   },
   "files": [
     "dist"
@@ -117,5 +118,8 @@
   },
   "engines": {
     "node": ">=22"
+  },
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
   }
 }
