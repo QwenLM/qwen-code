@@ -63,7 +63,7 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
   const maxHops = 40; // matches POSIX SYMLOOP_MAX
   let current = filePath;
   for (let i = 0; i < maxHops; i++) {
-    let lstats;
+    let lstats: Awaited<ReturnType<typeof fs.lstat>>;
     try {
       lstats = await fs.lstat(current);
     } catch (err) {
@@ -151,8 +151,13 @@ export async function atomicWriteFile(
     await fs.writeFile(tmpPath, data, writeOptions);
 
     // chmod to ensure permissions match (writeFile mode is masked by umask).
+    // Ignore errors: chmod fails on filesystems without POSIX permissions (FAT/exFAT).
     if (desiredMode !== undefined) {
-      await fs.chmod(tmpPath, desiredMode);
+      try {
+        await fs.chmod(tmpPath, desiredMode);
+      } catch {
+        // Ignore — not all filesystems support chmod.
+      }
     }
 
     await renameWithRetry(tmpPath, targetPath, retries, delayMs);
@@ -182,7 +187,11 @@ export async function atomicWriteFile(
       }
       await fs.writeFile(targetPath, data, fallbackOptions);
       if (desiredMode !== undefined) {
-        await fs.chmod(targetPath, desiredMode);
+        try {
+          await fs.chmod(targetPath, desiredMode);
+        } catch {
+          // Ignore — not all filesystems support chmod.
+        }
       }
       return;
     }
