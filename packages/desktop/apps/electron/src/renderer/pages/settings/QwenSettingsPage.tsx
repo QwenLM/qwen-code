@@ -26,6 +26,7 @@ import {
 import { useAppShellContext } from '@/context/AppShellContext';
 import { routes } from '@/lib/navigate';
 import type { DetailsPageMeta } from '@/lib/navigation-registry';
+import { normalizeQwenSettingsSnapshot } from '@/lib/qwen-settings-snapshot';
 import type {
   QwenCoreSettingKey,
   QwenCoreSettingsSnapshot,
@@ -385,7 +386,7 @@ export default function QwenSettingsPage({ tab }: { tab: QwenSettingsTab }) {
         activeSessionId,
         command,
       );
-      return result as QwenCoreSettingsSnapshot;
+      return normalizeQwenSettingsSnapshot(result as QwenCoreSettingsSnapshot);
     },
     [activeSessionId],
   );
@@ -543,17 +544,14 @@ function GeneralTab({
   ) => Promise<void>;
 }) {
   const { t } = useTranslation();
-  const outputLanguageOptions = useMemo(
-    () => [
-      { value: 'auto', label: t('settings.qwen.option.auto') },
-      { value: 'en', label: t('settings.qwen.language.english') },
-      { value: 'zh-Hans', label: t('settings.qwen.language.zhHans') },
-      { value: 'ja', label: t('settings.qwen.language.japanese') },
-      { value: 'es', label: t('settings.qwen.language.spanish') },
-      { value: 'fr', label: t('settings.qwen.language.french') },
-    ],
-    [t],
+  const outputLanguage = stringValue(
+    snapshot,
+    'general.outputLanguage',
+    'auto',
   );
+  const [outputLanguageDraft, setOutputLanguageDraft] =
+    useState(outputLanguage);
+  useEffect(() => setOutputLanguageDraft(outputLanguage), [outputLanguage]);
   const approvalModeOptions = useMemo(
     () => [
       { value: 'plan', label: t('settings.qwen.approvalMode.plan') },
@@ -578,15 +576,16 @@ function GeneralTab({
         description={t('settings.qwen.general.responseLanguageDesc')}
       >
         <SettingsCard>
-          <SettingsSelect
+          <SettingsInput
             inCard
             label={t('settings.qwen.general.outputLanguage')}
             description={t('settings.qwen.general.outputLanguageDesc')}
-            value={stringValue(snapshot, 'general.outputLanguage', 'auto')}
-            options={outputLanguageOptions}
-            onValueChange={(value) =>
-              void onSave('general.outputLanguage', value)
-            }
+            value={outputLanguageDraft}
+            placeholder={t('settings.qwen.option.auto')}
+            onChange={(value) => {
+              setOutputLanguageDraft(value);
+              void onSave('general.outputLanguage', value);
+            }}
           />
         </SettingsCard>
       </SettingsSection>
@@ -770,7 +769,13 @@ function McpServersTab({
     [t],
   );
   const entries = useMemo(
-    () => [...snapshot.user.mcpServers, ...snapshot.workspace.mcpServers],
+    () => [
+      ...snapshot.user.mcpServers,
+      ...snapshot.workspace.mcpServers,
+      ...snapshot.merged.mcpServers.filter(
+        (entry) => entry.scope === 'extension',
+      ),
+    ],
     [snapshot],
   );
 
@@ -956,22 +961,24 @@ function McpServersTab({
                       </div>
                     ) : null}
                   </div>
-                  <div className="flex gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setDraft(serverToDraft(entry))}
-                    >
-                      {t('common.edit')}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void remove(entry)}
-                    >
-                      <Trash2 className="w-4 h-4 text-destructive" />
-                    </Button>
-                  </div>
+                  {entry.scope === 'extension' ? null : (
+                    <div className="flex gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setDraft(serverToDraft(entry))}
+                      >
+                        {t('common.edit')}
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void remove(entry)}
+                      >
+                        <Trash2 className="w-4 h-4 text-destructive" />
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </SettingsCard>
             ))
@@ -1014,7 +1021,11 @@ function HooksTab({
     [t],
   );
   const entries = useMemo(
-    () => [...snapshot.user.hooks, ...snapshot.workspace.hooks],
+    () => [
+      ...snapshot.user.hooks,
+      ...snapshot.workspace.hooks,
+      ...snapshot.merged.hooks.filter((entry) => entry.scope === 'extension'),
+    ],
     [snapshot],
   );
 
@@ -1257,22 +1268,24 @@ function HooksTab({
                         {config?.command ?? config?.url}
                       </div>
                     </div>
-                    <div className="flex gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setDraft(hookToDraft(entry))}
-                      >
-                        {t('common.edit')}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => void remove(entry)}
-                      >
-                        <Trash2 className="w-4 h-4 text-destructive" />
-                      </Button>
-                    </div>
+                    {entry.scope === 'extension' ? null : (
+                      <div className="flex gap-1">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setDraft(hookToDraft(entry))}
+                        >
+                          {t('common.edit')}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => void remove(entry)}
+                        >
+                          <Trash2 className="w-4 h-4 text-destructive" />
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </SettingsCard>
               );
