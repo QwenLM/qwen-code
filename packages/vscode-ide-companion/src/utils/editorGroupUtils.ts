@@ -7,49 +7,75 @@
 import * as vscode from 'vscode';
 import { openChatCommand } from '../commands/index.js';
 
+const CHAT_WEBVIEW_TYPE = 'mainThreadWebview-qwenCode.chat';
+
+function isChatWebview(tab: vscode.Tab): boolean {
+  const input: unknown = (tab as { input?: unknown }).input;
+  return (
+    !!input &&
+    typeof input === 'object' &&
+    (input as { viewType: string }).viewType === CHAT_WEBVIEW_TYPE
+  );
+}
+
+function findWebviewGroup(): vscode.TabGroup | undefined {
+  return vscode.window.tabGroups.all.find((group) =>
+    group.tabs.some(isChatWebview),
+  );
+}
+
 /**
  * Find the editor group immediately to the left of the Qwen chat webview.
  * - If the chat webview group is the leftmost group, returns undefined.
  * - If no chat webview is found in any editor group, returns undefined.
- * - Uses the webview tab viewType 'mainThreadWebview-qwenCode.chat'.
  */
 export function findLeftGroupOfChatWebview(): vscode.ViewColumn | undefined {
   try {
-    const groups = vscode.window.tabGroups.all;
-
-    // Locate the group that contains our chat webview
-    const webviewGroup = groups.find((group) =>
-      group.tabs.some((tab) => {
-        const input: unknown = (tab as { input?: unknown }).input;
-        const isWebviewInput = (inp: unknown): inp is { viewType: string } =>
-          !!inp && typeof inp === 'object' && 'viewType' in inp;
-        return (
-          isWebviewInput(input) &&
-          input.viewType === 'mainThreadWebview-qwenCode.chat'
-        );
-      }),
-    );
-
+    const webviewGroup = findWebviewGroup();
     if (!webviewGroup) {
       return undefined;
     }
 
-    // Among all groups to the left (smaller viewColumn), choose the one with
-    // the largest viewColumn value (i.e. the immediate neighbor on the left).
-    let candidate:
-      | { group: vscode.TabGroup; viewColumn: vscode.ViewColumn }
-      | undefined;
-    for (const g of groups) {
-      if (g.viewColumn < webviewGroup.viewColumn) {
-        if (!candidate || g.viewColumn > candidate.viewColumn) {
-          candidate = { group: g, viewColumn: g.viewColumn };
-        }
+    // Among groups with smaller viewColumn, pick the largest (closest neighbor).
+    let candidate: vscode.ViewColumn | undefined;
+    for (const g of vscode.window.tabGroups.all) {
+      if (
+        g.viewColumn < webviewGroup.viewColumn &&
+        (candidate === undefined || g.viewColumn > candidate)
+      ) {
+        candidate = g.viewColumn;
       }
     }
-
-    return candidate?.viewColumn;
+    return candidate;
   } catch (_err) {
-    // Best-effort only; fall back to default behavior if anything goes wrong
+    return undefined;
+  }
+}
+
+/**
+ * Find the editor group immediately to the right of the Qwen chat webview.
+ * - If the chat webview group is the rightmost group, returns undefined.
+ * - If no chat webview is found in any editor group, returns undefined.
+ */
+export function findRightGroupOfChatWebview(): vscode.ViewColumn | undefined {
+  try {
+    const webviewGroup = findWebviewGroup();
+    if (!webviewGroup) {
+      return undefined;
+    }
+
+    // Among groups with larger viewColumn, pick the smallest (closest neighbor).
+    let candidate: vscode.ViewColumn | undefined;
+    for (const g of vscode.window.tabGroups.all) {
+      if (
+        g.viewColumn > webviewGroup.viewColumn &&
+        (candidate === undefined || g.viewColumn < candidate)
+      ) {
+        candidate = g.viewColumn;
+      }
+    }
+    return candidate;
+  } catch (_err) {
     return undefined;
   }
 }
@@ -100,18 +126,7 @@ export async function ensureLeftGroupOfChatWebview(): Promise<
   }
 
   // Locate the chat webview group
-  const groups = vscode.window.tabGroups.all;
-  const webviewGroup = groups.find((group) =>
-    group.tabs.some((tab) => {
-      const input: unknown = (tab as { input?: unknown }).input;
-      const isWebviewInput = (inp: unknown): inp is { viewType: string } =>
-        !!inp && typeof inp === 'object' && 'viewType' in inp;
-      return (
-        isWebviewInput(input) &&
-        input.viewType === 'mainThreadWebview-qwenCode.chat'
-      );
-    }),
-  );
+  const webviewGroup = findWebviewGroup();
 
   if (!webviewGroup) {
     return undefined;

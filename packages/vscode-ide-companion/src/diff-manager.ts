@@ -14,7 +14,7 @@ import * as vscode from 'vscode';
 import { DIFF_SCHEME } from './extension.js';
 import {
   findLeftGroupOfChatWebview,
-  ensureLeftGroupOfChatWebview,
+  findRightGroupOfChatWebview,
 } from './utils/editorGroupUtils.js';
 
 export class DiffContentProvider implements vscode.TextDocumentContentProvider {
@@ -222,17 +222,12 @@ export class DiffManager {
       true,
     );
 
-    // Prefer opening the diff adjacent to the chat webview (so we don't
-    // replace content inside the locked webview group). We try the group to
-    // the left of the chat webview first; if none exists we fall back to
-    // ViewColumn.Beside. With the chat locked in the leftmost group, this
-    // fallback opens diffs to the right of the chat.
-    let targetViewColumn = findLeftGroupOfChatWebview();
-    if (targetViewColumn === undefined) {
-      // If there is no left neighbor, create one to satisfy the requirement of
-      // opening diffs to the left of the chat webview.
-      targetViewColumn = await ensureLeftGroupOfChatWebview();
-    }
+    // Prefer opening the diff in the group to the left of the chat webview.
+    // When that isn't available (e.g. chat is in the leftmost group), try the
+    // group to the right so we reuse existing layout. Only fall back to
+    // ViewColumn.Beside when neither neighbour exists.
+    const targetViewColumn =
+      findLeftGroupOfChatWebview() ?? findRightGroupOfChatWebview();
 
     await vscode.commands.executeCommand(
       'vscode.diff',

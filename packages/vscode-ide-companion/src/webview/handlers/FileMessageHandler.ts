@@ -10,7 +10,7 @@ import { getFileName } from '../utils/webviewUtils.js';
 import { showDiffCommand } from '../../commands/index.js';
 import {
   findLeftGroupOfChatWebview,
-  ensureLeftGroupOfChatWebview,
+  findRightGroupOfChatWebview,
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
 import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
@@ -673,11 +673,9 @@ export class FileMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      // Find or ensure left group of chat webview
-      let targetViewColumn = findLeftGroupOfChatWebview();
-      if (targetViewColumn === undefined) {
-        targetViewColumn = await ensureLeftGroupOfChatWebview();
-      }
+      // Find the nearest editor group to the left or right of the chat webview
+      const targetViewColumn =
+        findLeftGroupOfChatWebview() ?? findRightGroupOfChatWebview();
 
       // Open as readonly document in the left group and focus it (single click should be enough)
       const document = await vscode.workspace.openTextDocument(uri);
