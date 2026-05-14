@@ -969,6 +969,92 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('fires SessionEnd for each active ACP session config on connection.closed', async () => {
+    const bootstrapHookSystem = {
+      fireSessionEndEvent: vi.fn().mockResolvedValue(undefined),
+      fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    mockConfig.getHookSystem = vi.fn().mockReturnValue(bootstrapHookSystem);
+    mockConfig.hasHooksForEvent = vi
+      .fn()
+      .mockImplementation((event: string) => event === 'SessionEnd');
+
+    const innerConfigA = await setupSessionMocks('session-end-a');
+    const sessionHookSystemA = {
+      fireSessionEndEvent: vi.fn().mockResolvedValue(undefined),
+      fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    innerConfigA.getHookSystem = vi.fn().mockReturnValue(sessionHookSystemA);
+    innerConfigA.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    innerConfigA.hasHooksForEvent = vi
+      .fn()
+      .mockImplementation((event: string) => event === 'SessionEnd');
+    innerConfigA.getGeminiClient = vi.fn().mockReturnValue({
+      isInitialized: vi.fn().mockReturnValue(false),
+      initialize: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const innerConfigB = makeInnerConfig();
+    innerConfigB.getSessionId = vi.fn().mockReturnValue('session-end-b');
+    const sessionHookSystemB = {
+      fireSessionEndEvent: vi.fn().mockResolvedValue(undefined),
+      fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    innerConfigB.getHookSystem = vi.fn().mockReturnValue(sessionHookSystemB);
+    innerConfigB.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    innerConfigB.hasHooksForEvent = vi
+      .fn()
+      .mockImplementation((event: string) => event === 'SessionEnd');
+    innerConfigB.getGeminiClient = vi.fn().mockReturnValue({
+      isInitialized: vi.fn().mockReturnValue(false),
+      initialize: vi.fn().mockResolvedValue(undefined),
+    });
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(innerConfigA as unknown as Config)
+      .mockResolvedValueOnce(innerConfigB as unknown as Config);
+    vi.mocked(Session).mockImplementation((...args: unknown[]) => {
+      const sessionId = args[0] as string;
+      const cfg = sessionId === 'session-end-a' ? innerConfigA : innerConfigB;
+      return {
+        getId: vi.fn().mockReturnValue(sessionId),
+        getConfig: vi.fn().mockReturnValue(cfg),
+        sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+        replayHistory: vi.fn().mockResolvedValue(undefined),
+        installRewriter: vi.fn(),
+      } as unknown as InstanceType<typeof Session>;
+    });
+    vi.mocked(loadSettings).mockReturnValue(makeSessionSettings());
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+
+    expect(bootstrapHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
+      SessionEndReason.PromptInputExit,
+    );
+    expect(sessionHookSystemA.fireSessionEndEvent).toHaveBeenCalledWith(
+      SessionEndReason.PromptInputExit,
+    );
+    expect(sessionHookSystemB.fireSessionEndEvent).toHaveBeenCalledWith(
+      SessionEndReason.PromptInputExit,
+    );
+  });
+
   it('rewindSession extension method rewinds the active session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     await setupSessionMocks(sessionId);

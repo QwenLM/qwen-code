@@ -615,6 +615,40 @@ describe('Gemini Client (client.ts)', () => {
         PermissionMode.Default,
       );
     });
+
+    it('rebuilds chat when initialize is called after the session id changes', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+      vi.mocked(mockConfig.getSessionId)
+        .mockReturnValueOnce('session-a')
+        .mockReturnValueOnce('session-b');
+
+      const freshClient = new GeminiClient(mockConfig);
+      await freshClient.initialize();
+      const firstChat = freshClient.getChat();
+      await freshClient.initialize(SessionStartSource.Resume);
+
+      expect(freshClient.getChat()).not.toBe(firstChat);
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenCalledTimes(2);
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenNthCalledWith(
+        1,
+        SessionStartSource.Startup,
+        'test-model',
+        PermissionMode.Default,
+      );
+      expect(hookSystem.fireSessionStartEvent).toHaveBeenNthCalledWith(
+        2,
+        SessionStartSource.Resume,
+        'test-model',
+        PermissionMode.Default,
+      );
+    });
   });
 
   describe('startChat — deferred tools', () => {

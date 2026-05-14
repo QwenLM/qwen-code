@@ -115,10 +115,11 @@ export async function runAcpAgent(
   console.debug = console.error;
 
   const stream = ndJsonStream(stdout, stdin);
-  const connection = new AgentSideConnection(
-    (conn) => new QwenAgent(config, settings, argv, conn),
-    stream,
-  );
+  let agentInstance: QwenAgent | undefined;
+  const connection = new AgentSideConnection((conn) => {
+    agentInstance = new QwenAgent(config, settings, argv, conn);
+    return agentInstance;
+  }, stream);
 
   // Handle SIGTERM/SIGINT for graceful shutdown.
   // Without this, signal handlers registered elsewhere in the CLI
@@ -132,9 +133,28 @@ export async function runAcpAgent(
   const fireSessionEndOnce = async (reason: SessionEndReason) => {
     if (sessionEndFired) return;
     sessionEndFired = true;
-    const hookSystem = config.getHookSystem?.();
-    const hooksEnabled = !config.getDisableAllHooks?.();
-    if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
+
+    const configs = new Set<Config>([config]);
+    const sessions = agentInstance?.['sessions'];
+    if (sessions instanceof Map) {
+      for (const session of sessions.values()) {
+        const sessionConfig = session.getConfig?.();
+        if (sessionConfig) {
+          configs.add(sessionConfig);
+        }
+      }
+    }
+
+    for (const cfg of configs) {
+      const hookSystem = cfg.getHookSystem?.();
+      const hooksEnabled = !cfg.getDisableAllHooks?.();
+      if (
+        !hooksEnabled ||
+        !hookSystem ||
+        !cfg.hasHooksForEvent?.('SessionEnd')
+      ) {
+        continue;
+      }
       try {
         await hookSystem.fireSessionEndEvent(reason);
       } catch (err) {

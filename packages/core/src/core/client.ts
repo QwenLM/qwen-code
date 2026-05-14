@@ -185,6 +185,7 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 export class GeminiClient {
   private chat?: GeminiChat;
+  private initializedSessionId: string | undefined;
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -216,9 +217,10 @@ export class GeminiClient {
   }
 
   async initialize(sessionStartSource?: SessionStartSource) {
-    this.lastPromptId = this.config.getSessionId();
+    const sessionId = this.config.getSessionId();
+    this.lastPromptId = sessionId;
 
-    if (this.isInitialized()) {
+    if (this.isInitialized() && this.initializedSessionId === sessionId) {
       return;
     }
 
@@ -248,6 +250,8 @@ export class GeminiClient {
         await this.startChat();
       }
     }
+
+    this.initializedSessionId = sessionId;
   }
 
   /**
@@ -387,6 +391,7 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastApiCompletionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
