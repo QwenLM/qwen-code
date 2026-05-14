@@ -592,24 +592,37 @@ export const AppContainer = (props: AppContainerProps) => {
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
   //
-  // refreshStatic() is fired from an effect (not inside the setState updater)
-  // so React.StrictMode's double-invoke of state updaters doesn't translate
-  // into two clearTerminal writes per model change. Side-effects belong in
-  // effects; the updater stays pure.
+  // Two requirements pull in opposite directions:
+  //   (a) refreshStatic() must NOT be called from inside a setState updater,
+  //       because React.StrictMode double-invokes updaters in dev and we'd
+  //       fire two clearTerminal writes per model swap.
+  //   (b) setHistoryRemountKey (inside refreshStatic) and setCurrentModel
+  //       MUST land in the SAME commit. MainContent's <Static> key is
+  //       `${historyRemountKey}-${currentModel}` and its render-phase
+  //       progressive-replay reset (lastRemountKey !== historyRemountKey)
+  //       only fires when historyRemountKey changes. If currentModel
+  //       changes first in its own render, Static remounts with the OLD
+  //       remount key and the unreset (full-length) replayCount — i.e.
+  //       a full-history Static render that bypasses progressive replay
+  //       (the issue #3899 freeze regression). See PR #4119 review.
+  //
+  // Fix: side-effect lives in the event handler (NOT the updater); a ref
+  // guard de-dupes same-model notifications. React batches the
+  // setHistoryRemountKey (via refreshStatic) and setCurrentModel calls in
+  // this event handler into a single commit, so the render-phase reset
+  // and the Static remount happen together — no full-history flash.
+  const lastNotifiedModelRef = useRef(currentModel);
   useEffect(() => {
     const unsubscribe = config.onModelChange((model) => {
+      if (lastNotifiedModelRef.current === model) {
+        return;
+      }
+      lastNotifiedModelRef.current = model;
+      refreshStatic();
       setCurrentModel(model);
     });
     return unsubscribe;
-  }, [config]);
-
-  const prevCurrentModelRef = useRef(currentModel);
-  useEffect(() => {
-    if (prevCurrentModelRef.current !== currentModel) {
-      prevCurrentModelRef.current = currentModel;
-      refreshStatic();
-    }
-  }, [currentModel, refreshStatic]);
+  }, [config, refreshStatic]);
 
   const {
     isThemeDialogOpen,
