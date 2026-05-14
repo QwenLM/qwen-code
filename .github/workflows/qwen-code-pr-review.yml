@@ -127,7 +127,7 @@ jobs:
           if [ "$EVENT_NAME" != "workflow_dispatch" ] && printf '%s' "$comment_body" | grep -qE '@qwen /review($|[[:space:]])'; then
             additional_instructions="$(
               printf '%s' "$comment_body" |
-                sed -n '/@qwen \/review/,$ p' |
+                sed -nE '/@qwen \/review($|[[:space:]])/,$ p' |
                 sed '1s/.*@qwen \/review//' |
                 sed 's/^[[:space:]]*//'
             )"
