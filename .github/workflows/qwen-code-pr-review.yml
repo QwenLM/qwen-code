@@ -122,15 +122,31 @@ jobs:
               ;;
           esac
 
+          should_run_review="true"
+
           # Use grep -qE with end-boundary so '@qwen /review' does not match
           # '@qwen /reviewer' or similar variants.
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] && printf '%s' "$comment_body" | grep -qE '@qwen /review($|[[:space:]])'; then
-            additional_instructions="$(
-              printf '%s' "$comment_body" |
-                sed -nE '/@qwen \/review($|[[:space:]])/,$ p' |
-                sed '1s/.*@qwen \/review//' |
-                sed 's/^[[:space:]]*//'
-            )"
+          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$EVENT_NAME" != "pull_request_target" ]; then
+            if printf '%s' "$comment_body" | grep -qE '@qwen /review($|[[:space:]])'; then
+              additional_instructions="$(
+                printf '%s' "$comment_body" |
+                  awk '
+                    BEGIN { found = 0 }
+                    !found {
+                      if (match($0, /@qwen \/review([[:space:]]|$)/)) {
+                        found = 1
+                        rest = substr($0, RSTART + RLENGTH)
+                        if (length(rest) > 0) print rest
+                      }
+                      next
+                    }
+                    { print }
+                  ' |
+                  sed 's/^[[:space:]]*//'
+              )"
+            else
+              should_run_review="false"
+            fi
           fi
           # Strip leading blank lines so the prompt doesn't start with an
           # empty line when @qwen /review is on its own line.
@@ -159,6 +175,7 @@ jobs:
           echo "number=$pr_number" >> "$GITHUB_OUTPUT"
           echo "review_mode=$review_mode" >> "$GITHUB_OUTPUT"
           echo "should_comment=$should_comment" >> "$GITHUB_OUTPUT"
+          echo "should_run_review=$should_run_review" >> "$GITHUB_OUTPUT"
           output_delimiter="QWEN_REVIEW_PROMPT_$(date +%s%N)"
           {
             echo "review_prompt<<$output_delimiter"
@@ -168,6 +185,8 @@ jobs:
 
       - name: 'Check PR size'
         id: 'size'
+        if: |-
+          steps.pr.outputs.should_run_review == 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           REVIEW_MODE: '${{ steps.pr.outputs.review_mode }}'
@@ -192,21 +211,44 @@ jobs:
 
           pr_json="$(gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --json additions,deletions,changedFiles,title,baseRefName,headRefName)"
+            --json additions,deletions,changedFiles,title,baseRefName,headRefName,isCrossRepository,headRepositoryOwner,headRepository)"
           additions="$(jq -r '.additions' <<< "$pr_json")"
           deletions="$(jq -r '.deletions' <<< "$pr_json")"
           changed_files="$(jq -r '.changedFiles' <<< "$pr_json")"
           title="$(jq -r '.title' <<< "$pr_json")"
           base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
           head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
+          is_cross_repository="$(jq -r '.isCrossRepository' <<< "$pr_json")"
+          head_owner="$(jq -r '.headRepositoryOwner.login // ""' <<< "$pr_json")"
+          head_repo="$(jq -r '.headRepository.name // ""' <<< "$pr_json")"
           changed_lines=$((additions + deletions))
 
           echo "changed_lines=$changed_lines" >> "$GITHUB_OUTPUT"
           echo "changed_files=$changed_files" >> "$GITHUB_OUTPUT"
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
-          echo "Review branch: $base_ref <- $head_ref"
+          echo "Review branch: $base_ref <- $head_owner/$head_repo:$head_ref"
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
+
+          if [ "$is_cross_repository" = "true" ]; then
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            {
+              printf 'Qwen Code automated PR review is disabled for cross-repository PRs because this workflow runs with review credentials and the bundled `/review` flow may install dependencies from the PR head.\n\n'
+              printf 'A maintainer can still review this PR manually, or copy trusted patches into a branch in this repository before requesting automated review.\n'
+            } > qwen-pr-review-fork-comment.md
+            if [ "$SHOULD_COMMENT" = "true" ]; then
+              gh pr comment "$PR_NUMBER" \
+                --repo "$GITHUB_REPOSITORY" \
+                --body-file qwen-pr-review-fork-comment.md
+            else
+              {
+                printf '### Qwen PR review dry run\n\n'
+                cat qwen-pr-review-fork-comment.md
+                printf '\nReview mode: `%s`; no PR comments were posted.\n' "$REVIEW_MODE"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit 0
+          fi
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
             echo "should_review=false" >> "$GITHUB_OUTPUT"
@@ -232,19 +274,11 @@ jobs:
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 'Load CI review rules'
-        if: |-
-          steps.size.outputs.should_review == 'true'
-        run: |-
-          if [ -f .github/review-rules.md ]; then
-            cp .github/review-rules.md .qwen/review-rules.md
-          fi
-
       - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
           steps.size.outputs.should_review == 'true'
-        uses: 'QwenLM/qwen-code-action@main'
+        uses: 'QwenLM/qwen-code-action@a08dc886c2094312d6cf2df08ba5fd0437c53339' # main pinned on 2026-05-14
         with:
           openai_api_key: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           openai_base_url: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
