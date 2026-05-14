@@ -387,8 +387,11 @@ export class BaseLlmClient {
       };
     }
 
-    const contentGenerator = await this.createContentGeneratorForModel(model);
-    const resolvedModel = this.resolveModelAcrossAuthTypes(model);
+    const contentGenerator = await this.createContentGeneratorForModel(
+      model,
+      selector,
+    );
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
       resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
 
@@ -414,10 +417,10 @@ export class BaseLlmClient {
    */
   private resolveModelAcrossAuthTypes(
     model: string,
+    selector: ResolvedModelId | undefined,
   ): ResolvedModelConfig | undefined {
     const modelsConfig = this.config.getModelsConfig?.();
     if (!modelsConfig) return undefined;
-    const selector = this.resolveModelSelector(model);
     if (!selector) return undefined;
     const modelId = selector.modelId;
 
@@ -450,17 +453,17 @@ export class BaseLlmClient {
 
   private async createContentGeneratorForModel(
     model: string,
+    selector: ResolvedModelId | undefined,
   ): Promise<ContentGenerator> {
-    const initialSelector = this.resolveModelSelector(model);
-    const cacheKey = initialSelector
-      ? `${initialSelector.authType ?? ''}:${initialSelector.modelId}`
+    const cacheKey = selector
+      ? `${selector.authType ?? ''}:${selector.modelId}`
       : model;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
     const generatorPromise = (async () => {
       try {
-        const resolvedModel = this.resolveModelAcrossAuthTypes(model);
+        const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
 
         if (!resolvedModel) {
           debugLogger.warn(
@@ -469,7 +472,6 @@ export class BaseLlmClient {
           return this.contentGenerator;
         }
 
-        const selector = this.resolveModelSelector(model);
         const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
