@@ -135,8 +135,8 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.NAVIGATION_UP]: [{ key: 'up' }],
   [Command.NAVIGATION_DOWN]: [{ key: 'down' }],
 
-  // Selection list navigation — up/k/Ctrl+P move selection up; down/j/Ctrl+N move selection down
-  // ctrl: false on k/j ensures Ctrl+K (kill-line) and Ctrl+N (history-down) are not captured here
+  // Selection-list nav: arrows + k/j + Ctrl+P/Ctrl+N
+  // ctrl: false on bare k/j skips Ctrl+K and Ctrl+J
   [Command.SELECTION_UP]: [
     { key: 'up' },
     { key: 'k', ctrl: false },
