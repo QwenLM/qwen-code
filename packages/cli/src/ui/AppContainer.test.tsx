@@ -3122,9 +3122,10 @@ describe('AppContainer State Management', () => {
     });
 
     it('opens rewind selector normally when IDE mode is disabled', () => {
+      const mockAddItemDisabled = vi.fn();
       mockedUseHistory.mockReturnValue({
         history: [{ id: 1, type: 'user', text: 'hello' }],
-        addItem: vi.fn(),
+        addItem: mockAddItemDisabled,
         updateItem: vi.fn(),
         clearItems: vi.fn(),
         loadHistory: vi.fn(),
@@ -3152,6 +3153,7 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.openRewindSelector();
 
+      expect(mockAddItemDisabled).not.toHaveBeenCalled();
       expect(capturedUIState.isRewindSelectorOpen).toBe(true);
     });
   });
