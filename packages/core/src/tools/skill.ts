@@ -298,6 +298,10 @@ ${skillDescriptions}
     );
   }
 
+  override toAutoClassifierInput(params: SkillParams): Record<string, unknown> {
+    return { skill: params.skill };
+  }
+
   getAvailableSkillNames(): string[] {
     return this.availableSkills.map((skill) => skill.name);
   }

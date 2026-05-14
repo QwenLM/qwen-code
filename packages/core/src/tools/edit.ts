@@ -799,6 +799,20 @@ Expectation for required parameters:
     return new EditToolInvocation(this.config, params);
   }
 
+  override toAutoClassifierInput(
+    params: EditToolParams,
+  ): Record<string, unknown> {
+    const oldStr = params.old_string ?? '';
+    const newStr = params.new_string ?? '';
+    return {
+      file_path: params.file_path,
+      old_string_preview: oldStr.slice(0, 80),
+      new_string_preview: newStr.slice(0, 80),
+      lines_changed:
+        (newStr.match(/\n/g)?.length ?? 0) - (oldStr.match(/\n/g)?.length ?? 0),
+    };
+  }
+
   getModifyContext(_: AbortSignal): ModifyContext<EditToolParams> {
     return {
       getFilePath: (params: EditToolParams) => params.file_path,

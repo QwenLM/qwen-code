@@ -234,6 +234,26 @@ export abstract class DeclarativeTool<
   }
 
   /**
+   * Projects tool params for the AUTO approval mode classifier.
+   *
+   * Tools with security-relevant parameters (file paths, shell commands,
+   * URLs) should override this to redact voluminous or sensitive fields
+   * (full content, secrets) while exposing enough for the classifier to
+   * judge safety.
+   *
+   * Returns:
+   *   - object: projected params to send to the classifier
+   *   - empty string: signals "no security relevance" — caller may skip
+   *     this tool entirely in the classifier transcript
+   *   - undefined (default): fall back to raw params
+   */
+  toAutoClassifierInput(
+    _params: TParams,
+  ): Record<string, unknown> | string | undefined {
+    return undefined;
+  }
+
+  /**
    * Validates the raw tool parameters.
    * Subclasses should override this to add custom validation logic
    * beyond the JSON schema check.

@@ -60,6 +60,12 @@ import {
   isPlanModeBlocked,
   abortGoalForStopHookCap,
   formatStopHookBlockingCapWarning,
+  evaluateAutoMode,
+  recordAllow,
+  recordBlock,
+  recordUnavailable,
+  shouldFallback,
+  shouldRunAutoModeForCall,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -1528,6 +1534,7 @@ export class Session implements SessionContext {
       plan: ApprovalMode.PLAN,
       default: ApprovalMode.DEFAULT,
       'auto-edit': ApprovalMode.AUTO_EDIT,
+      auto: ApprovalMode.AUTO,
       yolo: ApprovalMode.YOLO,
     };
 
@@ -1891,10 +1898,59 @@ export class Session implements SessionContext {
         );
       }
 
+      // ── L5: AUTO mode three-layer filter (duplicated from
+      // coreToolScheduler.ts; ACP routes through this Session path).
+      // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
+      // allowed skips requestPermission; fallback drops through to the
+      // existing manual-approval flow below.
+      let autoModeAllowed = false;
+      if (shouldRunAutoModeForCall(approvalMode, fc.name)) {
+        const denialState = this.config.getAutoModeDenialState();
+        const messages =
+          this.config.getGeminiClient?.()?.getHistory(false) ?? [];
+        const decision = await evaluateAutoMode({
+          ctx: pmCtx,
+          pmForcedAsk,
+          toolParams,
+          messages,
+          config: this.config,
+          signal: abortSignal,
+          skipClassifier: shouldFallback(denialState).fallback,
+        });
+
+        if (decision.via === 'classifier' && decision.shouldBlock) {
+          this.config.setAutoModeDenialState(
+            decision.unavailable
+              ? recordUnavailable(denialState)
+              : recordBlock(denialState),
+          );
+          return earlyErrorResponse(
+            new Error(
+              decision.unavailable
+                ? `Auto mode classifier unavailable; action blocked for safety`
+                : `Blocked by auto mode policy: ${decision.reason}`,
+            ),
+            fc.name,
+          );
+        }
+
+        if (decision.via !== 'fallback') {
+          // Allow path: fast-path hit OR classifier returned !shouldBlock.
+          this.config.setAutoModeDenialState(recordAllow(denialState));
+          autoModeAllowed = true;
+        }
+        // decision.via === 'fallback' → drop through; the existing
+        // needsConfirmation flow will route through requestPermission as
+        // if the session were in DEFAULT mode.
+      }
+
       let didRequestPermission = false;
       let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-      if (needsConfirmation(finalPermission, approvalMode, fc.name)) {
+      if (
+        !autoModeAllowed &&
+        needsConfirmation(finalPermission, approvalMode, fc.name)
+      ) {
         confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
 

@@ -21,6 +21,7 @@ import {
   normalizeMonitorCommand,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { findDangerousAllowRules } from './dangerousRules.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -118,6 +119,18 @@ export class PermissionManager {
   };
 
   /**
+   * Allow rules temporarily removed while the user is in AUTO mode.
+   * Populated by `stripDangerousRulesForAutoMode` (called from
+   * `Config.setApprovalMode` on AUTO entry) and drained by
+   * `restoreDangerousRules` (called on AUTO exit). `undefined` means
+   * "not currently in AUTO mode" — distinct from "no rules stripped".
+   */
+  private strippedAllowRules?: {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  };
+
+  /**
    * Canonical tool names from the legacy `coreTools` allowlist.
    * When non-null, `isToolEnabled()` rejects any tool not in this set.
    * Populated during `initialize()` from `config.getCoreTools()`.
@@ -149,6 +162,15 @@ export class PermissionManager {
       this.coreToolsAllowList = new Set(
         rawCoreTools.map((t) => parseRule(t).toolName),
       );
+    }
+
+    // When the session starts in AUTO (via `tools.approvalMode: 'auto'` in
+    // settings.json or `--approval-mode auto` on the CLI), the constructor
+    // sets approvalMode before PermissionManager is wired up. Catch that
+    // case here so AUTO-on-startup sessions get dangerous allow rules
+    // stripped, same as sessions that switch to AUTO via Shift+Tab.
+    if (this.config.getApprovalMode?.() === 'auto') {
+      this.stripDangerousRulesForAutoMode();
     }
   }
 
@@ -887,5 +909,87 @@ export class PermissionManager {
       ...this.sessionRules.allow.map((r) => r.raw),
       ...this.persistentRules.allow.map((r) => r.raw),
     ];
+  }
+
+  // ---------------------------------------------------------------------------
+  // AUTO mode dangerous-rule stash
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Remove any allow rules whose breadth would defeat the AUTO classifier
+   * (see {@link findDangerousAllowRules}) and stash them for restore.
+   * Idempotent — calling twice while in AUTO is a no-op. Deny rules are
+   * never stripped; users intend deny rules as hard blocks regardless of
+   * mode.
+   */
+  stripDangerousRulesForAutoMode(): {
+    persistent: PermissionRule[];
+    session: PermissionRule[];
+  } {
+    if (this.strippedAllowRules) {
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerous = findDangerousAllowRules(
+      this.persistentRules.allow,
+    );
+    const sessionDangerous = findDangerousAllowRules(this.sessionRules.allow);
+
+    if (persistentDangerous.length === 0 && sessionDangerous.length === 0) {
+      this.strippedAllowRules = { persistent: [], session: [] };
+      return this.strippedAllowRules;
+    }
+
+    const persistentDangerousSet = new Set(persistentDangerous);
+    const sessionDangerousSet = new Set(sessionDangerous);
+
+    this.persistentRules.allow = this.persistentRules.allow.filter(
+      (r) => !persistentDangerousSet.has(r),
+    );
+    this.sessionRules.allow = this.sessionRules.allow.filter(
+      (r) => !sessionDangerousSet.has(r),
+    );
+
+    this.strippedAllowRules = {
+      persistent: persistentDangerous,
+      session: sessionDangerous,
+    };
+    return this.strippedAllowRules;
+  }
+
+  /**
+   * Reverse of {@link stripDangerousRulesForAutoMode}: re-attach previously
+   * stripped allow rules to their original scope. Idempotent when not
+   * currently in AUTO.
+   */
+  restoreDangerousRules(): void {
+    if (!this.strippedAllowRules) return;
+    if (this.strippedAllowRules.persistent.length > 0) {
+      this.persistentRules.allow = [
+        ...this.persistentRules.allow,
+        ...this.strippedAllowRules.persistent,
+      ];
+    }
+    if (this.strippedAllowRules.session.length > 0) {
+      this.sessionRules.allow = [
+        ...this.sessionRules.allow,
+        ...this.strippedAllowRules.session,
+      ];
+    }
+    this.strippedAllowRules = undefined;
+  }
+
+  /**
+   * Return a snapshot of currently-stashed dangerous allow rules.
+   * Used by the UI to surface a "the following rules are disabled in AUTO
+   * mode" notice. Returns `undefined` when not currently in AUTO.
+   */
+  getStrippedDangerousRules():
+    | {
+        persistent: readonly PermissionRule[];
+        session: readonly PermissionRule[];
+      }
+    | undefined {
+    return this.strippedAllowRules;
   }
 }

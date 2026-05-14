@@ -82,6 +82,7 @@ const VALID_APPROVAL_MODE_VALUES = [
   'plan',
   'default',
   'auto-edit',
+  'auto',
   'yolo',
 ] as const;
 
@@ -106,6 +107,8 @@ function parseApprovalModeValue(value: string): ApprovalMode {
     case 'autoedit':
     case 'auto-edit':
       return ApprovalMode.AUTO_EDIT;
+    case 'auto':
+      return ApprovalMode.AUTO;
     default:
       throw formatApprovalModeError(value);
   }
@@ -641,9 +644,9 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .option('approval-mode', {
           type: 'string',
-          choices: ['plan', 'default', 'auto-edit', 'yolo'],
+          choices: ['plan', 'default', 'auto-edit', 'auto', 'yolo'],
           description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
+            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), auto (LLM classifier auto-approves safe actions, blocks risky ones), yolo (auto-approve all tools)',
         })
         .option('checkpointing', {
           type: 'boolean',
@@ -1656,6 +1659,7 @@ export async function loadCliConfig(
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+      autoMode: settings.permissions?.autoMode,
     },
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {

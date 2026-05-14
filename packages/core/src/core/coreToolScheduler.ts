@@ -64,6 +64,17 @@ import {
   isPlanModeBlocked,
   isAutoEditApproved,
 } from './permissionFlow.js';
+import {
+  evaluateAutoMode,
+  shouldRunAutoModeForCall,
+} from '../permissions/autoMode.js';
+import {
+  recordAllow,
+  recordBlock,
+  recordFallbackApprove,
+  recordUnavailable,
+  shouldFallback,
+} from '../permissions/denialTracking.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -1347,6 +1358,81 @@ export class CoreToolScheduler {
             continue;
           }
 
+          // ── L5: AUTO mode three-layer filter ──────────────────────────
+          // Fast-paths run BEFORE the fallback check so safe tools (Read,
+          // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
+          // fallback state — otherwise every trivially safe tool would
+          // force manual approval until the user toggles modes.
+          if (shouldRunAutoModeForCall(approvalMode, canonicalName)) {
+            const denialState = this.config.getAutoModeDenialState();
+            const fallback = shouldFallback(denialState);
+            const messages =
+              this.config.getGeminiClient?.()?.getHistory(false) ?? [];
+            const decision = await evaluateAutoMode({
+              ctx: pmCtx,
+              pmForcedAsk,
+              toolParams,
+              messages,
+              config: this.config,
+              signal,
+              skipClassifier: fallback.fallback,
+            });
+
+            const markApproved = () => {
+              this.config.setAutoModeDenialState(recordAllow(denialState));
+              this.setToolCallOutcome(
+                reqInfo.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+            };
+
+            switch (decision.via) {
+              case 'fast-path:accept-edits':
+              case 'fast-path:allowlist':
+                markApproved();
+                continue;
+              case 'classifier':
+                if (!decision.shouldBlock) {
+                  markApproved();
+                  continue;
+                }
+                this.config.setAutoModeDenialState(
+                  decision.unavailable
+                    ? recordUnavailable(denialState)
+                    : recordBlock(denialState),
+                );
+                this.setStatusInternal(
+                  reqInfo.callId,
+                  'error',
+                  createErrorResponse(
+                    reqInfo,
+                    new Error(
+                      decision.unavailable
+                        ? `Auto mode classifier unavailable; action blocked for safety`
+                        : `Blocked by auto mode policy: ${decision.reason}`,
+                    ),
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
+                );
+                continue;
+              case 'fallback':
+                // Drop through to the manual-approval flow below. The
+                // pending dialog tells the user what's being asked;
+                // operators see the cause in the debug log.
+                if (fallback.fallback) {
+                  debugLogger.warn(
+                    `Auto mode fallback to manual approval (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                  );
+                }
+                break;
+              default: {
+                const _exhaustive: never = decision;
+                void _exhaustive;
+              }
+            }
+          }
+
           // finalPermission === 'ask' (or 'default' from PM → treat as ask)
           // apply ApprovalMode overrides.
           // ask_user_question always needs confirmation so the user can answer;
@@ -1628,6 +1714,28 @@ export class CoreToolScheduler {
     }
 
     this.setToolCallOutcome(callId, outcome);
+
+    // AUTO-mode denialTracking recovery: when the user manually approves a
+    // call that fell back from AUTO (either by streak threshold or by an
+    // explicit ask rule), reset the consecutiveBlock counter so subsequent
+    // calls return to classifier flow. Without this, a session that hit
+    // the denial threshold once would stay in fallback for the rest of
+    // the session even after the user explicitly approves the next call.
+    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
+    // signal that the classifier was correct to block.
+    if (this.config.getApprovalMode() === ApprovalMode.AUTO) {
+      const isApproveOutcome =
+        outcome === ToolConfirmationOutcome.ProceedOnce ||
+        outcome === ToolConfirmationOutcome.ProceedAlways ||
+        outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+        outcome === ToolConfirmationOutcome.ProceedAlwaysUser ||
+        outcome === ToolConfirmationOutcome.ModifyWithEditor;
+      if (isApproveOutcome) {
+        this.config.setAutoModeDenialState(
+          recordFallbackApprove(this.config.getAutoModeDenialState()),
+        );
+      }
+    }
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {
       // Use custom cancel message from payload if provided, otherwise use default

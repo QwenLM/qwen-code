@@ -1244,6 +1244,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
+    settings,
     addItem: historyManager.addItem,
     onApprovalModeChange: handleApprovalModeChange,
     shouldBlockTab: () => hasSuggestionsVisible,

@@ -676,6 +676,17 @@ export class WriteFileTool
     return new WriteFileToolInvocation(this.config, params);
   }
 
+  override toAutoClassifierInput(
+    params: WriteFileToolParams,
+  ): Record<string, unknown> {
+    const content = params.content ?? '';
+    return {
+      file_path: params.file_path,
+      byte_count: Buffer.byteLength(content, 'utf8'),
+      first_80_chars: content.slice(0, 80),
+    };
+  }
+
   getModifyContext(
     _abortSignal: AbortSignal,
   ): ModifyContext<WriteFileToolParams> {
