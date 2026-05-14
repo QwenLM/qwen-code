@@ -1868,12 +1868,7 @@ export class CoreToolScheduler {
         this._executeToolCallBody(scheduledCall, signal, toolSpan),
       );
     } finally {
-      const tc = this.toolCalls.find((c) => c.request.callId === callId);
-      if (tc?.status === 'success') {
-        endToolSpan(toolSpan, { success: true });
-      } else {
-        endToolSpan(toolSpan);
-      }
+      endToolSpan(toolSpan);
     }
   }
 
@@ -2170,6 +2165,7 @@ export class CoreToolScheduler {
             : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
+        safeSetStatus(span, { code: SpanStatusCode.OK });
       } else {
         // It is a failure
         // PostToolUseFailure Hook
