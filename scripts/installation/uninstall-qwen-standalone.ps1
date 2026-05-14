@@ -54,6 +54,10 @@ function Get-QwenInstallBinDir {
     return Join-Path (Get-QwenInstallBase) 'bin'
 }
 
+function Get-CurrentCmdShimStatePath {
+    return Join-Path (Get-QwenInstallBase) 'current-cmd-shim.txt'
+}
+
 function Get-NormalizedPath {
     param([string]$PathValue)
 
@@ -188,7 +192,42 @@ function Add-PathCandidate {
     [void]$Candidates.Add($Directory.Trim().Trim('"'))
 }
 
+function Remove-CurrentCmdPathShimFile {
+    param([string]$ShimPath)
+
+    if ([string]::IsNullOrEmpty($ShimPath)) {
+        return
+    }
+
+    if (-not (Test-Path -LiteralPath $ShimPath -PathType Leaf)) {
+        return
+    }
+
+    $existingShim = Get-Content -LiteralPath $ShimPath -Raw -ErrorAction SilentlyContinue
+    if ($existingShim -notmatch 'Qwen Code current-session shim') {
+        return
+    }
+
+    Remove-Item -LiteralPath $ShimPath -Force -ErrorAction SilentlyContinue
+    Write-Success "Removed current cmd.exe qwen shim: $ShimPath"
+}
+
+function Remove-RecordedCurrentCmdPathShim {
+    $statePath = Get-CurrentCmdShimStatePath
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        return
+    }
+
+    foreach ($shimPath in Get-Content -LiteralPath $statePath -ErrorAction SilentlyContinue) {
+        Remove-CurrentCmdPathShimFile -ShimPath $shimPath
+    }
+
+    Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+}
+
 function Remove-CurrentCmdPathShim {
+    Remove-RecordedCurrentCmdPathShim
+
     $candidates = [System.Collections.Generic.List[string]]::new()
     foreach ($entry in @($env:Path -split ';')) {
         if (-not [string]::IsNullOrEmpty($entry)) {
@@ -208,17 +247,7 @@ function Remove-CurrentCmdPathShim {
 
     foreach ($candidate in $candidates) {
         $shimPath = Join-Path $candidate 'qwen.cmd'
-        if (-not (Test-Path -LiteralPath $shimPath -PathType Leaf)) {
-            continue
-        }
-
-        $existingShim = Get-Content -LiteralPath $shimPath -Raw -ErrorAction SilentlyContinue
-        if ($existingShim -notmatch 'Qwen Code current-session shim') {
-            continue
-        }
-
-        Remove-Item -LiteralPath $shimPath -Force -ErrorAction SilentlyContinue
-        Write-Success "Removed current cmd.exe qwen shim: $shimPath"
+        Remove-CurrentCmdPathShimFile -ShimPath $shimPath
     }
 }
 
@@ -291,6 +320,8 @@ $installDir = Get-QwenInstallDir
 $installBinDir = Get-QwenInstallBinDir
 $installWasManaged = Test-QwenStandaloneInstallDir -InstallDir $installDir
 
+Remove-CurrentCmdPathShim
+
 if ($installWasManaged) {
     Remove-Item -LiteralPath $installDir -Recurse -Force
     Write-Success "Removed $installDir"
@@ -307,7 +338,6 @@ if ($installWasManaged) {
 }
 
 Remove-UserPathEntry -BinDir $installBinDir
-Remove-CurrentCmdPathShim
 Remove-SourceMarker
 if ([string]::IsNullOrEmpty($env:QWEN_INSTALL_BIN_DIR)) {
     Remove-EmptyDirectory -Directory $installBinDir

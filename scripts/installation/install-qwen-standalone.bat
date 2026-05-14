@@ -481,6 +481,10 @@ rem args: %~1=version_path  → sets QWEN_OSS_BASE_URL
 set "QWEN_OSS_BASE_URL=https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/%~1"
 exit /b 0
 
+:AliyunLatestVersionUrl
+set "QWEN_OSS_LATEST_VERSION_URL=https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/latest/VERSION"
+exit /b 0
+
 :RaceMirrorHead
 rem args: %~1=timeout_seconds %~2=gh_url %~3=oss_url
 rem Sets QWEN_RACE_RESULT to "aliyun", "github", or "timeout". Sequential
@@ -508,8 +512,14 @@ call :ReleaseVersionPath
 
 if /i "!MIRROR!"=="auto" (
     call :GithubBaseUrlForVersion "!VERSION_PATH!"
-    call :AliyunBaseUrlForVersion "!VERSION_PATH!"
-    call :RaceMirrorHead 2 "!QWEN_GH_BASE_URL!/SHA256SUMS" "!QWEN_OSS_BASE_URL!/SHA256SUMS"
+    if /i "!VERSION_PATH!"=="latest" (
+        call :AliyunLatestVersionUrl
+        set "QWEN_OSS_PROBE_URL=!QWEN_OSS_LATEST_VERSION_URL!"
+    ) else (
+        call :AliyunBaseUrlForVersion "!VERSION_PATH!"
+        set "QWEN_OSS_PROBE_URL=!QWEN_OSS_BASE_URL!/SHA256SUMS"
+    )
+    call :RaceMirrorHead 2 "!QWEN_GH_BASE_URL!/SHA256SUMS" "!QWEN_OSS_PROBE_URL!"
     if /i "!QWEN_RACE_RESULT!"=="timeout" (
         echo INFO: Mirror auto-selection timed out; defaulting to github.
         set "MIRROR=github"
@@ -519,13 +529,18 @@ if /i "!MIRROR!"=="auto" (
     )
     set "QWEN_GH_BASE_URL="
     set "QWEN_OSS_BASE_URL="
+    set "QWEN_OSS_LATEST_VERSION_URL="
+    set "QWEN_OSS_PROBE_URL="
     set "QWEN_RACE_RESULT="
 )
 
 if /i "!MIRROR!"=="aliyun" (
-    call :AliyunBaseUrlForVersion "!VERSION_PATH!"
+    call :ResolveAliyunVersionPath "!VERSION_PATH!"
+    if !ERRORLEVEL! NEQ 0 exit /b 1
+    call :AliyunBaseUrlForVersion "!RESOLVED_VERSION_PATH!"
     set "STANDALONE_BASE_URL=!QWEN_OSS_BASE_URL!"
     set "QWEN_OSS_BASE_URL="
+    set "RESOLVED_VERSION_PATH="
     exit /b 0
 )
 
@@ -566,6 +581,51 @@ set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
 exit /b %PS_STATUS%
+
+:DownloadFileQuiet
+set "QWEN_DOWNLOAD_URL=%~1"
+set "QWEN_DOWNLOAD_DEST=%~2"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; if (Get-Command curl.exe -ErrorAction SilentlyContinue) { curl.exe -fsSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { $ProgressPreference = 'SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
+set "PS_STATUS=%ERRORLEVEL%"
+set "QWEN_DOWNLOAD_URL="
+set "QWEN_DOWNLOAD_DEST="
+exit /b %PS_STATUS%
+
+:ResolveAliyunVersionPath
+set "RESOLVED_VERSION_PATH="
+if /i not "%~1"=="latest" (
+    set "RESOLVED_VERSION_PATH=%~1"
+    exit /b 0
+)
+
+call :AliyunLatestVersionUrl
+call :CreateTempFile "qwen-code-latest-version"
+if !ERRORLEVEL! NEQ 0 exit /b 1
+set "TEMP_VERSION_FILE=!TEMP_FILE!"
+
+call :DownloadFileQuiet "!QWEN_OSS_LATEST_VERSION_URL!" "!TEMP_VERSION_FILE!"
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_VERSION_FILE!" del /F /Q "!TEMP_VERSION_FILE!" >nul 2>&1
+    set "TEMP_VERSION_FILE="
+    set "QWEN_OSS_LATEST_VERSION_URL="
+    echo WARNING: Failed to resolve Aliyun latest VERSION pointer.
+    exit /b 1
+)
+
+set "QWEN_VERSION_POINTER_FILE=!TEMP_VERSION_FILE!"
+for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = (Get-Content -LiteralPath $env:QWEN_VERSION_POINTER_FILE -Raw).Trim(); if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { if ($value.StartsWith('v')) { Write-Output $value } else { Write-Output ('v' + $value) }; exit 0 }; exit 1"') do if not defined RESOLVED_VERSION_PATH set "RESOLVED_VERSION_PATH=%%V"
+set "QWEN_VERSION_POINTER_FILE="
+if exist "!TEMP_VERSION_FILE!" del /F /Q "!TEMP_VERSION_FILE!" >nul 2>&1
+set "TEMP_VERSION_FILE="
+set "QWEN_OSS_LATEST_VERSION_URL="
+
+if "!RESOLVED_VERSION_PATH!"=="" (
+    echo ERROR: Aliyun latest VERSION pointer is not a valid semver value.
+    exit /b 1
+)
+
+echo INFO: Resolved Aliyun latest to !RESOLVED_VERSION_PATH!.
+exit /b 0
 
 :VerifyChecksum
 set "ARCHIVE_FILE=%~1"
@@ -666,6 +726,10 @@ if not "!ARCHIVE_PATH!"=="" (
 
     set "ARCHIVE_NAME=qwen-code-win-x64.zip"
     call :StandaloneBaseUrl
+    if !ERRORLEVEL! NEQ 0 (
+        if /i "!METHOD!"=="detect" exit /b 2
+        exit /b 1
+    )
     set "ARCHIVE_URL=!STANDALONE_BASE_URL!/!ARCHIVE_NAME!"
     set "CHECKSUM_SOURCE=!STANDALONE_BASE_URL!/SHA256SUMS"
 
@@ -1008,6 +1072,14 @@ for /f "delims=" %%i in ('npm -v 2^>nul') do set "NPM_VERSION=%%i"
 echo SUCCESS: npm %NPM_VERSION% detected.
 exit /b 0
 
+:NpmPackageSpec
+set "NPM_PACKAGE_SPEC=@qwen-code/qwen-code@latest"
+if /i "!VERSION!"=="latest" exit /b 0
+set "NPM_VERSION_SPEC=!VERSION!"
+if /i "!NPM_VERSION_SPEC:~0,1!"=="v" set "NPM_VERSION_SPEC=!NPM_VERSION_SPEC:~1!"
+set "NPM_PACKAGE_SPEC=@qwen-code/qwen-code@!NPM_VERSION_SPEC!"
+exit /b 0
+
 :InstallNpm
 call :RequireNode
 if %ERRORLEVEL% NEQ 0 exit /b 1
@@ -1015,21 +1087,27 @@ if %ERRORLEVEL% NEQ 0 exit /b 1
 call :RequireNpm
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
+call :NpmPackageSpec
+
 where qwen >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     for /f "delims=" %%i in ('qwen --version 2^>nul') do set "QWEN_VERSION=%%i"
     echo INFO: Existing Qwen Code detected: !QWEN_VERSION!
-    echo INFO: Upgrading to the latest version.
+    if /i "!VERSION!"=="latest" (
+        echo INFO: Upgrading to the latest version.
+    ) else (
+        echo INFO: Installing requested version !VERSION!.
+    )
 )
 
-echo INFO: Running: npm install -g @qwen-code/qwen-code@latest --registry !NPM_REGISTRY!
-call npm install -g @qwen-code/qwen-code@latest --registry "!NPM_REGISTRY!"
+echo INFO: Running: npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
+call npm install -g !NPM_PACKAGE_SPEC! --registry "!NPM_REGISTRY!"
 if %ERRORLEVEL% NEQ 0 (
     echo ERROR: Failed to install Qwen Code.
     echo.
     echo This installer does not change your npm prefix or PATH.
     echo If the failure is a permission error, fix your npm global package directory, then run:
-    echo   npm install -g @qwen-code/qwen-code@latest --registry !NPM_REGISTRY!
+    echo   npm install -g !NPM_PACKAGE_SPEC! --registry !NPM_REGISTRY!
     exit /b 1
 )
 

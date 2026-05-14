@@ -202,6 +202,8 @@ async function assertRemoteAssetAvailable(url, fetchImpl) {
   }
   await response.body?.cancel?.();
 
+  // Some object-storage hosts disable HEAD; fall back to a 1-byte ranged GET
+  // so the verifier can confirm reachability without downloading the archive.
   response = await fetchWithTimeout(fetchImpl, url, {
     headers: {
       Range: 'bytes=0-0',

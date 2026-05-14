@@ -514,8 +514,8 @@ maybe_update_shell_path() {
         export_line="export PATH=${quoted_install_bin_dir}:\$PATH"
     fi
 
-    if [[ -f "${rc_file}" ]] && grep -qF "${marker}" "${rc_file}" 2>/dev/null; then
-        log_info "PATH update already present in ${rc_file} (skipping)."
+    if [[ -f "${rc_file}" ]] && grep -qxF "${export_line}" "${rc_file}" 2>/dev/null; then
+        log_info "PATH update for ${install_bin_dir} already present in ${rc_file} (skipping)."
         return 0
     fi
 
@@ -546,6 +546,80 @@ github_base_url_for_version() {
 aliyun_base_url_for_version() {
     local version_path="$1"
     echo "https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/${version_path}"
+}
+
+aliyun_latest_version_url() {
+    echo "https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/latest/VERSION"
+}
+
+normalize_version_path_value() {
+    local raw_version="$1"
+    local version_path
+
+    raw_version=$(printf '%s' "${raw_version}" | tr -d '\r' | awk 'NF { print $1; exit }')
+    if [[ -z "${raw_version}" ]]; then
+        return 1
+    fi
+
+    case "${raw_version}" in
+        v*)
+            version_path="${raw_version}"
+            ;;
+        *)
+            version_path="v${raw_version}"
+            ;;
+    esac
+
+    if [[ "${version_path}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$ ]]; then
+        echo "${version_path}"
+        return 0
+    fi
+
+    return 1
+}
+
+download_text() {
+    local url="$1"
+
+    if command_exists curl; then
+        curl -fsSL --retry 2 "${url}"
+        return $?
+    fi
+
+    if command_exists wget; then
+        wget -q --tries=3 -O - "${url}"
+        return $?
+    fi
+
+    log_error "curl or wget is required to resolve the standalone release version."
+    return 1
+}
+
+resolve_aliyun_version_path() {
+    local version_path="$1"
+
+    if [[ "${version_path}" != "latest" ]]; then
+        echo "${version_path}"
+        return 0
+    fi
+
+    local latest_url
+    latest_url=$(aliyun_latest_version_url)
+
+    local latest_version
+    if ! latest_version=$(download_text "${latest_url}"); then
+        log_warning "Failed to resolve Aliyun latest VERSION pointer." >&2
+        return 1
+    fi
+
+    local resolved_version_path
+    if ! resolved_version_path=$(normalize_version_path_value "${latest_version}"); then
+        log_error "Aliyun latest VERSION pointer is not a valid semver value."
+        return 1
+    fi
+
+    log_info "Resolved Aliyun latest to ${resolved_version_path}." >&2
+    echo "${resolved_version_path}"
 }
 
 # Race two HEAD probes; print "aliyun" or "github" based on which mirror's
@@ -595,7 +669,11 @@ standalone_base_url() {
     if [[ "${MIRROR}" == "auto" ]]; then
         local gh_head oss_head selected
         gh_head="$(github_base_url_for_version "${version_path}")/SHA256SUMS"
-        oss_head="$(aliyun_base_url_for_version "${version_path}")/SHA256SUMS"
+        if [[ "${version_path}" == "latest" ]]; then
+            oss_head="$(aliyun_latest_version_url)"
+        else
+            oss_head="$(aliyun_base_url_for_version "${version_path}")/SHA256SUMS"
+        fi
         selected=$(race_mirror_head 2 "${gh_head}" "${oss_head}")
         if [[ "${selected}" == "timeout" ]]; then
             log_info "Mirror auto-selection timed out; defaulting to github." >&2
@@ -607,6 +685,9 @@ standalone_base_url() {
     fi
 
     if [[ "${MIRROR}" == "aliyun" ]]; then
+        if ! version_path=$(resolve_aliyun_version_path "${version_path}"); then
+            return 1
+        fi
         aliyun_base_url_for_version "${version_path}"
         return 0
     fi
@@ -896,7 +977,12 @@ install_standalone() {
         archive_name="qwen-code-${target}.${archive_extension}"
 
         local base_url
-        base_url=$(standalone_base_url)
+        if ! base_url=$(standalone_base_url); then
+            if [[ "${METHOD}" == "detect" ]]; then
+                return 2
+            fi
+            return 1
+        fi
         local archive_url="${base_url}/${archive_name}"
         checksum_source="${base_url}/SHA256SUMS"
 
@@ -1004,27 +1090,44 @@ install_standalone() {
     log_info "Installed to ${INSTALL_LIB_DIR}"
 }
 
+npm_package_spec() {
+    if [[ "${VERSION}" == "latest" ]]; then
+        echo "@qwen-code/qwen-code@latest"
+        return 0
+    fi
+
+    local npm_version="${VERSION#v}"
+    echo "@qwen-code/qwen-code@${npm_version}"
+}
+
 install_npm() {
     require_node || return 1
     require_npm || return 1
+
+    local package_spec
+    package_spec=$(npm_package_spec)
 
     if command_exists qwen; then
         local qwen_version
         qwen_version=$(qwen --version 2>/dev/null || echo "unknown")
         log_info "Existing Qwen Code detected: ${qwen_version}"
-        log_info "Upgrading to the latest version."
+        if [[ "${VERSION}" == "latest" ]]; then
+            log_info "Upgrading to the latest version."
+        else
+            log_info "Installing requested version ${VERSION}."
+        fi
     fi
 
     local install_cmd=(
         npm
         install
         -g
-        @qwen-code/qwen-code@latest
+        "${package_spec}"
         --registry
         "${NPM_REGISTRY}"
     )
 
-    log_info "Running: npm install -g @qwen-code/qwen-code@latest --registry ${NPM_REGISTRY}"
+    log_info "Running: npm install -g ${package_spec} --registry ${NPM_REGISTRY}"
     if "${install_cmd[@]}"; then
         log_success "Qwen Code installed successfully."
         create_source_json
@@ -1036,7 +1139,7 @@ install_npm() {
     echo "This installer does not change your npm prefix or shell profile."
     echo "If the failure is a permission error, install Node.js with a user-owned"
     echo "Node version manager or fix your npm global package directory, then run:"
-    echo "  npm install -g @qwen-code/qwen-code@latest --registry ${NPM_REGISTRY}"
+    echo "  npm install -g ${package_spec} --registry ${NPM_REGISTRY}"
     return 1
 }
 

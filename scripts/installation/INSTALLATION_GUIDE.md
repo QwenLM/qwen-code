@@ -10,7 +10,8 @@ The installers are intentionally lightweight:
 
 - They try a standalone archive first by default.
 - They do not install Node.js, NVM, or any other Node version manager.
-- They do not edit npm config or shell profiles.
+- They do not edit npm config. Standalone installs may update the shell profile
+  or user PATH so the generated `qwen` shim is discoverable.
 - They do not start `qwen` automatically after installation.
 - They store source information in `~/.qwen/source.json` or
   `%USERPROFILE%\.qwen\source.json` when `--source` is provided.
@@ -76,8 +77,10 @@ contents byte-for-byte to
 `installation/uninstall-qwen-standalone.sh`, and
 `installation/uninstall-qwen-standalone.ps1`; the staging command also writes
 `SHA256SUMS` for upload verification. The hosted installers intentionally
-default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a
-standalone release.
+default to `latest`; on Aliyun OSS this means reading
+`releases/qwen-code/latest/VERSION` first, then downloading the matching
+versioned release directory. Use `--version` or `QWEN_INSTALL_VERSION` to pin a
+standalone release directly.
 
 Configure the `production-release` GitHub environment with these required
 secrets before enabling OSS sync:
@@ -247,9 +250,11 @@ Use `--base-url` for private mirrors. The URL must contain
 base URLs must use `https://`.
 
 For Aliyun OSS/CDN, release publishing uploads byte-identical artifacts to the
-versioned directory, for example `vX.Y.Z/`. Stable releases also update the
-`latest/` directory used by the default installer path; nightly and preview
-releases do not overwrite `latest/`.
+versioned directory, for example `releases/qwen-code/vX.Y.Z/`. Stable releases
+also update the small `releases/qwen-code/latest/VERSION` pointer used by the
+default installer path. The installer reads that pointer and then downloads the
+versioned archive plus the versioned `SHA256SUMS`; nightly and preview releases
+do not update the pointer.
 
 ## Supported Source Values
 

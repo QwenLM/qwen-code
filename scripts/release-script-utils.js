@@ -42,6 +42,9 @@ export function parseSha256Sums(content) {
     if (!match) {
       fail(`Malformed SHA256SUMS line ${index + 1}: ${trimmed}`);
     }
+    if (checksums.has(match[2])) {
+      fail(`Duplicate SHA256SUMS entry for: ${match[2]}`);
+    }
     checksums.set(match[2], match[1].toLowerCase());
   }
   return checksums;
@@ -86,6 +89,9 @@ export function parseArgs(argv, definitions) {
     if (eqIndex >= 0) {
       const key = raw.slice(0, eqIndex);
       const value = raw.slice(eqIndex + 1);
+      if (key === '--help' || key === '-h') {
+        fail(`${key} does not accept a value`);
+      }
       const def = definitions[key];
       if (!def) {
         fail(`Unknown option: ${key}`);
@@ -93,7 +99,7 @@ export function parseArgs(argv, definitions) {
       if (def.type === 'flag') {
         fail(`${key} does not accept a value`);
       }
-      if (!value) {
+      if (!value || value.startsWith('-')) {
         fail(`${key} requires a value`);
       }
       args[def.key] = value;
