@@ -203,22 +203,7 @@ goto usage_error
 call :ValidateOptions
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
-echo ===========================================
-echo Qwen Code Installation Script
-echo ===========================================
-echo.
-echo INFO: Install method: !METHOD!
-if /i not "!METHOD!"=="npm" (
-    echo INFO: Standalone mirror: !MIRROR!
-    if not "!BASE_URL!"=="" echo INFO: Standalone base URL: !BASE_URL!
-    if not "!ARCHIVE_PATH!"=="" (
-        echo INFO: Standalone archive: !ARCHIVE_PATH!
-    ) else (
-        echo INFO: Standalone version: !VERSION!
-    )
-)
-if /i not "!METHOD!"=="standalone" echo INFO: npm registry: !NPM_REGISTRY!
-if not "!SOURCE!"=="unknown" echo INFO: Installation source: !SOURCE!
+echo Qwen Code Installer
 echo.
 
 REM Discover all qwen executables on disk BEFORE we install. We can't
@@ -963,9 +948,19 @@ set "PS_STATUS=!ERRORLEVEL!"
 set "QWEN_MANAGED_DIR="
 if !PS_STATUS! EQU 0 exit /b 0
 
-echo ERROR: !MANAGED_DIR! exists but is not a Qwen Code standalone install.
-echo ERROR: Refusing to overwrite it. Move or remove it manually, then rerun the installer.
-exit /b 1
+rem Directory exists but is not a qwen-code standalone install.
+rem Back it up so the user doesn't lose data, then proceed.
+for /f "delims=" %%t in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMddTHHmmss'"') do set "BACKUP_TIMESTAMP=%%t"
+set "BACKUP_DIR=!MANAGED_DIR!.backup.!BACKUP_TIMESTAMP!"
+if "!BACKUP_TIMESTAMP!"=="" for /f "delims=" %%s in ('powershell -NoProfile -Command "[int](Get-Date -UFormat %s)"') do set "BACKUP_DIR=!MANAGED_DIR!.backup.%%s"
+echo WARNING: !MANAGED_DIR! exists but is not a Qwen Code standalone install.
+echo WARNING: Backing up to !BACKUP_DIR!
+move /Y "!MANAGED_DIR!" "!BACKUP_DIR!" >nul
+if !ERRORLEVEL! NEQ 0 (
+    echo ERROR: Failed to back up !MANAGED_DIR!. Move or remove it manually, then rerun the installer.
+    exit /b 1
+)
+exit /b 0
 
 :RequireNode
 where node >nul 2>&1
@@ -1068,21 +1063,14 @@ if not "!EXTRA_BIN!"=="" (
 )
 
 echo.
-echo ===========================================
-echo Installation completed!
-echo ===========================================
-echo.
 
 set "INSTALLED_VERSION=unknown"
 if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
     for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
 )
 
-if not "!INSTALLED_BIN!"=="" (
-    echo SUCCESS: Installed at !INSTALLED_BIN!: !INSTALLED_VERSION!
-) else (
-    echo SUCCESS: Qwen Code installed: !INSTALLED_VERSION!
-)
+echo Qwen Code !INSTALLED_VERSION! installed.
+if not "!INSTALLED_BIN!"=="" echo Location: !INSTALLED_BIN!
 
 rem Build OTHER_QWENS = PRE_INSTALL_QWENS_LIST minus the install we just made.
 set "OTHER_QWENS="
@@ -1129,31 +1117,10 @@ if defined OTHER_QWENS (
 
 where qwen >nul 2>&1
 if %ERRORLEVEL% NEQ 0 (
-    echo WARNING: Qwen Code was installed, but qwen is not on PATH in this prompt.
-    echo.
-    echo Restart your command prompt, then run: qwen
-    if not "!EXTRA_BIN!"=="" (
-        echo.
-        echo Or add this directory to PATH:
-        echo   !EXTRA_BIN!
-        echo Then run:
-        echo   qwen
-        exit /b 0
-    )
-
-    for /f "delims=" %%i in ('npm prefix -g 2^>nul') do set "NPM_PREFIX=%%i"
-    if not "!NPM_PREFIX!"=="" (
-        echo.
-        echo Or add this npm global directory to PATH:
-        echo   !NPM_PREFIX!
-        echo Then run:
-        echo   qwen
-    )
+    echo Run: qwen
+    echo ^(Restart your command prompt for PATH changes to take effect.^)
+    if not "!EXTRA_BIN!"=="" echo Or now: "!EXTRA_BIN!\qwen.cmd"
     exit /b 0
 )
-
-echo.
-echo You can now run: qwen
-echo.
-echo INFO: Run qwen in your project directory to start an interactive session.
+echo Run: qwen
 exit /b 0

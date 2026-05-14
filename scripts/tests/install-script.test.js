@@ -13,6 +13,7 @@ const {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -68,7 +69,7 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'npm install -g @qwen-code/qwen-code@latest --registry',
     );
-    expect(script).toContain('You can now run: qwen');
+    expect(script).toContain('Run: qwen');
   });
 
   it('supports code-server-style standalone install on Linux/macOS', () => {
@@ -156,7 +157,7 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'npm install -g @qwen-code/qwen-code@latest --registry',
     );
-    expect(script).toContain('You can now run: qwen');
+    expect(script).toContain('Run: qwen');
   });
 
   it('supports code-server-style standalone install on Windows', () => {
@@ -1459,7 +1460,7 @@ describe('Linux/macOS installer end-to-end', () => {
     },
   );
 
-  itOnUnix('refuses to overwrite a non-managed install directory', () => {
+  itOnUnix('backs up and overwrites a non-managed install directory', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
 
@@ -1470,12 +1471,26 @@ describe('Linux/macOS installer end-to-end', () => {
       mkdirSync(installDir, { recursive: true });
       writeFileSync(path.join(installDir, 'important.txt'), 'keep me\n');
 
-      expect(() =>
-        runUnixInstaller(archive, installRoot, path.join(tmpDir, 'home')),
-      ).toThrow(/not a Qwen Code standalone install/);
-      expect(readScript(path.join(installDir, 'important.txt'))).toBe(
-        'keep me\n',
+      const output = runUnixInstaller(
+        archive,
+        installRoot,
+        path.join(tmpDir, 'home'),
+      ).toString();
+
+      expect(output).toContain('not a Qwen Code standalone install');
+      expect(output).toContain('Backing up to');
+
+      // Original directory should be backed up, not destroyed
+      const backups = readdirSync(path.join(installRoot, 'lib')).filter((e) =>
+        e.startsWith('qwen-code.backup.'),
       );
+      expect(backups.length).toBe(1);
+      expect(
+        readScript(path.join(installRoot, 'lib', backups[0], 'important.txt')),
+      ).toBe('keep me\n');
+
+      // New install should be at the original location
+      expect(existsSync(path.join(installDir, 'manifest.json'))).toBe(true);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
       if (createdDist) {

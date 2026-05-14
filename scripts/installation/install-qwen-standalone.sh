@@ -309,29 +309,7 @@ done
 validate_options
 
 print_header() {
-    echo "=========================================="
-    echo "   Qwen Code Installation Script"
-    echo "=========================================="
-    echo ""
-    log_info "System: $(uname -s 2>/dev/null || echo unknown) $(uname -r 2>/dev/null || true)"
-    log_info "Install method: ${METHOD}"
-    if [[ "${METHOD}" != "npm" ]]; then
-        log_info "Standalone mirror: ${MIRROR}"
-        if [[ -n "${BASE_URL}" ]]; then
-            log_info "Standalone base URL: ${BASE_URL}"
-        fi
-        if [[ -n "${ARCHIVE_PATH}" ]]; then
-            log_info "Standalone archive: ${ARCHIVE_PATH}"
-        else
-            log_info "Standalone version: ${VERSION}"
-        fi
-    fi
-    if [[ "${METHOD}" != "standalone" ]]; then
-        log_info "npm registry: ${NPM_REGISTRY}"
-    fi
-    if [[ "${SOURCE}" != "unknown" ]]; then
-        log_info "Installation source: ${SOURCE}"
-    fi
+    echo "Qwen Code Installer"
     echo ""
 }
 
@@ -848,8 +826,14 @@ ensure_managed_install_dir() {
         return 0
     fi
 
-    log_error "${install_dir} exists but is not a Qwen Code standalone install."
-    log_error "Refusing to overwrite it. Move or remove it manually, then rerun the installer."
+    local backup="${install_dir}.backup.$(date +%Y%m%dT%H%M%S 2>/dev/null || date +%Y%m%d%H%M%S)"
+    log_warning "${install_dir} exists but is not a Qwen Code standalone install."
+    log_warning "Backing up to: ${backup}"
+    if mv "${install_dir}" "${backup}"; then
+        return 0
+    fi
+
+    log_error "Failed to back up ${install_dir}. Move or remove it manually, then rerun the installer."
     return 1
 }
 
@@ -1086,10 +1070,6 @@ print_final_instructions() {
     fi
 
     echo ""
-    echo "=========================================="
-    echo "Installation completed!"
-    echo "=========================================="
-    echo ""
 
     local installed_version="unknown"
     if [[ -n "${installed_bin}" && -x "${installed_bin}" ]]; then
@@ -1098,10 +1078,9 @@ print_final_instructions() {
         installed_version=$(qwen --version 2>/dev/null || echo "unknown")
     fi
 
+    echo "Qwen Code ${installed_version} installed."
     if [[ -n "${installed_bin}" ]]; then
-        log_success "Installed at ${installed_bin}: ${installed_version}"
-    else
-        log_success "Qwen Code installed: ${installed_version}"
+        echo "Location: ${installed_bin}"
     fi
 
     if [[ -n "${other_qwens}" ]]; then
@@ -1133,22 +1112,15 @@ print_final_instructions() {
     fi
 
     if ! command_exists qwen; then
-        log_warning "Qwen Code was installed, but qwen is not on PATH in this shell."
-        echo ""
-        echo "Restart your terminal, then run: qwen"
+        echo "Run: qwen"
+        echo "(Restart your terminal for PATH changes to take effect.)"
         if [[ -n "${install_bin_dir}" ]]; then
-            echo ""
-            echo "Or run this in the current shell:"
-            echo "  export PATH=${quoted_install_bin_dir}:\$PATH"
-            echo "  qwen"
+            echo "Or now: export PATH=${quoted_install_bin_dir}:\$PATH && qwen"
         fi
         return 0
     fi
 
-    echo ""
-    echo "You can now run: qwen"
-    echo ""
-    log_info "Run qwen in your project directory to start an interactive session."
+    echo "Run: qwen"
 }
 
 main() {
