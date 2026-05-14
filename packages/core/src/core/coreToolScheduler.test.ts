@@ -128,45 +128,47 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     startToolSpan: vi.fn(
-    (name: string, attrs?: Record<string, string | number | boolean>) =>
-      createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
-  ),
-  endToolSpan: vi.fn(
-    (
-      span: ReturnType<typeof createMockToolSpan>,
-      metadata?: { success?: boolean; error?: string },
-    ) => {
-      try {
-        if (metadata) {
-          if (metadata.success !== false) {
-            span.setStatus({ code: 1 });
-          } else {
-            span.setStatus({
-              code: 2,
-              message: metadata.error ?? 'tool error',
-            });
+      (name: string, attrs?: Record<string, string | number | boolean>) =>
+        createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
+    ),
+    endToolSpan: vi.fn(
+      (
+        span: ReturnType<typeof createMockToolSpan>,
+        metadata?: { success?: boolean; error?: string },
+      ) => {
+        try {
+          if (metadata) {
+            if (metadata.success !== false) {
+              span.setStatus({ code: 1 });
+            } else {
+              span.setStatus({
+                code: 2,
+                message: metadata.error ?? 'tool error',
+              });
+            }
           }
+          span.end();
+        } catch {
+          // best-effort
         }
-        span.end();
-      } catch {
-        // best-effort
-      }
-    },
-  ),
-  runInToolSpanContext: vi.fn(<T>(_span: unknown, fn: () => T): T => fn()),
-  startToolExecutionSpan: vi.fn(() => createMockToolSpan('tool.execution', {})),
-  endToolExecutionSpan: vi.fn(
-    (
-      span: ReturnType<typeof createMockToolSpan>,
-      _metadata?: { success?: boolean; error?: string },
-    ) => {
-      try {
-        span.end();
-      } catch {
-        // best-effort
-      }
-    },
-  ),
+      },
+    ),
+    runInToolSpanContext: vi.fn(<T>(_span: unknown, fn: () => T): T => fn()),
+    startToolExecutionSpan: vi.fn(() =>
+      createMockToolSpan('tool.execution', {}),
+    ),
+    endToolExecutionSpan: vi.fn(
+      (
+        span: ReturnType<typeof createMockToolSpan>,
+        _metadata?: { success?: boolean; error?: string },
+      ) => {
+        try {
+          span.end();
+        } catch {
+          // best-effort
+        }
+      },
+    ),
   };
 });
 
@@ -2970,7 +2972,9 @@ describe('CoreToolScheduler telemetry spans', () => {
   });
 
   function getLastToolSpan(): ToolSpanRecord {
-    const spanRecord = toolSpanRecords.at(-1);
+    const spanRecord = toolSpanRecords.findLast(
+      (r) => r.name.startsWith('tool.') && r.name !== 'tool.execution',
+    );
     if (!spanRecord) {
       throw new Error('tool span was not created');
     }
