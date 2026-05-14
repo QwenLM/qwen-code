@@ -647,6 +647,8 @@ describe('standalone release packaging', () => {
       const installSh = path.join(tmpDir, 'install-qwen-standalone.sh');
       const installBat = path.join(tmpDir, 'install-qwen-standalone.bat');
       const installPs1 = path.join(tmpDir, 'install-qwen-standalone.ps1');
+      const uninstallSh = path.join(tmpDir, 'uninstall-qwen-standalone.sh');
+      const uninstallPs1 = path.join(tmpDir, 'uninstall-qwen-standalone.ps1');
       const checksums = readScript(path.join(tmpDir, 'SHA256SUMS'));
       const checksumLines = checksums.trim().split('\n');
 
@@ -654,6 +656,8 @@ describe('standalone release packaging', () => {
         'install-qwen-standalone.sh',
         'install-qwen-standalone.bat',
         'install-qwen-standalone.ps1',
+        'uninstall-qwen-standalone.sh',
+        'uninstall-qwen-standalone.ps1',
       ]);
       expect(HOSTED_INSTALLATION_ASSETS.map(({ output }) => output)).toEqual(
         HOSTED_INSTALLATION_ASSET_NAMES,
@@ -670,11 +674,19 @@ describe('standalone release packaging', () => {
       expect(readScript(installPs1)).toBe(
         readScript('scripts/installation/install-qwen-standalone.ps1'),
       );
+      expect(readScript(uninstallSh)).toBe(
+        readScript('scripts/installation/uninstall-qwen-standalone.sh'),
+      );
+      expect(readScript(uninstallPs1)).toBe(
+        readScript('scripts/installation/uninstall-qwen-standalone.ps1'),
+      );
       expect(existsSync(path.join(tmpDir, 'install'))).toBe(false);
       expect(checksumLines.map((line) => line.split('  ')[1])).toEqual([
         'install-qwen-standalone.bat',
         'install-qwen-standalone.ps1',
         'install-qwen-standalone.sh',
+        'uninstall-qwen-standalone.ps1',
+        'uninstall-qwen-standalone.sh',
       ]);
       expect(checksums).toMatch(
         /^[0-9a-f]{64} {2}install-qwen-standalone\.sh$/m,
@@ -685,8 +697,15 @@ describe('standalone release packaging', () => {
       expect(checksums).toMatch(
         /^[0-9a-f]{64} {2}install-qwen-standalone\.ps1$/m,
       );
+      expect(checksums).toMatch(
+        /^[0-9a-f]{64} {2}uninstall-qwen-standalone\.sh$/m,
+      );
+      expect(checksums).toMatch(
+        /^[0-9a-f]{64} {2}uninstall-qwen-standalone\.ps1$/m,
+      );
       if (process.platform !== 'win32') {
         expect(lstatSync(installSh).mode & 0o111).not.toBe(0);
+        expect(lstatSync(uninstallSh).mode & 0o111).not.toBe(0);
       }
 
       writeFileSync(installSh, 'tampered');
@@ -724,6 +743,14 @@ describe('standalone release packaging', () => {
         path.join(sourceDir, 'install-qwen-standalone.ps1'),
         "# --version vX.Y.Z\n$env:QWEN_INSTALL_VERSION = 'latest'\n",
       );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
+        '#!/usr/bin/env bash\nis_qwen_standalone_install_dir() { return 0; }\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
+        'function Test-QwenStandaloneInstallDir { return $true }\n',
+      );
 
       await expect(
         buildHostedInstallationAssets(tmpDir, { root: tmpRoot }),
@@ -759,6 +786,14 @@ describe('standalone release packaging', () => {
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.ps1'),
         '& $qwenInstallerPath @args\n# QWEN_INSTALL_VERSION\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
+        '#!/usr/bin/env bash\nis_qwen_standalone_install_dir() { return 0; }\n',
+      );
+      writeFileSync(
+        path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
+        'function Test-QwenStandaloneInstallDir { return $true }\n',
       );
 
       await expect(
@@ -1252,6 +1287,8 @@ describe('standalone release packaging', () => {
     expect(workflow).toContain('installation/install-qwen-standalone.sh');
     expect(workflow).toContain('installation/install-qwen-standalone.bat');
     expect(workflow).toContain('installation/install-qwen-standalone.ps1');
+    expect(workflow).toContain('installation/uninstall-qwen-standalone.sh');
+    expect(workflow).toContain('installation/uninstall-qwen-standalone.ps1');
     expect(workflow).toContain('--acl public-read');
     expect(workflow).toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
@@ -1273,6 +1310,8 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('installation/install-qwen-standalone.sh');
     expect(guide).toContain('installation/install-qwen-standalone.bat');
     expect(guide).toContain('installation/install-qwen-standalone.ps1');
+    expect(guide).toContain('installation/uninstall-qwen-standalone.sh');
+    expect(guide).toContain('installation/uninstall-qwen-standalone.ps1');
     expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_ID');
     expect(guide).toContain('ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(guide).toContain('ALIYUN_OSS_BUCKET');
@@ -1280,6 +1319,32 @@ describe('standalone release packaging', () => {
     expect(guide).toContain('Public installation documentation');
     expect(guide).toContain('node-pty');
     expect(guide).toContain('clipboard');
+  });
+
+  it('provides standalone uninstall scripts that clean install-owned files only', () => {
+    const uninstallShellSource = readScript(
+      'scripts/installation/uninstall-qwen-standalone.sh',
+    );
+    const uninstallPowerShellSource = readScript(
+      'scripts/installation/uninstall-qwen-standalone.ps1',
+    );
+
+    expect(uninstallShellSource).toContain('is_qwen_standalone_install_dir');
+    expect(uninstallShellSource).toContain('remove_shell_path_entry');
+    expect(uninstallShellSource).toContain('QWEN_UNINSTALL_PURGE');
+    expect(uninstallShellSource).toContain('Preserving');
+    expect(uninstallShellSource).toContain('source.json');
+
+    expect(uninstallPowerShellSource).toContain(
+      'Test-QwenStandaloneInstallDir',
+    );
+    expect(uninstallPowerShellSource).toContain('Remove-UserPathEntry');
+    expect(uninstallPowerShellSource).toContain('Remove-CurrentCmdPathShim');
+    expect(uninstallPowerShellSource).toContain(
+      'Qwen Code current-session shim',
+    );
+    expect(uninstallPowerShellSource).toContain('QWEN_UNINSTALL_PURGE');
+    expect(uninstallPowerShellSource).toContain('Preserving');
   });
 });
 
@@ -1320,6 +1385,53 @@ describe('Linux/macOS installer end-to-end', () => {
       }
     },
   );
+
+  itOnUnix('uninstalls standalone files while preserving user config', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-uninstall-test-'));
+
+    try {
+      const archive = packageFakeStandalone(tmpDir);
+      const installRoot = path.join(tmpDir, 'install');
+      const home = path.join(tmpDir, 'home');
+      runUnixInstaller(archive, installRoot, home);
+
+      const rcFile = path.join(home, '.zshrc');
+      writeFileSync(
+        rcFile,
+        [
+          'before',
+          '# Added by qwen-code installer (multi-qwen shadow fix)',
+          `export PATH='${installRoot}/bin':$PATH`,
+          'after',
+        ].join('\n') + '\n',
+      );
+      const qwenDir = path.join(home, '.qwen');
+      const sourceJson = path.join(qwenDir, 'source.json');
+      const settingsJson = path.join(qwenDir, 'settings.json');
+      writeFileSync(settingsJson, '{"theme":"dark"}\n');
+
+      runUnixUninstaller(installRoot, home);
+
+      expect(existsSync(path.join(installRoot, 'lib', 'qwen-code'))).toBe(
+        false,
+      );
+      expect(existsSync(path.join(installRoot, 'bin', 'qwen'))).toBe(false);
+      expect(readScript(rcFile)).toBe('before\nafter\n');
+      expect(existsSync(sourceJson)).toBe(true);
+      expect(existsSync(settingsJson)).toBe(true);
+
+      runUnixUninstaller(installRoot, home, { QWEN_UNINSTALL_PURGE: '1' });
+
+      expect(existsSync(sourceJson)).toBe(false);
+      expect(existsSync(settingsJson)).toBe(true);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (createdDist) {
+        rmSync('dist', { recursive: true, force: true });
+      }
+    }
+  });
 
   itOnUnix('shell-quotes custom install paths in the generated wrapper', () => {
     const createdDist = ensureMinimalDist();
@@ -2094,6 +2206,34 @@ function runUnixInstaller(
         '--source',
         'smoke',
       ],
+      {
+        env: {
+          ...process.env,
+          HOME: home,
+          QWEN_INSTALL_ROOT: installRoot,
+          ...extraEnv,
+        },
+        stdio: 'pipe',
+      },
+    );
+  } catch (error) {
+    const processError = error;
+    throw new Error(
+      [
+        processError.message,
+        processError.stdout?.toString() || '',
+        processError.stderr?.toString() || '',
+      ].join('\n'),
+    );
+  }
+}
+
+function runUnixUninstaller(installRoot, home, extraEnv = {}) {
+  mkdirSync(home, { recursive: true });
+  try {
+    return execFileSync(
+      'bash',
+      ['scripts/installation/uninstall-qwen-standalone.sh'],
       {
         env: {
           ...process.env,

@@ -24,6 +24,8 @@ are only required when the installer falls back to npm or when
 
 - Linux/macOS: `install-qwen-standalone.sh`
 - Windows: `install-qwen-standalone.ps1`
+- Linux/macOS uninstall: `uninstall-qwen-standalone.sh`
+- Windows uninstall: `uninstall-qwen-standalone.ps1`
 
 ## Release Artifacts
 
@@ -54,6 +56,8 @@ Hosted installer assets are staged separately from GitHub Release archives:
 - `install-qwen-standalone.ps1` is the Windows hosted entrypoint for `irm | iex`.
 - `install-qwen-standalone.bat` is the Windows installer implementation used by
   `install-qwen-standalone.ps1` and can also be downloaded and run directly.
+- `uninstall-qwen-standalone.sh` removes Linux/macOS standalone installs.
+- `uninstall-qwen-standalone.ps1` removes Windows standalone installs.
 
 Build them with:
 
@@ -61,13 +65,16 @@ Build them with:
 npm run package:hosted-installation -- --out-dir dist/installation
 ```
 
-The staged `install-qwen-standalone.sh`, `install-qwen-standalone.ps1`, and
-`install-qwen-standalone.bat` files map to the standalone-suffixed hosted URLs
+The staged `install-qwen-standalone.sh`, `install-qwen-standalone.ps1`,
+`install-qwen-standalone.bat`, `uninstall-qwen-standalone.sh`, and
+`uninstall-qwen-standalone.ps1` files map to the standalone-suffixed hosted URLs
 shown above. During a non-dry-run release, the publish workflow uploads their
 contents byte-for-byte to
 `installation/install-qwen-standalone.sh`,
 `installation/install-qwen-standalone.ps1`, and
-`installation/install-qwen-standalone.bat`; the staging command also writes
+`installation/install-qwen-standalone.bat`,
+`installation/uninstall-qwen-standalone.sh`, and
+`installation/uninstall-qwen-standalone.ps1`; the staging command also writes
 `SHA256SUMS` for upload verification. The hosted installers intentionally
 default to `latest`; use `--version` or `QWEN_INSTALL_VERSION` to pin a
 standalone release.
@@ -161,6 +168,17 @@ Standalone installs to:
 Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_PARENT`,
 `QWEN_INSTALL_LIB_DIR`, or `QWEN_INSTALL_BIN_DIR` when needed.
 
+Uninstall a standalone Linux/macOS install:
+
+```bash
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.sh | bash
+```
+
+The uninstaller removes only the standalone runtime, generated `qwen` wrapper,
+and installer-managed shell PATH block. It preserves `~/.qwen` by default. Set
+`QWEN_UNINSTALL_PURGE=1` to remove `~/.qwen/source.json`; other config and auth
+files are still preserved.
+
 ## Windows Usage
 
 ```bat
@@ -190,6 +208,18 @@ Override with `QWEN_INSTALL_ROOT`, `QWEN_INSTALL_LIB_DIR`, or
 `QWEN_INSTALL_BIN_DIR` when needed.
 
 Restart the terminal if `qwen` is not immediately available on PATH.
+
+Uninstall a standalone Windows install:
+
+```bat
+powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.ps1 | iex"
+```
+
+The uninstaller removes only the standalone runtime, generated `qwen.cmd`
+wrapper, user PATH entry, and the current-session `cmd.exe` shim created by the
+hosted PowerShell installer. It preserves `%USERPROFILE%\.qwen` by default. Set
+`QWEN_UNINSTALL_PURGE=1` to remove `%USERPROFILE%\.qwen\source.json`; other
+config and auth files are still preserved.
 
 ## Mirrors and Overrides
 

@@ -36,6 +36,15 @@ const HOSTED_INSTALLATION_ASSETS = [
     sourcePath: ['scripts', 'installation', 'install-qwen-standalone.ps1'],
     output: 'install-qwen-standalone.ps1',
   },
+  {
+    sourcePath: ['scripts', 'installation', 'uninstall-qwen-standalone.sh'],
+    output: 'uninstall-qwen-standalone.sh',
+    mode: 0o755,
+  },
+  {
+    sourcePath: ['scripts', 'installation', 'uninstall-qwen-standalone.ps1'],
+    output: 'uninstall-qwen-standalone.ps1',
+  },
 ];
 const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
   ({ output }) => output,
@@ -77,6 +86,38 @@ const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
     {
       name: 'QWEN_INSTALL_VERSION documentation',
       pattern: /QWEN_INSTALL_VERSION/,
+    },
+  ],
+  'uninstall-qwen-standalone.sh': [
+    {
+      name: 'standalone directory guard',
+      pattern: /is_qwen_standalone_install_dir/,
+    },
+    {
+      name: 'PATH cleanup',
+      pattern: /remove_shell_path_entry/,
+    },
+    {
+      name: 'config preservation',
+      pattern: /QWEN_UNINSTALL_PURGE/,
+    },
+  ],
+  'uninstall-qwen-standalone.ps1': [
+    {
+      name: 'standalone directory guard',
+      pattern: /Test-QwenStandaloneInstallDir/,
+    },
+    {
+      name: 'PATH cleanup',
+      pattern: /Remove-UserPathEntry/,
+    },
+    {
+      name: 'current cmd shim cleanup',
+      pattern: /Remove-CurrentCmdPathShim/,
+    },
+    {
+      name: 'config preservation',
+      pattern: /QWEN_UNINSTALL_PURGE/,
     },
   ],
 };

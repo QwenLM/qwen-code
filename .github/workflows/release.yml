@@ -513,6 +513,8 @@ jobs:
           upload_asset "dist/installation/install-qwen-standalone.sh" "installation/install-qwen-standalone.sh"
           upload_asset "dist/installation/install-qwen-standalone.ps1" "installation/install-qwen-standalone.ps1"
           upload_asset "dist/installation/install-qwen-standalone.bat" "installation/install-qwen-standalone.bat"
+          upload_asset "dist/installation/uninstall-qwen-standalone.sh" "installation/uninstall-qwen-standalone.sh"
+          upload_asset "dist/installation/uninstall-qwen-standalone.ps1" "installation/uninstall-qwen-standalone.ps1"
           upload_asset "dist/installation/SHA256SUMS" "installation/SHA256SUMS"
 
       - name: 'Verify Aliyun OSS Release Assets'
@@ -532,7 +534,7 @@ jobs:
             npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"
           fi
 
-          for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat SHA256SUMS; do
+          for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat uninstall-qwen-standalone.sh uninstall-qwen-standalone.ps1 SHA256SUMS; do
             url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${asset}"
             curl -fsSIL "${url}" >/dev/null || curl -fsSL --range 0-0 "${url}" >/dev/null
           done
