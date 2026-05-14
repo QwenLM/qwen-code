@@ -132,6 +132,9 @@ jobs:
                 sed 's/^[[:space:]]*//'
             )"
           fi
+          # Strip leading blank lines so the prompt doesn't start with an
+          # empty line when @qwen /review is on its own line.
+          additional_instructions="$(printf '%s' "$additional_instructions" | sed '/./,$!d')"
           # Hard-cap to 2KB to keep prompt-injection surface bounded.
           # Reviewers should keep instructions short.
           additional_instructions="$(printf '%s' "$additional_instructions" | head -c 2048)"
@@ -173,7 +176,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "${OPENAI_MODEL:-}" ]; then
-            echo "::error::Repository variable QWEN_PR_REVIEW_MODEL is required for this workflow."
+            echo "::error::Repository variable QWEN_PR_REVIEW_MODEL is required for this workflow (maps to env var OPENAI_MODEL)."
             exit 1
           fi
 
