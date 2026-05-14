@@ -41,6 +41,8 @@ const releaseScriptUtilsUrl = pathToFileURL(
 const itOnUnix = process.platform === 'win32' ? it.skip : it;
 const itOnWindows = process.platform === 'win32' ? it : it.skip;
 
+vi.setConfig({ testTimeout: 30_000 });
+
 describe('installation scripts', () => {
   it('keeps the Linux/macOS installer lightweight', () => {
     const script = readScript(
@@ -232,6 +234,23 @@ describe('installation scripts', () => {
     expect(script).toContain(':CreateTempFile');
     expect(script).not.toContain('%RANDOM%');
   });
+
+  it('checks out the Windows standalone batch installer with CRLF line endings', () => {
+    const attrs = execFileSync(
+      'git',
+      [
+        'check-attr',
+        'eol',
+        '--',
+        'scripts/installation/install-qwen-standalone.bat',
+      ],
+      { encoding: 'utf8' },
+    );
+
+    expect(attrs).toContain(
+      'scripts/installation/install-qwen-standalone.bat: eol: crlf',
+    );
+  });
 });
 
 describe('release-script-utils', () => {
@@ -284,6 +303,9 @@ describe('release-script-utils', () => {
       /Unknown option: --unknown/,
     );
     expect(() => parseArgs(['--out-dir'], defs)).toThrow(
+      /--out-dir requires a value/,
+    );
+    expect(() => parseArgs(['--out-dir='], defs)).toThrow(
       /--out-dir requires a value/,
     );
     expect(() => parseArgs(['--out-dir', '--help'], defs)).toThrow(

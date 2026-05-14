@@ -93,6 +93,9 @@ export function parseArgs(argv, definitions) {
       if (def.type === 'flag') {
         fail(`${key} does not accept a value`);
       }
+      if (!value) {
+        fail(`${key} requires a value`);
+      }
       args[def.key] = value;
       continue;
     }
