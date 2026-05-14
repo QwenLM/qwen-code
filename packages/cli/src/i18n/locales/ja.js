@@ -99,6 +99,7 @@ export default {
   'Restore code only': 'コードのみ復元',
   'Never mind': 'やめる',
   'Computing file changes...': 'ファイルの変更を計算中...',
+  'Restoring...': '復元中...',
   'Restored {{count}} file(s).': '{{count}} 個のファイルを復元しました。',
   'Failed to restore files: {{error}}':
     'ファイルの復元に失敗しました：{{error}}',

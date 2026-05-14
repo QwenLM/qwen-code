@@ -142,6 +142,7 @@ export default {
   'Restore code only': 'Восстановить только код',
   'Never mind': 'Неважно',
   'Computing file changes...': 'Вычисление изменений файлов...',
+  'Restoring...': 'Восстановление...',
   'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
   'Failed to restore files: {{error}}':
     'Не удалось восстановить файлы: {{error}}',

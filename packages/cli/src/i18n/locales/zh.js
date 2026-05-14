@@ -134,6 +134,7 @@ export default {
   'Restore code only': '仅恢复代码',
   'Never mind': '算了',
   'Computing file changes...': '正在计算文件变更...',
+  'Restoring...': '正在恢复...',
   'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
   'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
   'Failed to restore {{count}} file(s): {{files}}':

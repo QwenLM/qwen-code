@@ -161,6 +161,7 @@ export function RewindSelector({
   const [restoreOptionIndex, setRestoreOptionIndex] = useState(0);
   const [diffStats, setDiffStats] = useState<DiffStats | undefined>(undefined);
   const [loadingDiff, setLoadingDiff] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
 
   const boxWidth = width - 4;
   const maxVisibleItems = Math.min(MAX_VISIBLE_ITEMS, userTurns.length);
@@ -222,7 +223,10 @@ export function RewindSelector({
   const handleConfirmSelect = useCallback(
     (confirmed: boolean) => {
       if (confirmed && confirmItem) {
-        Promise.resolve(onRewind(confirmItem, 'conversation')).catch(() => {});
+        setIsRestoring(true);
+        Promise.resolve(onRewind(confirmItem, 'conversation'))
+          .catch(() => {})
+          .finally(() => setIsRestoring(false));
       } else {
         setConfirmItem(null);
       }
@@ -269,6 +273,8 @@ export function RewindSelector({
   // Restore option key handler
   useKeypress(
     (key) => {
+      if (isRestoring) return;
+
       const { name, ctrl } = key;
 
       if (name === 'escape' || (ctrl && name === 'c')) {
@@ -286,7 +292,10 @@ export function RewindSelector({
             setRestoreItem(null);
             setDiffStats(undefined);
           } else {
-            Promise.resolve(onRewind(restoreItem!, option.key)).catch(() => {});
+            setIsRestoring(true);
+            Promise.resolve(onRewind(restoreItem!, option.key))
+              .catch(() => {})
+              .finally(() => setIsRestoring(false));
           }
         }
         return;
@@ -310,6 +319,8 @@ export function RewindSelector({
   // Legacy confirm key handler
   useKeypress(
     (key) => {
+      if (isRestoring) return;
+
       const { name, ctrl, sequence } = key;
 
       if (name === 'escape' || (ctrl && name === 'c')) {
@@ -382,6 +393,8 @@ export function RewindSelector({
               <Text color={theme.text.secondary}>
                 {t('Computing file changes...')}
               </Text>
+            ) : isRestoring ? (
+              <Text color={theme.text.secondary}>{t('Restoring...')}</Text>
             ) : (
               <Box flexDirection="column">
                 {restoreOptions.map((option, idx) => {

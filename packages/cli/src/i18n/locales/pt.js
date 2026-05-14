@@ -133,6 +133,7 @@ export default {
   'Restore code only': 'Restaurar apenas o código',
   'Never mind': 'Deixa pra lá',
   'Computing file changes...': 'Calculando alterações de arquivo...',
+  'Restoring...': 'Restaurando...',
   'Restored {{count}} file(s).': '{{count}} arquivo(s) restaurado(s).',
   'Failed to restore files: {{error}}':
     'Falha ao restaurar arquivos: {{error}}',

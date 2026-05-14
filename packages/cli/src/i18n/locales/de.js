@@ -118,6 +118,7 @@ export default {
   'Restore code only': 'Nur Code wiederherstellen',
   'Never mind': 'Egal',
   'Computing file changes...': 'Dateiänderungen werden berechnet...',
+  'Restoring...': 'Wiederherstellung läuft...',
   'Restored {{count}} file(s).': '{{count}} Datei(en) wiederhergestellt.',
   'Failed to restore files: {{error}}':
     'Fehler beim Wiederherstellen der Dateien: {{error}}',

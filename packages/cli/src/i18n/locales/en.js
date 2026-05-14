@@ -140,6 +140,7 @@ export default {
   'Restore code only': 'Restore code only',
   'Never mind': 'Never mind',
   'Computing file changes...': 'Computing file changes...',
+  'Restoring...': 'Restoring...',
   'Restored {{count}} file(s).': 'Restored {{count}} file(s).',
   'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
   'Failed to restore {{count}} file(s): {{files}}':

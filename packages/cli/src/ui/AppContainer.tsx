@@ -1978,145 +1978,148 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
-      // Close the selector immediately to prevent double submission
-      // while the async file restore is in progress.
-      setIsRewindSelectorOpen(false);
-
-      // For 'both', validate that conversation can be truncated BEFORE
-      // touching files — otherwise we'd roll back the workspace while
-      // the conversation stays at the newer state.
-      const needsConversation = option === 'conversation' || option === 'both';
-      const geminiClient = needsConversation ? config.getGeminiClient() : null;
-      let apiTruncateIndex = -1;
-      if (needsConversation) {
-        if (!geminiClient) {
-          if (option === 'conversation') return;
-          // 'both' with no client: skip conversation, still try files
-        } else {
-          apiTruncateIndex = computeApiTruncationIndex(
-            historyManager.history,
-            userItem.id,
-            geminiClient.getHistory(),
-          );
-          if (apiTruncateIndex < 0) {
-            historyManager.addItem(
-              {
-                type: 'error',
-                text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-              },
-              Date.now(),
+      try {
+        // For 'both', validate that conversation can be truncated BEFORE
+        // touching files — otherwise we'd roll back the workspace while
+        // the conversation stays at the newer state.
+        const needsConversation =
+          option === 'conversation' || option === 'both';
+        const geminiClient = needsConversation
+          ? config.getGeminiClient()
+          : null;
+        let apiTruncateIndex = -1;
+        if (needsConversation) {
+          if (!geminiClient) {
+            if (option === 'conversation') return;
+            // 'both' with no client: skip conversation, still try files
+          } else {
+            apiTruncateIndex = computeApiTruncationIndex(
+              historyManager.history,
+              userItem.id,
+              geminiClient.getHistory(),
             );
-            if (option === 'both') {
-              // Abort file restore too — don't create inconsistent state
+            if (apiTruncateIndex < 0) {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                },
+                Date.now(),
+              );
+              if (option === 'both') {
+                // Abort file restore too — don't create inconsistent state
+                return;
+              }
               return;
             }
-            return;
           }
         }
-      }
 
-      // Restore code (files on disk). For 'code'-only, don't truncate
-      // the snapshot timeline — the conversation turns remain visible
-      // and their snapshots must stay available for future rewinds.
-      let fileRestoreMessage: string | undefined;
-      let fileRestoreError: string | undefined;
-      let hasRestoreFailure = false;
-      if (option === 'code' || option === 'both') {
-        const promptId = (userItem as HistoryItemUser).promptId;
-        if (promptId) {
-          try {
-            const truncateHistory =
-              option === 'both' && !!geminiClient && apiTruncateIndex >= 0;
-            const result = await config
-              .getFileHistoryService()
-              .rewind(promptId, truncateHistory);
-            if (result.filesChanged.length > 0) {
-              fileRestoreMessage = t('Restored {{count}} file(s).', {
-                count: String(result.filesChanged.length),
-              });
-            } else if (result.filesFailed.length === 0) {
-              fileRestoreMessage = t('No files needed restoration.');
-            }
-            if (result.filesFailed.length > 0) {
+        // Restore code (files on disk). For 'code'-only, don't truncate
+        // the snapshot timeline — the conversation turns remain visible
+        // and their snapshots must stay available for future rewinds.
+        let fileRestoreMessage: string | undefined;
+        let fileRestoreError: string | undefined;
+        let hasRestoreFailure = false;
+        if (option === 'code' || option === 'both') {
+          const promptId = (userItem as HistoryItemUser).promptId;
+          if (promptId) {
+            try {
+              const truncateHistory =
+                option === 'both' && !!geminiClient && apiTruncateIndex >= 0;
+              const result = await config
+                .getFileHistoryService()
+                .rewind(promptId, truncateHistory);
+              if (result.filesChanged.length > 0) {
+                fileRestoreMessage = t('Restored {{count}} file(s).', {
+                  count: String(result.filesChanged.length),
+                });
+              } else if (result.filesFailed.length === 0) {
+                fileRestoreMessage = t('No files needed restoration.');
+              }
+              if (result.filesFailed.length > 0) {
+                hasRestoreFailure = true;
+                fileRestoreError = t(
+                  'Failed to restore {{count}} file(s): {{files}}',
+                  {
+                    count: String(result.filesFailed.length),
+                    files: result.filesFailed
+                      .map((f) => f.split('/').pop())
+                      .join(', '),
+                  },
+                );
+              }
+            } catch (error) {
               hasRestoreFailure = true;
-              fileRestoreError = t(
-                'Failed to restore {{count}} file(s): {{files}}',
-                {
-                  count: String(result.filesFailed.length),
-                  files: result.filesFailed
-                    .map((f) => f.split('/').pop())
-                    .join(', '),
-                },
-              );
+              fileRestoreError = t('Failed to restore files: {{error}}', {
+                error: error instanceof Error ? error.message : String(error),
+              });
             }
-          } catch (error) {
+          } else {
             hasRestoreFailure = true;
-            fileRestoreError = t('Failed to restore files: {{error}}', {
-              error: error instanceof Error ? error.message : String(error),
-            });
+            fileRestoreError = t(
+              'Cannot restore files: this turn was created before file checkpointing was enabled.',
+            );
           }
-        } else {
-          hasRestoreFailure = true;
-          fileRestoreError = t(
-            'Cannot restore files: this turn was created before file checkpointing was enabled.',
+        }
+
+        // Truncate conversation (already validated above).
+        // Skip if file restore had failures in "both" mode to avoid inconsistent state.
+        if (
+          needsConversation &&
+          geminiClient &&
+          apiTruncateIndex >= 0 &&
+          !(option === 'both' && hasRestoreFailure)
+        ) {
+          const originalHistory = historyManager.history;
+          const originalLength = originalHistory.length;
+
+          let targetTurnIndex = 0;
+          for (const h of originalHistory) {
+            if (h.id === userItem.id) break;
+            if (isRealUserTurn(h)) targetTurnIndex++;
+          }
+
+          geminiClient.truncateHistory(apiTruncateIndex);
+
+          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          historyManager.loadHistory(truncatedUi);
+
+          refreshStatic();
+
+          if (userItem.type === 'user' && userItem.text) {
+            buffer.setText(userItem.text);
+          }
+
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
+            },
+            Date.now(),
+          );
+
+          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+            truncatedCount: originalLength - truncatedUi.length,
+          });
+        }
+
+        // Show file restore result after conversation truncation so the
+        // message isn't immediately removed by loadHistory.
+        if (fileRestoreMessage) {
+          historyManager.addItem(
+            { type: 'info', text: fileRestoreMessage },
+            Date.now(),
           );
         }
-      }
-
-      // Truncate conversation (already validated above).
-      // Skip if file restore had failures in "both" mode to avoid inconsistent state.
-      if (
-        needsConversation &&
-        geminiClient &&
-        apiTruncateIndex >= 0 &&
-        !(option === 'both' && hasRestoreFailure)
-      ) {
-        const originalHistory = historyManager.history;
-        const originalLength = originalHistory.length;
-
-        let targetTurnIndex = 0;
-        for (const h of originalHistory) {
-          if (h.id === userItem.id) break;
-          if (isRealUserTurn(h)) targetTurnIndex++;
+        if (fileRestoreError) {
+          historyManager.addItem(
+            { type: 'error', text: fileRestoreError },
+            Date.now(),
+          );
         }
-
-        geminiClient.truncateHistory(apiTruncateIndex);
-
-        const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
-        historyManager.loadHistory(truncatedUi);
-
-        refreshStatic();
-
-        if (userItem.type === 'user' && userItem.text) {
-          buffer.setText(userItem.text);
-        }
-
-        historyManager.addItem(
-          {
-            type: 'info',
-            text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
-          },
-          Date.now(),
-        );
-
-        config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-          truncatedCount: originalLength - truncatedUi.length,
-        });
-      }
-
-      // Show file restore result after conversation truncation so the
-      // message isn't immediately removed by loadHistory.
-      if (fileRestoreMessage) {
-        historyManager.addItem(
-          { type: 'info', text: fileRestoreMessage },
-          Date.now(),
-        );
-      }
-      if (fileRestoreError) {
-        historyManager.addItem(
-          { type: 'error', text: fileRestoreError },
-          Date.now(),
-        );
+      } finally {
+        setIsRewindSelectorOpen(false);
       }
     },
     [config, historyManager, refreshStatic, buffer],

@@ -121,6 +121,7 @@ export default {
   'Restore code only': '僅恢復程式碼',
   'Never mind': '算了',
   'Computing file changes...': '正在計算檔案變更...',
+  'Restoring...': '正在恢復...',
   'Restored {{count}} file(s).': '已恢復 {{count}} 個檔案。',
   'Failed to restore files: {{error}}': '恢復檔案失敗：{{error}}',
   'Failed to restore {{count}} file(s): {{files}}':

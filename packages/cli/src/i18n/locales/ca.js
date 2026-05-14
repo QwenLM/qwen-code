@@ -139,6 +139,7 @@ export default {
   'Restore code only': 'Restaura només el codi',
   'Never mind': 'Tant és',
   'Computing file changes...': "S'estan calculant els canvis als fitxers...",
+  'Restoring...': "S'està restaurant...",
   'Restored {{count}} file(s).': "S'han restaurat {{count}} fitxer(s).",
   'Failed to restore files: {{error}}':
     'Error en restaurar els fitxers: {{error}}',
