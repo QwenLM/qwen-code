@@ -55,22 +55,6 @@ Detection priority:
 3. System locale via JavaScript Intl API
 4. Default: English
 
-### Dynamic Command Translation
-
-Dynamic slash command descriptions from skills, extensions, file commands, and
-MCP prompts can be translated with AI. This is **off by default** to avoid
-unexpected model calls, latency, and token usage.
-
-```bash
-/language translate status  # Show current status
-/language translate on      # Enable AI translation for dynamic descriptions
-/language translate off     # Disable AI translation
-```
-
-Use `/language translate cache refresh` to re-translate cached dynamic
-descriptions after enabling translation, or `/language translate cache clear` to
-remove cached translations.
-
 ## LLM Output Language
 
 The LLM output language controls what language the AI assistant responds in, regardless of what language you type your questions in.
