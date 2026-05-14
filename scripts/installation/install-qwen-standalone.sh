@@ -619,12 +619,16 @@ download_file() {
     local destination="$2"
 
     if command_exists curl; then
-        curl -fsSL --retry 2 "${url}" -o "${destination}"
+        curl -fL --retry 2 --progress-bar "${url}" -o "${destination}"
         return $?
     fi
 
     if command_exists wget; then
-        wget -q --tries=3 "${url}" -O "${destination}" || return 1
+        if wget --help 2>&1 | grep -q -- '--progress'; then
+            wget --progress=bar:force:noscroll --tries=3 "${url}" -O "${destination}" || return 1
+        else
+            wget --tries=3 "${url}" -O "${destination}" || return 1
+        fi
         return $?
     fi
 

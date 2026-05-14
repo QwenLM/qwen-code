@@ -121,7 +121,18 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'tar -xzf "${archive_path}" -C "${destination}" || return 1',
     );
-    expect(script).toContain('wget -q --tries=3 "${url}" -O "${destination}"');
+    expect(script).toContain(
+      'curl -fL --retry 2 --progress-bar "${url}" -o "${destination}"',
+    );
+    expect(script).toContain(
+      'wget --progress=bar:force:noscroll --tries=3 "${url}" -O "${destination}"',
+    );
+    expect(script).not.toContain(
+      'curl -fsSL --retry 2 "${url}" -o "${destination}"',
+    );
+    expect(script).not.toContain(
+      'wget -q --tries=3 "${url}" -O "${destination}"',
+    );
     expect(script).toContain('TEMP_DIRS+=');
     expect(script).toContain('validate_github_repo()');
     expect(script).toContain(
