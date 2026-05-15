@@ -2373,6 +2373,87 @@ hello
       );
     });
 
+    it('should inject auto-memory on first ToolResult when recall settles after UserQuery', async () => {
+      // Controllable promise — recall stays pending across the UserQuery turn
+      // and only settles before the ToolResult turn runs.
+      let resolveRecall:
+        | ((value: {
+            prompt: string;
+            selectedDocs: never[];
+            strategy: 'model';
+          }) => void)
+        | undefined;
+      mockMemoryManager.recall.mockReturnValue(
+        new Promise((resolve) => {
+          resolveRecall = resolve;
+        }),
+      );
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      // Turn 1: UserQuery — recall still pending, no injection
+      const userStream = client.sendMessageStream(
+        [{ text: 'What is my name?' }],
+        new AbortController().signal,
+        'prompt-id-user-query',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of userStream) {
+        // consume
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Deferred memory result'),
+        ]),
+        expect.any(AbortSignal),
+      );
+
+      // Recall settles between turns
+      resolveRecall!({
+        prompt: '## Relevant memory\n\nDeferred memory result.',
+        selectedDocs: [],
+        strategy: 'model',
+      });
+      // Drain microtasks so the settledAt finally() callback runs
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Turn 2: ToolResult — settledAt is now non-null, memory should inject
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'world' };
+        })(),
+      );
+      const toolStream = client.sendMessageStream(
+        [{ functionResponse: { name: 'foo', response: { ok: true } } }],
+        new AbortController().signal,
+        'prompt-id-tool-result',
+        { type: SendMessageType.ToolResult },
+      );
+      for await (const _ of toolStream) {
+        // consume
+      }
+
+      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nDeferred memory result.',
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
     it('should proceed without auto-memory when managed auto-memory is disabled', async () => {
       // When getManagedAutoMemoryEnabled returns false, no recall is initiated
       // and sendMessageStream completes without memory content
