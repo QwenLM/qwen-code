@@ -17,7 +17,6 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
-  HistoryItemInfo,
   HistoryItemWithoutId,
   IndividualToolCallDisplay,
 } from '../types.js';
@@ -510,11 +509,11 @@ export function applyResumeDisplayPolicy(
  */
 export function createHistoryCollapseSummaryItem(
   messageCount: number,
-): Omit<HistoryItemInfo, 'id'> {
+): HistoryItemWithoutId {
   return {
     type: MessageType.INFO,
     text: t(
-      'History collapsed: {{n}} messages hidden. Use /history expand to show.',
+      'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
       { n: String(messageCount) },
     ),
     display: { kind: 'collapse-summary' },
@@ -535,10 +534,10 @@ export function applyCollapsePolicyAndSummary(
   if (collapseOnResume && rawItems.length > 0) {
     const summaryItem = createHistoryCollapseSummaryItem(rawItems.length);
     const nextId = Math.max(...rawItems.map((i) => i.id)) + 1;
-    const summaryHistoryItem: HistoryItemInfo & { id: number } = {
+    const summaryHistoryItem = {
       id: nextId,
       ...summaryItem,
-    };
+    } as HistoryItem;
     uiHistoryItems.push(summaryHistoryItem);
   }
 
