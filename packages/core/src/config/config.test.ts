@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode } from './config.js';
+import { Config, ApprovalMode, MCPServerConfig } from './config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
@@ -468,6 +468,69 @@ describe('Server Config (config.ts)', () => {
         ),
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
     });
+
+    it('skips inline MCP discovery by default (progressive availability)', async () => {
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+
+      // Default path passes `skipDiscovery: true` to createToolRegistry,
+      // so the synchronous tool-registry construction must NOT invoke
+      // discoverAllTools. MCP is started in the background instead.
+      expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_CODE_LEGACY_MCP_BLOCKING=1 by running MCP discovery inline', async () => {
+      const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
+      try {
+        const config = new Config({ ...baseParams, checkpointing: false });
+        await config.initialize();
+
+        // Legacy escape hatch must call back into the synchronous discover
+        // path the cli relied on prior to PR-A.
+        expect(ToolRegistry.prototype.discoverAllTools).toHaveBeenCalledTimes(
+          1,
+        );
+      } finally {
+        if (originalLegacy === undefined) {
+          delete process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+        } else {
+          process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = originalLegacy;
+        }
+      }
+    });
+
+    it('waitForMcpReady resolves immediately when no MCP discovery was started', async () => {
+      // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
+      // is called but the registry mock returns no manager, so the discovery
+      // promise stays undefined and waitForMcpReady is a no-op.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+      await expect(config.waitForMcpReady()).resolves.toBeUndefined();
+    });
+
+    it('getFailedMcpServerNames returns an empty array when no MCP servers are configured', () => {
+      // The helper underpins the non-interactive "Warning: MCP server(s)
+      // failed to start" emission. Must be a no-op when there's nothing
+      // to warn about, otherwise --prompt runs with no MCP config would
+      // emit a spurious warning every time.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('getFailedMcpServerNames skips disabled servers', () => {
+      // A user-disabled server is not "failed" — the user explicitly
+      // turned it off. Treating it as failed would generate noise on
+      // every non-interactive run. Disablement is tracked via
+      // `excludedMcpServers` (see `isMcpServerDisabled`).
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: { off: new MCPServerConfig() },
+        excludedMcpServers: ['off'],
+      } as ConfigParameters);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
   });
 
   describe('refreshAuth', () => {
@@ -697,6 +760,190 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
+    it('keeps getFastModel current-auth-only for direct runtime callers', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'deepseek-v4-flash',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBe('deepseek-v4-flash');
+    });
+
+    it('returns an authType-qualified fast model selector for side queries', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'shared-model',
+        fastModel: 'openai:shared-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'shared-model',
+              name: 'OpenAI shared model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'shared-model',
+              name: 'Anthropic shared model',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBe('openai:shared-model');
+    });
+
+    it('returns a bare fast model for getFastModel when authType-qualified selector matches the current auth type', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+        fastModel: 'openai:deepseek-v4-flash',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe('deepseek-v4-flash');
+      expect(config.getFastModelForSideQuery()).toBe(
+        'openai:deepseek-v4-flash',
+      );
+    });
+
+    it('accepts runtime fast models for authType-qualified selectors', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-fast-model',
+        fastModel: 'openai:runtime-fast-model',
+        generationConfig: {
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          apiKey: { kind: 'programmatic', detail: 'test' },
+          baseUrl: { kind: 'programmatic', detail: 'test' },
+        },
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'registry-model',
+              name: 'Registry Model',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+      config.getModelsConfig().detectAndCaptureRuntimeModel();
+
+      expect(config.getFastModel()).toBe('runtime-fast-model');
+      expect(config.getFastModelForSideQuery()).toBe(
+        'openai:runtime-fast-model',
+      );
+    });
+
+    it('returns undefined when the fast model is not configured for any auth type', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'missing-fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
+    it('returns undefined when the fast model selector is malformed', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'openai:',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
+    it('returns undefined when fastModel points back to the fast selector', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'fast',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
     it('should refresh auth when switching to model with different envKey', async () => {
       // This test verifies the fix for switching between modelProvider models
       // with different envKeys (e.g., deepseek-chat with DEEPSEEK_API_KEY)

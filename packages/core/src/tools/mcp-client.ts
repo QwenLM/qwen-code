@@ -165,34 +165,62 @@ export class McpClient {
 
   /**
    * Discovers tools and prompts from the MCP server.
+   *
+   * On error, the client's status is flipped to DISCONNECTED before the
+   * error is re-thrown. Without this, a server that connects successfully
+   * but then crashes (or returns no tools, or whose `tools/list` call
+   * rejects) would remain `CONNECTED` in the global status registry, and
+   * `Config.getFailedMcpServerNames()` — which filters by
+   * `status !== CONNECTED` — would silently omit it from the
+   * non-interactive failure banner. The caller (manager) still catches
+   * and logs; we just need the status registry to reflect reality.
    */
   async discover(cliConfig: Config): Promise<void> {
     if (this.status !== MCPServerStatus.CONNECTED) {
       throw new Error('Client is not connected.');
     }
 
-    const prompts = await this.discoverPrompts();
-    const tools = await this.discoverTools(cliConfig);
+    try {
+      const prompts = await this.discoverPrompts();
+      const tools = await this.discoverTools(cliConfig);
 
-    if (prompts.length === 0 && tools.length === 0) {
-      throw new Error('No prompts or tools found on the server.');
-    }
+      if (prompts.length === 0 && tools.length === 0) {
+        throw new Error('No prompts or tools found on the server.');
+      }
 
-    for (const tool of tools) {
-      this.toolRegistry.registerTool(tool);
+      for (const tool of tools) {
+        this.toolRegistry.registerTool(tool);
+      }
+    } catch (error) {
+      this.updateStatus(MCPServerStatus.DISCONNECTED);
+      throw error;
     }
   }
 
   /**
    * Disconnects from the MCP server.
+   *
+   * The intentional DISCONNECTED status update must reach the global
+   * registry — `getFailedMcpServerNames()` filters on `status !== CONNECTED`
+   * and the Footer's MCP health pill subscribes to the registry. Going
+   * through `updateStatus()` would have it swallowed by the
+   * `isDisconnecting` guard whose only purpose is to suppress LATE writes
+   * from a stale `connect()` catch. We therefore write the local field and
+   * the global registry directly, then flip `isDisconnecting = true` to
+   * shut down propagation from any in-flight `connect()` / `discover()`
+   * whose catch will fire after the transport has been torn down.
    */
   async disconnect(): Promise<void> {
+    // Set the local status BEFORE flipping `isDisconnecting`. A concurrent
+    // `discover()` reading `this.status` would otherwise see the stale
+    // CONNECTED value and try to register tools that we're about to drop.
+    this.status = MCPServerStatus.DISCONNECTED;
+    updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
       await this.transport.close();
     }
     this.client.close();
-    this.updateStatus(MCPServerStatus.DISCONNECTED);
   }
 
   /**

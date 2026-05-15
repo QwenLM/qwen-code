@@ -72,6 +72,7 @@ Key flags:
 ## Step 4 — Run the unified PR review pipeline
 
 The authoritative entry point is `pr_review.py` — a unified pipeline that combines:
+
 - Per-PR structural risk scoring (blast radius, test coverage, interface changes, etc.)
 - Cross-PR graph analysis (connected components, shared callers, function conflicts)
 - A single Markdown report with three prioritized sections
@@ -135,21 +136,21 @@ share the same implementation — prepare via CLI, query via Python works.
 
 **`codegraph pr-review prepare`:**
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--db` | Yes | Path to the `.codegraph` database directory |
-| `--repo` | No | GitHub repository in `owner/repo` format (auto-detected from `git remote`) |
-| `--author` | No | Filter PRs by GitHub login |
-| `--output` | No | Output directory for reports (default: `./pr_review_output`) |
-| `--skip-single-pr` | No | Skip per-PR risk scoring; only cross-PR conflict analysis |
+| Argument           | Required | Description                                                                |
+| ------------------ | -------- | -------------------------------------------------------------------------- |
+| `--db`             | Yes      | Path to the `.codegraph` database directory                                |
+| `--repo`           | No       | GitHub repository in `owner/repo` format (auto-detected from `git remote`) |
+| `--author`         | No       | Filter PRs by GitHub login                                                 |
+| `--output`         | No       | Output directory for reports (default: `./pr_review_output`)               |
+| `--skip-single-pr` | No       | Skip per-PR risk scoring; only cross-PR conflict analysis                  |
 
 **`codegraph pr-review label`:**
 
-| Argument | Required | Description |
-|----------|----------|-------------|
-| `--db` | Yes | Path to the `.codegraph` database directory |
-| `--repo` | No | GitHub repository in `owner/repo` format (auto-detected from `git remote`) |
-| `--dry-run` | No | Preview labels and comments without making API calls |
+| Argument    | Required | Description                                                                |
+| ----------- | -------- | -------------------------------------------------------------------------- |
+| `--db`      | Yes      | Path to the `.codegraph` database directory                                |
+| `--repo`    | No       | GitHub repository in `owner/repo` format (auto-detected from `git remote`) |
+| `--dry-run` | No       | Preview labels and comments without making API calls                       |
 
 ### Report Structure
 
@@ -160,6 +161,7 @@ The unified report (`pr_review.md`) has three sections:
 3. **Part 3 — Conflicting PR Groups**: PRs sharing code/call paths, must be reviewed as a batch
 
 Each PR entry includes:
+
 - Risk level (CRITICAL/HIGH/MEDIUM/LOW/UNKNOWN) with emoji
 - Impact scope (peak blast radius, clickable to call graph)
 - Key risk factors
@@ -173,23 +175,23 @@ For each PR, the script computes signals at two levels.
 
 ### File-level signals
 
-| Signal | How it's computed |
-|---|---|
-| **Changed files** | `gh pr diff --name-only`, filtered to source extensions (.ts/.tsx/.js/.jsx/.py/.java/.c/.cpp/.h/.go, excluding test files) |
-| **Module spread** | Set of top-level `packages/xxx` directories touched |
-| **Config/schema files** | File name matches common config patterns across languages (config.ts, settings.ts, settingsSchema.ts, types.ts, *.yaml, *.toml, *.cfg, etc.) |
-| **Interface/abstract changes** | Diff lines starting with `+` that match `interface Foo` or `abstract class Foo` |
-| **Potential dead code** | Functions in changed files that appear in `cs.dead_code()` (fan_in = 0 in graph) |
+| Signal                         | How it's computed                                                                                                                             |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Changed files**              | `gh pr diff --name-only`, filtered to source extensions (.ts/.tsx/.js/.jsx/.py/.java/.c/.cpp/.h/.go, excluding test files)                    |
+| **Module spread**              | Set of top-level `packages/xxx` directories touched                                                                                           |
+| **Config/schema files**        | File name matches common config patterns across languages (config.ts, settings.ts, settingsSchema.ts, types.ts, _.yaml, _.toml, \*.cfg, etc.) |
+| **Interface/abstract changes** | Diff lines starting with `+` that match `interface Foo` or `abstract class Foo`                                                               |
+| **Potential dead code**        | Functions in changed files that appear in `cs.dead_code()` (fan_in = 0 in graph)                                                              |
 
 ### Function-level signals (per function in changed files)
 
-| Signal | How it's computed |
-|---|---|
-| **blast_radius** | `fan_in × fan_out` via Cypher CALLS edge counts |
-| **call depth** | Fixed 1-hop and 2-hop queries from known entry points (`main`, `run`, `sendMessageStream`, etc.). Returns 1/2 if reachable, -1 if not. Variable-length path queries (`CALLS*1..N`) are intentionally avoided — they are expensive on large graphs. |
-| **test coverage** | Graph CALLS from `.test.` files to this function, with filesystem fallback (same-stem `.test.ts` exists) |
-| **new vs modified** | `locate_pr(pr_num)` — returns per-file `New Function` / `Hunk Function` / `Deleted Function` sets; functions in `Hunk Function - New Function` are classified as modified, the rest as new |
-| **co-change risk** | `cs.co_change(func_name)` — historically co-changed files absent from PR. **Currently disabled** (`co_change_missing` weight = 0.0) |
+| Signal              | How it's computed                                                                                                                                                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **blast_radius**    | `fan_in × fan_out` via Cypher CALLS edge counts                                                                                                                                                                                                    |
+| **call depth**      | Fixed 1-hop and 2-hop queries from known entry points (`main`, `run`, `sendMessageStream`, etc.). Returns 1/2 if reachable, -1 if not. Variable-length path queries (`CALLS*1..N`) are intentionally avoided — they are expensive on large graphs. |
+| **test coverage**   | Graph CALLS from `.test.` files to this function, with filesystem fallback (same-stem `.test.ts` exists)                                                                                                                                           |
+| **new vs modified** | `locate_pr(pr_num)` — returns per-file `New Function` / `Hunk Function` / `Deleted Function` sets; functions in `Hunk Function - New Function` are classified as modified, the rest as new                                                         |
+| **co-change risk**  | `cs.co_change(func_name)` — historically co-changed files absent from PR. **Currently disabled** (`co_change_missing` weight = 0.0)                                                                                                                |
 
 ### Per-PR confidence score
 
@@ -213,12 +215,12 @@ The PR score is the average per-function score plus file-level bonuses (interfac
 
 ### Risk level thresholds
 
-| PR Risk Score | Level |
-|---|---|
-| ≥ 12 | CRITICAL |
-| ≥ 7 | HIGH |
-| ≥ 3 | MEDIUM |
-| < 3 | LOW |
+| PR Risk Score | Level    |
+| ------------- | -------- |
+| ≥ 12          | CRITICAL |
+| ≥ 7           | HIGH     |
+| ≥ 3           | MEDIUM   |
+| < 3           | LOW      |
 
 ---
 
@@ -308,10 +310,10 @@ with open(OUTPUT_FILE, 'w') as fout:
 
 Cross-PR conflicts are detected at three levels of granularity:
 
-| Level | What it detects | How it's detected |
-|-------|----------------|-------------------|
-| **File-level overlap** | Two PRs modify the same file | Set intersection of `gh pr diff --name-only` results |
-| **Function-level overlap** | Two PRs modify the same function (even different lines) | `CHANGES {info: 'hunk'}` edges to the same `Function` node — this powers the automated connected-components detection |
+| Level                        | What it detects                                                                                                                     | How it's detected                                                                                                                       |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **File-level overlap**       | Two PRs modify the same file                                                                                                        | Set intersection of `gh pr diff --name-only` results                                                                                    |
+| **Function-level overlap**   | Two PRs modify the same function (even different lines)                                                                             | `CHANGES {info: 'hunk'}` edges to the same `Function` node — this powers the automated connected-components detection                   |
 | **Dependency chain overlap** | PR A modifies function X, PR B modifies function Y, and Y calls X — git reports no conflict but merging A may break B's assumptions | Cypher: `MATCH (pr1:PR)-[c1:CHANGES]->(f:Function)-[:CALLS]->(g:Function)<-[c2:CHANGES]-(pr2:PR)` — see usecase3 (manual) queries below |
 
 ### When to Use
@@ -358,11 +360,11 @@ cross = CrossPRAnalyzer(cs, repo_dir=REPO_DIR)
 rows1, rows2, components = cross.analyze_all(out_dir='/tmp')
 ```
 
-| Usecase | What it finds | When to use |
-|---------|--------------|-------------|
-| **usecase1** PR → hunk functions | All functions directly modified by each PR; rendered as vis-network HTML | Quick inventory |
-| **usecase2** hunk + fan-in callers | Who calls each modified function (1-hop upstream); rendered as 2-hop vis-network HTML | Blast-radius exposure per PR |
-| **usecase3** Connected Components (DSU) | Groups of PRs linked by modifying or deleting the same function | Identifies conflicting PR groups requiring coordinated review |
+| Usecase                                 | What it finds                                                                         | When to use                                                   |
+| --------------------------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| **usecase1** PR → hunk functions        | All functions directly modified by each PR; rendered as vis-network HTML              | Quick inventory                                               |
+| **usecase2** hunk + fan-in callers      | Who calls each modified function (1-hop upstream); rendered as 2-hop vis-network HTML | Blast-radius exposure per PR                                  |
+| **usecase3** Connected Components (DSU) | Groups of PRs linked by modifying or deleting the same function                       | Identifies conflicting PR groups requiring coordinated review |
 
 ### Cypher Queries
 
@@ -404,10 +406,10 @@ RETURN pr1.id, pr2.id;
 
 ### Interpreting usecase3 Results
 
-| Connected Component Size | Meaning | Recommended action |
-|--------------------------|---------|-------------------|
-| Size 1 (singleton) | PR has no cross-PR dependencies | Can be reviewed and merged independently |
-| Size > 1 | PRs in the same component share code or call paths | Review as a batch; see `pr_review.py` Part 3 report |
+| Connected Component Size | Meaning                                            | Recommended action                                  |
+| ------------------------ | -------------------------------------------------- | --------------------------------------------------- |
+| Size 1 (singleton)       | PR has no cross-PR dependencies                    | Can be reviewed and merged independently            |
+| Size > 1                 | PRs in the same component share code or call paths | Review as a batch; see `pr_review.py` Part 3 report |
 
 ---
 
@@ -415,4 +417,3 @@ RETURN pr1.id, pr2.id;
 
 - Index directory: `.codegraph/` (repo root, add to `.gitignore`)
 - Default output: `/tmp/pr_analysis.txt` (configurable)
-

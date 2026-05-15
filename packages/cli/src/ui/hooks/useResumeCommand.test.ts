@@ -149,7 +149,7 @@ describe('useResumeCommand', () => {
     };
     const startNewSession = vi.fn();
     const geminiClient = {
-      initialize: vi.fn(),
+      initialize: vi.fn().mockResolvedValue(undefined),
     };
     const resetMonitorRegistry = vi.fn();
 
@@ -220,6 +220,7 @@ describe('useResumeCommand', () => {
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
     expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
+    expect(geminiClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
     expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);

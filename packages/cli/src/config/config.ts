@@ -57,6 +57,7 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
+import { serveCommand } from '../commands/serve.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -158,6 +159,8 @@ export interface CliArgs {
   resume: string | undefined;
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
+  /** Internal: preserve the outer session ID when relaunching in a sandbox */
+  sandboxSessionId?: string | undefined;
   maxSessionTurns: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
@@ -802,6 +805,10 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Specify a session ID for this run.',
         })
+        .option('sandbox-session-id', {
+          type: 'string',
+          hidden: true,
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
@@ -903,10 +910,22 @@ export async function parseArguments(): Promise<CliArgs> {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
           }
           if (
+            argv['sandboxSessionId'] &&
+            (argv['sessionId'] || argv['continue'] || argv['resume'])
+          ) {
+            return 'Cannot use internal --sandbox-session-id with --session-id, --continue, or --resume.';
+          }
+          if (
             argv['sessionId'] &&
             !isValidSessionId(argv['sessionId'] as string)
           ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          if (
+            argv['sandboxSessionId'] &&
+            !isValidSessionId(argv['sandboxSessionId'] as string)
+          ) {
+            return `Invalid --sandbox-session-id: "${argv['sandboxSessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
           // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
@@ -965,7 +984,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Channel subcommands
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
-    .command(reviewCommand);
+    .command(reviewCommand)
+    // Register `qwen serve` (Stage 1 daemon — see issue #3803)
+    .command(serveCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -991,6 +1012,9 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review')
   ) {
+    // Note: `serve` is intentionally NOT in this list. Its handler blocks
+    // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
+    // drives shutdown. Hitting `process.exit(0)` here would kill the daemon.
     // MCP/Extensions/Auth/Hooks/Channel/Review commands handle their own
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
@@ -1526,6 +1550,8 @@ export async function loadCliConfig(
         process.exit(1);
       }
     }
+  } else if (argv.sandboxSessionId) {
+    sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
     // Check if session ID is already in use
