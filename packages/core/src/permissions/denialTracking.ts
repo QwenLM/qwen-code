@@ -110,14 +110,26 @@ export function shouldFallback(
 
 /**
  * Called after the user manually approves a fallback-prompted tool call.
- * Resets `consecutiveBlock` so the agent can resume normal AUTO flow.
- * Unavailable counter is unchanged — approval doesn't fix an infra outage.
+ * Resets BOTH consecutive counters so the agent can resume normal AUTO flow.
+ *
+ * Symmetric with `recordAllow`: a manual approval signals the user accepted
+ * the action, and the next call should re-engage the classifier. If the
+ * classifier or its infrastructure is still degraded, the next call's
+ * verdict will simply re-arm the appropriate counter (one block / one
+ * unavailable) — same recovery curve as initial onset, no permanent
+ * lock-out. Resetting only `consecutiveBlock` (the original v1 behaviour)
+ * created an asymmetry: a transient API blip past
+ * `maxConsecutiveUnavailable` would permanently downgrade the rest of the
+ * session to manual approval even after the user approved the fallback
+ * prompt, until ApprovalMode toggled.
  */
 export function recordFallbackApprove(
   state: AutoModeDenialState,
 ): AutoModeDenialState {
-  if (state.consecutiveBlock === 0) return state;
-  return { ...state, consecutiveBlock: 0 };
+  if (state.consecutiveBlock === 0 && state.consecutiveUnavailable === 0) {
+    return state;
+  }
+  return { ...state, consecutiveBlock: 0, consecutiveUnavailable: 0 };
 }
 
 /**

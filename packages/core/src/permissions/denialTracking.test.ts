@@ -137,12 +137,35 @@ describe('recordFallbackApprove', () => {
     expect(shouldFallback(s).fallback).toBe(false);
   });
 
-  it('does not reset consecutiveUnavailable', () => {
+  it('resets consecutiveUnavailable so AUTO flow can resume after a transient classifier blip', () => {
+    // Regression guard: a transient classifier API outage would push
+    // consecutiveUnavailable to its threshold and trigger fallback. Before
+    // this fix, recordFallbackApprove only reset consecutiveBlock, so
+    // every subsequent call kept seeing shouldFallback === true and the
+    // session was permanently downgraded to manual approval until the
+    // user toggled ApprovalMode. Symmetric reset matches recordAllow.
     let s: AutoModeDenialState = FRESH;
     s = recordUnavailable(s);
     s = recordUnavailable(s);
+    expect(shouldFallback(s).fallback).toBe(true);
     s = recordFallbackApprove(s);
-    expect(s.consecutiveUnavailable).toBe(2);
+    expect(s.consecutiveUnavailable).toBe(0);
+    expect(shouldFallback(s).fallback).toBe(false);
+  });
+
+  it('preserves total counters (telemetry)', () => {
+    let s: AutoModeDenialState = FRESH;
+    s = recordBlock(s);
+    s = recordUnavailable(s);
+    s = recordUnavailable(s);
+    s = recordFallbackApprove(s);
+    expect(s.totalBlock).toBe(1);
+    expect(s.totalUnavailable).toBe(2);
+  });
+
+  it('is a no-op when both consecutive counters are already zero', () => {
+    const s: AutoModeDenialState = FRESH;
+    expect(recordFallbackApprove(s)).toBe(s);
   });
 });
 
