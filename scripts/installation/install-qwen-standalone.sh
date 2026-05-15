@@ -1256,6 +1256,7 @@ print_final_instructions() {
     local install_method="${3:-standalone}"
     local installed_bin=""
     local quoted_install_bin_dir=""
+    local standalone_uninstall_url="https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.sh"
     if [[ -n "${install_bin_dir}" ]]; then
         installed_bin="${install_bin_dir}/qwen"
         quoted_install_bin_dir=$(shell_quote "${install_bin_dir}")
@@ -1312,12 +1313,10 @@ print_final_instructions() {
     echo "Uninstall:"
     if [[ "${install_method}" == "npm" ]]; then
         echo "  npm uninstall -g @qwen-code/qwen-code"
-    elif [[ -n "${install_dir}" && -n "${installed_bin}" ]]; then
-        echo "  rm -rf $(shell_quote "${install_dir}") $(shell_quote "${installed_bin}")"
-    elif [[ -n "${install_dir}" ]]; then
-        echo "  rm -rf $(shell_quote "${install_dir}")"
+    elif [[ -n "${install_dir}" && -n "${install_bin_dir}" ]]; then
+        echo "  curl -fsSL ${standalone_uninstall_url} | QWEN_INSTALL_LIB_DIR=$(shell_quote "${install_dir}") QWEN_INSTALL_BIN_DIR=$(shell_quote "${install_bin_dir}") bash"
     else
-        echo "  npm uninstall -g @qwen-code/qwen-code"
+        echo "  curl -fsSL ${standalone_uninstall_url} | bash"
     fi
 
     if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then

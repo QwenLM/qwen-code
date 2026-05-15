@@ -1221,6 +1221,7 @@ exit /b 0
 set "EXTRA_BIN=%~1"
 set "SUMMARY_INSTALL_DIR=%~2"
 set "SUMMARY_INSTALL_METHOD=%~3"
+set "STANDALONE_UNINSTALL_URL=https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.ps1"
 if "!SUMMARY_INSTALL_METHOD!"=="" set "SUMMARY_INSTALL_METHOD=standalone"
 
 set "INSTALLED_BIN="
@@ -1255,8 +1256,15 @@ echo Uninstall:
 if /i "!SUMMARY_INSTALL_METHOD!"=="npm" (
     echo   npm uninstall -g @qwen-code/qwen-code
 ) else (
-    if not "!SUMMARY_INSTALL_DIR!"=="" echo   rmdir /S /Q "!SUMMARY_INSTALL_DIR!"
-    if not "!INSTALLED_BIN!"=="" echo   del /F /Q "!INSTALLED_BIN!"
+    if not "!SUMMARY_INSTALL_DIR!"=="" (
+        if not "!EXTRA_BIN!"=="" (
+            echo   set "QWEN_INSTALL_LIB_DIR=!SUMMARY_INSTALL_DIR!" ^&^& set "QWEN_INSTALL_BIN_DIR=!EXTRA_BIN!" ^&^& powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
+        ) else (
+            echo   powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
+        )
+    ) else (
+        echo   powershell -ExecutionPolicy Bypass -c "irm !STANDALONE_UNINSTALL_URL! ^| iex"
+    )
 )
 
 rem Build OTHER_QWENS = PRE_INSTALL_QWENS_LIST minus the install we just made.

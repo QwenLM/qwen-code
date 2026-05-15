@@ -76,6 +76,8 @@ describe('installation scripts', () => {
     expect(script).toContain('To start:');
     expect(script).toContain('Installed to:');
     expect(script).toContain('Uninstall:');
+    expect(script).toContain('uninstall-qwen-standalone.sh');
+    expect(script).not.toContain('rm -rf $(shell_quote "${install_dir}")');
   });
 
   it('supports code-server-style standalone install on Linux/macOS', () => {
@@ -193,6 +195,9 @@ describe('installation scripts', () => {
     expect(script).toContain('To start:');
     expect(script).toContain('Installed to:');
     expect(script).toContain('Uninstall:');
+    expect(script).toContain('uninstall-qwen-standalone.ps1');
+    expect(script).not.toContain('rmdir /S /Q "!SUMMARY_INSTALL_DIR!"');
+    expect(script).not.toContain('del /F /Q "!INSTALLED_BIN!"');
   });
 
   it('supports code-server-style standalone install on Windows', () => {
@@ -303,6 +308,14 @@ describe('installation scripts', () => {
     expect(attrs).toContain(
       'scripts/installation/install-qwen-standalone.bat: eol: crlf',
     );
+
+    const script = readScript(
+      'scripts/installation/install-qwen-standalone.bat',
+    );
+    const bareLfLines = script
+      .split(/(?<=\n)/)
+      .filter((line) => line.endsWith('\n') && !line.endsWith('\r\n'));
+    expect(bareLfLines).toHaveLength(0);
   });
 
   it('creates PowerShell validation scripts with a ps1 extension', () => {
@@ -1519,8 +1532,15 @@ describe('Linux/macOS installer end-to-end', () => {
         );
         expect(output).toContain('Uninstall:');
         expect(output).toContain(
-          `rm -rf '${path.join(installRoot, 'lib', 'qwen-code')}'`,
+          'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.sh',
         );
+        expect(output).toContain(
+          `QWEN_INSTALL_LIB_DIR='${path.join(installRoot, 'lib', 'qwen-code')}'`,
+        );
+        expect(output).toContain(
+          `QWEN_INSTALL_BIN_DIR='${path.join(installRoot, 'bin')}'`,
+        );
+        expect(output).not.toContain('rm -rf');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         if (createdDist) {
