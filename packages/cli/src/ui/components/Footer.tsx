@@ -145,6 +145,18 @@ export const Footer: React.FC = () => {
               {line}
             </Text>
           ))}
+        {/* Built-in worktree indicator. Hidden when the user has a custom
+            statusline (their script already gets `worktree` in stdin payload
+            and likely renders it itself). Also hidden during ctrl-quit
+            warnings so they take precedence. */}
+        {uiState.activeWorktree &&
+          statusLineLines.length === 0 &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text dimColor wrap="truncate">
+              {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
+            </Text>
+          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
