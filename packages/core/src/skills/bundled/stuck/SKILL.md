@@ -32,14 +32,16 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 
 1. **Resolve the runtime base directory**, then enumerate live sessions via the runtime sidecar (preferred, reliable):
 
-   Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The base directory is taken from (in priority order): `QWEN_RUNTIME_DIR`, `QWEN_HOME`, the `advanced.runtimeOutputDir` setting, and finally `~/.qwen`. Use the resolved value in every command below — substituting the literal default would silently miss sessions on machines that override it.
+   Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The base directory is taken from (in priority order): `QWEN_RUNTIME_DIR` env var, the `advanced.runtimeOutputDir` setting, `QWEN_HOME` env var, and finally `~/.qwen`. Use the resolved value in every command below — substituting the literal default would silently miss sessions on machines that override it.
 
    ```
-   RUNTIME_DIR="${QWEN_RUNTIME_DIR:-${QWEN_HOME:-$HOME/.qwen}}"
+   RUNTIME_DIR="${QWEN_RUNTIME_DIR:-}"
+   [ -z "$RUNTIME_DIR" ] && RUNTIME_DIR=$(jq -r '.advanced.runtimeOutputDir // empty' ~/.qwen/settings.json 2>/dev/null)
+   RUNTIME_DIR="${RUNTIME_DIR:-${QWEN_HOME:-$HOME/.qwen}}"
    ls -1 "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
    ```
 
-   (If the user has set `advanced.runtimeOutputDir` in `settings.json`, ask them or read it from settings; otherwise the env-var resolution above is correct.) Each sidecar file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
+   (The `jq` line gracefully degrades — if `jq` isn't installed or `settings.json` doesn't exist, the next line falls back to `QWEN_HOME` or the default.) Each sidecar file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
 
    For each file, read it and check whether the recorded `pid` is still alive (`kill -0 <pid>` returns 0). Stale files where the PID is gone mean the session has exited — skip them silently. PID reuse is rare but possible, so when you cross-reference with `ps` in step 2, also skip records whose live PID's command line no longer looks like a Qwen Code process.
 
