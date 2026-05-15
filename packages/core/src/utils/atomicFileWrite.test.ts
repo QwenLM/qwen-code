@@ -231,4 +231,38 @@ describe('atomicWriteFile', () => {
     const filePath = path.join(tmpDir, 'no', 'such', 'dir', 'file.txt');
     await expect(atomicWriteFile(filePath, 'data')).rejects.toThrow();
   });
+
+  it('should resolve relative symlink targets through directory symlinks', async () => {
+    // Set up: tmpDir/realDir/file.txt is a symlink to ../target.txt
+    //         tmpDir/linkDir is a symlink to realDir
+    // Writing via tmpDir/linkDir/file.txt should resolve correctly to
+    // tmpDir/target.txt (NOT tmpDir/target.txt via string-only dirname,
+    // which would happen to be the same here — so we use a more tricky setup)
+    const realDir = path.join(tmpDir, 'realDir');
+    const otherDir = path.join(tmpDir, 'otherDir');
+    const targetFile = path.join(otherDir, 'target.txt');
+    const linkInRealDir = path.join(realDir, 'file.txt');
+    const linkDir = path.join(tmpDir, 'linkDir');
+
+    await fs.mkdir(realDir);
+    await fs.mkdir(otherDir);
+    await fs.writeFile(targetFile, 'original');
+    // file.txt → ../otherDir/target.txt (relative to its parent)
+    await fs.symlink('../otherDir/target.txt', linkInRealDir);
+    // linkDir → realDir (directory symlink)
+    await fs.symlink(realDir, linkDir);
+
+    // Write via the path that goes through the directory symlink.
+    await atomicWriteFile(
+      path.join(linkDir, 'file.txt'),
+      'updated via dir symlink',
+    );
+
+    // Should have updated the real target through both symlinks.
+    const content = await fs.readFile(targetFile, 'utf-8');
+    expect(content).toBe('updated via dir symlink');
+    // Symlinks themselves should be intact.
+    expect(await fs.readlink(linkDir)).toBe(realDir);
+    expect(await fs.readlink(linkInRealDir)).toBe('../otherDir/target.txt');
+  });
 });

@@ -76,9 +76,15 @@ async function resolveSymlinkChain(filePath: string): Promise<string> {
       return current;
     }
     const linkTarget = await fs.readlink(current);
-    current = path.isAbsolute(linkTarget)
-      ? linkTarget
-      : path.resolve(path.dirname(current), linkTarget);
+    if (path.isAbsolute(linkTarget)) {
+      current = linkTarget;
+    } else {
+      // Resolve relative targets against the kernel-resolved parent dir.
+      // path.dirname() is purely string-based and would mis-resolve when
+      // intermediate path components are themselves directory symlinks.
+      const parentDir = await fs.realpath(path.dirname(current));
+      current = path.resolve(parentDir, linkTarget);
+    }
   }
   const err = new Error(
     `ELOOP: too many levels of symbolic links, resolve '${filePath}'`,
