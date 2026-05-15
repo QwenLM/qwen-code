@@ -9,6 +9,10 @@ import crypto from 'node:crypto';
 const crawlCache = new Map<string, string[]>();
 const cacheTimers = new Map<string, NodeJS.Timeout>();
 
+// Limits to prevent heap exhaustion when many projects are crawled concurrently
+const MAX_CACHE_ENTRIES = 256;      // max distinct project roots cached
+const MAX_TOTAL_PATHS = 50_000;     // max total paths across all entries
+
 /**
  * Generates a unique cache key based on the project directory and the content
  * of ignore files. This ensures that the cache is invalidated if the project
@@ -42,11 +46,52 @@ export const read = (key: string): string[] | undefined => crawlCache.get(key);
 
 /**
  * Writes data to the in-memory cache and sets a timer to evict it after the TTL.
+ * Enforces MAX_CACHE_ENTRIES (LRU by insertion order) and MAX_TOTAL_PATHS to
+ * prevent heap exhaustion when many large projects are crawled.
  */
 export const write = (key: string, results: string[], ttlMs: number): void => {
   // Clear any existing timer for this key to prevent premature deletion
   if (cacheTimers.has(key)) {
     clearTimeout(cacheTimers.get(key)!);
+  }
+
+  // Evict oldest entries when cache exceeds entry limit (FIFO / insertion-order)
+  while (crawlCache.size >= MAX_CACHE_ENTRIES && !crawlCache.has(key)) {
+    const oldestKey = crawlCache.keys().next().value;
+    if (oldestKey) {
+      crawlCache.delete(oldestKey);
+      if (cacheTimers.has(oldestKey)) {
+        clearTimeout(cacheTimers.get(oldestKey)!);
+        cacheTimers.delete(oldestKey);
+      }
+    }
+  }
+
+  // Evict largest entries when total path count exceeds limit
+  let totalPaths = 0;
+  for (const entry of crawlCache.values()) {
+    totalPaths += entry.length;
+  }
+  while (totalPaths + results.length > MAX_TOTAL_PATHS && crawlCache.size > 1 && !crawlCache.has(key)) {
+    // Find and remove the entry with the most paths
+    let largestKey: string | undefined;
+    let largestSize = 0;
+    for (const [k, v] of crawlCache) {
+      if (v.length > largestSize) {
+        largestSize = v.length;
+        largestKey = k;
+      }
+    }
+    if (largestKey) {
+      totalPaths -= crawlCache.get(largestKey)!.length;
+      crawlCache.delete(largestKey);
+      if (cacheTimers.has(largestKey)) {
+        clearTimeout(cacheTimers.get(largestKey)!);
+        cacheTimers.delete(largestKey);
+      }
+    } else {
+      break;
+    }
   }
 
   // Store the new data
