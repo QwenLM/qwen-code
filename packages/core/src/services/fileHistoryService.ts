@@ -14,7 +14,7 @@ import {
   stat,
   unlink,
 } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { diffLines } from 'diff';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -632,7 +632,7 @@ export class FileHistoryService {
 
   private maybeShortenFilePath(filePath: string): string {
     if (!isAbsolute(filePath)) return filePath;
-    if (filePath.startsWith(this.cwd + '/') || filePath === this.cwd) {
+    if (filePath.startsWith(this.cwd + sep) || filePath === this.cwd) {
       return relative(this.cwd, filePath);
     }
     return filePath;
