@@ -14,7 +14,7 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, vi, type Mock } from 'vitest';
 import type { UseShellHistoryReturn } from '../hooks/useShellHistory.js';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import type { UseCommandCompletionReturn } from '../hooks/useCommandCompletion.js';
@@ -3809,7 +3809,7 @@ describe('InputPrompt', () => {
       // navigateUp returns boolean true on a real history move. We model that
       // here so the post-navigation moveToOffset(0) side-effect (the "cursor
       // at start of the restored older entry" rule) is observable.
-      mockInputHistory.navigateUp.mockReturnValue(true);
+      (mockInputHistory.navigateUp as Mock).mockReturnValue(true);
       mockBuffer.setText('current draft');
       mockBuffer.visualCursor = [0, 0];
 
@@ -3828,7 +3828,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('Ctrl+P/N do not change input history while a tool confirmation owns navigation', async () => {
+    it('Ctrl+P/N and arrows do not change input history while a tool confirmation owns navigation', async () => {
       mockedUseUIState.mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: [],
@@ -3855,6 +3855,10 @@ describe('InputPrompt', () => {
       await wait();
       stdin.write('\u000E'); // Ctrl+N
       await wait();
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
 
       expect(mockInputHistory.navigateUp).not.toHaveBeenCalled();
       expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
@@ -3862,7 +3866,7 @@ describe('InputPrompt', () => {
     });
 
     it('Ctrl+N falls through to the agent tab bar when there is no newer history', async () => {
-      mockInputHistory.navigateDown.mockReturnValue(false);
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
       mockedUseAgentViewState.mockReturnValue({
         activeView: 'main',
         agents: new Map([['agent-1', {}]]),
@@ -3880,6 +3884,67 @@ describe('InputPrompt', () => {
       await wait();
 
       stdin.write('\u000E'); // Ctrl+N
+      await wait();
+
+      expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+      expect(mockViewActions.setAgentTabBarFocused).toHaveBeenCalledWith(true);
+      unmount();
+    });
+
+    it('arrow Down applies the same snap-before-history rule as Ctrl+N', async () => {
+      mockBuffer.setText('hello');
+      mockBuffer.visualCursor = [0, 0];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockBuffer.move).toHaveBeenCalledWith('end');
+      expect(mockInputHistory.navigateDown).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down at end-of-line walks history', async () => {
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(true);
+      mockBuffer.setText('current draft');
+      mockBuffer.visualCursor = [0, 'current draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
+      await wait();
+
+      expect(mockInputHistory.navigateDown).toHaveBeenCalled();
+      expect(mockViewActions.setAgentTabBarFocused).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('arrow Down falls through to the agent tab bar when there is no newer history', async () => {
+      (mockInputHistory.navigateDown as Mock).mockReturnValue(false);
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map([['agent-1', {}]]),
+        agentShellFocused: false,
+        agentInputBufferText: '',
+        agentTabBarFocused: false,
+        agentApprovalModes: new Map(),
+      } as unknown as ReturnType<typeof useAgentViewState>);
+      mockBuffer.setText('draft');
+      mockBuffer.visualCursor = [0, 'draft'.length];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[B'); // Down arrow
       await wait();
 
       expect(mockInputHistory.navigateDown).toHaveBeenCalled();

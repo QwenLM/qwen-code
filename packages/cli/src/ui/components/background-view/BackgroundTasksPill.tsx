@@ -81,9 +81,17 @@ export const BackgroundTasksPill: React.FC = () => {
       // Enter shortcut. The LiveAgentPanel's overflow callout
       // (`↓ to view all`) relies on this; without a Down handler
       // the chain dead-ends at the highlighted pill.
-      if (key.name === 'return' || key.name === 'down') {
+      if (
+        key.name === 'return' ||
+        key.name === 'down' ||
+        (key.ctrl && key.name === 'n')
+      ) {
         openDialog();
-      } else if (key.name === 'up' || key.name === 'escape') {
+      } else if (
+        key.name === 'up' ||
+        (key.ctrl && key.name === 'p') ||
+        key.name === 'escape'
+      ) {
         setPillFocused(false);
       } else if (
         key.sequence &&
