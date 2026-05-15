@@ -124,13 +124,29 @@ goto usage_error
 call :ValidateOptions
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
-call :PrintHeader
+echo ===========================================
+echo Qwen Code Installation Script
+echo ===========================================
+echo.
+echo INFO: Install method: !METHOD!
+if /i not "!METHOD!"=="npm" (
+    echo INFO: Standalone mirror: !MIRROR!
+    if not "!BASE_URL!"=="" echo INFO: Standalone base URL: !BASE_URL!
+    if not "!ARCHIVE_PATH!"=="" (
+        echo INFO: Standalone archive: !ARCHIVE_PATH!
+    ) else (
+        echo INFO: Standalone version: !VERSION!
+    )
+)
+if /i not "!METHOD!"=="standalone" echo INFO: npm registry: !NPM_REGISTRY!
+if not "!SOURCE!"=="unknown" echo INFO: Installation source: !SOURCE!
+echo.
 
 REM Dispatch after validation; detect falls back to npm only when unavailable.
 if /i "!METHOD!"=="standalone" (
     call :InstallStandalone
     if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
-    call :PrintFinalInstructions "!INSTALL_BIN_DIR!" "!INSTALL_DIR!" "standalone"
+    call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
     endlocal
     exit /b 0
 )
@@ -138,7 +154,7 @@ if /i "!METHOD!"=="standalone" (
 if /i "!METHOD!"=="npm" (
     call :InstallNpm
     if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
-    call :PrintFinalInstructions "" "" "npm"
+    call :PrintFinalInstructions ""
     endlocal
     exit /b 0
 )
@@ -146,7 +162,7 @@ if /i "!METHOD!"=="npm" (
 call :InstallStandalone
 set "STANDALONE_STATUS=!ERRORLEVEL!"
 if !STANDALONE_STATUS! EQU 0 (
-    call :PrintFinalInstructions "!INSTALL_BIN_DIR!" "!INSTALL_DIR!" "standalone"
+    call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
     endlocal
     exit /b 0
 )
@@ -159,7 +175,7 @@ if !STANDALONE_STATUS! EQU 2 (
         echo WARNING: Retry with --method standalone to debug the standalone failure, or install Node.js 20+ and rerun --method npm.
         exit /b !ERRORLEVEL!
     )
-    call :PrintFinalInstructions "" "" "npm"
+    call :PrintFinalInstructions ""
     endlocal
     exit /b 0
 )
@@ -191,14 +207,6 @@ echo   --version VERSION        Standalone release version. Defaults to latest.
 echo   --registry REGISTRY      npm registry to use.
 echo                            Defaults to QWEN_NPM_REGISTRY or https://registry.npmmirror.com
 echo   -h, --help               Show this help message.
-exit /b 0
-
-:PrintHeader
-set "DISPLAY_VERSION=!VERSION!"
-if /i not "!DISPLAY_VERSION!"=="latest" (
-    if /i "!DISPLAY_VERSION:~0,1!"=="v" set "DISPLAY_VERSION=!DISPLAY_VERSION:~1!"
-)
-echo Installing Qwen Code version: !DISPLAY_VERSION!
 exit /b 0
 
 :ValidateOptions
@@ -479,7 +487,7 @@ if not "!ARCHIVE_PATH!"=="" (
     mkdir "!TEMP_DIR!" >nul 2>&1
     set "ARCHIVE_FILE=!TEMP_DIR!\!ARCHIVE_NAME!"
 
-    echo Downloading !ARCHIVE_NAME!
+    echo INFO: Downloading !ARCHIVE_URL!
     call :DownloadFile "!ARCHIVE_URL!" "!ARCHIVE_FILE!"
     if !ERRORLEVEL! NEQ 0 (
         if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
@@ -748,48 +756,22 @@ exit /b 0
 
 :PrintFinalInstructions
 set "EXTRA_BIN=%~1"
-set "SUMMARY_INSTALL_DIR=%~2"
-set "SUMMARY_INSTALL_METHOD=%~3"
-if "!SUMMARY_INSTALL_METHOD!"=="" set "SUMMARY_INSTALL_METHOD=standalone"
 if not "!EXTRA_BIN!"=="" set "PATH=!EXTRA_BIN!;!PATH!"
 
 echo.
-echo QWEN CODE
+echo ===========================================
+echo Installation completed!
+echo ===========================================
 echo.
 
-set "QWEN_VERSION="
 where qwen >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
     for /f "delims=" %%i in ('qwen --version 2^>nul') do set "QWEN_VERSION=%%i"
-)
-
-if not "!QWEN_VERSION!"=="" (
-    echo Qwen Code !QWEN_VERSION! installed successfully.
-) else (
-    echo Qwen Code installed successfully.
-)
-
-echo.
-echo To start:
-echo   cd ^<project^>
-echo   qwen
-
-if not "!SUMMARY_INSTALL_DIR!"=="" (
+    echo SUCCESS: Qwen Code is ready to use: !QWEN_VERSION!
     echo.
-    echo Installed to:
-    echo   !SUMMARY_INSTALL_DIR!
-)
-
-echo.
-echo Uninstall:
-if /i "!SUMMARY_INSTALL_METHOD!"=="npm" (
-    echo   npm uninstall -g @qwen-code/qwen-code
-) else (
-    if not "!SUMMARY_INSTALL_DIR!"=="" echo   rmdir /S /Q "!SUMMARY_INSTALL_DIR!"
-    if not "!EXTRA_BIN!"=="" echo   del /F /Q "!EXTRA_BIN!\qwen.cmd"
-)
-
-if not "!QWEN_VERSION!"=="" (
+    echo You can now run: qwen
+    echo.
+    echo INFO: Run qwen in your project directory to start an interactive session.
     exit /b 0
 )
 

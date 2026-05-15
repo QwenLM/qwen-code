@@ -1870,7 +1870,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         const archive = packageFakeStandalone(tmpDir);
         const installRoot = path.join(tmpDir, 'install');
         const home = path.join(tmpDir, 'home');
-        const output = runUnixInstaller(archive, installRoot, home).toString();
+        runUnixInstaller(archive, installRoot, home);
 
         expect(existsSync(path.join(installRoot, 'bin', 'qwen'))).toBe(true);
         expect(
