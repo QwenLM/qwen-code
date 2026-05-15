@@ -2892,6 +2892,37 @@ describe('InputPrompt', () => {
 
       unmount();
     });
+
+    it('does not fall through to shell history on Ctrl+P/N while reverse search is active', async () => {
+      const getPreviousCommand = vi.fn();
+      const getNextCommand = vi.fn();
+      vi.mocked(useShellHistory).mockReturnValue({
+        history: ['echo hello', 'echo world', 'ls'],
+        getPreviousCommand,
+        getNextCommand,
+        addCommandToHistory: vi.fn(),
+        resetHistoryPosition: vi.fn(),
+      });
+
+      const { stdin, stdout, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x12'); // Ctrl+R
+      await wait();
+      expect(stdout.lastFrame()).toContain('(r:)');
+
+      stdin.write('\u0010'); // Ctrl+P
+      await wait();
+      stdin.write('\u000E'); // Ctrl+N
+      await wait();
+
+      expect(getPreviousCommand).not.toHaveBeenCalled();
+      expect(getNextCommand).not.toHaveBeenCalled();
+      expect(stdout.lastFrame()).toContain('(r:)');
+      unmount();
+    });
   });
 
   describe('Ctrl+E keyboard shortcut', () => {

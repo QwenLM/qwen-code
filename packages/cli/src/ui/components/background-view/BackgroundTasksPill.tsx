@@ -74,8 +74,10 @@ export const BackgroundTasksPill: React.FC = () => {
 
   const onKeypress = useCallback(
     (key: Key) => {
-      // `return` and `down` both open the dialog. Down completes the
-      // focus chain Composer ↓ → AgentTabBar ↓ → Pill ↓ → Dialog,
+      // `return`, down, and the readline-style Ctrl+N all open the dialog.
+      // This is focus-chain handling rather than selection-list handling
+      // (see keyBindings.ts SELECTION_DOWN), so keep the matcher inline.
+      // Down completes the focus chain Composer ↓ → AgentTabBar ↓ → Pill ↓ → Dialog,
       // so users can `↓ ↓ (↓)` their way from an empty composer
       // straight into the roster without having to remember the
       // Enter shortcut. The LiveAgentPanel's overflow callout
