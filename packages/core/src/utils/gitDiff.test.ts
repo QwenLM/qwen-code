@@ -424,12 +424,12 @@ describe('fetchGitDiffHunks', () => {
 
     const hunks = await fetchGitDiffHunks(repo);
     expect([...hunks.keys()]).toEqual([weirdName]);
-    expect(hunks.get(weirdName)![0].lines.some((l) => l.startsWith('-x'))).toBe(
-      true,
-    );
-    expect(hunks.get(weirdName)![0].lines.some((l) => l.startsWith('+y'))).toBe(
-      true,
-    );
+    expect(
+      hunks.get(weirdName)![0].lines.some((l: string) => l.startsWith('-x')),
+    ).toBe(true);
+    expect(
+      hunks.get(weirdName)![0].lines.some((l: string) => l.startsWith('+y')),
+    ).toBe(true);
   });
 
   it('keys hunks by the real path for files whose name contains " b/"', async () => {

@@ -1768,13 +1768,14 @@ export class CoreToolScheduler {
       payload.newContent,
       toolCall.request.args,
     );
-    const updatedDiff = Diff.createPatch(
-      confirmDetails.filePath,
-      currentContent,
-      payload.newContent,
-      'Current',
-      'Proposed',
-    );
+    const updatedDiff =
+      Diff.createPatch(
+        confirmDetails.filePath,
+        currentContent,
+        payload.newContent,
+        'Current',
+        'Proposed',
+      ) ?? '';
 
     this.setArgsInternal(toolCall.request.callId, updatedParams);
     this.setStatusInternal(toolCall.request.callId, 'awaiting_approval', {

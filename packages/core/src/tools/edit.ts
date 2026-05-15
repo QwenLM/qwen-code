@@ -28,7 +28,7 @@ import {
   detectLineEnding,
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { DEFAULT_CREATE_PATCH_OPTIONS, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -393,14 +393,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     const fileName = path.basename(this.params.file_path);
-    const fileDiff = Diff.createPatch(
-      fileName,
-      editData.currentContent ?? '',
-      editData.newContent,
-      'Current',
-      'Proposed',
-      DEFAULT_DIFF_OPTIONS,
-    );
+    const fileDiff =
+      Diff.createPatch(
+        fileName,
+        editData.currentContent ?? '',
+        editData.newContent,
+        'Current',
+        'Proposed',
+        DEFAULT_CREATE_PATCH_OPTIONS,
+      ) ?? '';
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
       title: `Confirm Edit: ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`,
@@ -607,14 +608,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         editData.newContent,
       );
 
-      const fileDiff = Diff.createPatch(
-        fileName,
-        editData.currentContent ?? '', // Should not be null here if not isNewFile
-        editData.newContent,
-        'Current',
-        'Proposed',
-        DEFAULT_DIFF_OPTIONS,
-      );
+      const fileDiff =
+        Diff.createPatch(
+          fileName,
+          editData.currentContent ?? '', // Should not be null here if not isNewFile
+          editData.newContent,
+          'Current',
+          'Proposed',
+          DEFAULT_CREATE_PATCH_OPTIONS,
+        ) ?? '';
       const displayResult = {
         fileDiff,
         fileName,

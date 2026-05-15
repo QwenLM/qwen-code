@@ -771,7 +771,7 @@
             "enabled": {
               "description": "Setting to track whether Folder trust is enabled.",
               "type": "boolean",
-              "default": false
+              "default": true
             }
           }
         },

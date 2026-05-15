@@ -193,7 +193,7 @@ export async function atomicWriteFile(
 export async function atomicWriteJSON(
   filePath: string,
   data: unknown,
-  options?: AtomicWriteOptions,
+  options?: AtomicWriteFileOptions,
 ): Promise<void> {
   await atomicWriteFile(filePath, JSON.stringify(data, null, 2), {
     encoding: 'utf-8',
