@@ -279,6 +279,16 @@ denies the tool, the run hits `maxSessionTurns` and the
 `--json-schema` hint in `handleMaxTurnsExceededError` tells them where
 to look.
 
+**`--bare` interaction.** Bare mode short-circuits the settings → CLI
+config bridge: `packages/cli/src/config/config.ts` builds
+`mergedDeny` as `[...(bareMode ? [] : settings.permissions.deny), ...]`,
+so settings-level denies (and `tools.exclude`) are dropped under
+`--bare`. Argv-level `--exclude-tools` is unconditionally appended
+into `mergedDeny`, so it still applies. The synthetic tool is
+registered independently of all this (driven by `jsonSchema`, not by
+the deny list), so a settings-only deny of `structured_output`
+silently no-ops under `--bare` while the tool remains callable.
+
 ## Subagent contexts
 
 `Config.createToolRegistry` accepts a `forSubAgent: true` option that
@@ -353,7 +363,7 @@ catch schemas like `{anyOf: [{$ref: "#/$defs/String"}], $defs: {…}}`
 at parse time. Rejected for now because the cost (cycle detection,
 JSON Pointer syntax, `$defs` vs `definitions`, partial pointers,
 remote refs) outweighs the benefit; the `maxSessionTurns` hint already
-points users at "schema is satisfiable" as a likely cause.
+points users at "schema is unsatisfiable" as a likely cause.
 
 ## Open work
 

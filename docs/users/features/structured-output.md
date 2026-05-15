@@ -33,13 +33,20 @@ Output on stdout (default `--output-format text`):
 The line is exactly the JSON-stringified payload + newline — no
 envelope, no event log. Pipe it straight into `jq` or another consumer.
 
-All error messages and log lines go to **stderr**. Stdout in text
-mode is reserved for the JSON payload on success and is empty on
-failure. The model's incidental prose during planning is **not**
-mirrored to stderr — text mode discards it; reach for `--output-format
-json` or `stream-json` if you need to see it. `$(qwen --json-schema
-…)` capture patterns are safe — failures land in stderr, not mixed
-into the captured variable.
+In **text** mode, stdout is reserved for the JSON payload on success
+and is empty on failure; error messages and log lines go to stderr.
+That makes `$(qwen --json-schema …) || exit 1` capture patterns safe
+under text mode — failures land in stderr, not mixed into the captured
+variable. The model's incidental prose during planning is **not**
+mirrored to stderr either — text mode discards it; reach for
+`--output-format json` or `stream-json` if you need to see it.
+
+In `--output-format json` and `stream-json`, the failure result
+message is emitted on **stdout** alongside the success path (as the
+final element of the JSON array, or the terminating `result` line on
+the JSONL stream). Wrappers that switch to those modes must
+distinguish success from failure by reading `is_error` on the result
+message rather than by checking whether stdout is empty.
 
 > **Empty schema:** Passing `{}` produces `{}` (an empty JSON object)
 > on stdout. The model calls `structured_output` with no arguments;
@@ -72,9 +79,13 @@ with `utf8` encoding.
 > **Security note:** Schemas may contain user-supplied regular
 > expressions in `pattern` keywords. Ajv compiles these with the
 > ECMAScript regex engine, which is vulnerable to catastrophic
-> backtracking — a malicious schema like `{"pattern": "(a+)+b"}` can
-> hang the CLI on a moderately long input. Only run `--json-schema`
-> with schemas from sources you trust.
+> backtracking. Because tool arguments are always objects, the
+> `pattern` keyword only fires inside string properties — a malicious
+> schema like
+> `{"type":"object","properties":{"value":{"type":"string","pattern":"(a+)+b"}}}`
+> can hang the CLI when the model supplies a moderately long
+> matching value. Only run `--json-schema` with schemas from sources
+> you trust.
 
 Validation at parse time:
 
@@ -213,6 +224,16 @@ metadata are preserved.
 > public toward the provider and keep secrets, customer records, and
 > other sensitive payloads out of the schema body.
 
+> **Hooks see raw args.** The redaction described above only applies
+> to telemetry and chat-recording. `PreToolUse`, `PostToolUse`, and
+> `PostToolUseFailure` hooks (including HTTP hooks that can forward
+> payloads off-device) receive the unredacted `tool_input` for
+> `structured_output`, since the hook contract is "see what the tool
+> sees." If you operate audit-style catch-all hooks, either disable
+> them for `structured_output` (filter on `tool_name`) or add
+> hook-side redaction before running `--json-schema` against
+> sensitive data.
+
 ## Session resumption (`--continue` / `--resume`)
 
 `--json-schema` is a per-run flag, not a per-session property. The
@@ -239,10 +260,17 @@ synthetic tool is registered when the CLI parses its arguments, so:
 the tool only exists when `--json-schema` is set, so excluding it
 would leave the run with no terminal contract.
 
-Explicit `permissions.deny` rules or `--exclude-tools` settings DO take
-effect. If you deny the tool, the model can't call it and the run will
-hit `maxSessionTurns` — at which point the `--json-schema` hint in the
-error message tells you exactly where to look.
+Explicit `permissions.deny` rules and `--exclude-tools` settings DO
+take effect. If you deny the tool, the model can't call it and the
+run will hit `maxSessionTurns` — at which point the `--json-schema`
+hint in the error message tells you exactly where to look.
+
+> **`--bare` caveat.** Bare mode ignores most settings-derived inputs,
+> including settings-level `permissions.deny` and `tools.exclude`. The
+> synthetic tool stays registered, so a settings-only deny of
+> `structured_output` will silently no-op under `--bare`. Argv-level
+> `--exclude-tools structured_output` still applies in bare mode — use
+> the flag rather than settings if you need to lock down a bare run.
 
 ## Conflict with MCP tools
 
