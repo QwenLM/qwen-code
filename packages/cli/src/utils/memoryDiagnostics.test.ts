@@ -11,7 +11,7 @@ import {
 } from './memoryDiagnostics.js';
 
 describe('memoryDiagnostics', () => {
-  it('collects baseline process and V8 memory fields', () => {
+  it('collects baseline memory fields', () => {
     const diagnostics = getMemoryDiagnostics();
 
     expect(diagnostics.process.pid).toBe(process.pid);

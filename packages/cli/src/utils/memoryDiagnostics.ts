@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Qwen
+ * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -34,6 +34,9 @@ export interface MemoryDiagnostics {
 function countProcessInternals(
   name: '_getActiveHandles' | '_getActiveRequests',
 ) {
+  // These process methods are undocumented Node.js internals. They provide
+  // useful diagnostic counts, but may change across Node.js major versions; if
+  // unavailable or unstable, report `unavailable` instead of failing /doctor.
   const getter = (process as unknown as Record<string, unknown>)[name];
   if (typeof getter !== 'function') {
     return { count: 0, unavailable: true };
@@ -88,6 +91,8 @@ export function getMemoryDiagnostics(): MemoryDiagnostics {
 }
 
 function formatBytes(value: unknown): string {
+  // Report binary mebibytes (MiB) because Node/V8 memory APIs return byte
+  // counts and binary units avoid ambiguity when comparing heap limits.
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return 'unavailable';
   }

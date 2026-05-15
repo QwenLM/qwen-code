@@ -34,16 +34,7 @@ describe('doctorCommand', () => {
     },
   ];
 
-  beforeEach(() => {
-    mockContext = createMockCommandContext({
-      executionMode: 'interactive',
-      ui: {
-        addItem: vi.fn(),
-        setPendingItem: vi.fn(),
-      },
-    } as unknown as CommandContext);
-
-    vi.mocked(doctorChecksModule.runDoctorChecks).mockResolvedValue(mockChecks);
+  function mockMemoryDiagnostics() {
     vi.mocked(memoryDiagnosticsModule.getMemoryDiagnostics).mockReturnValue({
       generatedAt: '2026-05-15T12:00:00.000Z',
       process: {
@@ -70,6 +61,19 @@ describe('doctorCommand', () => {
     vi.mocked(memoryDiagnosticsModule.formatMemoryDiagnostics).mockReturnValue(
       'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3',
     );
+  }
+
+  beforeEach(() => {
+    mockContext = createMockCommandContext({
+      executionMode: 'interactive',
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    vi.mocked(doctorChecksModule.runDoctorChecks).mockResolvedValue(mockChecks);
+    mockMemoryDiagnostics();
   });
 
   afterEach(() => {
@@ -179,6 +183,82 @@ describe('doctorCommand', () => {
       messageType: 'info',
       content: 'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3',
     });
+    expect(doctorChecksModule.runDoctorChecks).not.toHaveBeenCalled();
+  });
+
+  it('should stop memory diagnostics when aborted before collection', async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+
+    mockContext = createMockCommandContext({
+      executionMode: 'interactive',
+      abortSignal: abortController.signal,
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await doctorCommand.action!(mockContext, 'memory');
+
+    expect(result).toBeUndefined();
+    expect(memoryDiagnosticsModule.getMemoryDiagnostics).not.toHaveBeenCalled();
+    expect(
+      memoryDiagnosticsModule.formatMemoryDiagnostics,
+    ).not.toHaveBeenCalled();
+    expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+    expect(doctorChecksModule.runDoctorChecks).not.toHaveBeenCalled();
+  });
+
+  it('should not add memory diagnostics when aborted after collection', async () => {
+    const abortController = new AbortController();
+    vi.mocked(memoryDiagnosticsModule.getMemoryDiagnostics).mockImplementation(
+      () => {
+        const diagnostics = {
+          generatedAt: '2026-05-15T12:00:00.000Z',
+          process: {
+            pid: 123,
+            nodeVersion: 'v22.0.0',
+            platform: 'linux' as const,
+            arch: 'x64',
+            uptimeSeconds: 42,
+          },
+          memory: {
+            rss: 100,
+            heapTotal: 80,
+            heapUsed: 40,
+            external: 5,
+            arrayBuffers: 2,
+          },
+          v8: {
+            heapStatistics: {},
+            heapSpaces: [],
+          },
+          activeHandles: { count: 3, unavailable: false },
+          activeRequests: { count: 1, unavailable: false },
+        };
+        abortController.abort();
+        return diagnostics;
+      },
+    );
+
+    mockContext = createMockCommandContext({
+      executionMode: 'interactive',
+      abortSignal: abortController.signal,
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await doctorCommand.action!(mockContext, 'memory');
+
+    expect(result).toBeUndefined();
+    expect(memoryDiagnosticsModule.getMemoryDiagnostics).toHaveBeenCalled();
+    expect(
+      memoryDiagnosticsModule.formatMemoryDiagnostics,
+    ).not.toHaveBeenCalled();
+    expect(mockContext.ui.addItem).not.toHaveBeenCalled();
     expect(doctorChecksModule.runDoctorChecks).not.toHaveBeenCalled();
   });
 

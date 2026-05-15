@@ -6,13 +6,16 @@
 
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
-import type { HistoryItemDoctor, HistoryItemInfo } from '../types.js';
+import type { HistoryItemDoctor } from '../types.js';
 import { runDoctorChecks } from '../../utils/doctorChecks.js';
 import {
   formatMemoryDiagnostics,
   getMemoryDiagnostics,
 } from '../../utils/memoryDiagnostics.js';
 import { t } from '../../i18n/index.js';
+
+const MEMORY_SUBCOMMAND = 'memory';
+const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND] as const;
 
 export const doctorCommand: SlashCommand = {
   name: 'doctor',
@@ -24,24 +27,41 @@ export const doctorCommand: SlashCommand = {
   argumentHint: '[memory]',
   examples: ['/doctor', '/doctor memory'],
   completion: async (_context, partialArg) => {
-    const candidates = ['memory'];
     const trimmed = partialArg.trimStart();
-    return candidates.filter((candidate) => candidate.startsWith(trimmed));
+    return DOCTOR_SUBCOMMANDS.filter((candidate) =>
+      candidate.startsWith(trimmed),
+    );
   },
   action: async (context, args) => {
     const executionMode = context.executionMode ?? 'interactive';
     const abortSignal = context.abortSignal;
-    const subCommand = args.trim().toLowerCase();
+    const subCommand = args?.trim().toLowerCase() ?? '';
 
-    if (subCommand === 'memory') {
-      const report = formatMemoryDiagnostics(getMemoryDiagnostics());
+    if (subCommand === MEMORY_SUBCOMMAND) {
+      if (abortSignal?.aborted) {
+        return;
+      }
+
+      const diagnostics = getMemoryDiagnostics();
+
+      if (abortSignal?.aborted) {
+        return;
+      }
+
+      const report = formatMemoryDiagnostics(diagnostics);
+
+      if (abortSignal?.aborted) {
+        return;
+      }
 
       if (executionMode === 'interactive') {
-        const memoryItem: Omit<HistoryItemInfo, 'id'> = {
-          type: 'info',
-          text: report,
-        };
-        context.ui.addItem(memoryItem, Date.now());
+        context.ui.addItem(
+          {
+            type: 'info',
+            text: report,
+          },
+          Date.now(),
+        );
         return;
       }
 
