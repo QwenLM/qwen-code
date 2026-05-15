@@ -183,8 +183,8 @@ function collectTranscript(
   try {
     const client = config.getGeminiClient();
     if (!client.isInitialized()) return fallbackTranscript(lastAssistantText);
-    const full = client.getHistory();
-    const tail = full.slice(-TRANSCRIPT_TAIL_MESSAGES).map(capContent);
+    const full = client.getHistoryTail(TRANSCRIPT_TAIL_MESSAGES);
+    const tail = full.map(capContent);
     if (tail.length === 0) return fallbackTranscript(lastAssistantText);
     // If the live history's last assistant text doesn't include the supplied
     // `lastAssistantText`, splice it in — the Stop hook can fire before the

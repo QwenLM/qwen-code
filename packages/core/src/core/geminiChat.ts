@@ -1158,6 +1158,18 @@ export class GeminiChat {
   }
 
   /**
+   * Returns a deep-copied tail of the chat history. This avoids cloning the
+   * entire session when callers only need recent context.
+   */
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    if (count <= 0) return [];
+    const history = curated
+      ? extractCuratedHistory(this.history)
+      : this.history;
+    return structuredClone(history.slice(-count));
+  }
+
+  /**
    * Returns the number of entries in the raw chat history. O(1) and
    * does not clone — use this when you only need the count and would
    * otherwise pay the {@link getHistory} `structuredClone` cost.

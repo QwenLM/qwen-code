@@ -1887,6 +1887,31 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('getHistoryTail', () => {
+    it('returns only the requested recent entries as a deep copy', () => {
+      const oldContent: Content = { role: 'user', parts: [{ text: 'old' }] };
+      const recentContent: Content = {
+        role: 'model',
+        parts: [{ text: 'recent' }],
+      };
+      chat.addHistory(oldContent);
+      chat.addHistory(recentContent);
+
+      const tail = chat.getHistoryTail(1);
+
+      expect(tail).toEqual([recentContent]);
+      expect(tail[0]).not.toBe(recentContent);
+      tail[0]!.parts![0]!.text = 'mutated';
+      expect(chat.getHistory()[1]!.parts![0]!.text).toBe('recent');
+    });
+
+    it('returns an empty tail for non-positive counts', () => {
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      expect(chat.getHistoryTail(0)).toEqual([]);
+      expect(chat.getHistoryTail(-1)).toEqual([]);
+    });
+  });
+
   describe('sendMessageStream with retries', () => {
     it('should retry on invalid content, succeed, and report metrics', async () => {
       vi.useFakeTimers();

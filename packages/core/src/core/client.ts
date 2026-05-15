@@ -314,6 +314,10 @@ export class GeminiClient {
     return this.getChat().getHistory(curated);
   }
 
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    return this.getChat().getHistoryTail(count, curated);
+  }
+
   /**
    * Pop orphaned trailing user entries from the in-memory chat history.
    * Used by:

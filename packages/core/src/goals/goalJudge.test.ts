@@ -17,11 +17,13 @@ vi.mock('../utils/errorReporting.js', () => ({
 interface MockClient {
   generateContent: ReturnType<typeof vi.fn>;
   getHistory: ReturnType<typeof vi.fn>;
+  getHistoryTail?: ReturnType<typeof vi.fn>;
   isInitialized: ReturnType<typeof vi.fn>;
 }
 
 function makeMockClient(opts: {
   history?: Content[];
+  historyTail?: Content[];
   initialized?: boolean;
   reply?: string;
   throws?: Error;
@@ -30,6 +32,9 @@ function makeMockClient(opts: {
   return {
     isInitialized: vi.fn().mockReturnValue(opts.initialized ?? true),
     getHistory: vi.fn().mockReturnValue(opts.history ?? []),
+    getHistoryTail: vi
+      .fn()
+      .mockReturnValue(opts.historyTail ?? opts.history ?? []),
     generateContent: opts.throws
       ? vi.fn().mockRejectedValue(opts.throws)
       : vi.fn().mockResolvedValue({
@@ -225,6 +230,26 @@ describe('judgeGoal', () => {
     expect(generationConfig.responseSchema).toBeTruthy();
     expect(generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
     expect(generationConfig.temperature).toBe(0);
+  });
+
+  it('uses a bounded history tail without cloning the full session when available', async () => {
+    const tail: Content[] = [
+      { role: 'user', parts: [{ text: 'recent prompt' }] },
+      { role: 'model', parts: [{ text: 'recent answer' }] },
+    ];
+    const client = makeMockClient({ history: [], historyTail: tail });
+    const config = makeConfig({ client });
+
+    await judgeGoal(config, {
+      condition: 'finish',
+      lastAssistantText: 'recent answer',
+      signal: new AbortController().signal,
+    });
+
+    expect(client.getHistoryTail).toHaveBeenCalledWith(24);
+    expect(client.getHistory).not.toHaveBeenCalled();
+    const [contents] = client.generateContent.mock.calls[0];
+    expect(contents.slice(0, tail.length)).toEqual(tail);
   });
 
   it('appends lastAssistantText as a model turn when history does not contain it', async () => {
