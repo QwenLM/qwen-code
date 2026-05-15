@@ -400,6 +400,36 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
+    it('400 when cwd exceeds MAX_WORKSPACE_PATH_LENGTH (memory amplification guard)', async () => {
+      // Real filesystem paths fit well under PATH_MAX (4096 on Linux).
+      // A multi-MB `cwd` is either a malformed client or a memory-
+      // amplification attempt — `WorkspaceMismatchError` interpolates
+      // `requested` into `.message` twice, `sendBridgeError` writes it
+      // to stderr, and `res.json` echoes it again, so a ~10 MB body
+      // (right under express.json's 10 MB cap) would amplify to
+      // ~60 MB/request × maxConnections. The route caps the input
+      // before any of those echoes.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      // Build an absolute path of MAX+1 chars. `path.isAbsolute`
+      // sees the leading `/` and the length cap fires before the
+      // isAbsolute branch — verifying both invariants in one go.
+      const longCwd = `/${'a'.repeat(4096)}`;
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: longCwd });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/exceeds the 4096-character limit/);
+      // Bridge must NOT be touched — silent fallback or pass-through
+      // would defeat the cap.
+      expect(bridge.calls).toHaveLength(0);
+    });
+
     it('400 workspace_mismatch when bridge rejects cross-workspace cwd (#3803 §02)', async () => {
       // Single-workspace mode: bridge throws WorkspaceMismatchError
       // when the route forwards a non-bound cwd. Route translates
@@ -631,29 +661,64 @@ describe('createServeApp', () => {
 
   describe('GET /workspace/:id/sessions', () => {
     it('returns the list returned by the bridge', async () => {
+      // #3803 §02 (commit 0c6e963cd): the route now rejects
+      // cross-workspace queries with 400 workspace_mismatch (so
+      // orchestrators don't mistake "no sessions here" for
+      // "workspace is idle"). Bind the daemon to the same workspace
+      // we'll query so the happy path runs.
       const bridge = fakeBridge({
         listImpl: () => [
-          { sessionId: 's-1', workspaceCwd: '/work/a' },
-          { sessionId: 's-2', workspaceCwd: '/work/a' },
+          { sessionId: 's-1', workspaceCwd: WS_BOUND },
+          { sessionId: 's-2', workspaceCwd: WS_BOUND },
         ],
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
       const res = await request(app)
-        .get(`/workspace/${encodeURIComponent('/work/a')}/sessions`)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(2);
-      expect(bridge.listCalls).toEqual(['/work/a']);
+      expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
     it('returns an empty array when no sessions exist for the workspace', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
       const res = await request(app)
-        .get(`/workspace/${encodeURIComponent('/work/idle')}/sessions`)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ sessions: [] });
+    });
+
+    it('400 workspace_mismatch when querying a cross-workspace path (#3803 §02)', async () => {
+      // Pin the §02 cross-workspace rejection: querying any path
+      // that doesn't canonicalize to the bound workspace gets a 400
+      // with `code: 'workspace_mismatch'` and both paths in the
+      // body — so an orchestrator-aware client can route to / spawn
+      // the right daemon. The bridge MUST NOT be touched (a silent
+      // fallback would defeat the whole purpose of §02).
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_DIFFERENT)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('workspace_mismatch');
+      expect(res.body.boundWorkspace).toBe(WS_BOUND);
+      expect(bridge.listCalls).toHaveLength(0);
     });
 
     it('400 when :id does not decode to an absolute path', async () => {
