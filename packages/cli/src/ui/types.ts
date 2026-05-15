@@ -342,6 +342,19 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
 
 // --- Context Usage types ---
 
+export type ContextTier = 'safe' | 'warn' | 'auto' | 'hard';
+
+export interface ContextThresholds {
+  /** Window minus 20K summary reserve — the budget available for input + summary. */
+  effectiveWindow: number;
+  /** Token count at which the warn tier triggers. */
+  warn: number;
+  /** Token count at which auto-compaction triggers. */
+  auto: number;
+  /** Token count at which auto-compaction is forced (resets failure counter). */
+  hard: number;
+}
+
 export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
@@ -350,7 +363,20 @@ export interface ContextCategoryBreakdown {
   skills: number;
   messages: number;
   freeSpace: number;
+  /**
+   * Distance from the auto-compaction threshold to the window edge.
+   * Derived from `thresholds.auto` (= `contextWindowSize - auto`); retained
+   * so the legacy three-segment progress bar in `ContextUsage.tsx` keeps
+   * working without a separate code path.
+   */
   autocompactBuffer: number;
+  /** Three-tier ladder used by auto-compaction (warn / auto / hard) plus the effective window. */
+  thresholds: ContextThresholds;
+  /**
+   * Which tier the current usage sits in. `safe` is below `warn`; `warn` /
+   * `auto` / `hard` mean `totalTokens` has crossed the corresponding tier.
+   */
+  currentTier: ContextTier;
 }
 
 export interface ContextToolDetail {

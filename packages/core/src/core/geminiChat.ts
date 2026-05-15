@@ -45,8 +45,11 @@ import {
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
+  computeThresholds,
+  MAX_CONSECUTIVE_FAILURES,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
+import { estimatePromptTokens } from '../services/tokenEstimation.js';
 import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
@@ -144,6 +147,13 @@ interface ContentRetryOptions {
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
+  /**
+   * Pending user message about to be sent. Threaded through to the
+   * compression service's cheap-gate so it can see the real prompt size
+   * even when `lastPromptTokenCount === 0` (first send after inherited
+   * history). See `estimatePromptTokens` for the fallback math.
+   */
+  pendingUserMessage?: Content;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -434,12 +444,13 @@ export class GeminiChat {
   private lastPromptTokenCount = 0;
 
   /**
-   * Per-chat sticky flag. After an unforced compression attempt fails (empty
-   * summary or inflated token count), automatic compaction is suppressed
-   * for the remainder of this chat to avoid burning compression API calls
-   * in a loop. Manual `/compress` still works (it passes `force=true`).
+   * Number of consecutive auto-compaction failures for this chat. The cheap-gate
+   * NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3) until a successful
+   * compress (forced or not) resets it to 0. Replaces the single-shot
+   * hasFailedCompressionAttempt lock that previously disabled auto-compaction
+   * for the rest of the session on any failure.
    */
-  private hasFailedCompressionAttempt = false;
+  private consecutiveFailures = 0;
 
   /**
    * Heap-pressure compaction is process-wide pressure applied per chat. If one
@@ -542,10 +553,11 @@ export class GeminiChat {
       force,
       model,
       config: this.config,
-      hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
+      consecutiveFailures: this.consecutiveFailures,
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
       bypassTokenThreshold,
+      pendingUserMessage: options?.pendingUserMessage,
       trigger: options?.trigger,
       signal,
     });
@@ -571,23 +583,25 @@ export class GeminiChat {
       // Subagents pass `telemetryService=undefined` to keep their context
       // usage out of the main agent's UI counters.
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
-      // Re-enable auto-compaction so a forced /compress recovers a chat
-      // that an earlier auto-attempt latched off.
-      this.hasFailedCompressionAttempt = false;
+      // Reset the consecutive-failure counter on success so a forced /compress
+      // (or any successful compaction) recovers a chat whose breaker had
+      // tripped. Also clear the heap-pressure cooldown — pressure has eased
+      // enough that compaction worked.
+      this.consecutiveFailures = 0;
       this.heapPressureCompressionCooldownUntil = 0;
     } else if (bypassTokenThreshold) {
-      // If heap-pressure compaction cannot reduce history (NOOP or failure),
-      // avoid repeatedly cloning history and/or paying side-query latency while
-      // the process-wide pressure remains high.
+      // Heap-pressure compaction failed: skip touching the failure counter
+      // (it tracks token-threshold compaction health, not memory pressure)
+      // and start a short cooldown so we don't burn API calls / clones while
+      // pressure remains high.
       this.heapPressureCompressionCooldownUntil =
         Date.now() + HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
-      // Track failed attempts (only mark as failed if not forced) so we
-      // stop spending compression-API calls on a chat that can't shrink.
-      // Heap-pressure attempts are a safety net, not evidence that normal
-      // token-threshold compaction should be latched off for this chat.
+      // Track failed attempts (only count if not forced) so we stop spending
+      // compression-API calls on a chat that can't shrink after
+      // MAX_CONSECUTIVE_FAILURES strikes in a row.
       if (!force) {
-        this.hasFailedCompressionAttempt = true;
+        this.consecutiveFailures += 1;
       }
     }
 
@@ -689,14 +703,39 @@ export class GeminiChat {
       // resolves it) has not run yet. Any setup error before returning the
       // generator must release the lock or subsequent sends will block forever
       // at `await this.sendPromise`.
+      // Build the user content BEFORE compression so the cheap-gate can size
+      // the upcoming prompt — closes the "first send after inherited history"
+      // gap where `lastPromptTokenCount === 0` and the gate would otherwise
+      // see only the stale prior-turn count (0).
+      const userContent = createUserContent(params.message);
+
+      // Hard-tier rescue: when the estimated prompt size is at or above the
+      // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
+      // this send instead of waiting for the API to reject the request as too
+      // large. This also resets the consecutive-failure counter so a session
+      // that previously latched the breaker can recover — hard implies the
+      // next API call would very likely overflow without compaction.
+      const contextLimit =
+        this.config.getContentGeneratorConfig()?.contextWindowSize ??
+        DEFAULT_TOKEN_LIMIT;
+      const { hard } = computeThresholds(contextLimit);
+      const effectiveTokens = estimatePromptTokens(
+        this.getHistory(true),
+        userContent,
+        this.lastPromptTokenCount,
+      );
+      const shouldForceFromHard = effectiveTokens >= hard;
+      if (shouldForceFromHard) {
+        this.consecutiveFailures = 0;
+      }
+
       compressionInfo = await this.tryCompress(
         prompt_id,
         model,
-        false,
+        shouldForceFromHard,
         params.config?.abortSignal,
+        { pendingUserMessage: userContent },
       );
-
-      const userContent = createUserContent(params.message);
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
@@ -891,7 +930,12 @@ export class GeminiChat {
                   if (
                     isCompressionFailureStatus(reactiveInfo.compressionStatus)
                   ) {
-                    self.hasFailedCompressionAttempt = true;
+                    // Reactive compression is force=true so tryCompress's failure
+                    // branch did not increment the counter. We still want to
+                    // suppress further auto-compaction since the chat clearly
+                    // can't shrink — trip the breaker to its NOOP threshold so
+                    // subsequent unforced sends short-circuit at the cheap-gate.
+                    self.consecutiveFailures = MAX_CONSECUTIVE_FAILURES;
                   }
                 } catch (compressionError) {
                   if (

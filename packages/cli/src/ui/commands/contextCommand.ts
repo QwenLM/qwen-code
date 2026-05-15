@@ -13,6 +13,7 @@ import {
   MessageType,
   type HistoryItemContextUsage,
   type ContextCategoryBreakdown,
+  type ContextTier,
   type ContextToolDetail,
   type ContextMemoryDetail,
   type ContextSkillDetail,
@@ -24,14 +25,26 @@ import {
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
+  computeThresholds,
+  type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 /**
- * Default compression token threshold (triggers compression at 70% usage).
- * The autocompact buffer is (1 - threshold) * contextWindowSize.
+ * Classify a token count against the three-tier compaction ladder. Mirrors
+ * the gating logic in `chatCompressionService` / `geminiChat` so the
+ * `/context` output's "current tier" label reflects exactly which tier the
+ * runtime would treat the session as sitting in.
  */
-const DEFAULT_COMPRESSION_THRESHOLD = 0.7;
+function currentTier(
+  tokens: number,
+  thresholds: CompactionThresholds,
+): ContextTier {
+  if (tokens >= thresholds.hard) return 'hard';
+  if (tokens >= thresholds.auto) return 'auto';
+  if (tokens >= thresholds.warn) return 'warn';
+  return 'safe';
+}
 
 /**
  * Estimate token count for a string using a character-based heuristic.
@@ -174,13 +187,16 @@ export async function collectContextData(
 
   const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
-  const compressionThreshold =
-    config.getChatCompression()?.contextPercentageThreshold ??
-    DEFAULT_COMPRESSION_THRESHOLD;
-  const autocompactBuffer =
-    compressionThreshold > 0
-      ? Math.round((1 - compressionThreshold) * contextWindowSize)
-      : 0;
+  const thresholds = computeThresholds(contextWindowSize);
+  // Keep the `(window - auto)` buffer for the legacy three-segment progress
+  // bar in ContextUsage.tsx — it visualizes the headroom between the auto
+  // threshold and the window edge, which is exactly `contextWindowSize -
+  // thresholds.auto`. New consumers should read `breakdown.thresholds`
+  // directly.
+  const autocompactBuffer = Math.max(
+    0,
+    Math.round(contextWindowSize - thresholds.auto),
+  );
 
   const rawOverhead =
     systemPromptTokens +
@@ -287,6 +303,11 @@ export async function collectContextData(
         : skills;
   }
 
+  // Tier classification: when no API data has come back yet we treat the
+  // session as `safe` rather than estimating from overhead — the per-tier
+  // labels are about *reported* usage, not pre-conversation overhead.
+  const tierTokens = isEstimated ? 0 : apiTotalTokens;
+
   const breakdown: ContextCategoryBreakdown = {
     systemPrompt: displaySystemPrompt,
     builtinTools: displayBuiltinTools,
@@ -296,6 +317,13 @@ export async function collectContextData(
     messages: messagesTokens,
     freeSpace,
     autocompactBuffer,
+    thresholds: {
+      effectiveWindow: thresholds.effectiveWindow,
+      warn: thresholds.warn,
+      auto: thresholds.auto,
+      hard: thresholds.hard,
+    },
+    currentTier: currentTier(tierTokens, thresholds),
   };
 
   return {
@@ -340,6 +368,11 @@ function fmtCategoryRow(
   return `${leftPart}${' '.repeat(dots)}${right}`;
 }
 
+/** Locale-grouped integer (e.g. 147000 -> "147,000"). */
+function formatNum(n: number): string {
+  return Math.round(n).toLocaleString('en-US');
+}
+
 /**
  * Convert a HistoryItemContextUsage to a human-readable text string,
  * mirroring the layout of the interactive ContextUsage component.
@@ -377,13 +410,15 @@ export function formatContextUsageText(data: HistoryItemContextUsage): string {
     lines.push('');
     lines.push(fmtCategoryRow('Used', totalTokens, contextWindowSize));
     lines.push(fmtCategoryRow('Free', breakdown.freeSpace, contextWindowSize));
+    lines.push('');
+    lines.push('**Compaction thresholds**');
     lines.push(
-      fmtCategoryRow(
-        'Autocompact buffer',
-        breakdown.autocompactBuffer,
-        contextWindowSize,
-      ),
+      `  Effective window:   ${formatNum(breakdown.thresholds.effectiveWindow)}  (window − 20K reserve)`,
     );
+    lines.push(`  Warn threshold:     ${formatNum(breakdown.thresholds.warn)}`);
+    lines.push(`  Auto threshold:     ${formatNum(breakdown.thresholds.auto)}`);
+    lines.push(`  Hard threshold:     ${formatNum(breakdown.thresholds.hard)}`);
+    lines.push(`  Current tier:       ${breakdown.currentTier}`);
     lines.push('');
     lines.push('**Usage by category**');
   }

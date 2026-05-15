@@ -131,6 +131,10 @@ export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 // Services
 // ============================================================================
 
+export {
+  computeThresholds,
+  type CompactionThresholds,
+} from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
