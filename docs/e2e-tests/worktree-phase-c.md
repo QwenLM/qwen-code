@@ -54,10 +54,10 @@ git commit -q -m "initial" --no-verify
 ```bash
 SESSION=$(node $QWEN "use the enter_worktree tool with name='a1-test' to create a worktree" \
   --approval-mode yolo --output-format json 2>/dev/null \
-  | jq -r 'select(.type=="system") | .session_id' | head -1)
+  | jq -r '.[] | select(.type=="system") | .session_id' | head -1)
 
-PROJECT_HASH=$(node -e "console.log(require('crypto').createHash('sha256').update(process.argv[1]).digest('hex'))" "$TEST_DIR")
-SIDECAR=~/.qwen/tmp/$PROJECT_HASH/chats/$SESSION.worktree.json
+PROJECT_ID=$(node -e "console.log(process.argv[1].replace(/[^a-zA-Z0-9]/g,'-'))" "$TEST_DIR")
+SIDECAR=~/.qwen/projects/$PROJECT_ID/chats/$SESSION.worktree.json
 
 # Verify all fields present
 cat "$SIDECAR" | jq '.slug, .worktreePath, .worktreeBranch, .originalCwd, .originalBranch, .originalHeadCommit'
@@ -79,9 +79,9 @@ cat "$SIDECAR" | jq '.slug, .worktreePath, .worktreeBranch, .originalCwd, .origi
 ```bash
 SESSION=$(node $QWEN "create a worktree named 'a2-test' using enter_worktree, then immediately exit it with action='keep' using exit_worktree" \
   --approval-mode yolo --output-format json 2>/dev/null \
-  | jq -r 'select(.type=="system") | .session_id' | head -1)
+  | jq -r '.[] | select(.type=="system") | .session_id' | head -1)
 
-SIDECAR=~/.qwen/tmp/$PROJECT_HASH/chats/$SESSION.worktree.json
+SIDECAR=~/.qwen/projects/$PROJECT_ID/chats/$SESSION.worktree.json
 test ! -f "$SIDECAR" && echo "PASS: sidecar removed" || echo "FAIL: sidecar still exists"
 ```
 
@@ -94,9 +94,9 @@ test ! -f "$SIDECAR" && echo "PASS: sidecar removed" || echo "FAIL: sidecar stil
 ```bash
 SESSION=$(node $QWEN "create a worktree named 'a3-test' using enter_worktree, then immediately exit it with action='remove' and discard_changes=true using exit_worktree" \
   --approval-mode yolo --output-format json 2>/dev/null \
-  | jq -r 'select(.type=="system") | .session_id' | head -1)
+  | jq -r '.[] | select(.type=="system") | .session_id' | head -1)
 
-SIDECAR=~/.qwen/tmp/$PROJECT_HASH/chats/$SESSION.worktree.json
+SIDECAR=~/.qwen/projects/$PROJECT_ID/chats/$SESSION.worktree.json
 test ! -f "$SIDECAR" && echo "PASS: sidecar removed" || echo "FAIL: sidecar still exists"
 # Also verify the worktree dir is gone
 test ! -d "$TEST_DIR/.qwen/worktrees/a3-test" && echo "PASS: worktree dir removed"
@@ -181,7 +181,7 @@ rm -f /tmp/qwen-wt-hook-marker
 # Create initial session with worktree
 INIT_OUT=$(node $QWEN "use enter_worktree with name='c1-test' to create a worktree" \
   --approval-mode yolo --output-format json 2>/dev/null)
-SESSION=$(echo "$INIT_OUT" | jq -r 'select(.type=="system") | .session_id' | head -1)
+SESSION=$(echo "$INIT_OUT" | jq -r '.[] | select(.type=="system") | .session_id' | head -1)
 
 # Resume the session and ask "what's my context?"
 RESUMED=$(node $QWEN --resume "$SESSION" "say SIDECAR-CONFIRM" \
@@ -200,8 +200,8 @@ echo "$RESUMED" | grep -q "Resumed.*Active worktree.*c1-test" && echo "PASS" || 
 ```bash
 INIT_OUT=$(node $QWEN "use enter_worktree with name='c2-test' to create a worktree" \
   --approval-mode yolo --output-format json 2>/dev/null)
-SESSION=$(echo "$INIT_OUT" | jq -r 'select(.type=="system") | .session_id' | head -1)
-SIDECAR=~/.qwen/tmp/$PROJECT_HASH/chats/$SESSION.worktree.json
+SESSION=$(echo "$INIT_OUT" | jq -r '.[] | select(.type=="system") | .session_id' | head -1)
+SIDECAR=~/.qwen/projects/$PROJECT_ID/chats/$SESSION.worktree.json
 
 # Delete the worktree directory out-of-band
 rm -rf "$TEST_DIR/.qwen/worktrees/c2-test"
