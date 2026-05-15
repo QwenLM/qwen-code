@@ -455,7 +455,14 @@ class Session {
         captureMonitorRegistrations: false,
       });
     } catch (error) {
-      debugLogger.error('[Session] Query execution error:', error);
+      if (turnAbortController.signal.aborted) {
+        debugLogger.debug(
+          '[Session] Query cancelled:',
+          (error as Error)?.message,
+        );
+      } else {
+        debugLogger.error('[Session] Query execution error:', error);
+      }
     } finally {
       if (this.currentTurnAbortController === turnAbortController) {
         this.currentTurnAbortController = null;
@@ -494,6 +501,8 @@ class Session {
           captureMonitorRegistrations: false,
         },
       );
+    } catch (error) {
+      debugLogger.error('[Session] Monitor notification error:', error);
     } finally {
       if (this.currentTurnAbortController === turnAbortController) {
         this.currentTurnAbortController = null;
@@ -599,8 +608,12 @@ class Session {
 
   private handleInterrupt(): void {
     debugLogger.info('[Session] Interrupt requested');
-    this.currentTurnAbortController?.abort();
-    this.dispatcher?.abortOutgoingRequests('Interrupted');
+    if (this.currentTurnAbortController) {
+      this.currentTurnAbortController.abort();
+      this.dispatcher?.abortOutgoingRequests('Interrupted');
+    } else {
+      debugLogger.warn('[Session] No active turn to interrupt');
+    }
   }
 
   private setupSignalHandlers(): void {
