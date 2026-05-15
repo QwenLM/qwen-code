@@ -160,7 +160,10 @@ export interface CliArgs {
   resume: string | undefined;
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
-  /** Fork the resumed session into a new session before continuing */
+  /**
+   * Create a new forked session from the resumed session. Must be used with
+   * --resume or --continue.
+   */
   forkSession?: boolean | undefined;
   maxSessionTurns: number | undefined;
   coreTools: string[] | undefined;
@@ -809,7 +812,7 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('fork-session', {
           type: 'boolean',
           description:
-            'Fork the resumed session into a new session before continuing. Must be used with --resume or --continue.',
+            'Create a new forked session from the resumed session. Must be used with --resume or --continue.',
           default: false,
         })
         .option('max-session-turns', {
@@ -1531,7 +1534,9 @@ export async function loadCliConfig(
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
       } else if (argv.forkSession) {
-        writeStderrLine('No saved session found to fork.');
+        writeStderrLine(
+          'Cannot use --fork-session with --continue: no saved session found to fork.',
+        );
         process.exit(1);
       }
     }

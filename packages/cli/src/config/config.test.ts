@@ -438,6 +438,8 @@ describe('parseArguments', () => {
   it('should parse --fork-session with the --resume picker form', async () => {
     process.argv = ['node', 'script.js', '--resume', '--fork-session'];
     const argv = await parseArguments();
+    // Empty string is the existing yargs shape for picker form: --resume
+    // without an explicit session ID.
     expect(argv.resume).toBe('');
     expect(argv.forkSession).toBe(true);
   });
@@ -935,10 +937,30 @@ describe('loadCliConfig', () => {
       sourceSessionId,
       config.getSessionId(),
     );
-    expect(config.getSessionId()).not.toBe(sourceSessionId);
+    expect(config.getSessionId()).toBe(
+      mockSessionServiceInstance.forkSession.mock.calls[0]?.[1],
+    );
     expect(mockSessionServiceInstance.loadSession).toHaveBeenCalledWith(
       config.getSessionId(),
     );
+  });
+
+  it('should explain when --continue --fork-session has no saved session to fork', async () => {
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(
+      loadCliConfig({}, {
+        continue: true,
+        forkSession: true,
+      } as CliArgs),
+    ).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Cannot use --fork-session with --continue: no saved session found to fork.',
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
   });
 
   it('should reset context filenames to defaults when context.fileName is not configured', async () => {
