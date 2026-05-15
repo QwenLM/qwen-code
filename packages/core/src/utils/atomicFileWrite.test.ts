@@ -261,8 +261,12 @@ describe('atomicWriteFile', () => {
     // Should have updated the real target through both symlinks.
     const content = await fs.readFile(targetFile, 'utf-8');
     expect(content).toBe('updated via dir symlink');
-    // Symlinks themselves should be intact.
-    expect(await fs.readlink(linkDir)).toBe(realDir);
-    expect(await fs.readlink(linkInRealDir)).toBe('../otherDir/target.txt');
+    // Symlinks themselves should be intact (normalize for Windows path separators).
+    expect(path.normalize(await fs.readlink(linkDir))).toBe(
+      path.normalize(realDir),
+    );
+    expect(path.normalize(await fs.readlink(linkInRealDir))).toBe(
+      path.normalize('../otherDir/target.txt'),
+    );
   });
 });
