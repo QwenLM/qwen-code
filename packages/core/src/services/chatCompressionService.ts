@@ -20,12 +20,7 @@ import {
   resolveSlimmingConfig,
   slimCompactionInput,
 } from './compactionInputSlimming.js';
-
-/**
- * Threshold for compression token count as a fraction of the model's token limit.
- * If the chat history exceeds this threshold, it will be compressed.
- */
-export const COMPRESSION_TOKEN_THRESHOLD = 0.7;
+import { estimatePromptTokens } from './tokenEstimation.js';
 
 /**
  * The fraction of the latest chat history to keep. A value of 0.3
@@ -49,6 +44,103 @@ export const MIN_COMPRESSION_FRACTION = 0.05;
  * always retained on top of these).
  */
 export const TOOL_ROUND_RETAIN_COUNT = 2;
+
+/**
+ * Hard cap on the compression sideQuery output (summary text only, since
+ * thinking is disabled). Mirrors claude-code's MAX_OUTPUT_TOKENS_FOR_SUMMARY
+ * (autoCompact.ts:30) which is based on p99.99 of real compaction outputs.
+ */
+export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
+
+/**
+ * Default proportional auto-compaction threshold. Used as a small-window
+ * fallback / safety net inside computeThresholds — when the window is so
+ * small that the absolute branch becomes degenerate, the proportional
+ * branch keeps the trigger usable.
+ */
+export const DEFAULT_PCT = 0.7;
+
+/**
+ * Offset from DEFAULT_PCT used to position the warn tier proportionally
+ * (warn-pct = 0.7 - 0.1 = 0.6). Three-tier ladder makes warn fire
+ * meaningfully before auto on small windows where the absolute formula
+ * would otherwise compress warn flush against auto.
+ */
+export const WARN_PCT_OFFSET = 0.1;
+
+/**
+ * Token budget reserved from the window for compression output. Matches
+ * COMPACT_MAX_OUTPUT_TOKENS because thinking is disabled (see Task 1) and
+ * maxOutputTokens is therefore the hard ceiling on total summary output.
+ */
+export const SUMMARY_RESERVE = COMPACT_MAX_OUTPUT_TOKENS; // 20_000
+
+/**
+ * Distance between auto threshold and effectiveWindow. Matches claude-code's
+ * AUTOCOMPACT_BUFFER_TOKENS (autoCompact.ts:62) — empirically chosen to leave
+ * headroom for the compaction sideQuery round-trip plus a few user-message
+ * turns before the window saturates.
+ */
+export const AUTOCOMPACT_BUFFER = 13_000;
+
+/**
+ * Distance between warn threshold and auto threshold. Matches claude-code's
+ * WARNING_THRESHOLD_BUFFER_TOKENS (autoCompact.ts:63) — sized so the warn
+ * tier fires a couple of turns before auto-compaction in practice.
+ */
+export const WARN_BUFFER = 20_000;
+
+/** Distance between hard threshold and effectiveWindow (matches claude-code's MANUAL_COMPACT_BUFFER). */
+export const HARD_BUFFER = 3_000;
+
+/**
+ * Auto-compaction consecutive-failure circuit breaker. After this many
+ * consecutive failures the cheap-gate NOOPs until a successful force
+ * compress resets the counter. Co-located here with other compaction-
+ * tuning constants; the counter state itself lives on GeminiChat.
+ */
+export const MAX_CONSECUTIVE_FAILURES = 3;
+
+export interface CompactionThresholds {
+  /** Token count at which UI warn tier triggers. */
+  readonly warn: number;
+  /** Token count at which auto-compaction triggers. */
+  readonly auto: number;
+  /** Token count at which auto-compaction is forced (resets failure counter). */
+  readonly hard: number;
+  /** Window minus SUMMARY_RESERVE; the budget available for input + summary. */
+  readonly effectiveWindow: number;
+}
+
+/**
+ * Compute the three-tier threshold ladder for a given context window.
+ *
+ * Each tier is `max(proportional, absolute)`:
+ *   auto = max(DEFAULT_PCT * window,                       effectiveWindow - AUTOCOMPACT_BUFFER)
+ *   warn = max((DEFAULT_PCT - WARN_PCT_OFFSET) * window,   auto - WARN_BUFFER)
+ *   hard = max(effectiveWindow - HARD_BUFFER,              auto)   // hard degrades to auto for tiny windows
+ *
+ * Small windows (where the absolute branch goes negative) automatically
+ * fall back to the proportional branch. Large windows are dominated by
+ * the absolute branch, capping wasted reservation to ~33K instead of 30%
+ * of the window.
+ *
+ * Pure function — no I/O, no shared state — safe to call repeatedly.
+ */
+export function computeThresholds(window: number): CompactionThresholds {
+  const effectiveWindow = window - SUMMARY_RESERVE;
+
+  const absAuto = effectiveWindow - AUTOCOMPACT_BUFFER;
+  const auto = Math.max(DEFAULT_PCT * window, absAuto);
+
+  const absWarn = auto - WARN_BUFFER;
+  const warn = Math.max((DEFAULT_PCT - WARN_PCT_OFFSET) * window, absWarn);
+
+  const rawHard = effectiveWindow - HARD_BUFFER;
+  const hard = Math.max(rawHard, auto);
+
+  return { warn, auto, hard, effectiveWindow };
+}
 
 export type CompactTrigger = 'manual' | 'auto';
 
@@ -170,13 +262,16 @@ export interface CompressOptions {
   model: string;
   config: Config;
   /**
-   * Whether a previous unforced compression attempt failed for this chat.
-   * Suppresses auto-compaction; manual `/compress` (force=true) overrides.
+   * Number of consecutive auto-compaction failures for this chat. When it reaches
+   * MAX_CONSECUTIVE_FAILURES, the cheap-gate stops trying until a successful
+   * force=true call resets it.
    */
-  hasFailedCompressionAttempt: boolean;
+  consecutiveFailures: number;
   /**
    * Most recent prompt token count for this chat. Compared against
-   * `threshold * contextWindowSize` for the auto-compaction gate. Callers
+   * `computeThresholds(contextWindowSize).auto` for the auto-compaction
+   * gate, optionally augmented by the pending user message's estimated
+   * token count via `estimatePromptTokens` (see Task 3 / Task 6). Callers
    * source this from the per-chat counter (main session, subagents alike) —
    * the service does not read or write any global telemetry.
    */
@@ -196,6 +291,14 @@ export interface CompressOptions {
    */
   trigger?: CompactTrigger;
   signal?: AbortSignal;
+  /**
+   * Pending user message about to be sent. When present, the cheap-gate
+   * adds its estimated token count to `originalTokenCount` (which reflects
+   * only the prior turn's API usage) so the gate sees the real prompt size.
+   * Optional for backward compatibility with callers that don't have a
+   * user message in hand (e.g. manual /compress force=true paths).
+   */
+  pendingUserMessage?: Content;
 }
 
 export class ChatCompressionService {
@@ -208,7 +311,7 @@ export class ChatCompressionService {
       force,
       model,
       config,
-      hasFailedCompressionAttempt,
+      consecutiveFailures,
       originalTokenCount,
       bypassTokenThreshold = false,
       trigger,
@@ -216,17 +319,16 @@ export class ChatCompressionService {
     } = opts;
     const compactTrigger = trigger ?? (force ? 'manual' : 'auto');
     const chatCompressionSettings = config.getChatCompression();
-    const threshold =
-      chatCompressionSettings?.contextPercentageThreshold ??
-      COMPRESSION_TOKEN_THRESHOLD;
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
 
     // Cheap gates first — these don't need the curated history. Heap-pressure
-    // bypass must also bypass the failed-attempt latch, otherwise one failed
-    // compression would disable this safety net for the rest of the chat.
+    // bypass must also bypass the consecutive-failure breaker, otherwise N
+    // failed compactions would disable this memory-pressure safety net for
+    // the rest of the chat.
     if (
-      threshold <= 0 ||
-      (hasFailedCompressionAttempt && !force && !bypassTokenThreshold)
+      consecutiveFailures >= MAX_CONSECUTIVE_FAILURES &&
+      !force &&
+      !bypassTokenThreshold
     ) {
       return {
         newHistory: null,
@@ -245,7 +347,17 @@ export class ChatCompressionService {
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
-      if (originalTokenCount < threshold * contextLimit) {
+      const { auto } = computeThresholds(contextLimit);
+      const pendingUserMessage = opts.pendingUserMessage;
+      const effectiveTokens = pendingUserMessage
+        ? estimatePromptTokens(
+            chat.getHistory(true),
+            pendingUserMessage,
+            originalTokenCount,
+            slimmingConfig.imageTokenEstimate,
+          )
+        : originalTokenCount;
+      if (effectiveTokens < auto) {
         return {
           newHistory: null,
           info: {
@@ -380,9 +492,13 @@ export class ChatCompressionService {
           ],
         },
       ],
-      // Compression quality drives every subsequent main turn — keep reasoning on.
+      // Compression output is bounded by maxOutputTokens to guarantee a predictable
+      // reserve across providers (see docs/design/auto-compaction-threshold-redesign.md).
+      // Thinking is disabled because per-provider thinking-budget semantics are
+      // inconsistent (Anthropic/OpenAI count it separately, Gemini varies by model).
       config: {
-        thinkingConfig: { includeThoughts: true },
+        thinkingConfig: { includeThoughts: false },
+        maxOutputTokens: COMPACT_MAX_OUTPUT_TOKENS,
       },
       abortSignal: signal ?? new AbortController().signal,
       promptId,
@@ -442,7 +558,8 @@ export class ChatCompressionService {
       //
       // Note: compressionInputTokenCount includes the compression prompt and
       // the extra "reason in your scratchpad" instruction(approx. 1000 tokens), and
-      // compressionOutputTokenCount may include non-persisted tokens (thoughts).
+      // compressionOutputTokenCount reflects the summary tokens only since
+      // thinking is disabled.
       // We accept these inaccuracies to avoid local token estimation.
       if (
         typeof compressionInputTokenCount === 'number' &&

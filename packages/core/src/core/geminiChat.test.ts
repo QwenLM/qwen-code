@@ -24,7 +24,10 @@ import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
-import { ChatCompressionService } from '../services/chatCompressionService.js';
+import {
+  ChatCompressionService,
+  MAX_CONSECUTIVE_FAILURES,
+} from '../services/chatCompressionService.js';
 import { SessionStartSource } from '../hooks/types.js';
 
 const { mockGetHeapStatistics } = vi.hoisted(() => ({
@@ -1223,7 +1226,17 @@ describe('GeminiChat', async () => {
             compressionStatus: CompressionStatus.NOOP,
           },
         });
-      vi.spyOn(chat, 'getHistory').mockImplementationOnce(() => {
+      // sendMessageStream now calls getHistory(true) twice: once during the
+      // hard-tier rescue check (before compression) and once after
+      // compression to build requestContents. We want the post-compression
+      // call to throw — let the first pass through to the real impl, then
+      // explode on the second.
+      const realGetHistory = chat.getHistory.bind(chat);
+      const getHistorySpy = vi.spyOn(chat, 'getHistory');
+      getHistorySpy.mockImplementationOnce((curated?: boolean) =>
+        realGetHistory(curated),
+      );
+      getHistorySpy.mockImplementationOnce(() => {
         throw new Error('history setup failed');
       });
 
@@ -1336,13 +1349,68 @@ describe('GeminiChat', async () => {
       ).toBe(200);
     });
 
-    it('clears hasFailedCompressionAttempt after a forced successful compression', async () => {
+    it('forwards the pending user message to the compression cheap-gate', async () => {
+      // The cheap-gate inside ChatCompressionService.compress uses
+      // estimatePromptTokens(history, pendingUserMessage, lastPromptTokenCount)
+      // so the very first send after inherited history (where
+      // lastPromptTokenCount === 0) can still trigger compaction. This test
+      // pins the wiring: sendMessageStream MUST pass the user message it just
+      // built through to tryCompress -> service.compress.
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 150_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('answer'),
+      );
+
+      const userMessageText = 'next user prompt';
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: userMessageText },
+        'prompt-id-first-turn',
+      );
+      // The first event in the stream should be COMPRESSED because the
+      // cheap-gate, fed the pending user message, can now size the prompt.
+      const first = await stream.next();
+      expect(first.done).toBe(false);
+      expect(first.value?.type).toBe(StreamEventType.COMPRESSED);
+
+      // Drain the rest so the send-lock releases cleanly.
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      const passedOpts = compressSpy.mock.calls[0][1];
+      expect(passedOpts.pendingUserMessage).toBeDefined();
+      expect(passedOpts.pendingUserMessage?.role).toBe('user');
+      expect(
+        passedOpts.pendingUserMessage?.parts?.some(
+          (part) => part.text === userMessageText,
+        ),
+      ).toBe(true);
+    });
+
+    it('clears consecutiveFailures after a forced successful compression', async () => {
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
         'compress',
       );
 
-      // Step 1: auto-compression fails — latch is set on the chat.
+      // Step 1: auto-compression fails — counter increments on the chat.
       compressSpy.mockResolvedValueOnce({
         newHistory: null,
         info: {
@@ -1363,14 +1431,12 @@ describe('GeminiChat', async () => {
       for await (const _ of stream1) {
         /* consume */
       }
-      // Latch passed to service was false on this attempt; service marks it
-      // failed and tryCompress flips the chat's flag to true.
-      expect(compressSpy.mock.calls[0][1].hasFailedCompressionAttempt).toBe(
-        false,
-      );
+      // Counter passed to service was 0 on this attempt; the failure branch
+      // in tryCompress then increments it to 1.
+      expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(0);
 
-      // Step 2: a forced /compress succeeds. After this, the latch must
-      // be cleared so future auto-compressions are not suppressed.
+      // Step 2: a forced /compress succeeds. After this, the counter must
+      // be reset so future auto-compressions are not suppressed.
       compressSpy.mockResolvedValueOnce({
         newHistory: [
           { role: 'user', parts: [{ text: 'summary' }] },
@@ -1383,13 +1449,12 @@ describe('GeminiChat', async () => {
         },
       });
       await chat.tryCompress('prompt-latch-force', 'test-model', true);
-      // tryCompress was called with force=true, so the service got latch=true
-      // (the gate is `hasFailedCompressionAttempt && !force`, force overrides).
-      expect(compressSpy.mock.calls[1][1].hasFailedCompressionAttempt).toBe(
-        true,
-      );
+      // tryCompress was called with force=true, so the service got
+      // consecutiveFailures=1 (carried from step 1's increment); force
+      // bypasses the breaker, but the counter was still forwarded as-is.
+      expect(compressSpy.mock.calls[1][1].consecutiveFailures).toBe(1);
 
-      // Step 3: next auto-compression sees the cleared latch.
+      // Step 3: next auto-compression sees the reset counter.
       compressSpy.mockResolvedValueOnce({
         newHistory: null,
         info: {
@@ -1409,9 +1474,7 @@ describe('GeminiChat', async () => {
       for await (const _ of stream2) {
         /* consume */
       }
-      expect(compressSpy.mock.calls[2][1].hasFailedCompressionAttempt).toBe(
-        false,
-      );
+      expect(compressSpy.mock.calls[2][1].consecutiveFailures).toBe(0);
     });
 
     it('reactively compresses and retries once after a context overflow error', async () => {
@@ -1787,8 +1850,12 @@ describe('GeminiChat', async () => {
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(3);
-      expect(compressSpy.mock.calls[2][1].hasFailedCompressionAttempt).toBe(
-        true,
+      // Reactive compression is force=true, so tryCompress's own failure
+      // branch doesn't increment the counter (force=true skips it). The
+      // reactive overflow handler instead trips the breaker explicitly to
+      // MAX_CONSECUTIVE_FAILURES so subsequent unforced sends short-circuit.
+      expect(compressSpy.mock.calls[2][1].consecutiveFailures).toBe(
+        MAX_CONSECUTIVE_FAILURES,
       );
     });
 
@@ -1851,6 +1918,191 @@ describe('GeminiChat', async () => {
               'next request ok',
         ),
       ).toBe(true);
+    });
+  });
+
+  // Task 9 (P3): the hard-tier rescue pulls reactive overflow recovery
+  // forward to BEFORE the API call. When the estimated prompt size already
+  // crosses `computeThresholds(window).hard`, sendMessageStream must:
+  //   1) reset consecutiveFailures (so a latched circuit breaker can recover)
+  //   2) call tryCompress with force=true (so MAX_CONSECUTIVE_FAILURES does
+  //      not gate the only attempt that can save the next round-trip).
+  describe('sendMessageStream hard-tier rescue', () => {
+    function makeStreamResponse(text = 'ok') {
+      return (async function* () {
+        yield {
+          candidates: [
+            {
+              content: { parts: [{ text }], role: 'model' },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => text,
+        } as unknown as GenerateContentResponse;
+      })();
+    }
+
+    /**
+     * Default 200K window in our mocks; computeThresholds:
+     *   effectiveWindow = 200K - 20K (SUMMARY_RESERVE) = 180K
+     *   hard            = max(180K - 3K, auto) = 177K
+     * So lastPromptTokenCount=176K + a small user message tips over 177K.
+     */
+    beforeEach(() => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 200_000,
+      });
+    });
+
+    it('forces compaction with force=true when estimated tokens cross hard threshold', async () => {
+      const compressedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ];
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: compressedHistory,
+          info: {
+            originalTokenCount: 176_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('after rescue'),
+      );
+
+      // Seed lastPromptTokenCount JUST under the 177K hard threshold; the
+      // pending user message adds a handful of estimate-tokens that pushes
+      // effective >= 177K, so the rescue must trigger.
+      chat.setLastPromptTokenCount(176_999);
+
+      const userMessage = 'this is the next user message';
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: userMessage },
+        'prompt-id-hard-rescue-forces',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      const passedOpts = compressSpy.mock.calls[0][1];
+      expect(passedOpts.force).toBe(true);
+      expect(passedOpts.pendingUserMessage).toBeDefined();
+      expect(passedOpts.pendingUserMessage?.role).toBe('user');
+      expect(
+        passedOpts.pendingUserMessage?.parts?.some(
+          (part) => part.text === userMessage,
+        ),
+      ).toBe(true);
+    });
+
+    it('resets consecutiveFailures before forcing when hard threshold crossed', async () => {
+      // Pre-latch the breaker by failing the unforced cheap-gate
+      // MAX_CONSECUTIVE_FAILURES times below the hard threshold.
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+
+      // The latching sends never touch the hard tier; lastPromptTokenCount is
+      // small enough that effective < hard, so force stays false on each.
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 100_000,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        },
+      });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => makeStreamResponse(),
+      );
+      chat.setLastPromptTokenCount(50_000);
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        const s = await chat.sendMessageStream(
+          'test-model',
+          { message: `latch-${i}` },
+          `prompt-latch-${i}`,
+        );
+        for await (const _ of s) {
+          /* consume */
+        }
+        expect(compressSpy.mock.calls[i][1].force).toBe(false);
+      }
+      // The counter is now at MAX_CONSECUTIVE_FAILURES (latched).
+      expect(compressSpy.mock.calls.at(-1)![1].consecutiveFailures).toBe(
+        MAX_CONSECUTIVE_FAILURES - 1,
+      );
+
+      // Now bump lastPromptTokenCount into hard tier and send again. The
+      // hard-tier rescue must reset the counter and force=true on the call —
+      // not short-circuit on the latched breaker.
+      compressSpy.mockClear();
+      compressSpy.mockResolvedValueOnce({
+        newHistory: [
+          { role: 'user', parts: [{ text: 'summary' }] },
+          { role: 'model', parts: [{ text: 'ack' }] },
+        ],
+        info: {
+          originalTokenCount: 178_000,
+          newTokenCount: 40_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+      chat.setLastPromptTokenCount(176_999);
+      const rescueStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'rescue me' },
+        'prompt-hard-rescue-reset',
+      );
+      for await (const _ of rescueStream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      // Counter forwarded to the service must be 0 (reset before the call),
+      // not MAX_CONSECUTIVE_FAILURES (which would gate the cheap-gate).
+      expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(0);
+      expect(compressSpy.mock.calls[0][1].force).toBe(true);
+    });
+
+    it('does not force when tokens are below hard threshold (normal auto path)', async () => {
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse(),
+      );
+
+      // Well below 177K hard threshold — normal auto path.
+      chat.setLastPromptTokenCount(50_000);
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'small message' },
+        'prompt-id-hard-rescue-below',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
     });
   });
 
@@ -3562,9 +3814,9 @@ describe('GeminiChat', async () => {
   });
 
   // Compression logic is tested in chatCompressionService.test.ts; this
-  // suite covers per-chat state on GeminiChat: hasFailedCompressionAttempt
-  // stickiness, token-count mutation, history replacement, and conditional
-  // telemetry mirroring.
+  // suite covers per-chat state on GeminiChat: consecutiveFailures
+  // circuit breaker, token-count mutation, history replacement, and
+  // conditional telemetry mirroring.
   describe('tryCompress (per-chat state)', () => {
     const userMsg = (text: string) => ({
       role: 'user' as const,
@@ -3659,7 +3911,7 @@ describe('GeminiChat', async () => {
       expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
     });
 
-    it('marks hasFailedCompressionAttempt and suppresses subsequent unforced auto-compactions', async () => {
+    it('increments consecutiveFailures and forwards it to subsequent unforced auto-compactions', async () => {
       const compressSpy = mockCompressionService('failed-inflated');
 
       const first = await chat.tryCompress('p1', 'm1');
@@ -3669,9 +3921,10 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(1);
 
       // The next unforced call should reach the service with
-      // hasFailedCompressionAttempt=true; the service's threshold check then
-      // returns NOOP. The important thing here is that GeminiChat actually
-      // forwards the sticky flag.
+      // consecutiveFailures=1 (incremented after the first failure). The
+      // important thing here is that GeminiChat actually forwards the
+      // updated counter — the service's own threshold logic is tested
+      // separately in chatCompressionService.test.ts.
       compressSpy.mockClear();
       compressSpy.mockResolvedValue({
         newHistory: null,
@@ -3683,9 +3936,7 @@ describe('GeminiChat', async () => {
       });
       await chat.tryCompress('p2', 'm1');
       expect(compressSpy).toHaveBeenCalledTimes(1);
-      expect(compressSpy.mock.calls[0][1].hasFailedCompressionAttempt).toBe(
-        true,
-      );
+      expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(1);
     });
 
     it('forwards force=true to the compression service', async () => {
@@ -3820,6 +4071,148 @@ describe('GeminiChat', async () => {
       await chat.tryCompress('p1', 'm1');
 
       expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+    });
+  });
+
+  // The circuit breaker is the three-strike replacement for the old
+  // single-shot hasFailedCompressionAttempt lock. After
+  // MAX_CONSECUTIVE_FAILURES failures the chat stops trying to auto-compact
+  // until a successful force compress (or any successful compress) resets
+  // the counter.
+  describe('compression failure circuit breaker', () => {
+    const userMsg = (text: string) => ({
+      role: 'user' as const,
+      parts: [{ text }],
+    });
+    const modelMsg = (text: string) => ({
+      role: 'model' as const,
+      parts: [{ text }],
+    });
+
+    it('tolerates MAX_CONSECUTIVE_FAILURES - 1 failures and increments the counter each time', async () => {
+      // Mock the service to "fail" every call (the chat's counter increments
+      // each time). After (MAX - 1) failures, the next tryCompress should
+      // still call the service. The actual NOOP-at-threshold gating is the
+      // service's job (and verified separately) — here we just observe that
+      // GeminiChat keeps forwarding the incremented counter.
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 100_000,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+        },
+      });
+      chat.setHistory([userMsg('a'), modelMsg('b'), userMsg('c')]);
+
+      for (let i = 0; i < MAX_CONSECUTIVE_FAILURES; i++) {
+        await chat.tryCompress(`p${i}`, 'm1');
+        // The i-th call sees consecutiveFailures = i (counter pre-increment).
+        expect(compressSpy.mock.calls[i][1].consecutiveFailures).toBe(i);
+      }
+      // After MAX_CONSECUTIVE_FAILURES failures, the breaker is tripped.
+      // The next call will still be made by GeminiChat (it does not
+      // short-circuit on its side), but the service's cheap-gate will NOOP.
+      expect(compressSpy).toHaveBeenCalledTimes(MAX_CONSECUTIVE_FAILURES);
+      await chat.tryCompress('p-last', 'm1');
+      expect(
+        compressSpy.mock.calls[MAX_CONSECUTIVE_FAILURES][1].consecutiveFailures,
+      ).toBe(MAX_CONSECUTIVE_FAILURES);
+    });
+
+    it('does not increment the counter on forced-call failures', async () => {
+      // Forced compressions (manual /compress, reactive overflow) bypass
+      // the breaker AND must not count toward it. Otherwise a flaky
+      // manual /compress would burn the breaker for auto-compaction.
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 100_000,
+          newTokenCount: 100_000,
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+        },
+      });
+      for (let i = 0; i < 5; i++) {
+        await chat.tryCompress(`p-force-${i}`, 'm1', true);
+      }
+      // After 5 forced failures, an unforced call must still see counter=0.
+      compressSpy.mockResolvedValueOnce({
+        newHistory: null,
+        info: {
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      await chat.tryCompress('p-unforced', 'm1');
+      const lastCall = compressSpy.mock.calls.at(-1);
+      expect(lastCall![1].consecutiveFailures).toBe(0);
+    });
+
+    it('resets the counter to 0 on a successful (forced) compress', async () => {
+      // After two failures, a successful force compress should reset the
+      // counter — the next unforced send tries again with consecutiveFailures=0.
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      compressSpy
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 100_000,
+            newTokenCount: 100_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 100_000,
+            newTokenCount: 100_000,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: [userMsg('summary'), modelMsg('ack')],
+          info: {
+            originalTokenCount: 100_000,
+            newTokenCount: 30_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        })
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+      // Two failures → counter is 2.
+      await chat.tryCompress('p1', 'm1');
+      await chat.tryCompress('p2', 'm1');
+      expect(compressSpy.mock.calls[1][1].consecutiveFailures).toBe(1);
+
+      // Forced successful compress → counter resets to 0.
+      await chat.tryCompress('p-force', 'm1', true);
+      expect(compressSpy.mock.calls[2][1].consecutiveFailures).toBe(2);
+
+      // Next unforced call: counter is back to 0.
+      await chat.tryCompress('p3', 'm1');
+      expect(compressSpy.mock.calls[3][1].consecutiveFailures).toBe(0);
     });
   });
 });
