@@ -528,9 +528,18 @@ function appendRecoveryContinuationParts(
     // Drop the matched continuation text part: a non-empty suffix has already
     // been appended above, and an empty suffix means the part was a pure
     // replay of the previous tail and should be discarded so it does not
-    // duplicate into history. Non-text parts in `nextParts` (thoughts, tool
-    // calls) are preserved.
-    nextParts.splice(continuationTextIndex, 1);
+    // duplicate into history. Hoist any non-text parts that preceded the
+    // matched text on the continuation side (typically the recovery turn's
+    // thought) so they land *before* the merged text part — thinking-model
+    // providers (Gemini 2.5+, Anthropic, OpenAI o-series) validate
+    // thought-signature provenance and expect a thought to precede the
+    // content it generated. Trailing non-text parts (tool calls etc.) keep
+    // their position via the final `[...mergedParts, ...nextParts]` concat.
+    const leadingNonTextParts = nextParts.splice(0, continuationTextIndex);
+    nextParts.shift();
+    if (leadingNonTextParts.length > 0) {
+      mergedParts.splice(previousTextIndex, 0, ...leadingNonTextParts);
+    }
   }
 
   return [...mergedParts, ...nextParts];
