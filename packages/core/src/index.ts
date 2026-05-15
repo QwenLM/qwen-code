@@ -269,6 +269,7 @@ export * from './followup/index.js';
 // ============================================================================
 
 export * from './utils/browser.js';
+export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';

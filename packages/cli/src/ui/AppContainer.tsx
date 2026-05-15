@@ -60,6 +60,7 @@ import {
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -434,6 +435,33 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const lastTitleRef = useRef<string | null>(null);
   const staticExtraHeight = 3;
+
+  // Prefetch the lowlight chunk on mount so the dynamic import is already
+  // in flight before the first code block needs colorizing. Without this
+  // kick-off, code blocks committed to ink's append-only <Static> region
+  // before the import resolves stay plain text for the rest of the session
+  // — Static can only be re-rendered via `refreshStatic`, which is not
+  // wired to lowlight load completion. Common reachable paths: short
+  // `--prompt -p` runs that finalize quickly, Ctrl+C-cancelled first turns,
+  // and the first-paint history replay on `--resume`. Firing the load
+  // from mount keeps the startup parse-cost win (V8 still parses off the
+  // critical path) while restoring the "first paint sees a loaded
+  // instance" guarantee. Errors are silently swallowed; CodeColorizer
+  // already falls back to plain text on miss.
+  useEffect(() => {
+    void loadLowlight().catch((err) => {
+      // The loader caches rejection with a cooldown (see
+      // `LOWLIGHT_RETRY_COOLDOWN_MS` / `lowlightLastFailureAt` in
+      // `lowlightLoader.ts`). This useEffect runs once on mount, so this
+      // catch fires at most once per session regardless. Log to the debug
+      // channel so a degraded syntax-highlight state (corrupted install,
+      // missing chunk) leaves a breadcrumb without spamming the user's
+      // TTY — `CodeColorizer` already falls back to plain text.
+      debugLogger.warn(
+        `Failed to load lowlight chunk; code blocks will render as plain text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, []);
 
   // Initialize config (runs once on mount)
   useEffect(() => {
