@@ -1174,9 +1174,13 @@ export class GitWorktreeService {
    * match the convention most JS projects use (husky's prepare script
    * configures `core.hooksPath=.husky` in the main repo).
    *
-   * Skips the subprocess write when the value already matches the desired
-   * one — saves ~14ms of spawn overhead on every worktree creation when
-   * `core.hooksPath` happens to be inherited from the parent.
+   * Skips the `git config` write subprocess when the value already
+   * matches the desired one — common when this method runs against a
+   * worktree that already inherits the same `core.hooksPath` from a
+   * prior creation cycle. The probe read itself is still a subprocess
+   * (claude-code's `parseGitConfigValue` reads the config file
+   * directly to avoid even that, but the read runs once per worktree
+   * creation so the extra ~14ms isn't worth the file-parsing complexity).
    */
   private async configureHooksPath(worktreePath: string): Promise<void> {
     const huskyPath = path.join(this.sourceRepoPath, '.husky');
@@ -1196,6 +1200,10 @@ export class GitWorktreeService {
     const worktreeGit = simpleGit(worktreePath);
     let existing = '';
     try {
+      // Saves the write subprocess when value already matches. The probe
+      // read is also a subprocess — claude-code skips even that via
+      // parseGitConfigValue, but the read runs once per worktree
+      // creation so the extra ~14ms isn't worth the file-parser tax.
       existing = (
         await worktreeGit.raw(['config', '--local', 'core.hooksPath'])
       ).trim();

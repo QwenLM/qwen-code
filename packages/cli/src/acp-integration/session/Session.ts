@@ -161,10 +161,15 @@ export class Session implements SessionContext {
   /**
    * Phase C worktree restore notice. Set by acpAgent.loadSession when a
    * resumed session has a live worktree sidecar; prepended to the next
-   * #executePrompt call as a <system-reminder>, then cleared. TUI uses
-   * historyManager.addItem(INFO) for the equivalent UX hint and headless
-   * prepends to the single shot prompt — all three modes share the
-   * `restoreWorktreeContext` helper that produces this string.
+   * #executePrompt call as a <system-reminder>, then cleared.
+   *
+   * One-shot by design — after the first prompt the worktree path is
+   * already in the conversation context (the reminder we just sent + any
+   * subsequent tool calls), so re-injecting on every turn would clutter
+   * the history without adding signal. TUI uses historyManager.addItem(INFO)
+   * for the equivalent UX hint and headless prepends to the single shot
+   * prompt; all three modes share the `restoreWorktreeContext` helper
+   * that produces this string.
    */
   pendingWorktreeNotice: string | null = null;
 
