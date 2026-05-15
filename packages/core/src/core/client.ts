@@ -386,10 +386,8 @@ export class GeminiClient {
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
-    if (this.pendingRecallAbortController) {
-      this.pendingRecallAbortController.abort();
-      this.pendingRecallAbortController = undefined;
-    }
+    this.pendingMemoryPrefetch?.controller.abort();
+    this.pendingMemoryPrefetch = undefined;
     // Drop any deferred tools revealed this session so /clear really gives
     // a clean slate. We don't clear inside startChat itself because that path
     // is also taken by compression (which preserves the session), and
@@ -1158,8 +1156,8 @@ export class GeminiClient {
           this.config.getMaxSessionTurns() > 0 &&
           this.sessionTurnCount > this.config.getMaxSessionTurns()
         ) {
-          this.pendingRecallAbortController?.abort();
-          this.pendingRecallAbortController = undefined;
+          this.pendingMemoryPrefetch?.controller.abort();
+          this.pendingMemoryPrefetch = undefined;
           yield { type: GeminiEventType.MaxSessionTurns };
           if (isTopLevelInteraction)
             endInteractionSpan('error', {
@@ -1172,8 +1170,8 @@ export class GeminiClient {
       // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
       const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
-        this.pendingRecallAbortController?.abort();
-        this.pendingRecallAbortController = undefined;
+        this.pendingMemoryPrefetch?.controller.abort();
+        this.pendingMemoryPrefetch = undefined;
         if (isTopLevelInteraction)
           endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
         return new Turn(this.getChat(), prompt_id);
@@ -1188,8 +1186,8 @@ export class GeminiClient {
         const lastPromptTokenCount =
           uiTelemetryService.getLastPromptTokenCount();
         if (lastPromptTokenCount > sessionTokenLimit) {
-          this.pendingRecallAbortController?.abort();
-          this.pendingRecallAbortController = undefined;
+          this.pendingMemoryPrefetch?.controller.abort();
+          this.pendingMemoryPrefetch = undefined;
           yield {
             type: GeminiEventType.SessionTokenLimitExceeded,
             value: {
@@ -1249,8 +1247,8 @@ export class GeminiClient {
             `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
           );
           await arenaAgentClient.reportCancelled();
-          this.pendingRecallAbortController?.abort();
-          this.pendingRecallAbortController = undefined;
+          this.pendingMemoryPrefetch?.controller.abort();
+          this.pendingMemoryPrefetch = undefined;
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return new Turn(this.getChat(), prompt_id);
         }
