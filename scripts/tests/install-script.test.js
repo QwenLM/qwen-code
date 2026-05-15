@@ -2471,7 +2471,7 @@ describe('Windows installer end-to-end', () => {
         const installRoot = path.join(tmpDir, 'install');
         const home = path.join(tmpDir, 'home');
 
-        createFakeWindowsCurlExe(fakeBin);
+        const fakeCurl = createFakeWindowsCurlCommand(fakeBin);
 
         const output = runWindowsCommand(
           [
@@ -2489,7 +2489,7 @@ describe('Windows installer end-to-end', () => {
             QWEN_FAKE_ARCHIVE: archive,
             QWEN_FAKE_SHA256SUMS: checksumFile,
             QWEN_FAKE_CURL_LOG: curlLog,
-            QWEN_INSTALL_CURL_EXE: path.join(fakeBin, 'curl.exe'),
+            QWEN_INSTALL_CURL_EXE: fakeCurl,
             ...prependWindowsPath(fakeBin),
             PROCESSOR_ARCHITECTURE: 'AMD64',
             PROCESSOR_ARCHITEW6432: '',
@@ -2770,75 +2770,53 @@ function createFakeWindowsNpmTools(fakeBin) {
   );
 }
 
-function createFakeWindowsCurlExe(fakeBin) {
+function createFakeWindowsCurlCommand(fakeBin) {
   mkdirSync(fakeBin, { recursive: true });
-  const sourcePath = path.join(fakeBin, 'FakeCurl.cs');
-  const outputPath = path.join(fakeBin, 'curl.exe');
+  const outputPath = path.join(fakeBin, 'curl.cmd');
   writeFileSync(
-    sourcePath,
-    String.raw`
-using System;
-using System.IO;
-
-public static class FakeCurl {
-  public static int Main(string[] args) {
-    string destination = null;
-    string url = null;
-
-    for (int index = 0; index < args.Length; index++) {
-      string arg = args[index];
-      if (arg.StartsWith("-") && arg.IndexOf('o') >= 0 && index + 1 < args.Length) {
-        destination = args[++index];
-        continue;
-      }
-      if (arg.StartsWith("http", StringComparison.OrdinalIgnoreCase)) {
-        url = arg;
-      }
-    }
-
-    File.AppendAllText(Environment.GetEnvironmentVariable("QWEN_FAKE_CURL_LOG"), url + Environment.NewLine);
-    if (url == null || destination == null) {
-      Console.Error.WriteLine("missing url or destination");
-      return 2;
-    }
-
-    if (url.EndsWith("/releases/qwen-code/latest/VERSION", StringComparison.OrdinalIgnoreCase)) {
-      File.WriteAllText(destination, "v0.0.0-smoke" + Environment.NewLine);
-      return 0;
-    }
-    if (url.EndsWith("/releases/qwen-code/v0.0.0-smoke/qwen-code-win-x64.zip", StringComparison.OrdinalIgnoreCase)) {
-      File.Copy(Environment.GetEnvironmentVariable("QWEN_FAKE_ARCHIVE"), destination, true);
-      return 0;
-    }
-    if (url.EndsWith("/releases/qwen-code/v0.0.0-smoke/SHA256SUMS", StringComparison.OrdinalIgnoreCase)) {
-      File.Copy(Environment.GetEnvironmentVariable("QWEN_FAKE_SHA256SUMS"), destination, true);
-      return 0;
-    }
-
-    Console.Error.WriteLine("unexpected url: " + url);
-    return 22;
-  }
-}
-`,
-  );
-  execFileSync(
-    'powershell',
     [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      '$source = Get-Content -LiteralPath $env:QWEN_FAKE_CURL_SOURCE -Raw; Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $env:QWEN_FAKE_CURL_OUTPUT -OutputType ConsoleApplication',
-    ],
-    {
-      env: {
-        ...process.env,
-        QWEN_FAKE_CURL_SOURCE: sourcePath,
-        QWEN_FAKE_CURL_OUTPUT: outputPath,
-      },
-      stdio: 'pipe',
-    },
+      '@echo off',
+      'setlocal EnableExtensions EnableDelayedExpansion',
+      'set "destination="',
+      'set "url="',
+      ':parse_args',
+      'if "%~1"=="" goto done_parse',
+      'set "arg=%~1"',
+      'if "!arg:~0,1!"=="-" (',
+      '  echo(!arg! | findstr /C:"o" >nul && (',
+      '    shift',
+      '    set "destination=%~1"',
+      '    shift',
+      '    goto parse_args',
+      '  )',
+      '  shift',
+      '  goto parse_args',
+      ')',
+      'if /i "!arg:~0,4!"=="http" set "url=!arg!"',
+      'shift',
+      'goto parse_args',
+      ':done_parse',
+      '>>"%QWEN_FAKE_CURL_LOG%" echo(!url!',
+      'if "!url!"=="" echo missing url or destination 1>&2 & exit /b 2',
+      'if "!destination!"=="" echo missing url or destination 1>&2 & exit /b 2',
+      'echo(!url! | findstr /I /C:"/releases/qwen-code/latest/VERSION" >nul && (',
+      '  > "!destination!" echo v0.0.0-smoke',
+      '  exit /b 0',
+      ')',
+      'echo(!url! | findstr /I /C:"/releases/qwen-code/v0.0.0-smoke/qwen-code-win-x64.zip" >nul && (',
+      '  copy /Y "%QWEN_FAKE_ARCHIVE%" "!destination!" >nul',
+      '  exit /b 0',
+      ')',
+      'echo(!url! | findstr /I /C:"/releases/qwen-code/v0.0.0-smoke/SHA256SUMS" >nul && (',
+      '  copy /Y "%QWEN_FAKE_SHA256SUMS%" "!destination!" >nul',
+      '  exit /b 0',
+      ')',
+      'echo unexpected url: !url! 1>&2',
+      'exit /b 22',
+      '',
+    ].join('\r\n'),
   );
+  return outputPath;
 }
 
 function prependWindowsPath(directory) {
