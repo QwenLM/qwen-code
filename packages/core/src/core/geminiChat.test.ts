@@ -3050,6 +3050,62 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('should keep the recovery thought before the merged text part (thought-signature provenance)', async () => {
+      // Thinking-model providers (Gemini 2.5+, Anthropic, OpenAI o-series)
+      // validate thought-signature provenance and expect a thought to
+      // precede its associated content. The sibling
+      // `prompt-recovery-thinking-continuation` test only pins the joined
+      // non-thought text, not structural position, so a regression where
+      // the recovery turn's leading thought is appended *after* the merged
+      // text part slips through. Assert the ordering explicitly.
+      const streams = [
+        makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk([{ text: 'Alpha shared recovery suffix' }], 'MAX_TOKENS'),
+        ]),
+        makeStream([
+          makeChunk(
+            [
+              { text: 'planning the rest', thought: true },
+              { text: 'shared recovery suffix and continuation' },
+            ],
+            'STOP',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-recovery-thinking-continuation-order',
+      );
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const parts = lastEntry.parts ?? [];
+
+      const thoughtIdx = parts.findIndex(
+        (part) => 'thought' in part && part.thought === true,
+      );
+      const mergedTextIdx = parts.findIndex(
+        (part) =>
+          'text' in part &&
+          typeof part.text === 'string' &&
+          part.text.includes('Alpha shared recovery suffix'),
+      );
+
+      expect(thoughtIdx).toBeGreaterThanOrEqual(0);
+      expect(mergedTextIdx).toBeGreaterThanOrEqual(0);
+      expect(thoughtIdx).toBeLessThan(mergedTextIdx);
+    });
+
     it('should preserve a coincidental 2-character CJK overlap (byte floor insufficient for CJK)', async () => {
       // Regression: `RECOVERY_OVERLAP_MIN_BYTES = 6` admits a 2-character
       // CJK overlap (each Chinese char is 3 UTF-8 bytes). Two-character
