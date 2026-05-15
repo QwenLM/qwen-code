@@ -1331,6 +1331,25 @@ export class GeminiClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      if (messageType === SendMessageType.ToolResult) {
+        const prefetchHandle = this.pendingMemoryPrefetch;
+        if (
+          prefetchHandle &&
+          prefetchHandle.settledAt !== null &&
+          !prefetchHandle.consumed
+        ) {
+          prefetchHandle.consumed = true;
+          this.pendingMemoryPrefetch = undefined;
+          const result = await prefetchHandle.promise;
+          if (result.prompt) {
+            requestToSend = [result.prompt, ...requestToSend];
+            for (const doc of result.selectedDocs) {
+              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+            }
+          }
+        }
+      }
+
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
