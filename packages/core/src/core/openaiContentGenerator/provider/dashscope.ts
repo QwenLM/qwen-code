@@ -32,8 +32,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   /**
    * Determines whether to use the DashScope-compatible provider.
    * Covers dashscope.aliyuncs.com, dashscope-intl.aliyuncs.com,
-   * internal DataWorks Agent domains (*.dw.alibaba-inc.com,
-   * *.data.aliyun-inc.com), and proxy matches.
+   * internal Alibaba domains (*.alibaba-inc.com, *.aliyun-inc.com),
+   * and proxy matches.
+   *
+   * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
+   * DashScope-compatible endpoint by design. If a future internal service
+   * under these domains is not DashScope-compatible, narrow the match via
+   * a runtime provider property rather than re-introducing business-name
+   * subdomains here.
    */
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -66,13 +72,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
         hostname.endsWith('.dashscope.aliyuncs.com') ||
         hostname.endsWith('.dashscope-intl.aliyuncs.com'));
 
-    // Internal Alibaba domains used by DataWorks Agent and other internal
-    // services proxying to DashScope-compatible APIs.
-    // Covers *.dw.alibaba-inc.com and *.data.aliyun-inc.com.
+    // Internal Alibaba domains proxying to DashScope-compatible APIs.
+    // Covers *.alibaba-inc.com and *.aliyun-inc.com.
     const isInternalOrigin =
       hostname !== null &&
-      (hostname.endsWith('.dw.alibaba-inc.com') ||
-        hostname.endsWith('.data.aliyun-inc.com'));
+      (hostname.endsWith('.alibaba-inc.com') ||
+        hostname.endsWith('.aliyun-inc.com'));
 
     // Check if proxy is configured and matches
     const normalizedProxyUrl = DASHSCOPE_PROXY_BASE_URL?.endsWith('/')
