@@ -91,9 +91,7 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
-    abortSignal: callerAbortSignal
-      ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
-      : AbortSignal.timeout(1_000),
+    abortSignal: callerAbortSignal ?? new AbortController().signal,
 
     // Uses runSideQuery's default side-query model policy: fast model first,
     // then main session model when no fast model is configured.
