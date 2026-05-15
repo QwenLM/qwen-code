@@ -169,6 +169,42 @@ export function runPrettier() {
   }
 }
 
+export function runSensitiveKeywords() {
+  console.log('\nRunning sensitive keyword linter...');
+  // Check for potentially sensitive keywords in the codebase.
+  // We use a basic grep for now, focusing on common secret patterns.
+  // Exclude known safe files and directories.
+  const patterns = [
+    'AKIA[0-9A-Z]{16}', // AWS Access Key ID
+    'GH[0-9a-zA-Z]{35}', // GitHub Token
+    'AIza[0-9A-Za-z_\\-]{35}', // Google API Key
+    'sk_live_[0-9a-zA-Z]{24}', // Stripe Live Key
+  ];
+  const patternStr = patterns.join('|');
+  const command = `git ls-files | grep -vE 'package-lock.json|scripts/lint.js|packages/core/vendor/|.*\\.test\\.tsx?' | xargs grep -lE "${patternStr}" || true`;
+
+  try {
+    const output = execSync(command, {
+      encoding: 'utf-8',
+      shell: '/bin/bash',
+    }).trim();
+    if (output) {
+      console.error(
+        '❌ Error: Potentially sensitive keywords found in the following files:',
+      );
+      console.error(output);
+      console.error(
+        '   Please remove these secrets or patterns before committing.',
+      );
+      process.exit(1);
+    }
+    console.log('✅ No sensitive keywords found.');
+  } catch (error) {
+    console.error('Failed to run sensitive keyword linter:', error);
+    process.exit(1);
+  }
+}
+
 function main() {
   const args = process.argv.slice(2);
 
@@ -190,6 +226,9 @@ function main() {
   if (args.includes('--prettier')) {
     runPrettier();
   }
+  if (args.includes('--sensitive-keywords')) {
+    runSensitiveKeywords();
+  }
 
   if (args.length === 0) {
     setupLinters();
@@ -198,6 +237,7 @@ function main() {
     runShellcheck();
     runYamllint();
     runPrettier();
+    runSensitiveKeywords();
     console.log('\nAll linting checks passed!');
   }
 }

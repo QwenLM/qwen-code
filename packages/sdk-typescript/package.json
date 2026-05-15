@@ -47,18 +47,21 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@opentelemetry/sdk-node": "0.218.0",
+    "diff": "9.0.0",
+    "vite": "8.0.13",
     "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^7.13.0",
     "@typescript-eslint/parser": "^7.13.0",
-    "@vitest/coverage-v8": "^1.6.0",
+    "@vitest/coverage-v8": "^4.1.6",
     "dts-bundle-generator": "^9.5.1",
     "esbuild": "^0.25.12",
     "eslint": "^8.57.0",
     "typescript": "^5.4.5",
-    "vitest": "^1.6.0"
+    "vitest": "^4.1.6"
   },
   "peerDependencies": {
     "typescript": ">=5.0.0"
