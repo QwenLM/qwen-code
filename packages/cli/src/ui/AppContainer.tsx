@@ -60,7 +60,10 @@ import {
   ToolConfirmationOutcome,
   type WaitingToolCall,
   ToolNames,
+  readWorktreeSession,
+  clearWorktreeSession,
 } from '@qwen-code/qwen-code-core';
+import * as fsPromises from 'node:fs/promises';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import {
   getStickyTodos,
@@ -504,6 +507,45 @@ export const AppContainer = (props: AppContainerProps) => {
           .getSessionTitle(config.getSessionId());
         if (title) {
           setSessionName(title);
+        }
+
+        // If the resumed session had an active worktree, inject a context
+        // message so the model immediately knows to keep using the
+        // worktree path for file operations (qwen-code can't `chdir` the
+        // way claude-code does — Config.targetDir is immutable).
+        //
+        // Stale sidecars (worktree dir deleted between sessions) get
+        // cleaned up so Footer / useWorktreeSession don't show a phantom
+        // worktree indicator.
+        try {
+          const sessionPath = config
+            .getSessionService()
+            .getWorktreeSessionPath(config.getSessionId());
+          const ws = await readWorktreeSession(sessionPath);
+          if (ws) {
+            const worktreeAlive = await fsPromises
+              .stat(ws.worktreePath)
+              .then((s) => s.isDirectory())
+              .catch(() => false);
+            if (worktreeAlive) {
+              historyManager.addItem(
+                {
+                  type: MessageType.INFO,
+                  text:
+                    `[Resumed] Active worktree: "${ws.slug}" at ${ws.worktreePath} ` +
+                    `(branch: ${ws.worktreeBranch}). Continue using this path for all file operations.`,
+                },
+                Date.now(),
+              );
+            } else {
+              await clearWorktreeSession(sessionPath);
+            }
+          }
+        } catch (error) {
+          // Best-effort: failures here only affect UI hint visibility,
+          // not the resumed conversation itself.
+          // eslint-disable-next-line no-console
+          console.debug('worktree session restore failed:', error);
         }
       }
 
