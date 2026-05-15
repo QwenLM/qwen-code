@@ -71,6 +71,15 @@ shell_quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+display_install_version() {
+    if [[ "${VERSION}" == "latest" ]]; then
+        echo "latest"
+        return 0
+    fi
+
+    echo "${VERSION#v}"
+}
+
 trap cleanup_temp_dirs EXIT
 trap 'cleanup_temp_dirs; exit 130' INT
 trap 'cleanup_temp_dirs; exit 143' TERM
@@ -290,30 +299,7 @@ done
 validate_options
 
 print_header() {
-    echo "=========================================="
-    echo "   Qwen Code Installation Script"
-    echo "=========================================="
-    echo ""
-    log_info "System: $(uname -s 2>/dev/null || echo unknown) $(uname -r 2>/dev/null || true)"
-    log_info "Install method: ${METHOD}"
-    if [[ "${METHOD}" != "npm" ]]; then
-        log_info "Standalone mirror: ${MIRROR}"
-        if [[ -n "${BASE_URL}" ]]; then
-            log_info "Standalone base URL: ${BASE_URL}"
-        fi
-        if [[ -n "${ARCHIVE_PATH}" ]]; then
-            log_info "Standalone archive: ${ARCHIVE_PATH}"
-        else
-            log_info "Standalone version: ${VERSION}"
-        fi
-    fi
-    if [[ "${METHOD}" != "standalone" ]]; then
-        log_info "npm registry: ${NPM_REGISTRY}"
-    fi
-    if [[ "${SOURCE}" != "unknown" ]]; then
-        log_info "Installation source: ${SOURCE}"
-    fi
-    echo ""
+    echo "Installing Qwen Code version: $(display_install_version)"
 }
 
 print_node_help() {
@@ -396,6 +382,10 @@ get_npm_global_bin() {
             echo "${prefix}/bin"
             ;;
     esac
+}
+
+get_npm_global_root() {
+    npm root -g 2>/dev/null || true
 }
 
 create_source_json() {
@@ -505,12 +495,12 @@ download_file() {
     local destination="$2"
 
     if command_exists curl; then
-        curl -fsSL --retry 2 "${url}" -o "${destination}"
+        curl -fL --retry 2 --progress-bar "${url}" -o "${destination}"
         return $?
     fi
 
     if command_exists wget; then
-        wget -q --tries=3 "${url}" -O "${destination}" || return 1
+        wget --tries=3 "${url}" -O "${destination}" || return 1
         return $?
     fi
 
@@ -763,7 +753,7 @@ install_standalone() {
         register_temp_dir "${temp_dir}"
         archive_path="${temp_dir}/${archive_name}"
 
-        log_info "Downloading ${archive_url}"
+        echo "Downloading ${archive_name}"
         if ! download_file "${archive_url}" "${archive_path}"; then
             rm -rf "${temp_dir}"
             log_warning "Failed to download standalone archive."
@@ -896,24 +886,51 @@ install_npm() {
 
 print_final_instructions() {
     local install_bin_dir="${1:-}"
+    local install_dir="${2:-}"
+    local install_method="${3:-standalone}"
     if [[ -n "${install_bin_dir}" ]]; then
         export PATH="${install_bin_dir}:${PATH}"
     fi
 
     echo ""
-    echo "=========================================="
-    echo "Installation completed!"
-    echo "=========================================="
+    echo "QWEN CODE"
     echo ""
 
+    local qwen_version=""
     if command_exists qwen; then
-        local qwen_version
         qwen_version=$(qwen --version 2>/dev/null || echo "unknown")
-        log_success "Qwen Code is ready to use: ${qwen_version}"
+    fi
+
+    if [[ -n "${qwen_version}" ]]; then
+        echo "Qwen Code ${qwen_version} installed successfully."
+    else
+        echo "Qwen Code installed successfully."
+    fi
+
+    echo ""
+    echo "To start:"
+    echo "  cd <project>"
+    echo "  qwen"
+
+    if [[ -n "${install_dir}" ]]; then
         echo ""
-        echo "You can now run: qwen"
-        echo ""
-        log_info "Run qwen in your project directory to start an interactive session."
+        echo "Installed to:"
+        echo "  ${install_dir}"
+    fi
+
+    echo ""
+    echo "Uninstall:"
+    if [[ "${install_method}" == "npm" ]]; then
+        echo "  npm uninstall -g @qwen-code/qwen-code"
+    elif [[ -n "${install_dir}" && -n "${install_bin_dir}" ]]; then
+        echo "  rm -rf $(shell_quote "${install_dir}") $(shell_quote "${install_bin_dir}/qwen")"
+    elif [[ -n "${install_dir}" ]]; then
+        echo "  rm -rf $(shell_quote "${install_dir}")"
+    else
+        echo "  npm uninstall -g @qwen-code/qwen-code"
+    fi
+
+    if [[ -n "${qwen_version}" ]]; then
         return 0
     fi
 
@@ -939,22 +956,22 @@ main() {
     case "${METHOD}" in
         standalone)
             install_standalone
-            print_final_instructions "${INSTALL_BIN_DIR}"
+            print_final_instructions "${INSTALL_BIN_DIR}" "${INSTALL_LIB_DIR}" "standalone"
             ;;
         npm)
             install_npm
-            print_final_instructions "$(get_npm_global_bin)"
+            print_final_instructions "$(get_npm_global_bin)" "$(get_npm_global_root)" "npm"
             ;;
         detect)
             # Try the standalone archive first; fall back only when unavailable.
             if install_standalone; then
-                print_final_instructions "${INSTALL_BIN_DIR}"
+                print_final_instructions "${INSTALL_BIN_DIR}" "${INSTALL_LIB_DIR}" "standalone"
             else
                 standalone_status=$?
                 if [[ "${standalone_status}" -eq 2 ]]; then
                     log_warning "Falling back to npm installation."
                     if install_npm; then
-                        print_final_instructions "$(get_npm_global_bin)"
+                        print_final_instructions "$(get_npm_global_bin)" "$(get_npm_global_root)" "npm"
                     else
                         log_warning "Standalone archive was unavailable before npm fallback; npm fallback also failed."
                         log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 20+ and rerun --method npm."
