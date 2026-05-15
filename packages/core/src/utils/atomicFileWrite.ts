@@ -137,35 +137,28 @@ export async function atomicWriteFile(
 
   const desiredMode = existingMode ?? options?.mode;
 
+  const writeOptions: {
+    encoding?: BufferEncoding;
+    flush?: boolean;
+    mode?: number;
+  } = {};
+  if (typeof data === 'string') writeOptions.encoding = encoding;
+  if (flush) writeOptions.flush = true;
+  if (desiredMode !== undefined) writeOptions.mode = desiredMode;
+
+  // chmod fails on filesystems without POSIX permissions (FAT/exFAT). Best-effort.
+  const tryChmod = async (target: string): Promise<void> => {
+    if (desiredMode === undefined) return;
+    try {
+      await fs.chmod(target, desiredMode);
+    } catch {
+      // Ignore — not all filesystems support chmod.
+    }
+  };
+
   try {
-    const writeOptions: {
-      encoding?: BufferEncoding;
-      flush?: boolean;
-      mode?: number;
-    } = {};
-    if (typeof data === 'string') {
-      writeOptions.encoding = encoding;
-    }
-    if (flush) {
-      writeOptions.flush = true;
-    }
-    // Set mode during write to avoid a permission window on new files.
-    if (desiredMode !== undefined) {
-      writeOptions.mode = desiredMode;
-    }
-
     await fs.writeFile(tmpPath, data, writeOptions);
-
-    // chmod to ensure permissions match (writeFile mode is masked by umask).
-    // Ignore errors: chmod fails on filesystems without POSIX permissions (FAT/exFAT).
-    if (desiredMode !== undefined) {
-      try {
-        await fs.chmod(tmpPath, desiredMode);
-      } catch {
-        // Ignore — not all filesystems support chmod.
-      }
-    }
-
+    await tryChmod(tmpPath);
     await renameWithRetry(tmpPath, targetPath, retries, delayMs);
   } catch (error) {
     // Clean up temp file.
@@ -177,28 +170,8 @@ export async function atomicWriteFile(
 
     // EXDEV: cross-device rename not supported — fall back to direct write.
     if (isNodeError(error) && error.code === 'EXDEV') {
-      const fallbackOptions: {
-        encoding?: BufferEncoding;
-        flush?: boolean;
-        mode?: number;
-      } = {};
-      if (typeof data === 'string') {
-        fallbackOptions.encoding = encoding;
-      }
-      if (flush) {
-        fallbackOptions.flush = true;
-      }
-      if (desiredMode !== undefined) {
-        fallbackOptions.mode = desiredMode;
-      }
-      await fs.writeFile(targetPath, data, fallbackOptions);
-      if (desiredMode !== undefined) {
-        try {
-          await fs.chmod(targetPath, desiredMode);
-        } catch {
-          // Ignore — not all filesystems support chmod.
-        }
-      }
+      await fs.writeFile(targetPath, data, writeOptions);
+      await tryChmod(targetPath);
       return;
     }
 
@@ -211,6 +184,9 @@ export async function atomicWriteFile(
  *
  * Delegates to {@link atomicWriteFile} for the actual atomic
  * write-to-temp + rename flow.
+ *
+ * Note: if `filePath` is a symlink, the write resolves the chain
+ * and updates the real target file — the symlink itself is preserved.
  *
  * The parent directory of `filePath` must already exist.
  */
