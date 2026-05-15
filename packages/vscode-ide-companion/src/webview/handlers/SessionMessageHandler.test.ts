@@ -312,6 +312,127 @@ describe('SessionMessageHandler', () => {
     });
   });
 
+  it('does not switch to a colliding ACP session id when rename fails', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversation = {
+      id: 'conversation-1',
+      title: 'Conversation',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue(conversation),
+      getConversation: vi.fn().mockResolvedValue(conversation),
+      addMessage: vi.fn().mockResolvedValue(undefined),
+      renameConversationId: vi.fn().mockResolvedValue(false),
+    };
+    const sendToWebView = vi.fn();
+    const handlerRef: { current: SessionMessageHandler | null } = {
+      current: null,
+    };
+    const syncCurrentConversationId = vi.fn((id: string | null) => {
+      handlerRef.current?.setCurrentConversationId(id);
+    });
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+      syncCurrentConversationId,
+    );
+    handlerRef.current = handler;
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'first prompt' },
+    });
+
+    expect(conversationStore.renameConversationId).toHaveBeenCalledWith(
+      'conversation-1',
+      'session-1',
+    );
+    expect(syncCurrentConversationId).toHaveBeenCalledWith('conversation-1');
+    expect(syncCurrentConversationId).not.toHaveBeenCalledWith('session-1');
+    expect(handler.getCurrentConversationId()).toBe('conversation-1');
+    expect(sendToWebView).not.toHaveBeenCalledWith({
+      type: 'sessionTitleUpdated',
+      data: {
+        sessionId: 'session-1',
+        title: 'first prompt',
+      },
+    });
+  });
+
+  it('syncs ACP session id alignment through the owning router setter', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversation = {
+      id: 'conversation-1',
+      title: 'Conversation',
+      messages: [],
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue(conversation),
+      getConversation: vi.fn().mockResolvedValue(conversation),
+      addMessage: vi.fn().mockResolvedValue(undefined),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+    const handlerRef: { current: SessionMessageHandler | null } = {
+      current: null,
+    };
+    const syncCurrentConversationId = vi.fn((id: string | null) => {
+      handlerRef.current?.setCurrentConversationId(id);
+    });
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+      syncCurrentConversationId,
+    );
+    handlerRef.current = handler;
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'first prompt' },
+    });
+
+    expect(syncCurrentConversationId).toHaveBeenCalledWith('conversation-1');
+    expect(syncCurrentConversationId).toHaveBeenCalledWith('session-1');
+    expect(handler.getCurrentConversationId()).toBe('session-1');
+  });
+
   it('rewinds the active ACP session before sending an edited message', async () => {
     mockProcessImageAttachments.mockResolvedValue({
       formattedText: 'edited prompt',

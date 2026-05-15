@@ -295,7 +295,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         snapshot.id,
       );
     }
-    this.currentConversationId = snapshot.id;
+    this.updateCurrentConversationId(snapshot.id);
     this.sendToWebView({
       type: 'conversationLoaded',
       data: snapshot,
@@ -562,7 +562,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
       try {
         const newConv = await this.conversationStore.createConversation();
-        this.currentConversationId = newConv.id;
+        this.updateCurrentConversationId(newConv.id);
         this.sendToWebView({
           type: 'conversationLoaded',
           data: newConv,
@@ -883,9 +883,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
               previousConversationId,
               acpSessionId,
             );
+            return;
           }
         }
-        this.currentConversationId = acpSessionId;
+        this.updateCurrentConversationId(acpSessionId);
         this.sendToWebView({
           type: 'sessionTitleUpdated',
           data: {
@@ -1008,7 +1009,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
-      this.currentConversationId = null;
+      this.updateCurrentConversationId(null);
 
       this.sendToWebView({
         type: 'conversationCleared',
@@ -1063,7 +1064,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           // Show messages from local cache only
           const messages =
             await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
@@ -1108,7 +1109,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Try to load session via ACP (now we should be connected)
       try {
         // Set current id and clear UI first so replayed updates append afterwards
-        this.currentConversationId = sessionId;
+        this.updateCurrentConversationId(sessionId);
         this.sendToWebView({
           type: 'qwenSessionSwitched',
           data: { sessionId, messages: [], session: sessionDetails },
@@ -1173,7 +1174,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
             // to the new ACP id here would desync the backend from the webview
             // and cause rename/delete/title-update flows to target the wrong
             // session during the fallback window.
-            this.currentConversationId = sessionId;
+            this.updateCurrentConversationId(sessionId);
 
             this.sendToWebView({
               type: 'qwenSessionSwitched',
@@ -1224,7 +1225,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           }
         } else {
           // Offline view only
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages, session: sessionDetails },
@@ -1349,7 +1350,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         if (choice === 'offline') {
           const messages =
             await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
@@ -1366,7 +1367,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Try ACP load first
       try {
         // Pre-clear UI so replayed updates append afterwards
-        this.currentConversationId = sessionId;
+        this.updateCurrentConversationId(sessionId);
         this.sendToWebView({
           type: 'qwenSessionSwitched',
           data: { sessionId, messages: [] },
