@@ -699,6 +699,116 @@ describe('GeminiChat', async () => {
       ).resolves.not.toThrow();
     });
 
+    it('persists partial assistant turn when stream throws after a tool_use chunk', async () => {
+      // Weak-network scenario: Anthropic-compatible providers emit the
+      // `functionCall` part on `content_block_stop`; the SSE may then drop
+      // before `message_stop`. The yielded chunk is enough for `Turn.run`
+      // to queue a `ToolCallRequest`, the tool scheduler will eventually
+      // submit a `functionResponse` user turn — without a matching
+      // tool_use in history, the next request body shows
+      // `user → user[tool_result]` and DeepSeek/Anthropic rejects with
+      // "tool_use_id ... must have a corresponding tool_use block in the
+      // previous message". `processStreamResponse` must persist the
+      // partial model turn before re-throwing so the pairing is intact.
+      mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+      const networkError = new Error('SSE connection reset by peer');
+      const streamThatThrowsAfterToolCall = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_00_CeJrKJB0PSmXUZTCWHET7332',
+                      name: 'read_file',
+                      args: { path: '/tmp/x.txt' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        throw networkError;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamThatThrowsAfterToolCall,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'open /tmp/x.txt please' },
+        'prompt-weak-network-tool',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* drain */
+          }
+        })(),
+      ).rejects.toBe(networkError);
+
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      expect(history[0]!.role).toBe('user');
+      const modelTurn = history[1]!;
+      expect(modelTurn.role).toBe('model');
+      expect(modelTurn.parts).toBeDefined();
+      const functionCallPart = modelTurn.parts!.find((p) => p.functionCall);
+      expect(functionCallPart?.functionCall?.id).toBe(
+        'call_00_CeJrKJB0PSmXUZTCWHET7332',
+      );
+      expect(functionCallPart?.functionCall?.name).toBe('read_file');
+    });
+
+    it('does NOT persist partial assistant turn when stream throws before any tool_use chunk', async () => {
+      // Plain-text partial responses are deliberately dropped on stream
+      // error: the Retry path pops the trailing user prompt and re-issues
+      // it, so a stale partial-text model turn between them would bias
+      // the retry or surface as duplicate output. Only tool_use turns
+      // need the partial-history bridge to preserve the tool_use →
+      // tool_result invariant — text alone has no such invariant.
+      mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+      const networkError = new Error('connection reset');
+      const streamThatThrowsAfterText = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'partial reply that will be lost' }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        throw networkError;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamThatThrowsAfterText,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-weak-network-text',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* drain */
+          }
+        })(),
+      ).rejects.toBe(networkError);
+
+      const history = chat.getHistory();
+      // Only the user turn is in history — the partial-text model turn is
+      // intentionally not persisted.
+      expect(history.length).toBe(1);
+      expect(history[0]!.role).toBe('user');
+    });
+
     it('should throw InvalidStreamError when no tool call and no finish reason', async () => {
       vi.useFakeTimers();
       try {

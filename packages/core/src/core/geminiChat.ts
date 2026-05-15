@@ -1257,48 +1257,62 @@ export class GeminiChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    // Captured if the upstream stream throws mid-iteration (typical on weak
+    // networks: SSE drops between `content_block_stop` of a tool_use and the
+    // terminal `message_stop`). We still build / record / push a partial
+    // assistant turn below before re-throwing — see the dedicated branch in
+    // the post-loop block for why this is needed to keep tool_use/tool_result
+    // pairing intact across the failure.
+    let streamError: unknown = null;
 
-    for await (const chunk of streamResponse) {
-      // Use ||= to avoid later usage-only chunks (no candidates) overwriting
-      // a finishReason that was already seen in an earlier chunk.
-      hasFinishReason ||=
-        chunk?.candidates?.some((candidate) => candidate.finishReason) ?? false;
+    try {
+      for await (const chunk of streamResponse) {
+        // Use ||= to avoid later usage-only chunks (no candidates) overwriting
+        // a finishReason that was already seen in an earlier chunk.
+        hasFinishReason ||=
+          chunk?.candidates?.some((candidate) => candidate.finishReason) ??
+          false;
 
-      if (isValidResponse(chunk)) {
-        const content = chunk.candidates?.[0]?.content;
-        if (content?.parts) {
-          if (content.parts.some((part) => part.functionCall)) {
-            hasToolCall = true;
+        if (isValidResponse(chunk)) {
+          const content = chunk.candidates?.[0]?.content;
+          if (content?.parts) {
+            if (content.parts.some((part) => part.functionCall)) {
+              hasToolCall = true;
+            }
+
+            // Collect all parts for recording
+            allModelParts.push(...content.parts);
           }
-
-          // Collect all parts for recording
-          allModelParts.push(...content.parts);
         }
+
+        // Collect token usage for consolidated recording
+        if (chunk.usageMetadata) {
+          usageMetadata = chunk.usageMetadata;
+          // Context usage tracks prompt size; output isn't in history yet.
+          const lastPromptTokenCount =
+            usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
+          if (lastPromptTokenCount) {
+            // Always update the per-chat counter so this chat (including
+            // subagents) can make its own compaction decisions.
+            this.lastPromptTokenCount = lastPromptTokenCount;
+            // Mirror to the global telemetry only when wired — subagents
+            // pass `telemetryService=undefined` to keep their context usage
+            // out of the main session's UI counters.
+            this.telemetryService?.setLastPromptTokenCount(
+              lastPromptTokenCount,
+            );
+          }
+          if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
+            this.telemetryService.setLastCachedContentTokenCount(
+              usageMetadata.cachedContentTokenCount,
+            );
+          }
+        }
+
+        yield chunk; // Yield every chunk to the UI immediately.
       }
-
-      // Collect token usage for consolidated recording
-      if (chunk.usageMetadata) {
-        usageMetadata = chunk.usageMetadata;
-        // Context usage tracks prompt size; output isn't in history yet.
-        const lastPromptTokenCount =
-          usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
-        if (lastPromptTokenCount) {
-          // Always update the per-chat counter so this chat (including
-          // subagents) can make its own compaction decisions.
-          this.lastPromptTokenCount = lastPromptTokenCount;
-          // Mirror to the global telemetry only when wired — subagents
-          // pass `telemetryService=undefined` to keep their context usage
-          // out of the main session's UI counters.
-          this.telemetryService?.setLastPromptTokenCount(lastPromptTokenCount);
-        }
-        if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
-          this.telemetryService.setLastCachedContentTokenCount(
-            usageMetadata.cachedContentTokenCount,
-          );
-        }
-      }
-
-      yield chunk; // Yield every chunk to the UI immediately.
+    } catch (e) {
+      streamError = e;
     }
 
     let thoughtContentPart: Part | undefined;
@@ -1367,6 +1381,46 @@ export class GeminiChat {
         tokens: usageMetadata,
         contextWindowSize,
       });
+    }
+
+    // Mid-stream failure recovery: if the upstream stream threw (typical on
+    // weak networks — SSE cut between a tool_use `content_block_stop` and
+    // the terminal `message_stop`) AND any `functionCall` chunk was already
+    // yielded to consumers, we must persist the partial assistant turn here.
+    //
+    // The content generator (Anthropic / OpenAI) emits a `functionCall` part
+    // only at the end of a tool_use block. Once yielded, `Turn.run` registers
+    // a `ToolCallRequest` event, the React tool scheduler queues the call,
+    // and `handleCompletedTools` will fire `submitQuery(..., ToolResult)` —
+    // pushing a user message with `functionResponse` into history — even
+    // though the parent stream errored. Without preserving the matching
+    // tool_use on the model side, the next request body would have
+    // `user → user[tool_result]` with no tool_use in between, and the
+    // Anthropic-compatible API (DeepSeek, Anthropic, etc.) rejects with
+    //   "tool_use_id ... must have a corresponding tool_use block in the
+    //    previous message"
+    // — an unrecoverable state because Ctrl+Y's `stripOrphanedUserEntries`
+    // only strips trailing user entries; the lost tool_use can't be
+    // resurrected.
+    //
+    // Plain-text partial turns (no functionCall yielded) are deliberately
+    // NOT persisted — the Retry path pops the trailing user prompt and
+    // re-issues it; a stale partial-text model turn between them would
+    // either bias the retry or surface as a duplicate.
+    if (streamError !== null) {
+      if (
+        hasToolCall &&
+        (thoughtContentPart || consolidatedHistoryParts.length > 0)
+      ) {
+        this.history.push({
+          role: 'model',
+          parts: [
+            ...(thoughtContentPart ? [thoughtContentPart] : []),
+            ...consolidatedHistoryParts,
+          ],
+        });
+      }
+      throw streamError;
     }
 
     // Stream validation logic: A stream is considered successful if:
