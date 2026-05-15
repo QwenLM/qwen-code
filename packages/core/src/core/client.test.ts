@@ -663,6 +663,132 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('setTools — system instruction refresh', () => {
+    // Regression coverage for the progressive-MCP wiring bug: when MCP
+    // discovery completes AFTER startChat() (the new default), `setTools()`
+    // is the only hook that can teach the model about the freshly-registered
+    // MCP tools. Because MCP tools are `shouldDefer=true`, they never appear
+    // in `tools` declarations — the model only learns of them via the
+    // system prompt's "Deferred Tools" listing. So `setTools()` MUST
+    // rebuild the system instruction with the up-to-date deferred summary,
+    // not just update `chat.tools`.
+    //
+    // `prompts.ts` is auto-mocked at module scope (line ~99), so the
+    // assertions below inspect the `deferredTools` argument passed to
+    // `getCoreSystemPrompt` rather than the rendered string. The contract
+    // "freshly-registered MCP tool reaches the prompt" reduces to "it
+    // appears in the deferredTools arg".
+    function getRegistryMock() {
+      return vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getFunctionDeclarations: ReturnType<typeof vi.fn>;
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+        isDeferredToolRevealed: ReturnType<typeof vi.fn>;
+        revealDeferredTool: ReturnType<typeof vi.fn>;
+        warmAll: ReturnType<typeof vi.fn>;
+      };
+    }
+
+    function lastDeferredArg():
+      | Array<{ name: string; description: string }>
+      | undefined {
+      const mock = vi.mocked(getCoreSystemPrompt);
+      const lastCall = mock.mock.calls[mock.mock.calls.length - 1];
+      // signature: (userMemory, model, appendInstruction, deferredTools)
+      return lastCall?.[3] as
+        | Array<{ name: string; description: string }>
+        | undefined;
+    }
+
+    it('rebuilds systemInstruction so newly-registered MCP tools land in the prompt', async () => {
+      const reg = getRegistryMock();
+      // ToolSearch IS available — this is the standard case (the only
+      // path that fails before this fix). MCP discovery has now finished,
+      // so a freshly-arrived MCP tool appears in the deferred summary.
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__addition-server__add', description: 'Add two numbers' },
+      ]);
+
+      const setSystemInstructionSpy = vi
+        .spyOn(client.getChat(), 'setSystemInstruction')
+        .mockImplementation(() => {});
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      vi.mocked(getCoreSystemPrompt).mockClear();
+
+      await client.setTools();
+
+      expect(setSystemInstructionSpy).toHaveBeenCalledTimes(1);
+      const passedDeferred = lastDeferredArg();
+      expect(passedDeferred).toEqual([
+        { name: 'mcp__addition-server__add', description: 'Add two numbers' },
+      ]);
+    });
+
+    it('omits already-revealed deferred tools from the rendered listing', async () => {
+      // Tools the model has already revealed via ToolSearch are in the
+      // declaration list; advertising them again as "reachable via
+      // ToolSearch" would invite redundant lookup calls.
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+      reg.isDeferredToolRevealed.mockImplementation(
+        (n: string) => n === 'mcp__server__alpha',
+      );
+
+      vi.spyOn(client.getChat(), 'setSystemInstruction').mockImplementation(
+        () => {},
+      );
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      vi.mocked(getCoreSystemPrompt).mockClear();
+
+      await client.setTools();
+
+      const passedDeferred = lastDeferredArg();
+      expect(passedDeferred).toEqual([
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+    });
+
+    it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
+      // Mirrors startChat's silent-disappearance guard: without ToolSearch
+      // a deferred MCP tool can't be reached, so the only safe option is
+      // to reveal it so it lands in the declaration list. If setTools()
+      // skipped this branch, an MCP tool registered after startChat() in
+      // a session with `--exclude-tools tool_search` would be invisible
+      // forever.
+      const reg = getRegistryMock();
+      reg.getTool.mockReturnValue(null); // ToolSearch absent.
+      reg.getDeferredToolSummary.mockReturnValue([
+        { name: 'mcp__server__alpha', description: 'a' },
+        { name: 'mcp__server__beta', description: 'b' },
+      ]);
+      reg.revealDeferredTool.mockClear();
+
+      vi.spyOn(client.getChat(), 'setSystemInstruction').mockImplementation(
+        () => {},
+      );
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      vi.mocked(getCoreSystemPrompt).mockClear();
+
+      await client.setTools();
+
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__alpha');
+      expect(reg.revealDeferredTool).toHaveBeenCalledWith('mcp__server__beta');
+      // When ToolSearch is absent we render the prompt WITHOUT the
+      // deferred-tools listing (those tools are now in `tools`), so the
+      // deferredTools arg must be `undefined`, not an empty array.
+      expect(lastDeferredArg()).toBeUndefined();
+    });
+  });
+
   describe('addHistory', () => {
     it('should call chat.addHistory with the provided content', async () => {
       const mockChat = {
