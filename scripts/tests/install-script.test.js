@@ -68,7 +68,14 @@ describe('installation scripts', () => {
     expect(script).toContain('Node.js 22 or newer is required');
     expect(script).toContain('npm_package_spec()');
     expect(script).toContain('@qwen-code/qwen-code@latest');
-    expect(script).toContain('Run: qwen');
+    expect(script).toContain('Installing Qwen Code version:');
+    expect(script).toContain('QWEN CODE');
+    expect(script).toContain(
+      'Qwen Code ${installed_version} installed successfully.',
+    );
+    expect(script).toContain('To start:');
+    expect(script).toContain('Installed to:');
+    expect(script).toContain('Uninstall:');
   });
 
   it('supports code-server-style standalone install on Linux/macOS', () => {
@@ -126,6 +133,7 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'wget --progress=bar:force:noscroll --tries=3 "${url}" -O "${destination}"',
     );
+    expect(script).toContain('echo "Downloading ${archive_name}"');
     expect(script).not.toContain(
       'curl -fsSL --retry 2 "${url}" -o "${destination}"',
     );
@@ -177,7 +185,14 @@ describe('installation scripts', () => {
     expect(script).toContain('Please install Node.js');
     expect(script).toContain(':NpmPackageSpec');
     expect(script).toContain('@qwen-code/qwen-code@latest');
-    expect(script).toContain('Run: qwen');
+    expect(script).toContain('Installing Qwen Code version:');
+    expect(script).toContain('QWEN CODE');
+    expect(script).toContain(
+      'Qwen Code !INSTALLED_VERSION! installed successfully.',
+    );
+    expect(script).toContain('To start:');
+    expect(script).toContain('Installed to:');
+    expect(script).toContain('Uninstall:');
   });
 
   it('supports code-server-style standalone install on Windows', () => {
@@ -255,6 +270,7 @@ describe('installation scripts', () => {
     expect(script).toContain('Failed to update user PATH');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
+    expect(script).toContain('echo Downloading !ARCHIVE_NAME!');
     expect(script).toContain(':CreateTempFile');
     expect(script).toContain('/latest/VERSION');
     expect(script).toContain(':ResolveAliyunVersionPath');
@@ -1474,7 +1490,7 @@ describe('Linux/macOS installer end-to-end', () => {
         const archive = packageFakeStandalone(tmpDir);
         const installRoot = path.join(tmpDir, 'install');
         const home = path.join(tmpDir, 'home');
-        runUnixInstaller(archive, installRoot, home);
+        const output = runUnixInstaller(archive, installRoot, home).toString();
 
         expect(existsSync(path.join(installRoot, 'bin', 'qwen'))).toBe(true);
         expect(
@@ -1492,6 +1508,19 @@ describe('Linux/macOS installer end-to-end', () => {
           .toString()
           .trim();
         expect(version).toBe('0.0.0-smoke');
+        expect(output).toContain('Installing Qwen Code version: latest');
+        expect(output).toContain('QWEN CODE');
+        expect(output).toContain(
+          'Qwen Code 0.0.0-smoke installed successfully.',
+        );
+        expect(output).toContain('To start:\n  cd <project>\n  qwen');
+        expect(output).toContain(
+          `Installed to:\n  ${path.join(installRoot, 'lib', 'qwen-code')}`,
+        );
+        expect(output).toContain('Uninstall:');
+        expect(output).toContain(
+          `rm -rf '${path.join(installRoot, 'lib', 'qwen-code')}'`,
+        );
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         if (createdDist) {
@@ -1599,9 +1628,7 @@ describe('Linux/macOS installer end-to-end', () => {
         expect(curlUrls).not.toContain(
           '/releases/qwen-code/latest/qwen-code-linux-x64.tar.gz',
         );
-        expect(output).toContain(
-          'Downloading https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v0.0.0-smoke/qwen-code-linux-x64.tar.gz',
-        );
+        expect(output).toContain('Downloading qwen-code-linux-x64.tar.gz');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         if (createdDist) {
@@ -1726,9 +1753,7 @@ describe('Linux/macOS installer end-to-end', () => {
         expect(output).toContain(
           'Aliyun standalone archive not found; retrying GitHub mirror.',
         );
-        expect(output).toContain(
-          'Downloading https://github.com/QwenLM/qwen-code/releases/download/v0.0.0-smoke/qwen-code-linux-x64.tar.gz',
-        );
+        expect(output).toContain('Downloading qwen-code-linux-x64.tar.gz');
         expect(output).not.toContain('Falling back to npm installation');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
@@ -2434,9 +2459,7 @@ describe('Windows installer end-to-end', () => {
         expect(curlUrls).not.toContain(
           '/releases/qwen-code/latest/qwen-code-win-x64.zip',
         );
-        expect(output).toContain(
-          'Downloading https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/releases/qwen-code/v0.0.0-smoke/qwen-code-win-x64.zip',
-        );
+        expect(output).toContain('Downloading qwen-code-win-x64.zip');
         expect(existsSync(path.join(installRoot, 'bin', 'qwen.cmd'))).toBe(
           true,
         );

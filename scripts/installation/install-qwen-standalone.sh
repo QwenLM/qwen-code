@@ -71,6 +71,15 @@ shell_quote() {
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+display_install_version() {
+    if [[ "${VERSION}" == "latest" ]]; then
+        echo "latest"
+        return 0
+    fi
+
+    echo "${VERSION#v}"
+}
+
 trap cleanup_temp_dirs EXIT
 trap 'cleanup_temp_dirs; exit 130' INT
 trap 'cleanup_temp_dirs; exit 143' TERM
@@ -309,8 +318,7 @@ done
 validate_options
 
 print_header() {
-    echo "Qwen Code Installer"
-    echo ""
+    echo "Installing Qwen Code version: $(display_install_version)"
 }
 
 print_node_help() {
@@ -393,6 +401,10 @@ get_npm_global_bin() {
             echo "${prefix}/bin"
             ;;
     esac
+}
+
+get_npm_global_root() {
+    npm root -g 2>/dev/null || true
 }
 
 create_source_json() {
@@ -1057,7 +1069,7 @@ install_standalone() {
         register_temp_dir "${temp_dir}"
         archive_path="${temp_dir}/${archive_name}"
 
-        log_info "Downloading ${archive_url}"
+        echo "Downloading ${archive_name}"
         if ! download_file "${archive_url}" "${archive_path}"; then
             if [[ -n "${github_fallback_base_url}" ]]; then
                 rm -f "${archive_path}"
@@ -1065,7 +1077,7 @@ install_standalone() {
                 checksum_source="${github_fallback_base_url}/SHA256SUMS"
                 github_fallback_base_url=""
                 log_warning "Aliyun standalone archive download failed; retrying GitHub mirror."
-                log_info "Downloading ${archive_url}"
+                echo "Downloading ${archive_name}"
                 if download_file "${archive_url}" "${archive_path}"; then
                     :
                 else
@@ -1240,6 +1252,8 @@ install_npm() {
 
 print_final_instructions() {
     local install_bin_dir="${1:-}"
+    local install_dir="${2:-}"
+    local install_method="${3:-standalone}"
     local installed_bin=""
     local quoted_install_bin_dir=""
     if [[ -n "${install_bin_dir}" ]]; then
@@ -1280,9 +1294,30 @@ print_final_instructions() {
         installed_version=$(qwen --version 2>/dev/null || echo "unknown")
     fi
 
-    echo "Qwen Code ${installed_version} installed."
-    if [[ -n "${installed_bin}" ]]; then
-        echo "Location: ${installed_bin}"
+    echo "QWEN CODE"
+    echo ""
+    echo "Qwen Code ${installed_version} installed successfully."
+    echo ""
+    echo "To start:"
+    echo "  cd <project>"
+    echo "  qwen"
+
+    if [[ -n "${install_dir}" ]]; then
+        echo ""
+        echo "Installed to:"
+        echo "  ${install_dir}"
+    fi
+
+    echo ""
+    echo "Uninstall:"
+    if [[ "${install_method}" == "npm" ]]; then
+        echo "  npm uninstall -g @qwen-code/qwen-code"
+    elif [[ -n "${install_dir}" && -n "${installed_bin}" ]]; then
+        echo "  rm -rf $(shell_quote "${install_dir}") $(shell_quote "${installed_bin}")"
+    elif [[ -n "${install_dir}" ]]; then
+        echo "  rm -rf $(shell_quote "${install_dir}")"
+    else
+        echo "  npm uninstall -g @qwen-code/qwen-code"
     fi
 
     if [[ -n "${install_bin_dir}" && "${NO_MODIFY_PATH:-0}" != "1" ]]; then
@@ -1307,7 +1342,6 @@ print_final_instructions() {
         return 0
     fi
 
-    echo "Run: qwen"
     echo "(Open a new terminal for the PATH change to take effect.)"
 }
 
@@ -1358,22 +1392,22 @@ main() {
     case "${METHOD}" in
         standalone)
             install_standalone
-            print_final_instructions "${INSTALL_BIN_DIR}"
+            print_final_instructions "${INSTALL_BIN_DIR}" "${INSTALL_LIB_DIR}" "standalone"
             ;;
         npm)
             install_npm
-            print_final_instructions "$(get_npm_global_bin)"
+            print_final_instructions "$(get_npm_global_bin)" "$(get_npm_global_root)" "npm"
             ;;
         detect)
             # Try the standalone archive first; fall back only when unavailable.
             if install_standalone; then
-                print_final_instructions "${INSTALL_BIN_DIR}"
+                print_final_instructions "${INSTALL_BIN_DIR}" "${INSTALL_LIB_DIR}" "standalone"
             else
                 standalone_status=$?
                 if [[ "${standalone_status}" -eq 2 ]]; then
                     log_warning "Falling back to npm installation."
                     if install_npm; then
-                        print_final_instructions "$(get_npm_global_bin)"
+                        print_final_instructions "$(get_npm_global_bin)" "$(get_npm_global_root)" "npm"
                     else
                         log_warning "Standalone archive was unavailable before npm fallback; npm fallback also failed."
                         log_warning "Retry with --method standalone to debug the standalone failure, or install Node.js 22+ and rerun --method npm."

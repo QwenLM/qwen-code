@@ -203,8 +203,7 @@ goto usage_error
 call :ValidateOptions
 if %ERRORLEVEL% NEQ 0 exit /b 1
 
-echo Qwen Code Installer
-echo.
+call :PrintHeader
 
 REM Discover all qwen executables on disk BEFORE we install. We can't
 REM reliably simulate the user's PATH ordering, so enumerate well-known
@@ -240,7 +239,7 @@ REM Dispatch after validation; detect falls back to npm only when unavailable.
 if /i "!METHOD!"=="standalone" (
     call :InstallStandalone
     if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
-    call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
+    call :PrintFinalInstructions "!INSTALL_BIN_DIR!" "!INSTALL_DIR!" "standalone"
     endlocal & set "PATH=%INSTALL_BIN_DIR%;%PATH%"
     exit /b 0
 )
@@ -248,7 +247,7 @@ if /i "!METHOD!"=="standalone" (
 if /i "!METHOD!"=="npm" (
     call :InstallNpm
     if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
-    call :PrintFinalInstructions ""
+    call :PrintFinalInstructions "" "" "npm"
     endlocal
     exit /b 0
 )
@@ -256,7 +255,7 @@ if /i "!METHOD!"=="npm" (
 call :InstallStandalone
 set "STANDALONE_STATUS=!ERRORLEVEL!"
 if !STANDALONE_STATUS! EQU 0 (
-    call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
+    call :PrintFinalInstructions "!INSTALL_BIN_DIR!" "!INSTALL_DIR!" "standalone"
     endlocal & set "PATH=%INSTALL_BIN_DIR%;%PATH%"
     exit /b 0
 )
@@ -269,7 +268,7 @@ if !STANDALONE_STATUS! EQU 2 (
         echo WARNING: Retry with --method standalone to debug the standalone failure, or install Node.js 22+ and rerun --method npm.
         exit /b !ERRORLEVEL!
     )
-    call :PrintFinalInstructions ""
+    call :PrintFinalInstructions "" "" "npm"
     endlocal
     exit /b 0
 )
@@ -305,6 +304,14 @@ echo                            Defaults to QWEN_NPM_REGISTRY or https://registr
 echo   --no-modify-path         Do not prepend INSTALL_BIN_DIR to user PATH even
 echo                            when a shadowing 'qwen' is detected.
 echo   -h, --help               Show this help message.
+exit /b 0
+
+:PrintHeader
+set "DISPLAY_VERSION=!VERSION!"
+if /i not "!DISPLAY_VERSION!"=="latest" (
+    if /i "!DISPLAY_VERSION:~0,1!"=="v" set "DISPLAY_VERSION=!DISPLAY_VERSION:~1!"
+)
+echo Installing Qwen Code version: !DISPLAY_VERSION!
 exit /b 0
 
 :ValidateOptions
@@ -796,14 +803,14 @@ if not "!ARCHIVE_PATH!"=="" (
     if !ERRORLEVEL! NEQ 0 exit /b 1
     set "ARCHIVE_FILE=!TEMP_DIR!\!ARCHIVE_NAME!"
 
-    echo INFO: Downloading !ARCHIVE_URL!
+    echo Downloading !ARCHIVE_NAME!
     call :DownloadFile "!ARCHIVE_URL!" "!ARCHIVE_FILE!"
     set "DOWNLOAD_STATUS=!ERRORLEVEL!"
     if not "!DOWNLOAD_STATUS!"=="0" if not "!GITHUB_FALLBACK_BASE_URL!"=="" (
         if exist "!ARCHIVE_FILE!" del /F /Q "!ARCHIVE_FILE!" >nul 2>&1
         echo WARNING: Aliyun standalone archive download failed; retrying GitHub mirror.
         call :UseGithubFallbackBaseUrl
-        echo INFO: Downloading !ARCHIVE_URL!
+        echo Downloading !ARCHIVE_NAME!
         call :DownloadFile "!ARCHIVE_URL!" "!ARCHIVE_FILE!"
         set "DOWNLOAD_STATUS=!ERRORLEVEL!"
     )
@@ -1212,6 +1219,9 @@ exit /b 0
 
 :PrintFinalInstructions
 set "EXTRA_BIN=%~1"
+set "SUMMARY_INSTALL_DIR=%~2"
+set "SUMMARY_INSTALL_METHOD=%~3"
+if "!SUMMARY_INSTALL_METHOD!"=="" set "SUMMARY_INSTALL_METHOD=standalone"
 
 set "INSTALLED_BIN="
 if not "!EXTRA_BIN!"=="" (
@@ -1226,8 +1236,28 @@ if not "!INSTALLED_BIN!"=="" if exist "!INSTALLED_BIN!" (
     for /f "delims=" %%i in ('"!INSTALLED_BIN!" --version 2^>nul') do set "INSTALLED_VERSION=%%i"
 )
 
-echo Qwen Code !INSTALLED_VERSION! installed.
-if not "!INSTALLED_BIN!"=="" echo Location: !INSTALLED_BIN!
+echo QWEN CODE
+echo.
+echo Qwen Code !INSTALLED_VERSION! installed successfully.
+echo.
+echo To start:
+echo   cd ^<project^>
+echo   qwen
+
+if not "!SUMMARY_INSTALL_DIR!"=="" (
+    echo.
+    echo Installed to:
+    echo   !SUMMARY_INSTALL_DIR!
+)
+
+echo.
+echo Uninstall:
+if /i "!SUMMARY_INSTALL_METHOD!"=="npm" (
+    echo   npm uninstall -g @qwen-code/qwen-code
+) else (
+    if not "!SUMMARY_INSTALL_DIR!"=="" echo   rmdir /S /Q "!SUMMARY_INSTALL_DIR!"
+    if not "!INSTALLED_BIN!"=="" echo   del /F /Q "!INSTALLED_BIN!"
+)
 
 rem Build OTHER_QWENS = PRE_INSTALL_QWENS_LIST minus the install we just made.
 set "OTHER_QWENS="
@@ -1271,6 +1301,5 @@ if /i "!QWEN_INSTALLER_PARENT_POWERSHELL!"=="1" (
     echo INFO: Final PATH refresh is handled by the PowerShell entrypoint.
     exit /b 0
 )
-echo Run: qwen
 echo qwen is ready to use in this terminal.
 exit /b 0
