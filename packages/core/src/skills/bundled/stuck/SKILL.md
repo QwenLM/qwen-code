@@ -30,41 +30,42 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 
 ## Investigation steps
 
-**Fast path for targeted diagnosis** — if a digit-only PID argument was given, skip steps 1-2 (enumeration). Verify the PID is alive, grab its stats, and jump to step 3:
+**Preamble — resolve the runtime base directory.** Required for both paths below (sidecar enumeration in step 1, debug log lookup in step 3, and the PID fast path). The base directory is taken from (in priority order): `QWEN_RUNTIME_DIR` env var, the `advanced.runtimeOutputDir` setting, `QWEN_HOME` env var, and finally `~/.qwen`.
 
 ```
-kill -0 <pid> 2>/dev/null && \
-  ps -p <pid> -o pid=,pcpu=,rss=,etime=,state=,comm=,command= -ww \
-  || echo "PID <pid> is not running"
+RUNTIME_DIR="${QWEN_RUNTIME_DIR:-}"
+[ -z "$RUNTIME_DIR" ] && command -v jq >/dev/null && RUNTIME_DIR=$(jq -r '.advanced.runtimeOutputDir // empty' ~/.qwen/settings.json 2>/dev/null)
+RUNTIME_DIR="${RUNTIME_DIR:-${QWEN_HOME:-$HOME/.qwen}}"
 ```
+
+(If `jq` isn't installed, the settings layer is silently skipped — the env-var / default fallback covers the common case.)
+
+**Fast path for targeted diagnosis** — if a digit-only PID argument was given, skip step 1 enumeration but still match the PID to its sidecar so step 3 has the right session ID for log lookup:
+
+```
+kill -0 <pid> 2>/dev/null \
+  && ps -p <pid> -o pid=,pcpu=,rss=,etime=,state=,comm=,command= -ww \
+  || echo "PID <pid> is not running"
+grep -l '"pid"[[:space:]]*:[[:space:]]*<pid>\b' "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
+```
+
+The `grep -l` returns the sidecar file path (if any); the basename (stripped of `.runtime.json`) is the session ID for step 3's debug log read. Then jump to step 3.
 
 Otherwise (no arg, or symptom-only arg), run the general path below:
 
-1. **Resolve the runtime base directory**, then enumerate live sessions via the runtime sidecar (preferred, reliable):
+1. **Enumerate live sessions via the runtime sidecar** (preferred, reliable):
 
-   Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The base directory is taken from (in priority order): `QWEN_RUNTIME_DIR` env var, the `advanced.runtimeOutputDir` setting, `QWEN_HOME` env var, and finally `~/.qwen`. Use the resolved value in every command below — substituting the literal default would silently miss sessions on machines that override it.
+   Qwen Code writes a `runtime.json` sidecar for each interactive session at `"$RUNTIME_DIR"/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. Each file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
 
-   ```
-   RUNTIME_DIR="${QWEN_RUNTIME_DIR:-}"
-   [ -z "$RUNTIME_DIR" ] && RUNTIME_DIR=$(jq -r '.advanced.runtimeOutputDir // empty' ~/.qwen/settings.json 2>/dev/null)
-   RUNTIME_DIR="${RUNTIME_DIR:-${QWEN_HOME:-$HOME/.qwen}}"
-   ls -1 "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
-   ```
-
-   (The `jq` line gracefully degrades — if `jq` isn't installed or `settings.json` doesn't exist, the next line falls back to `QWEN_HOME` or the default.) Each sidecar file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
-
-   Then filter to live PIDs in one pass (avoids reading every stale sidecar individually):
+   Filter to live `(pid, sidecar-path)` pairs in one shot. Use Node (guaranteed available — qwen-code requires it) instead of `jq` (often missing on default macOS / minimal Linux) so this path doesn't silently degrade:
 
    ```
-   for f in "$RUNTIME_DIR"/projects/*/chats/*.runtime.json; do
-     pid=$(jq -r .pid "$f" 2>/dev/null)
-     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo "$pid $f"
-   done
+   node -e 'const fs=require("fs"); for (const f of process.argv.slice(1)) { try { const p=JSON.parse(fs.readFileSync(f,"utf8")).pid; if (p) { try { process.kill(p,0); console.log(p+" "+f); } catch {} } } catch {} }' "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
    ```
 
-   Only the live `(pid, sidecar-path)` pairs reach the report. PID reuse is rare but possible — when you cross-reference with `ps` in step 2, skip pairs whose live PID's command line no longer looks like a Qwen Code process.
+   PID reuse is rare but possible — when you cross-reference with `ps` in step 2, skip pairs whose live PID's command line no longer looks like a Qwen Code process.
 
-   **If no sidecar files are found** (empty output, or the directory does not exist), fall through to step 2 — `ps` is the working fallback.
+   **If the command emits nothing** (no sidecars, or no live PIDs), fall through to step 2 — `ps` is the working fallback.
 
 2. **List Qwen Code processes via `ps`** (macOS/Linux) — used to enrich each live session with CPU/RSS/state/uptime, and to catch sessions that may have started before the sidecar feature existed:
 
