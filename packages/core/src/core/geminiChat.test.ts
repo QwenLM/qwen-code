@@ -1887,6 +1887,26 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('getLastHistoryEntry', () => {
+    it('returns undefined for an empty history', () => {
+      expect(chat.getLastHistoryEntry()).toBeUndefined();
+    });
+
+    it('returns a defensive copy of only the last raw history entry', () => {
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
+
+      const last = chat.getLastHistoryEntry();
+      expect(last).toEqual({ role: 'model', parts: [{ text: 'b' }] });
+
+      last!.parts![0] = { text: 'mutated' };
+      expect(chat.getLastHistoryEntry()).toEqual({
+        role: 'model',
+        parts: [{ text: 'b' }],
+      });
+    });
+  });
+
   describe('sendMessageStream with retries', () => {
     it('should retry on invalid content, succeed, and report metrics', async () => {
       vi.useFakeTimers();
@@ -3559,6 +3579,16 @@ describe('GeminiChat', async () => {
       return compressSpy;
     }
 
+    function mockHeapUsed(heapUsed: number) {
+      return vi.spyOn(process, 'memoryUsage').mockReturnValue({
+        rss: heapUsed,
+        heapTotal: heapUsed,
+        heapUsed,
+        external: 0,
+        arrayBuffers: 0,
+      });
+    }
+
     it('replaces history and updates per-chat lastPromptTokenCount on COMPRESSED', async () => {
       mockCompressionService('compressed');
       chat.setHistory([userMsg('a'), modelMsg('b'), userMsg('c')]);
@@ -3625,6 +3655,22 @@ describe('GeminiChat', async () => {
 
       await chat.tryCompress('p1', 'm1', true);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
+    });
+
+    it('uses heap pressure to bypass the token gate without manual force semantics', async () => {
+      const compressSpy = mockCompressionService('noop');
+      mockHeapUsed(Number.MAX_SAFE_INTEGER);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 1000,
+      });
+
+      await chat.tryCompress('p1', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(0);
     });
   });
 });

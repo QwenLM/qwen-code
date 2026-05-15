@@ -17,6 +17,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
+import { getHeapStatistics } from 'node:v8';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -57,6 +58,7 @@ import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+const HEAP_PRESSURE_COMPRESSION_RATIO = 0.7;
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -496,6 +498,17 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    const bypassTokenThreshold = !force && this.isHeapPressureHigh();
+    if (bypassTokenThreshold) {
+      // Temporary safety net: token-based compaction can be too late for
+      // large-context sessions because JS heap pressure may hit first.
+      // Do not use force=true here because that carries manual /compress
+      // semantics in ChatCompressionService.
+      debugLogger.warn(
+        'Heap pressure is high; attempting auto-compaction before token threshold.',
+      );
+    }
+
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
@@ -505,6 +518,7 @@ export class GeminiChat {
       hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      bypassTokenThreshold,
       trigger: options?.trigger,
       signal,
     });
@@ -542,6 +556,17 @@ export class GeminiChat {
     }
 
     return info;
+  }
+
+  private isHeapPressureHigh(): boolean {
+    const heapLimit = getHeapStatistics().heap_size_limit;
+    if (!Number.isFinite(heapLimit) || heapLimit <= 0) {
+      return false;
+    }
+    return (
+      process.memoryUsage().heapUsed / heapLimit >=
+      HEAP_PRESSURE_COMPRESSION_RATIO
+    );
   }
 
   setSystemInstruction(sysInstr: string) {
@@ -1155,6 +1180,15 @@ export class GeminiChat {
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
     return structuredClone(history);
+  }
+
+  /**
+   * Returns a defensive copy of the last raw history entry without cloning the
+   * full conversation. Use this for O(1) inspections of comprehensive history.
+   */
+  getLastHistoryEntry(): Content | undefined {
+    const last = this.history[this.history.length - 1];
+    return last ? structuredClone(last) : undefined;
   }
 
   /**

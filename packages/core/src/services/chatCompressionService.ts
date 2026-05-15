@@ -182,6 +182,12 @@ export interface CompressOptions {
    */
   originalTokenCount: number;
   /**
+   * Bypass only the token-count threshold gate while preserving automatic
+   * compaction semantics. Used for temporary heap-pressure relief where
+   * `force=true` would be too broad because it means manual `/compress`.
+   */
+  bypassTokenThreshold?: boolean;
+  /**
    * Hook trigger to report for this compression. `force=true` bypasses the
    * threshold gate but does not always mean the user manually requested
    * compaction; reactive overflow recovery is forced but still automatic.
@@ -202,6 +208,7 @@ export class ChatCompressionService {
       config,
       hasFailedCompressionAttempt,
       originalTokenCount,
+      bypassTokenThreshold = false,
       trigger,
       signal,
     } = opts;
@@ -227,7 +234,7 @@ export class ChatCompressionService {
     // Don't compress if not forced and we are under the limit. This is the
     // steady-state path on every send; we want to exit before paying for the
     // full `getHistory(true)` clone below.
-    if (!force) {
+    if (!force && !bypassTokenThreshold) {
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
