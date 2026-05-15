@@ -55,22 +55,6 @@ Detection priority:
 3. System locale via JavaScript Intl API
 4. Default: English
 
-### Dynamic Command Translation
-
-Dynamic slash command descriptions from skills, extensions, file commands, and
-MCP prompts can be translated with AI. This is **off by default** to avoid
-unexpected model calls, latency, and token usage.
-
-```bash
-/language translate status  # Show current status
-/language translate on      # Enable AI translation for dynamic descriptions
-/language translate off     # Disable AI translation
-```
-
-Use `/language translate cache refresh` to re-translate cached dynamic
-descriptions after enabling translation, or `/language translate cache clear` to
-remove cached translations.
-
 ## LLM Output Language
 
 The LLM output language controls what language the AI assistant responds in, regardless of what language you type your questions in.
@@ -144,6 +128,29 @@ User directory takes precedence over built-in translations.
 >
 > Contributions are welcome! If you’d like to improve built-in translations or add new languages.
 > For a concrete example, see [PR #1238: feat(i18n): add Russian language support](https://github.com/QwenLM/qwen-code/pull/1238).
+
+### Maintaining `zh-TW` (Traditional Chinese for Taiwan)
+
+`zh-TW` is **not** an automatic OpenCC s2t conversion of `zh.js` — it is a hand-maintained Taiwan-vocabulary translation. When adding or updating keys, please follow the conventions below.
+
+The "CI enforced?" column indicates whether `npm run check-i18n` will fail the build on a violation. Rows marked **No** are style guidance enforced by review only — typically because the offending form has a legitimate non-UI meaning (`文件` can mean "document", `打開` is colloquially fine in Taiwan).
+
+| Avoid                 | Use instead           | CI enforced? | Reason                                                                                                                                                                           |
+| --------------------- | --------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 文件 (file)           | 檔案                  | No           | Taiwan term for filesystem files (but `文件` can legitimately mean "document")                                                                                                   |
+| 服務器 / 服务器       | 伺服器                | Yes          | Taiwan term for "server"                                                                                                                                                         |
+| 菜單 / 菜单           | 選單                  | Yes          | Taiwan term for "menu"                                                                                                                                                           |
+| 鏈接 / 链接           | 連結                  | Yes          | Taiwan term for "link" (bare `鏈` is fine — e.g. 區塊鏈)                                                                                                                         |
+| 打開                  | 開啟                  | No           | Taiwan-preferred verb for "open" (UI); `打開` is colloquially common                                                                                                             |
+| 爲 / 啓 / 曆史 / 鏈接 | 為 / 啟 / 歷史 / 連結 | Yes          | Variant Traditional forms from raw OpenCC s2t. Note: `曆` is context-dependent and correct in calendar terms (日曆, 農曆, 西曆); CI only flags the bigram `曆史`, not bare `曆`. |
+
+If you are not a Traditional Chinese speaker and need to bootstrap a value, **do not paste raw OpenCC `s2t` output**: the default s2t profile emits variant Traditional characters (e.g. 爲, 啓) that Taiwan does not use, and never rewrites Mainland-Chinese vocabulary (服務器, 菜單). Prefer `s2twp.json` (Simplified → Taiwan with phrase mapping) as a starting point and then ask a Taiwan-Chinese speaker to review.
+
+The `check-i18n` script (run in CI via `npm run check-i18n`) will fail the build if any of the CI-enforced substrings above end up in a `zh-TW` value. See `scripts/check-i18n.ts → ZH_TW_FORBIDDEN_PATTERNS` for the full list. If a translation legitimately needs to contain a CI-forbidden substring, add its key to `ZH_TW_ALLOWED_EXCEPTIONS` in the same file with a brief justification.
+
+> [!note]
+>
+> The check uses plain substring matching, which does not understand Chinese word boundaries. A bigram pattern can therefore false-positive across compound-word boundaries — for example, `區塊鏈接口` (= `區塊鏈` + `接口`) contains the substring `鏈接` even though neither word is incorrect. If you hit a surprising CI failure of this kind, add the translation key to `ZH_TW_ALLOWED_EXCEPTIONS` rather than removing the pattern.
 
 ### Language Pack Format
 

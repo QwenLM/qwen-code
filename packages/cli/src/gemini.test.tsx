@@ -93,6 +93,7 @@ vi.mock('./utils/stdioHelpers.js', () => ({
 
 vi.mock('./utils/relaunch.js', () => ({
   relaunchAppInChildProcess: vi.fn(),
+  relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
 }));
 
 vi.mock('./config/sandboxConfig.js', () => ({
@@ -306,6 +307,133 @@ describe('gemini.tsx main function', () => {
         projectHooks: undefined,
       },
     );
+  });
+
+  const runSandboxRelaunch = async (
+    argv: string[],
+    sessionId = '123e4567-e89b-12d3-a456-426614174000',
+  ): Promise<string[]> => {
+    const originalArgv = process.argv;
+    process.argv = argv;
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { start_sandbox } = await import('./utils/sandbox.js');
+
+    vi.mocked(start_sandbox).mockClear();
+    vi.mocked(parseArguments).mockResolvedValue({
+      debug: true,
+      prompt: 'hello',
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue({
+      command: 'sandbox-exec',
+      image: '',
+    });
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => sessionId,
+    } as unknown as Config);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
+
+    expect(start_sandbox).toHaveBeenCalledOnce();
+    return vi.mocked(start_sandbox).mock.calls[0]![3]!;
+  };
+
+  it('passes the outer session ID into the sandbox child process', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const sandboxArgs = await runSandboxRelaunch(
+      ['node', 'script.js', '--debug', '-p', 'hello'],
+      sessionId,
+    );
+
+    const idx = sandboxArgs.indexOf('--sandbox-session-id');
+    expect(idx).not.toBe(-1);
+    expect(sandboxArgs[idx + 1]).toBe(sessionId);
+    expect(sandboxArgs).not.toContain('--session-id');
+  });
+
+  it('does not pass an empty session ID into the sandbox child process', async () => {
+    const sandboxArgs = await runSandboxRelaunch(
+      ['node', 'script.js', '--debug', '-p', 'hello'],
+      '',
+    );
+
+    expect(sandboxArgs).not.toContain('--sandbox-session-id');
+    expect(sandboxArgs).not.toContain('--session-id');
+  });
+
+  it.each([
+    ['--continue', ['node', 'script.js', '--debug', '--continue']],
+    ['-c', ['node', 'script.js', '--debug', '-c']],
+    ['--resume', ['node', 'script.js', '--debug', '--resume', 'session-id']],
+    ['-r', ['node', 'script.js', '--debug', '-r', 'session-id']],
+    [
+      '--session-id',
+      [
+        'node',
+        'script.js',
+        '--debug',
+        '--session-id',
+        '123e4567-e89b-12d3-a456-426614174999',
+      ],
+    ],
+  ])(
+    'does not inject sandbox session ID when argv contains %s',
+    async (_flag, argv) => {
+      const sandboxArgs = await runSandboxRelaunch(argv);
+
+      expect(sandboxArgs).not.toContain('--sandbox-session-id');
+    },
+  );
+
+  it('inserts the sandbox session ID before the argument separator', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const sandboxArgs = await runSandboxRelaunch(
+      ['node', 'script.js', '--debug', '--', '--not-a-cli-flag'],
+      sessionId,
+    );
+
+    expect(sandboxArgs).toEqual([
+      'node',
+      'script.js',
+      '--debug',
+      '--sandbox-session-id',
+      sessionId,
+      '--',
+      '--not-a-cli-flag',
+    ]);
   });
 
   it('should log unhandled promise rejections and open debug console on first error', async () => {

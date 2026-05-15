@@ -171,9 +171,16 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
   let lastSessionMock:
     | { pendingWorktreeNotice: string | null; getId: ReturnType<typeof vi.fn> }
     | undefined;
-  let processExitSpy: ReturnType<typeof vi.spyOn>;
-  let stdinDestroySpy: ReturnType<typeof vi.spyOn>;
-  let stdoutDestroySpy: ReturnType<typeof vi.spyOn>;
+  // Use `any` for these spies because vitest's MockInstance<T> doesn't
+  // accept the heterogeneous Node.js prototype signatures (process.exit:
+  // never, stdin.destroy: ReadStream, stdout.destroy: WriteStream) under
+  // a single covariant type. We only call .mockRestore() on them.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let processExitSpy: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let stdinDestroySpy: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let stdoutDestroySpy: any;
 
   const mockArgv = {} as CliArgs;
 

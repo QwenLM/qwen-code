@@ -25,6 +25,7 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
+import { SessionStartSource } from '../hooks/types.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -185,6 +186,110 @@ describe('GeminiChat', async () => {
     await vi.advanceTimersByTimeAsync(advanceByMs);
     return collecting;
   }
+
+  describe('system instruction helpers', () => {
+    it('replaces prior session-start context instead of appending indefinitely', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction('Base instruction');
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
+      );
+    });
+
+    it('preserves existing system prompt suffixes when replacing session-start context', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule',
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
+      );
+    });
+
+    it('preserves non-string systemInstruction content when applying session-start context', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {
+          systemInstruction: {
+            role: 'system',
+            parts: [{ text: 'Base content instruction' }],
+          },
+        },
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base content instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
+      );
+    });
+
+    it('applies session-start context synchronously via applySessionStartContext', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction('Base instruction');
+
+      isolatedChat.applySessionStartContext(
+        '  Sync ctx  ',
+        SessionStartSource.Startup,
+      );
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nSync ctx\n</qwen:session-start-context>',
+      );
+    });
+
+    it('does not strip legitimate content that only resembles the old plain-text marker', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction(
+        'Base instruction\n\n---\n\nSessionStart additional context:\nLegitimate content',
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toContain(
+        'Legitimate content',
+      );
+      expect(isolatedChat['generationConfig'].systemInstruction).toContain(
+        '<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx1\n</qwen:session-start-context>',
+      );
+    });
+  });
 
   describe('sendMessageStream', () => {
     it('should succeed if a tool call is followed by an empty part', async () => {

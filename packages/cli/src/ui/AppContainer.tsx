@@ -42,7 +42,6 @@ import {
   ShellExecutionService,
   Storage,
   SessionEndReason,
-  SessionStartSource,
   generatePromptSuggestion,
   logPromptSuggestion,
   PromptSuggestionEvent,
@@ -56,7 +55,6 @@ import {
   ApprovalMode,
   ConditionalRulesRegistry,
   MCPDiscoveryState,
-  type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
   ToolNames,
@@ -65,6 +63,7 @@ import {
   GitWorktreeService,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -458,6 +457,33 @@ export const AppContainer = (props: AppContainerProps) => {
   const lastTitleRef = useRef<string | null>(null);
   const staticExtraHeight = 3;
 
+  // Prefetch the lowlight chunk on mount so the dynamic import is already
+  // in flight before the first code block needs colorizing. Without this
+  // kick-off, code blocks committed to ink's append-only <Static> region
+  // before the import resolves stay plain text for the rest of the session
+  // — Static can only be re-rendered via `refreshStatic`, which is not
+  // wired to lowlight load completion. Common reachable paths: short
+  // `--prompt -p` runs that finalize quickly, Ctrl+C-cancelled first turns,
+  // and the first-paint history replay on `--resume`. Firing the load
+  // from mount keeps the startup parse-cost win (V8 still parses off the
+  // critical path) while restoring the "first paint sees a loaded
+  // instance" guarantee. Errors are silently swallowed; CodeColorizer
+  // already falls back to plain text on miss.
+  useEffect(() => {
+    void loadLowlight().catch((err) => {
+      // The loader caches rejection with a cooldown (see
+      // `LOWLIGHT_RETRY_COOLDOWN_MS` / `lowlightLastFailureAt` in
+      // `lowlightLoader.ts`). This useEffect runs once on mount, so this
+      // catch fires at most once per session regardless. Log to the debug
+      // channel so a degraded syntax-highlight state (corrupted install,
+      // missing chunk) leaves a breadcrumb without spamming the user's
+      // TTY — `CodeColorizer` already falls back to plain text.
+      debugLogger.warn(
+        `Failed to load lowlight chunk; code blocks will render as plain text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, []);
+
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
@@ -531,32 +557,6 @@ export const AppContainer = (props: AppContainerProps) => {
           // eslint-disable-next-line no-console
           console.debug('worktree session restore failed:', error);
         }
-      }
-
-      // Fire SessionStart event after config is initialized
-      const sessionStartSource = resumedSessionData
-        ? SessionStartSource.Resume
-        : SessionStartSource.Startup;
-
-      const hookSystem = config.getHookSystem();
-
-      if (hookSystem) {
-        hookSystem
-          .fireSessionStartEvent(
-            sessionStartSource,
-            config.getModel() ?? '',
-            String(config.getApprovalMode()) as PermissionMode,
-          )
-          .then(() => {
-            debugLogger.debug('SessionStart event completed successfully');
-          })
-          .catch((err) => {
-            debugLogger.warn(`SessionStart hook failed: ${err}`);
-          });
-      } else {
-        debugLogger.debug(
-          'SessionStart: HookSystem not available, skipping event',
-        );
       }
     })();
 
@@ -811,17 +811,36 @@ export const AppContainer = (props: AppContainerProps) => {
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
+  //
+  // Two requirements pull in opposite directions:
+  //   (a) refreshStatic() must NOT be called from inside a setState updater,
+  //       because React.StrictMode double-invokes updaters in dev and we'd
+  //       fire two clearTerminal writes per model swap.
+  //   (b) setHistoryRemountKey (inside refreshStatic) and setCurrentModel
+  //       MUST land in the SAME commit. MainContent's <Static> key is
+  //       `${historyRemountKey}-${currentModel}` and its render-phase
+  //       progressive-replay reset (lastRemountKey !== historyRemountKey)
+  //       only fires when historyRemountKey changes. If currentModel
+  //       changes first in its own render, Static remounts with the OLD
+  //       remount key and the unreset (full-length) replayCount — i.e.
+  //       a full-history Static render that bypasses progressive replay
+  //       (the issue #3899 freeze regression). See PR #4119 review.
+  //
+  // Fix: side-effect lives in the event handler (NOT the updater); a ref
+  // guard de-dupes same-model notifications. React batches the
+  // setHistoryRemountKey (via refreshStatic) and setCurrentModel calls in
+  // this event handler into a single commit, so the render-phase reset
+  // and the Static remount happen together — no full-history flash.
+  const lastNotifiedModelRef = useRef(currentModel);
   useEffect(() => {
     const unsubscribe = config.onModelChange((model) => {
-      setCurrentModel((prev) => {
-        if (prev === model) {
-          return prev;
-        }
-        refreshStatic();
-        return model;
-      });
+      if (lastNotifiedModelRef.current === model) {
+        return;
+      }
+      lastNotifiedModelRef.current = model;
+      refreshStatic();
+      setCurrentModel(model);
     });
-
     return unsubscribe;
   }, [config, refreshStatic]);
 
