@@ -1075,6 +1075,18 @@ export class GeminiClient {
           this.pendingMemoryPrefetch?.controller.abort();
           this.pendingMemoryPrefetch = undefined;
           const controller = new AbortController();
+          // Bridge the caller's signal into the prefetch controller so a user
+          // abort (Ctrl-C / Esc) on the parent turn also terminates the
+          // recall side-query. `{ once: true }` lets the listener clean itself
+          // up after firing; we still call removeEventListener on the promise's
+          // finally to cover the normal-completion case so a long-lived parent
+          // signal doesn't accumulate listeners across many turns.
+          const onParentAbort = () => controller.abort();
+          if (signal.aborted) {
+            controller.abort();
+          } else {
+            signal.addEventListener('abort', onParentAbort, { once: true });
+          }
           const promise = this.config
             .getMemoryManager()
             .recall(this.config.getProjectRoot(), partToString(request), {
@@ -1101,6 +1113,7 @@ export class GeminiClient {
           };
           void promise.finally(() => {
             handle.settledAt = Date.now();
+            signal.removeEventListener('abort', onParentAbort);
           });
           this.pendingMemoryPrefetch = handle;
         }

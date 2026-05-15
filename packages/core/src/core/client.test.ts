@@ -2459,6 +2459,42 @@ hello
       expect(memoryIdx).toBeGreaterThan(functionResponseIdx);
     });
 
+    it('should abort the pending prefetch when the caller signal aborts', async () => {
+      let abortHandlerInvoked = false;
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        opts.abortSignal?.addEventListener('abort', () => {
+          abortHandlerInvoked = true;
+        });
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      const callerController = new AbortController();
+      const stream = client.sendMessageStream(
+        [{ text: 'user typed but then aborted' }],
+        callerController.signal,
+        'prompt-id-aborted',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      expect(abortHandlerInvoked).toBe(false);
+      callerController.abort();
+      expect(abortHandlerInvoked).toBe(true);
+    });
+
     it('should abort the previous prefetch when a new UserQuery arrives mid-flight', async () => {
       // Pending recall on first UserQuery — never resolves on its own.
       const abortSignals: AbortSignal[] = [];

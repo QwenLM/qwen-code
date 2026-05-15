@@ -22,7 +22,7 @@ Root cause: the main-agent request path `await`s the recall result before sendin
 Fire recall on UserQuery and never await it. Consume the result at two opportunistic points — whichever fires first:
 
 1. **UserQuery consume point** — synchronous `settledAt !== null` check just before `turn.run()`. Zero-wait: if already settled, use it; if not, skip.
-2. **ToolResult inject point** — same check on every ToolResult turn. Injects memory as a `system-reminder` prepended to the tool-result message, giving the model memory context before its next response.
+2. **ToolResult inject point** — same check on every ToolResult turn. Injects memory as a `system-reminder` **appended after** the functionResponse parts in `requestToSend`, giving the model memory context before its next response. (Append, not prepend: the Qwen API requires the functionResponse to immediately follow the model's functionCall — see the existing `hasPendingToolCall` IDE-context skip for the same constraint.)
 
 This matches the pattern used by Claude Code upstream (`startRelevantMemoryPrefetch` / `settledAt` polling in `query.ts`).
 
@@ -62,7 +62,22 @@ Delete the function entirely. It is replaced by the `settledAt` flag mechanism.
 Replace the `resolveAutoMemoryWithDeadline` call with:
 
 ```typescript
+// Abort any in-flight prefetch from a previous UserQuery before installing
+// the new handle (prevents orphan side-queries when the user types again
+// before recall settles).
+this.pendingMemoryPrefetch?.controller.abort();
+this.pendingMemoryPrefetch = undefined;
+
 const controller = new AbortController();
+// Bridge the caller's signal into the prefetch controller so a user abort
+// (Ctrl-C / Esc) on the parent turn also terminates the recall side-query.
+const onParentAbort = () => controller.abort();
+if (signal.aborted) {
+  controller.abort();
+} else {
+  signal.addEventListener('abort', onParentAbort, { once: true });
+}
+
 const promise = this.config
   .getMemoryManager()
   .recall(projectRoot, partToString(request), {
@@ -85,6 +100,7 @@ const handle: MemoryPrefetchHandle = {
 };
 void promise.finally(() => {
   handle.settledAt = Date.now();
+  signal.removeEventListener('abort', onParentAbort);
 });
 this.pendingMemoryPrefetch = handle;
 // no await — continue immediately
@@ -127,7 +143,10 @@ if (messageType === SendMessageType.ToolResult) {
     this.pendingMemoryPrefetch = undefined;
     const result = await prefetchHandle.promise;
     if (result.prompt) {
-      requestToSend = [result.prompt, ...requestToSend];
+      // Append (not prepend) so functionResponse parts stay first
+      // and the model's functionCall/functionResponse pairing
+      // isn't broken on the native Gemini path.
+      requestToSend = [...requestToSend, result.prompt];
       for (const doc of result.selectedDocs) {
         this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
       }
@@ -136,16 +155,27 @@ if (messageType === SendMessageType.ToolResult) {
 }
 ```
 
-### 5. `client.ts` — cleanup paths (6 locations)
+### 5. `client.ts` — cleanup paths
 
-Replace all `pendingRecallAbortController?.abort()` + `= undefined` with:
+The handle is released by two distinct mechanisms:
+
+**5 abort-and-clear sites** (the prefetch is still pending, abort the controller before dropping the reference). Replace `pendingRecallAbortController?.abort()` + `= undefined` with:
 
 ```typescript
 this.pendingMemoryPrefetch?.controller.abort();
 this.pendingMemoryPrefetch = undefined;
 ```
 
-Locations: `resetChat()`, MaxSessionTurns early-return, boundedTurns=0 early-return, SessionTokenLimitExceeded early-return, Arena control signal early-return, post-consume clear.
+Sites: `resetChat()`, `MaxSessionTurns` early-return, `boundedTurns=0` early-return, `SessionTokenLimitExceeded` early-return, Arena control-signal early-return. The fire path itself also performs this abort-then-replace when a new UserQuery arrives while the previous prefetch is still in flight.
+
+**2 clear-only sites** (the prefetch has already settled and we're consuming it — no controller to abort, just drop the reference):
+
+```typescript
+prefetchHandle.consumed = true;
+this.pendingMemoryPrefetch = undefined;
+```
+
+Sites: UserQuery consume point, ToolResult inject point.
 
 ### 6. `relevanceSelector.ts` — remove `AbortSignal.timeout(1_000)`
 
