@@ -267,19 +267,19 @@ describe('TodoWriteTool', () => {
       );
     });
 
-    it('should block todo creation when validation hook returns deny', async () => {
+    it('should block todo creation when validation hook returns block', async () => {
       const hookResult: AggregatedHookResult = {
         success: true,
         allOutputs: [
           new DefaultHookOutput({
-            decision: 'deny',
+            decision: 'block',
             reason: 'Creation denied',
           }),
         ],
         errors: [],
         totalDuration: 10,
         finalOutput: new DefaultHookOutput({
-          decision: 'deny',
+          decision: 'block',
           reason: 'Creation denied',
         }),
       };
@@ -321,19 +321,19 @@ describe('TodoWriteTool', () => {
       );
     });
 
-    it('should block todo completion when validation hook returns deny', async () => {
+    it('should block todo completion when validation hook returns block', async () => {
       const hookResult: AggregatedHookResult = {
         success: true,
         allOutputs: [
           new DefaultHookOutput({
-            decision: 'deny',
+            decision: 'block',
             reason: 'Completion denied',
           }),
         ],
         errors: [],
         totalDuration: 10,
         finalOutput: new DefaultHookOutput({
-          decision: 'deny',
+          decision: 'block',
           reason: 'Completion denied',
         }),
       };
@@ -378,19 +378,19 @@ describe('TodoWriteTool', () => {
       );
     });
 
-    it('should ignore postWrite deny decisions after persistence', async () => {
+    it('should ignore postWrite block decisions after persistence', async () => {
       const hookResult: AggregatedHookResult = {
         success: true,
         allOutputs: [
           new DefaultHookOutput({
-            decision: 'deny',
+            decision: 'block',
             reason: 'Ignored after write',
           }),
         ],
         errors: [],
         totalDuration: 10,
         finalOutput: new DefaultHookOutput({
-          decision: 'deny',
+          decision: 'block',
           reason: 'Ignored after write',
         }),
       };
@@ -471,14 +471,14 @@ describe('TodoWriteTool', () => {
             success: true,
             allOutputs: [
               new DefaultHookOutput({
-                decision: 'deny',
+                decision: 'block',
                 reason: 'Second todo denied',
               }),
             ],
             errors: [],
             totalDuration: 10,
             finalOutput: new DefaultHookOutput({
-              decision: 'deny',
+              decision: 'block',
               reason: 'Second todo denied',
             }),
           }),
@@ -515,6 +515,55 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain(
         'Todo creation blocked: Second todo denied',
       );
+    });
+
+    it('should report success when postWrite hooks fail after persistence', async () => {
+      const postWriteError = new Error('Hook timeout');
+      const validationAllow: AggregatedHookResult = {
+        success: true,
+        allOutputs: [new DefaultHookOutput({ decision: 'allow' })],
+        errors: [],
+        totalDuration: 10,
+        finalOutput: new DefaultHookOutput({ decision: 'allow' }),
+      };
+
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi
+          .fn()
+          .mockResolvedValueOnce(validationAllow)
+          .mockRejectedValueOnce(postWriteError),
+        fireTodoCompletedEvent: vi.fn(),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      const params: TodoWriteParams = {
+        todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
+      };
+
+      const enoentError = new Error('ENOENT') as Error & { code: string };
+      enoentError.code = 'ENOENT';
+      mockFs.readFile.mockRejectedValue(enoentError);
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockFs.writeFile.mockResolvedValue(undefined);
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(mockFs.writeFile).toHaveBeenCalled();
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      expect(result.llmContent).toContain(
+        'Todos were persisted successfully, but post-write hooks failed with error: Hook timeout.',
+      );
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        todos: params.todos,
+      });
     });
 
     it('should run postWrite hooks concurrently after persistence', async () => {

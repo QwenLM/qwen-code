@@ -363,9 +363,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         );
 
         const blockedCreatedResult = createdResults.find(
-          (result) =>
-            result.finalOutput?.decision === 'block' ||
-            result.finalOutput?.decision === 'deny',
+          (result) => result.finalOutput?.decision === 'block',
         );
         if (blockedCreatedResult?.finalOutput) {
           const reason =
@@ -397,9 +395,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         );
 
         const blockedCompletedResult = completedResults.find(
-          (result) =>
-            result.finalOutput?.decision === 'block' ||
-            result.finalOutput?.decision === 'deny',
+          (result) => result.finalOutput?.decision === 'block',
         );
         if (blockedCompletedResult?.finalOutput) {
           const reason =
@@ -418,36 +414,45 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted
       // We don't check for blocking here since validation already passed
-      if (hookSystem && changes.created.length > 0) {
-        await Promise.all(
-          changes.created.map((todo) =>
-            hookSystem.fireTodoCreatedEvent(
-              todo.id,
-              todo.content,
-              todo.status,
-              finalTodos,
-              HookPhase.PostWrite,
-              _signal,
+      let postWriteError: Error | undefined;
+      try {
+        if (hookSystem && changes.created.length > 0) {
+          await Promise.all(
+            changes.created.map((todo) =>
+              hookSystem.fireTodoCreatedEvent(
+                todo.id,
+                todo.content,
+                todo.status,
+                finalTodos,
+                HookPhase.PostWrite,
+                _signal,
+              ),
             ),
-          ),
-        );
-      }
+          );
+        }
 
-      if (hookSystem && changes.completed.length > 0) {
-        await Promise.all(
-          changes.completed.map((todo) => {
-            const oldTodo = oldTodosMap.get(todo.id);
-            const previousStatus = oldTodo?.status ?? 'pending';
+        if (hookSystem && changes.completed.length > 0) {
+          await Promise.all(
+            changes.completed.map((todo) => {
+              const oldTodo = oldTodosMap.get(todo.id);
+              const previousStatus = oldTodo?.status ?? 'pending';
 
-            return hookSystem.fireTodoCompletedEvent(
-              todo.id,
-              todo.content,
-              previousStatus as 'pending' | 'in_progress',
-              finalTodos,
-              HookPhase.PostWrite,
-              _signal,
-            );
-          }),
+              return hookSystem.fireTodoCompletedEvent(
+                todo.id,
+                todo.content,
+                previousStatus as 'pending' | 'in_progress',
+                finalTodos,
+                HookPhase.PostWrite,
+                _signal,
+              );
+            }),
+          );
+        }
+      } catch (error) {
+        postWriteError =
+          error instanceof Error ? error : new Error(String(error));
+        debugLogger.error(
+          `[TodoWriteTool] Post-write hooks failed after todos were persisted: ${postWriteError.message}`,
         );
       }
 
@@ -461,6 +466,13 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // Create plain string format with system reminder
       const todosJson = JSON.stringify(finalTodos);
       let llmContent: string;
+      const postWriteReminder = postWriteError
+        ? `
+
+<system-reminder>
+Todos were persisted successfully, but post-write hooks failed with error: ${postWriteError.message}. Do not tell the user the write failed; only handle any follow-up hook issues if needed.
+</system-reminder>`
+        : '';
 
       if (finalTodos.length === 0) {
         // Special message for empty todos
@@ -468,7 +480,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
 <system-reminder>
 Your todo list is now empty. DO NOT mention this explicitly to the user. You have no pending tasks in your todo list.
-</system-reminder>`;
+</system-reminder>${postWriteReminder}`;
       } else {
         // Normal message for todos with items
         llmContent = `Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
@@ -477,7 +489,7 @@ Your todo list is now empty. DO NOT mention this explicitly to the user. You hav
 Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list:
 
 ${todosJson}. Continue on with the tasks at hand if applicable.
-</system-reminder>`;
+</system-reminder>${postWriteReminder}`;
       }
 
       return {

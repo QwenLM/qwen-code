@@ -42,9 +42,8 @@ import type {
   TodoCompletedInput,
   TodoItem,
   TodoStatus,
-  HookPhase,
 } from './types.js';
-import { PermissionMode } from './types.js';
+import { HookPhase, PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
@@ -548,6 +547,21 @@ export class HookEventHandler {
     context?: HookEventContext,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
+    const failClosedResult: AggregatedHookResult = {
+      success: false,
+      allOutputs: [],
+      errors: [],
+      totalDuration: 0,
+      finalOutput:
+        eventName === HookEventName.TodoCreated ||
+        eventName === HookEventName.TodoCompleted
+          ? {
+              decision: 'block',
+              reason: `Hook system failed while processing ${eventName}`,
+            }
+          : undefined,
+    };
+
     try {
       // Create execution plan from registry hooks
       const plan = this.hookPlanner.createExecutionPlan(eventName, context);
@@ -643,12 +657,13 @@ export class HookEventHandler {
     } catch (error) {
       debugLogger.error(`Hook event bus error for ${eventName}: ${error}`);
 
-      return {
-        success: false,
-        allOutputs: [],
-        errors: [error instanceof Error ? error : new Error(String(error))],
-        totalDuration: 0,
-      };
+      const normalizedError =
+        error instanceof Error ? error : new Error(String(error));
+      failClosedResult.errors = [normalizedError];
+      if (failClosedResult.finalOutput) {
+        failClosedResult.finalOutput.reason = `${failClosedResult.finalOutput.reason}: ${normalizedError.message}`;
+      }
+      return failClosedResult;
     }
   }
 
@@ -694,6 +709,37 @@ export class HookEventHandler {
     }
   }
 
+  private sanitizeHookInputForTelemetry(
+    eventName: HookEventName,
+    input: HookInput,
+  ): Record<string, unknown> {
+    const telemetryInput: Record<string, unknown> = { ...input };
+
+    if (eventName === HookEventName.TodoCreated) {
+      delete telemetryInput['todo_content'];
+      delete telemetryInput['all_todos'];
+      if ('phase' in telemetryInput) {
+        telemetryInput['phase'] =
+          telemetryInput['phase'] === HookPhase.PostWrite
+            ? HookPhase.PostWrite
+            : HookPhase.Validation;
+      }
+    }
+
+    if (eventName === HookEventName.TodoCompleted) {
+      delete telemetryInput['todo_content'];
+      delete telemetryInput['all_todos'];
+      if ('phase' in telemetryInput) {
+        telemetryInput['phase'] =
+          telemetryInput['phase'] === HookPhase.PostWrite
+            ? HookPhase.PostWrite
+            : HookPhase.Validation;
+      }
+    }
+
+    return telemetryInput;
+  }
+
   /**
    * Log hook execution for observability
    */
@@ -722,6 +768,8 @@ export class HookEventHandler {
       );
     }
 
+    const telemetryInput = this.sanitizeHookInputForTelemetry(eventName, input);
+
     for (const result of results) {
       const hookName = this.getHookNameFromResult(result);
       const hookType = this.getHookTypeFromResult(result);
@@ -730,7 +778,7 @@ export class HookEventHandler {
         eventName,
         hookType,
         hookName,
-        { ...input },
+        telemetryInput,
         result.duration,
         result.success,
         result.output ? { ...result.output } : undefined,
