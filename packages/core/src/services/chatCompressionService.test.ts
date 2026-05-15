@@ -811,7 +811,7 @@ describe('ChatCompressionService', () => {
       force: true,
       model: mockModel,
       config: mockConfig,
-      hasFailedCompressionAttempt: false,
+      consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
     });
 
