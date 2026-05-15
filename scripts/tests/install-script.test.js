@@ -107,6 +107,12 @@ describe('installation scripts', () => {
     expect(script).toContain('Falling back to npm installation');
     expect(script).toContain('standalone_status=$?');
     expect(script).toContain('[[ "${standalone_status}" -eq 2 ]]');
+    expect(script).toMatch(
+      /Aliyun standalone archive not found; retrying GitHub mirror\.[\s\S]*checksum_source="\$\{base_url\}\/SHA256SUMS"[\s\S]*MIRROR="github"/,
+    );
+    expect(script).toMatch(
+      /archive_url="\$\{github_fallback_base_url\}\/\$\{archive_name\}"[\s\S]*checksum_source="\$\{github_fallback_base_url\}\/SHA256SUMS"[\s\S]*MIRROR="github"[\s\S]*Aliyun standalone archive download failed; retrying GitHub mirror\./,
+    );
     expect(script).toContain(
       'Standalone install failed. Retry with --method npm',
     );
@@ -284,6 +290,9 @@ describe('installation scripts', () => {
     expect(script).toContain('endlocal & set "PATH=%INSTALL_BIN_DIR%;%PATH%"');
     expect(script).not.toContain(
       'endlocal & set "PATH=!INSTALL_BIN_DIR!;%PATH%"',
+    );
+    expect(script).toContain(
+      'if /i "!METHOD!"=="detect" exit /b 2\r\n        exit /b 1',
     );
     expect(script).toContain(':RestoreStaleInstallBackup');
     expect(script).toContain('call :RestoreStaleInstallBackup');
@@ -517,6 +526,11 @@ describe('standalone release packaging', () => {
     expect(releaseVerifyScript).toContain('verifyReleaseBaseUrl');
     expect(releaseVerifyScript).toContain('EXPECTED_RELEASE_ASSET_NAMES');
     expect(releaseVerifyScript).toContain('EXPECTED_STANDALONE_ARCHIVE_NAMES');
+    expect(releaseVerifyScript).toContain('import { RELEASE_TARGETS }');
+    expect(releaseVerifyScript).toContain(
+      'standaloneArchiveNamesFromReleaseTargets',
+    );
+    expect(releaseVerifyScript).not.toContain("'qwen-code-win-x64.zip'");
     expect(releaseVerifyScript).not.toContain('INSTALLATION_ASSET_NAMES');
     expect(releaseVerifyScript).not.toContain('assertInstallAliasMatches');
   });

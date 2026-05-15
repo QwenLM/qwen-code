@@ -1054,6 +1054,7 @@ install_standalone() {
                     base_url="${github_fallback_base_url}"
                     archive_url="${github_archive_url}"
                     checksum_source="${base_url}/SHA256SUMS"
+                    MIRROR="github"
                     github_fallback_base_url=""
                 else
                     log_warning "Standalone archive not found: ${archive_name}"
@@ -1075,6 +1076,7 @@ install_standalone() {
                 rm -f "${archive_path}"
                 archive_url="${github_fallback_base_url}/${archive_name}"
                 checksum_source="${github_fallback_base_url}/SHA256SUMS"
+                MIRROR="github"
                 github_fallback_base_url=""
                 log_warning "Aliyun standalone archive download failed; retrying GitHub mirror."
                 echo "Downloading ${archive_name}"

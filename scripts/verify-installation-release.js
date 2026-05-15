@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { RELEASE_TARGETS } from './build-standalone-release.js';
 import {
   fail,
   isMainModule,
@@ -21,13 +22,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
-const EXPECTED_STANDALONE_ARCHIVE_NAMES = [
-  'qwen-code-darwin-arm64.tar.gz',
-  'qwen-code-darwin-x64.tar.gz',
-  'qwen-code-linux-arm64.tar.gz',
-  'qwen-code-linux-x64.tar.gz',
-  'qwen-code-win-x64.zip',
-];
+const EXPECTED_STANDALONE_ARCHIVE_NAMES =
+  standaloneArchiveNamesFromReleaseTargets(RELEASE_TARGETS);
 // Release artifacts that the installer chain expects in a GitHub Release.
 // Hosted installer scripts are served from a separate endpoint and are
 // intentionally not part of this set; they have their own staging path in
@@ -37,6 +33,13 @@ const EXPECTED_RELEASE_ASSET_NAMES = [
   'SHA256SUMS',
 ];
 const REMOTE_FETCH_TIMEOUT_MS = 30_000;
+
+function standaloneArchiveNamesFromReleaseTargets(releaseTargets) {
+  return releaseTargets.map(
+    ({ qwenTarget }) =>
+      `qwen-code-${qwenTarget}.${qwenTarget.startsWith('win-') ? 'zip' : 'tar.gz'}`,
+  );
+}
 
 const ARG_DEFS = {
   '--dir': { key: 'dir', type: 'value' },
