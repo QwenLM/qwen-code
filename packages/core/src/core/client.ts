@@ -149,42 +149,14 @@ function wrapIdeContext(contextText: string): string {
   return `<system-reminder>\n${safeContextText}\n</system-reminder>`;
 }
 
-/**
- * Resolve the auto-memory recall promise with a hard deadline.
- * If the recall (model-driven selection + heuristic fallback) does not complete
- * within the deadline, return an empty result so the main request is not delayed.
- *
- * The deadline is set slightly above the model-driven selector's own
- * AbortSignal.timeout (2s) to give the heuristic fallback time to complete,
- * but low enough that the user does not perceive a delay on every turn.
- */
-async function resolveAutoMemoryWithDeadline(
-  promise: Promise<RelevantAutoMemoryPromptResult> | undefined,
-  onDeadline: () => void,
-): Promise<RelevantAutoMemoryPromptResult> {
-  if (!promise) {
-    return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-  }
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<RelevantAutoMemoryPromptResult>((resolve) => {
-    timer = setTimeout(() => {
-      try {
-        onDeadline();
-      } finally {
-        resolve(EMPTY_RELEVANT_AUTO_MEMORY_RESULT);
-      }
-    }, 2_500);
-  });
-
-  try {
-    return await Promise.race([promise, deadline]);
-  } finally {
-    if (timer !== undefined) {
-      clearTimeout(timer);
-    }
-  }
-}
+type MemoryPrefetchHandle = {
+  promise: Promise<RelevantAutoMemoryPromptResult>;
+  /** Set by promise.finally(). null until the promise settles. */
+  settledAt: number | null;
+  /** True after memory has been injected — prevents double-inject. */
+  consumed: boolean;
+  controller: AbortController;
+};
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
 const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -204,7 +176,7 @@ export class GeminiClient {
   private lastPromptId: string | undefined = undefined;
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
-  private pendingRecallAbortController: AbortController | undefined;
+  private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
 
