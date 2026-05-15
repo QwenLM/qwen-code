@@ -1150,6 +1150,47 @@ describe('Gemini Client (client.ts)', () => {
       // deferredTools arg must be `undefined`, not an empty array.
       expect(lastDeferredArg()).toBeUndefined();
     });
+
+    it('preserves SessionStart additionalContext when refreshing via setTools', async () => {
+      // Regression for #4166 review (chiga0 P1): setTools's
+      // setSystemInstruction rewrites the chat's systemInstruction wholesale.
+      // A SessionStart hook's additionalContext applied by startChat (or a
+      // prior Compact) lives inside that systemInstruction, so a naive
+      // rewrite would silently drop it on every progressive-MCP refresh
+      // (which fires once per MCP server completion via AppContainer's
+      // batch-flush, plus a trailing call after waitForMcpReady). setTools
+      // MUST re-apply lastSessionStartContext after the rewrite, mirroring
+      // refreshSystemInstruction's contract.
+      //
+      // Three mockReturnValueOnce because startChat invokes
+      // getCoreSystemPrompt twice (initial chat + trailing setTools), and
+      // the explicit setTools call below is the third invocation.
+      vi.mocked(getCoreSystemPrompt)
+        .mockReturnValueOnce('Base instruction')
+        .mockReturnValueOnce('Base instruction')
+        .mockReturnValueOnce('Refreshed instruction');
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'HookCtx',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat(undefined, SessionStartSource.Startup);
+      await client.setTools();
+
+      expect(client.getChat()['generationConfig'].systemInstruction).toBe(
+        'Refreshed instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nHookCtx\n</qwen:session-start-context>',
+      );
+    });
   });
 
   describe('addHistory', () => {
