@@ -179,7 +179,7 @@ describe('installation scripts', () => {
     expect(script).not.toContain('node-v!NODE_VERSION!');
     expect(script).not.toContain('msiexec');
     expect(script).toContain('Invoke-WebRequest');
-    expect(script).toContain('curl.exe -#fSLo');
+    expect(script).toContain('& $curl -#fSLo');
     expect(script).not.toContain('PowerShell (Administrator)');
     expect(script).not.toContain('echo INFO: Installation source: %SOURCE%');
     expect(script).not.toMatch(/^\s*call\s+qwen\s*$/m);
@@ -254,9 +254,9 @@ describe('installation scripts', () => {
     expect(script).toContain(
       'call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"',
     );
-    expect(script).toContain(
-      "$ErrorActionPreference = 'Stop'; if (Get-Command curl.exe",
-    );
+    expect(script).toContain('$curl = $env:QWEN_INSTALL_CURL_EXE');
+    expect(script).toContain('QWEN_INSTALL_CURL_EXE');
+    expect(script).toContain('Get-Command curl.exe -CommandType Application');
     expect(script).toContain(
       '[Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13',
     );
@@ -2489,6 +2489,7 @@ describe('Windows installer end-to-end', () => {
             QWEN_FAKE_ARCHIVE: archive,
             QWEN_FAKE_SHA256SUMS: checksumFile,
             QWEN_FAKE_CURL_LOG: curlLog,
+            QWEN_INSTALL_CURL_EXE: path.join(fakeBin, 'curl.exe'),
             ...prependWindowsPath(fakeBin),
             PROCESSOR_ARCHITECTURE: 'AMD64',
             PROCESSOR_ARCHITEW6432: '',
