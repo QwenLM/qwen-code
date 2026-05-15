@@ -453,8 +453,10 @@ exit /b 1
 
 :DetectTarget
 set "TARGET="
-if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64" set "TARGET=win-x64"
-if /i "%PROCESSOR_ARCHITEW6432%"=="AMD64" set "TARGET=win-x64"
+if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "TARGET=win-x64"
+if /i "!PROCESSOR_ARCHITECTURE!"=="X64" set "TARGET=win-x64"
+if /i "!PROCESSOR_ARCHITEW6432!"=="AMD64" set "TARGET=win-x64"
+if /i "!PROCESSOR_ARCHITEW6432!"=="X64" set "TARGET=win-x64"
 if "!TARGET!"=="" (
     echo WARNING: Standalone archive is not available for this Windows architecture.
     exit /b 1

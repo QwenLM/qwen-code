@@ -226,6 +226,10 @@ describe('installation scripts', () => {
     expect(script).not.toContain('findstr /C:"!ARCHIVE_NAME!"');
     expect(script).not.toContain('certutil -hashfile');
     expect(script).toContain('qwen-code-win-x64.zip');
+    expect(script).toContain(
+      'if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "TARGET=win-x64"',
+    );
+    expect(script).not.toContain('if /i "%PROCESSOR_ARCHITECTURE%"=="AMD64"');
     expect(script).toContain('Expand-Archive');
     expect(script).toContain('$env:QWEN_DOWNLOAD_URL');
     expect(script).toContain('$env:QWEN_ARCHIVE_FILE');
