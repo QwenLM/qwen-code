@@ -539,21 +539,21 @@ describe('useSlashCommandProcessor', () => {
           type: 'message',
           messageType: 'info',
           content:
-            'History collapsed. (This is now your default preference for future sessions)',
+            'History will be collapsed by default for future resumed sessions.',
         }),
       });
       const result = setupProcessorHook([historyCmd]);
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       await act(async () => {
-        await result.current.handleSlashCommand('/history collapse');
+        await result.current.handleSlashCommand('/history collapse-on-resume');
       });
 
       expect(mockAddItem).toHaveBeenCalledTimes(1);
       expect(mockAddItem).toHaveBeenCalledWith(
         {
           type: MessageType.USER,
-          text: '/history collapse',
+          text: '/history collapse-on-resume',
         },
         expect.any(Number),
       );

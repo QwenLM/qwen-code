@@ -7,80 +7,61 @@
 import type { SlashCommand, MessageActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { createHistoryCollapseSummaryItem } from '../utils/resumeHistoryUtils.js';
 import { SettingScope } from '../../config/settings.js';
 
-const collapseCommand: SlashCommand = {
-  name: 'collapse',
+const collapseOnResumeCommand: SlashCommand = {
+  name: 'collapse-on-resume',
   get description() {
-    return t('Collapse the transcript into a summary row');
+    return t('Set history to collapse by default when resuming a session');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: (context): MessageActionReturn | void => {
-    const { history, loadHistory, addItem, refreshStatic } = context.ui;
     const { settings } = context.services;
 
-    // Persist the user's preference
     settings.setValue(SettingScope.User, 'ui.history.collapseOnResume', true);
-
-    // Count items that are NOT collapse summaries.
-    // This represents the total number of items that will be hidden.
-    const totalToHideCount = history.filter(
-      (item) => item.display?.kind !== 'collapse-summary',
-    ).length;
-
-    // Check if there are any items that are currently NOT suppressed.
-    const unsuppressedCount = history.filter(
-      (item) =>
-        !item.display?.suppressOnRestore &&
-        item.display?.kind !== 'collapse-summary',
-    ).length;
-
-    if (unsuppressedCount === 0) {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t('History is already collapsed.'),
-      };
-    }
-
-    // Mark all items as suppressed, and remove any existing summary items.
-    const updated = history
-      .filter((item) => item.display?.kind !== 'collapse-summary')
-      .map((item) => ({
-        ...item,
-        display: { ...item.display, suppressOnRestore: true },
-      }));
-    loadHistory(updated);
-
-    // Add summary item.
-    addItem(createHistoryCollapseSummaryItem(totalToHideCount), Date.now());
-    refreshStatic();
 
     return {
       type: 'message',
       messageType: 'info',
       content: t(
-        'History collapsed. (This is now your default preference for future sessions)',
+        'History will be collapsed by default for future resumed sessions.',
       ),
     };
   },
 };
 
-const expandCommand: SlashCommand = {
-  name: 'expand',
+const expandOnResumeCommand: SlashCommand = {
+  name: 'expand-on-resume',
   get description() {
-    return t('Expand the full transcript');
+    return t('Set history to expand by default when resuming a session');
+  },
+  kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive'] as const,
+  action: (context): MessageActionReturn | void => {
+    const { settings } = context.services;
+
+    settings.setValue(SettingScope.User, 'ui.history.collapseOnResume', false);
+
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: t(
+        'History will be expanded by default for future resumed sessions.',
+      ),
+    };
+  },
+};
+
+const expandNowCommand: SlashCommand = {
+  name: 'expand-now',
+  get description() {
+    return t('Expand the currently collapsed history transcript');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
   action: (context): MessageActionReturn | void => {
     const { history, loadHistory, refreshStatic } = context.ui;
-    const { settings } = context.services;
-
-    // Persist the user's preference
-    settings.setValue(SettingScope.User, 'ui.history.collapseOnResume', false);
 
     const hasSuppressed = history.some(
       (item) => item.display?.suppressOnRestore,
@@ -90,26 +71,32 @@ const expandCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: t('History is already expanded.'),
+        content: t('History is already expanded in this session.'),
       };
     }
 
     // Remove suppressOnRestore from all items and drop collapse summary items.
     const updated = history
       .filter((item) => item.display?.kind !== 'collapse-summary')
-      .map((item) => ({
-        ...item,
-        display: { ...item.display, suppressOnRestore: false },
-      }));
+      .map((item) => {
+        if (!item.display) {
+          return item;
+        }
+        const { suppressOnRestore: _suppressOnRestore, ...restDisplay } =
+          item.display;
+        return {
+          ...item,
+          display:
+            Object.keys(restDisplay).length > 0 ? restDisplay : undefined,
+        };
+      });
     loadHistory(updated);
     refreshStatic();
 
     return {
       type: 'message',
       messageType: 'info',
-      content: t(
-        'History expanded. (This is now your default preference for future sessions)',
-      ),
+      content: t('History expanded.'),
     };
   },
 };
@@ -117,15 +104,21 @@ const expandCommand: SlashCommand = {
 export const historyCommand: SlashCommand = {
   name: 'history',
   get description() {
-    return t('Control history display (collapse/expand)');
+    return t('Control history display preferences and visibility');
   },
-  argumentHint: 'collapse|expand',
+  argumentHint: 'collapse-on-resume|expand-on-resume|expand-now',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'] as const,
-  subCommands: [collapseCommand, expandCommand],
+  subCommands: [
+    collapseOnResumeCommand,
+    expandOnResumeCommand,
+    expandNowCommand,
+  ],
   action: async () => ({
     type: 'message',
     messageType: 'error',
-    content: t('Usage: /history collapse|expand'),
+    content: t(
+      'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+    ),
   }),
 };
