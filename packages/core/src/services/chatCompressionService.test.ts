@@ -2112,6 +2112,61 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(callArg.config?.thinkingConfig?.includeThoughts).toBe(false);
     expect(callArg.config?.maxOutputTokens).toBe(20_000);
   });
+
+  it('NOOPs when the summary output hits the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
+    // Mock the side-query to return a non-empty summary that exactly hits the
+    // 20K cap — the guard added in this PR should drop the result rather than
+    // persist a potentially truncated summary.
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>truncated...',
+      usage: {
+        promptTokenCount: 50_000,
+        candidatesTokenCount: 20_000, // ← exactly at COMPACT_MAX_OUTPUT_TOKENS
+        totalTokenCount: 70_000,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+      { role: 'user', parts: [{ text: 'msg3' }] },
+      { role: 'model', parts: [{ text: 'msg4' }] },
+    ];
+    const mockChat = {
+      getHistory: vi.fn().mockReturnValue(history),
+    } as unknown as GeminiChat;
+    const warn = vi.fn();
+    const mockConfig = {
+      getChatCompression: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: 200_000 }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn, debug: vi.fn() }),
+    } as unknown as Config;
+
+    const result = await new ChatCompressionService().compress(mockChat, {
+      promptId: 'p',
+      force: true,
+      model: 'qwen-test',
+      config: mockConfig,
+      consecutiveFailures: 0,
+      originalTokenCount: 180_000,
+    });
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    expect(result.newHistory).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
+    );
+  });
 });
 
 describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () => {

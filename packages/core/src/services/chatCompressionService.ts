@@ -521,6 +521,33 @@ export class ChatCompressionService {
       );
     }
 
+    // Defensive guard: if the side-query hit COMPACT_MAX_OUTPUT_TOKENS, the
+    // summary is likely truncated mid-content and unsafe to persist. Drop it
+    // and NOOP so the next send re-tries; reactive overflow still catches the
+    // catastrophic case where the next API call exceeds the window. See
+    // docs/design/auto-compaction-threshold-redesign.md risk #2.
+    if (
+      !isSummaryEmpty &&
+      typeof compressionOutputTokenCount === 'number' &&
+      compressionOutputTokenCount >= COMPACT_MAX_OUTPUT_TOKENS
+    ) {
+      config
+        .getDebugLogger()
+        .warn(
+          `[chat-compression] summary output reached the ` +
+            `COMPACT_MAX_OUTPUT_TOKENS cap (${COMPACT_MAX_OUTPUT_TOKENS}); ` +
+            `dropping potentially-truncated result and NOOPing this attempt.`,
+        );
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      };
+    }
+
     let newTokenCount = originalTokenCount;
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
