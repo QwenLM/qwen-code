@@ -470,19 +470,93 @@ describe('useSlashCommandProcessor', () => {
       expect(mockOpenModelDialog).toHaveBeenCalled();
     });
 
-    it('should handle "dialog: memory" action', async () => {
-      const command = createTestCommand({
-        name: 'memorycmd',
-        action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'memory' }),
+    it('awaits direct resume session switching before returning handled', async () => {
+      const actions = createMockActions();
+      let resolveResume: (() => void) | undefined;
+      actions.handleResume = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveResume = resolve;
+          }),
+      );
+
+      const resumeCommand = createTestCommand({
+        name: 'resume-direct',
+        action: vi.fn().mockResolvedValue({
+          type: 'dialog',
+          dialog: 'resume',
+          sessionId: 'session-123',
+        }),
       });
-      const result = setupProcessorHook([command]);
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze([resumeCommand]));
+
+      const { result } = renderHook(() =>
+        useSlashCommandProcessor(
+          mockConfig,
+          mockSettings,
+          [],
+          mockAddItem,
+          mockClearItems,
+          mockLoadHistory,
+          vi.fn(),
+          vi.fn(),
+          false,
+          vi.fn(),
+          { current: true },
+          vi.fn(),
+          actions,
+          new Map(),
+          true,
+          null,
+        ),
+      );
+
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let settled = false;
+      const promise = result.current
+        .handleSlashCommand('/resume-direct')
+        .then(() => {
+          settled = true;
+        });
+
+      await waitFor(() => {
+        expect(actions.handleResume).toHaveBeenCalledWith('session-123');
+      });
+      expect(settled).toBe(false);
+
+      resolveResume?.();
+      await act(async () => {
+        await promise;
+      });
+      expect(settled).toBe(true);
+    });
+
+    it('does not insert /history info feedback into canonical history', async () => {
+      const historyCmd = createTestCommand({
+        name: 'history',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'info',
+          content:
+            'History collapsed. (This is now your default preference for future sessions)',
+        }),
+      });
+      const result = setupProcessorHook([historyCmd]);
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       await act(async () => {
-        await result.current.handleSlashCommand('/memorycmd');
+        await result.current.handleSlashCommand('/history collapse');
       });
 
-      expect(mockOpenMemoryDialog).toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.USER,
+          text: '/history collapse',
+        },
+        expect.any(Number),
+      );
     });
 
     it('should pass interactive execution mode to command actions', async () => {

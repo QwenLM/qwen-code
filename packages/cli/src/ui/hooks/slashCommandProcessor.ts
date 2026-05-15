@@ -98,7 +98,7 @@ export interface SlashCommandProcessorActions {
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
-  handleResume: (sessionId: string) => void;
+  handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
@@ -646,11 +646,13 @@ export const useSlashCommandProcessor = (
                   };
                 case 'message':
                   if (result.messageType === 'info') {
-                    addMessage({
-                      type: MessageType.INFO,
-                      content: result.content,
-                      timestamp: new Date(),
-                    });
+                    if (commandToExecute.name !== 'history') {
+                      addMessage({
+                        type: MessageType.INFO,
+                        content: result.content,
+                        timestamp: new Date(),
+                      });
+                    }
                   } else {
                     addMessage({
                       type: MessageType.ERROR,
@@ -723,7 +725,7 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
-                        actions.handleResume(result.sessionId);
+                        await actions.handleResume(result.sessionId);
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }
