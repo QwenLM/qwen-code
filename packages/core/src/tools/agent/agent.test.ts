@@ -2080,6 +2080,7 @@ describe('AgentTool', () => {
     });
 
     it.each([
+      [AgentTerminateMode.CANCELLED, 'cancelled'],
       [AgentTerminateMode.ERROR, 'failed'],
       [AgentTerminateMode.MAX_TURNS, 'failed'],
       [AgentTerminateMode.TIMEOUT, 'failed'],
@@ -2087,11 +2088,12 @@ describe('AgentTool', () => {
       'foreground %s terminate mode patches meta as %s',
       async (mode, expectedStatus) => {
         // The fgTerminalStatus ternary maps GOAL → completed, CANCELLED →
-        // cancelled, and *everything else* → failed. Without coverage for
-        // the fallback branch, a regression that flips the default back to
-        // 'completed' (an earlier bug that shipped and was fixed in
-        // d67db4c50) would slip through the suite — the GOAL test stays
-        // green either way.
+        // cancelled, and *everything else* → failed. GOAL is covered by
+        // the "foreground subagent reserves a JSONL+meta path" test above;
+        // CANCELLED and the fallback branch are covered here. A regression
+        // that flipped CANCELLED → 'failed' or the fallback back to
+        // 'completed' (an earlier fallback bug shipped and was fixed in
+        // d67db4c50) would now fail at least one of these cases.
         const fgSubagent: SubagentConfig = {
           ...bgSubagent,
           name: 'file-search',
