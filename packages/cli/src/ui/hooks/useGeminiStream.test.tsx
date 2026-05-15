@@ -714,6 +714,128 @@ describe('useGeminiStream', () => {
     });
   });
 
+  it('drops a late tool result whose callId is already paired in chat.history (Race A dedup)', async () => {
+    // Race A repro: the chat-internal repair pass already synthesized a
+    // functionResponse for this callId on the Retry push (because the
+    // partial-tool_use turn was orphan when Ctrl+Y landed). The live
+    // scheduler's late real result must NOT also be submitted, otherwise
+    // the wire payload would carry two functionResponse parts for the
+    // same callId and the second one would land as an orphan tool_result.
+    // The dedup MUST run regardless of `isResponding`, because the
+    // scheduler's `onAllToolCallsComplete` is single-shot and would
+    // otherwise leave the tool stuck in `completed-but-not-submitted`.
+    const lateRealResult: TrackedCompletedToolCall = {
+      request: {
+        callId: 'call_race_A',
+        name: 'read_file',
+        args: { path: '/tmp/x.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-race-a',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_race_A',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_race_A',
+              name: 'read_file',
+              response: { output: 'real file contents' },
+            },
+          },
+        ],
+        errorType: undefined,
+      },
+      tool: { displayName: 'ReadFile' },
+      invocation: {
+        getDescription: () => 'read /tmp/x.txt',
+      } as unknown as AnyToolInvocation,
+    } as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // Simulate the chat-internal repair pass having already planted a
+    // synthetic functionResponse for the same callId on the previous
+    // (Retry) push.
+    client.getHistory = vi.fn().mockReturnValue([
+      { role: 'user', parts: [{ text: 'open /tmp/x.txt' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_race_A',
+              name: 'read_file',
+              args: { path: '/tmp/x.txt' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          { text: 'retry' },
+          {
+            functionResponse: {
+              id: 'call_race_A',
+              name: 'read_file',
+              response: {
+                error: 'Tool execution result was not recorded',
+              },
+            },
+          },
+        ],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([lateRealResult]);
+      }
+    });
+
+    await waitFor(() => {
+      // The dedup hit must `markToolsAsSubmitted` so the UI/scheduler is
+      // unblocked even though we drop the real result on the wire.
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_race_A']);
+    });
+
+    // No follow-up submission: the synthetic in history already closes
+    // the tool_use ↔ tool_result pair.
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('should not flicker streaming state to Idle between tool completion and submission', async () => {
     const toolCallResponseParts: PartListUnion = [
       { text: 'tool 1 final response' },

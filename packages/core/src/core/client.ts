@@ -700,9 +700,14 @@ export class GeminiClient {
       // partial-tool_use push (see `processStreamResponse`) and the React
       // scheduler's tool_result submission. Without this pass, the first
       // API call on a resumed session would 400 with the same
-      // `tool_use_id ... corresponding tool_use` error this whole subsystem
-      // is trying to escape.
-      this.chat.repairOrphanedToolUseTurns();
+      // `tool_use_id ... corresponding tool_use` error this whole
+      // subsystem is trying to escape. (Belt-and-suspenders: the same
+      // helper runs again inside `chat.sendMessageStream` after the user
+      // content is pushed, so a dangling left here by setHistory /
+      // compaction reordering is also caught — but doing it here keeps
+      // any pre-send code reading `chat.history` from seeing a malformed
+      // shape.)
+      this.repairOrphanedToolUseTurnsInHistory();
 
       const sessionStartAdditionalContext =
         await this.fireSessionStartHook(sessionStartSource);
@@ -1091,22 +1096,13 @@ export class GeminiClient {
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
-      // Close any dangling `model[functionCall]` whose tool_result never
-      // landed before composing the retry payload. Ctrl+Y race: the user
-      // retried while a tool was still running on a partial-tool_use turn
-      // pushed by `processStreamResponse`'s mid-stream error path. The
-      // scheduler's `onAllToolCallsComplete` is single-shot and gated on
-      // `isResponding` (`useGeminiStream:1971`), so the eventual
-      // `tool_result` would otherwise be silently swallowed and the next
-      // API call would 400 with "tool_use_id ... corresponding tool_use"
-      // anyway. The synthesized `error` `functionResponse` keeps the wire
-      // invariant intact; the live scheduler dedupes against history in
-      // `handleCompletedTools` before submitting its real result so the
-      // synthetic doesn't collide with a late real one.
-      //
-      // Restricted to the Retry branch to mirror `stripOrphanedUserEntries`
-      // scope. Crash-resume's path is covered separately in `startChat()`.
-      this.repairOrphanedToolUseTurnsInHistory();
+      // The matching dangling-`functionCall` repair runs inside
+      // `chat.sendMessageStream` AFTER the user content is pushed, so any
+      // tool_result the user is supplying (Retry of a ToolResult
+      // submission, lastPrompt === fr parts) closes the pair via the real
+      // `functionResponse` before we synthesize an error one. Doing the
+      // repair here would happen pre-push and race against the user
+      // content's own pairing — see PR #4176 review for the corner.
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)

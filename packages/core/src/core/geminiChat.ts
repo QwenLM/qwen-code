@@ -728,6 +728,26 @@ export class GeminiChat {
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       userContentAdded = true;
+      // Close any dangling `model[functionCall]` whose `functionResponse`
+      // never landed by the time we compose the request. Runs AFTER the
+      // user-supplied turn lands so a tool_result the user is supplying
+      // gets the first chance to close the pair before we synthesize an
+      // `error` `functionResponse`. Covers:
+      //   - Stream errored mid-tool_use (partial assistant push left a
+      //     dangling functionCall), then the React scheduler's eventual
+      //     tool_result lost the race against a Ctrl+Y retry whose
+      //     onAllToolCallsComplete fired into `isResponding=true` and
+      //     skipped submission.
+      //   - The same shape from a process crash / OOM mid-flight (the
+      //     transcript JSONL preserves the dangling model[fc] across
+      //     `--resume`; `startChat()` calls this once on load, but a
+      //     belt-and-suspenders pass here covers anything that slipped
+      //     past — including dangling shapes the load-time repair didn't
+      //     visit because compaction / setHistory ran after it).
+      // The React scheduler's late real result is then dedup'd against
+      // chat.history in `useGeminiStream.handleCompletedTools` so the
+      // synthetic doesn't collide with it on the wire.
+      repairOrphanedToolUseTurns(this.history);
       requestContents = this.getHistory(true);
     } catch (error) {
       if (userContentAdded) {

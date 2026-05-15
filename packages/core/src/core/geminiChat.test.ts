@@ -597,6 +597,138 @@ describe('GeminiChat', async () => {
         'This is the visible text that should not be lost.',
       );
     });
+
+    it('synthesizes a functionResponse for a dangling tool_use before sending', async () => {
+      // End-to-end: when sendMessageStream is invoked on a chat whose
+      // history carries a dangling `model[functionCall]` (typical state
+      // after a Ctrl+Y race or a crash-resume on a partial-tool_use
+      // turn), the inline repair pass closes the pair against the
+      // just-pushed user content so the wire payload doesn't 400 with
+      // "tool_use_id ... corresponding tool_use".
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first message' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_dangling_for_send',
+                name: 'read_file',
+                args: { path: '/tmp/x' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const ackStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'ok' }] },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        ackStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'next user prompt after a stream-error-mid-tool_use' },
+        'prompt-send-repair',
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      const history = chat.getHistory();
+      // The dangling fc should now be followed by a user turn that
+      // carries both the user-supplied text AND the synthetic fr that
+      // closes the pair.
+      const userTurn = history[2]!;
+      expect(userTurn.role).toBe('user');
+      const fr = userTurn.parts!.find((p) => p.functionResponse);
+      expect(fr?.functionResponse?.id).toBe('call_dangling_for_send');
+      expect(fr?.functionResponse?.name).toBe('read_file');
+      expect(
+        (fr?.functionResponse?.response as { error?: string })?.error,
+      ).toMatch(/interrupted/i);
+      // The user's own text part is still present.
+      expect(
+        userTurn.parts!.some(
+          (p) =>
+            p.text === 'next user prompt after a stream-error-mid-tool_use',
+        ),
+      ).toBe(true);
+    });
+
+    it('does NOT synthesize when the user supplies a matching tool_result', async () => {
+      // Retry-of-ToolResult case (lastPrompt is a functionResponse Part
+      // array): the user-supplied tool_result must close the pair before
+      // the inline repair pass sees it, so no synthetic error is
+      // injected. Otherwise the wire payload would carry two
+      // functionResponse parts for the same callId — the real one and a
+      // bogus synthetic.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'do the read' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_retry_real_fr',
+                name: 'read_file',
+                args: { path: '/tmp/y' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const ackStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: { role: 'model', parts: [{ text: 'ack' }] },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        ackStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: {
+            functionResponse: {
+              id: 'call_retry_real_fr',
+              name: 'read_file',
+              response: { output: 'real-tool-output' },
+            },
+          },
+        },
+        'prompt-retry-real-fr',
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      const userTurn = chat.getHistory()[2]!;
+      const frParts = userTurn.parts!.filter((p) => p.functionResponse);
+      // Exactly ONE functionResponse — the real one. No synthetic.
+      expect(frParts.length).toBe(1);
+      expect(frParts[0]!.functionResponse?.id).toBe('call_retry_real_fr');
+      expect(
+        (frParts[0]!.functionResponse?.response as { output?: string })?.output,
+      ).toBe('real-tool-output');
+    });
+
     it('should throw an error when a tool call is followed by an empty stream response', async () => {
       vi.useFakeTimers();
       try {
