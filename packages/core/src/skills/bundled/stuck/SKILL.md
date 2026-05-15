@@ -32,27 +32,28 @@ If the user gave an argument, first check whether it is a positive integer (PID)
 
 1. **Enumerate live sessions via the runtime sidecar (preferred, reliable)**:
 
-   Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The default `<runtime-base>` is `~/.qwen` (overridable by `QWEN_RUNTIME_DIR` or `QWEN_HOME`). Each file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}`. Use this as the authoritative source of `(pid, session_id, work_dir)` mappings:
+   Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The default `<runtime-base>` is `~/.qwen` (overridable by `QWEN_RUNTIME_DIR`, `QWEN_HOME`, or the `advanced.runtimeOutputDir` setting). Each file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}`. Use this as the authoritative source of `(pid, session_id, work_dir)` mappings:
 
    ```
    ls -1 ~/.qwen/projects/*/chats/*.runtime.json 2>/dev/null
    ```
 
-   For each file, read it and check whether the recorded `pid` is still alive (`kill -0 <pid>` returns 0). Stale files where the PID is gone mean the session has exited — skip them silently.
+   For each file, read it and check whether the recorded `pid` is still alive (`kill -0 <pid>` returns 0). Stale files where the PID is gone mean the session has exited — skip them silently. PID reuse is rare but possible, so when you cross-reference with `ps` in step 2, also skip records whose live PID's command line no longer looks like a Qwen Code process.
 
 2. **List Qwen Code processes via `ps`** (macOS/Linux) — used to enrich each live session with CPU/RSS/state/uptime, and to catch sessions that may have started before the sidecar feature existed:
 
    ```
-   ps -axo pid=,pcpu=,rss=,etime=,state=,comm=,command= -ww | grep -E '(qwen|node.*qwen|bun.*qwen)' | grep -v grep
+   ps -xo pid=,pcpu=,rss=,etime=,state=,comm=,command= -u "$(id -u)" -ww | grep -E '(qwen|node.*qwen|bun.*qwen)' | grep -v grep
    ```
 
-   The `-ww` flag disables column truncation — without it, long command paths get cut off and `grep` may miss sessions whose "qwen" path component falls beyond the terminal width. The `comm` column will be `node` or `bun`, not `qwen`. Filter to rows where the `command` column contains a path related to qwen (e.g., `qwen-code/dist/cli.js`, or a bin symlink ending in `/qwen`). Cross-reference with the PIDs from step 1.
+   `-u "$(id -u)"` restricts the scan to the current user — on shared hosts this avoids exposing other users' Qwen process paths/arguments into the chat. `-ww` disables column truncation so long "qwen" paths aren't cut off. The `comm` column will be `node` or `bun`, not `qwen`; filter to rows where the `command` column contains a qwen path (e.g., `qwen-code/dist/cli.js`, or a bin symlink ending in `/qwen`). Cross-reference with the PIDs from step 1.
+
+   Note: `ps` reports `rss` in **kilobytes** on both macOS and Linux. Divide by 1024 before comparing to the >=4GB threshold or reporting in MB.
 
 3. **For anything suspicious**, gather more context. Substitute `<pid>` only after the validation in "Argument validation" above (or after taking it from `ps` / sidecar output, which is trusted):
-   - Child processes: `pgrep -lP <pid>`
+   - Child processes (with state, so a hung `git` / `node` shows up): `pgrep -P <pid>` to get child PIDs, then `ps -p <child_pids> -o pid=,ppid=,pcpu=,state=,etime=,command=` for their state
    - If high CPU: sample again after 1-2s to confirm it's sustained
-   - If a child looks hung (e.g., a git command), note its full command line with `ps -p <child_pid> -o command=`
-   - Check the session's debug log if you can infer the session ID (from the sidecar): `~/.qwen/debug/<session-id>.txt` (the last few hundred lines often show what it was doing before hanging). If `QWEN_RUNTIME_DIR` or `QWEN_HOME` is set, the debug directory is `$QWEN_RUNTIME_DIR/debug/` or `$QWEN_HOME/debug/` instead of the default.
+   - Check the session's debug log if you can infer the session ID (from the sidecar): `~/.qwen/debug/<session-id>.txt` (the last few hundred lines often show what it was doing before hanging). If `QWEN_RUNTIME_DIR` or `QWEN_HOME` is set, the debug directory is `$QWEN_RUNTIME_DIR/debug/` or `$QWEN_HOME/debug/` instead of the default. Debug logs may contain prompts, file contents, or tokens from other sessions — paste only the lines relevant to the hang, and never quote secrets/API keys you happen to see.
    - The `~/.qwen/debug/latest` symlink points to the most recent session's log
 
 4. **Consider a stack dump** for a truly frozen process (advanced, optional):
