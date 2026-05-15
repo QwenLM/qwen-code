@@ -763,6 +763,76 @@ describe('GeminiChat', async () => {
       expect(functionCallPart?.functionCall?.name).toBe('read_file');
     });
 
+    it('preserves thinking parts alongside tool_use when stream throws mid-tool', async () => {
+      // Covers reasoning-mode providers (DeepSeek, Claude 4.6+) where the
+      // assistant turn carries both a thinking block and a tool_use. The
+      // partial-history push must keep the thinking part so DeepSeek's
+      // `injectThinkingOnToolUseTurns` converter pass sees an existing
+      // block on the replayed turn and does not pre-pend a synthetic one
+      // (which would discard the model's original reasoning text).
+      mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+      const networkError = new Error('SSE timeout');
+      const streamWithThinkingAndTool = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'planning the read', thought: true }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call_thinking_tool_use',
+                      name: 'read_file',
+                      args: { path: '/tmp/a.txt' },
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        throw networkError;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamWithThinkingAndTool,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'read /tmp/a.txt' },
+        'prompt-thinking-tool-weak-network',
+      );
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            /* drain */
+          }
+        })(),
+      ).rejects.toBe(networkError);
+
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      const modelTurn = history[1]!;
+      expect(modelTurn.role).toBe('model');
+      const parts = modelTurn.parts!;
+      // The thinking part must come before the functionCall — Anthropic
+      // requires thinking blocks first in the assistant content array.
+      expect(parts[0]!.thought).toBe(true);
+      expect(parts[0]!.text).toBe('planning the read');
+      const functionCallPart = parts.find((p) => p.functionCall);
+      expect(functionCallPart?.functionCall?.id).toBe('call_thinking_tool_use');
+    });
+
     it('does NOT persist partial assistant turn when stream throws before any tool_use chunk', async () => {
       // Plain-text partial responses are deliberately dropped on stream
       // error: the Retry path pops the trailing user prompt and re-issues
