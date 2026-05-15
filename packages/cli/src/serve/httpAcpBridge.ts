@@ -223,8 +223,8 @@ export interface HttpAcpBridge {
  */
 export class SessionNotFoundError extends Error {
   readonly sessionId: string;
-  constructor(sessionId: string) {
-    super(`No session with id "${sessionId}"`);
+  constructor(sessionId: string, extra?: string) {
+    super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
   }
@@ -1680,12 +1680,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           // continuation running (e.g. channel.exited firing during
           // a crash spawn, or a direct bridge.killSession call from
           // outside the route handler). In those cases byId.get()
-          // returned undefined; we'd otherwise return
-          // `{ attached: true, sessionId: <zombie> }` and every
-          // subsequent prompt/cancel call would 404. Fail loud
-          // instead so the caller can retry into a fresh spawn.
+          // returned undefined. Fail loud with a descriptive error
+          // so the caller can distinguish "immediate agent death"
+          // from a stale sessionId and retry into a fresh spawn.
           if (!attachedEntry) {
-            throw new SessionNotFoundError(session.sessionId);
+            throw new SessionNotFoundError(
+              session.sessionId,
+              'the agent child likely crashed during initialization — retry to spawn a new session',
+            );
           }
           if (req.modelServiceId) {
             // Same swallow as above — we picked up an in-flight
@@ -1897,7 +1899,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
     listWorkspaceSessions(workspaceCwd) {
       if (!path.isAbsolute(workspaceCwd)) return [];
-      const key = canonicalizeWorkspace(workspaceCwd);
+      // fast-path: under §02 single-workspace, string equality
+      // with boundWorkspace avoids a realpathSync syscall on
+      // every poll. If the literal doesn't match, canonicalize
+      // to handle symlink aliases; if that still doesn't match,
+      // this daemon doesn't own the workspace.
+      const key =
+        workspaceCwd === boundWorkspace
+          ? boundWorkspace
+          : canonicalizeWorkspace(workspaceCwd);
+      if (key !== boundWorkspace) return [];
       const out: BridgeSessionSummary[] = [];
       for (const entry of byId.values()) {
         if (entry.workspaceCwd === key) {
@@ -2321,8 +2332,19 @@ export function canonicalizeWorkspace(p: string): string {
     // entire bridge-side path resolution anyway, but if Stage 2
     // ever lands without that change, switch to the async version.
     return realpathSync.native(resolved);
-  } catch {
-    return resolved;
+  } catch (err) {
+    // Only fall back to path.resolve for ENOENT (path doesn't exist
+    // yet). Other filesystem errors (EACCES, EIO, ELOOP) should
+    // propagate — swallowing them would hide transient I/O failures
+    // behind misleading workspace_mismatch rejections.
+    if (
+      err &&
+      typeof err === 'object' &&
+      (err as { code?: unknown }).code === 'ENOENT'
+    ) {
+      return resolved;
+    }
+    throw err;
   }
 }
 

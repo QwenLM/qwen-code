@@ -434,6 +434,18 @@ export function createServeApp(
         .json({ error: '`:id` must decode to an absolute workspace path' });
       return;
     }
+    // #3803 §02: reject cross-workspace queries so orchestrators
+    // don't mistake "no sessions here" for "workspace is idle".
+    const key = canonicalizeWorkspace(workspaceCwd);
+    if (key !== boundWorkspace) {
+      res.status(400).json({
+        error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
+        code: 'workspace_mismatch',
+        boundWorkspace,
+        requestedWorkspace: key,
+      });
+      return;
+    }
     const sessions = bridge.listWorkspaceSessions(workspaceCwd);
     res.status(200).json({ sessions });
   });

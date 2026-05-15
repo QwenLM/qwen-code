@@ -91,7 +91,9 @@ export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
   if (typeof caps.workspaceCwd !== 'string' || caps.workspaceCwd.length === 0) {
     throw new DaemonCapabilityMissingError(
       'workspaceCwd',
-      'introduced in #3803 §02 (1 daemon = 1 workspace)',
+      caps.workspaceCwd === ''
+        ? 'daemon returned an empty workspaceCwd (post-§02 daemon with a bug)'
+        : 'daemon predates #3803 §02 (1 daemon = 1 workspace); upgrade it',
     );
   }
   return caps.workspaceCwd;
