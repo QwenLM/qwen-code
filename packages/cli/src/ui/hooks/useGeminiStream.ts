@@ -2019,16 +2019,61 @@ export const useGeminiStream = (
         );
       }
 
-      const geminiTools = completedAndReadyToSubmitTools.filter(
+      const geminiToolsRaw = completedAndReadyToSubmitTools.filter(
         (t) => !t.request.isClientInitiated,
       );
 
-      for (const toolCall of geminiTools) {
+      for (const toolCall of geminiToolsRaw) {
         geminiClient?.recordCompletedToolCall(
           toolCall.request.name,
           toolCall.request.args as Record<string, unknown>,
         );
       }
+
+      // History-based dedup: if a synthetic `functionResponse` for this
+      // callId is already in chat.history (planted by
+      // `client.repairOrphanedToolUseTurnsInHistory()` on session-load or
+      // Retry), the in-flight scheduler result would land as a duplicate
+      // `tool_result` and produce two consecutive user turns where the
+      // second is orphaned (no preceding tool_use — the synthetic ate it).
+      //
+      // For dedup hits: mark the tool as submitted so the UI advances and
+      // `useReactToolScheduler.allToolCallsCompleteHandler` (single-shot)
+      // doesn't leave the call permanently stuck in `completed-but-not-
+      // submitted`. The real result is dropped on the wire — same trade-off
+      // upstream Claude Code makes when its `StreamingToolExecutor.discard()`
+      // is followed by a `yieldMissingToolResultBlocks` synthesis
+      // (`query.ts:733` + `:984`). The model sees the synthetic error and
+      // can retry the tool if it still wants the result.
+      const historyCallIdsWithResponse = new Set<string>();
+      // Guard the call: some test harnesses build a partial GeminiClient
+      // mock without `getHistory`. Skipping dedup in that case is safe —
+      // it just means tests that never set up the repair pre-condition
+      // run with the original (pre-dedup) submission shape.
+      if (geminiClient && typeof geminiClient.getHistory === 'function') {
+        for (const entry of geminiClient.getHistory()) {
+          if (entry.role !== 'user') continue;
+          for (const part of entry.parts ?? []) {
+            const id = part.functionResponse?.id;
+            if (id) historyCallIdsWithResponse.add(id);
+          }
+        }
+      }
+
+      const dedupedCallIds = geminiToolsRaw
+        .filter((tc) => historyCallIdsWithResponse.has(tc.request.callId))
+        .map((tc) => tc.request.callId);
+      if (dedupedCallIds.length > 0) {
+        debugLogger.warn(
+          `[REPAIR] Dropping ${dedupedCallIds.length} late tool result(s) ` +
+            `whose callId already has a synthetic functionResponse in ` +
+            `history: ${dedupedCallIds.join(', ')}`,
+        );
+        markToolsAsSubmitted(dedupedCallIds);
+      }
+      const geminiTools = geminiToolsRaw.filter(
+        (tc) => !historyCallIdsWithResponse.has(tc.request.callId),
+      );
 
       if (geminiTools.length === 0) {
         return;

@@ -353,6 +353,44 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
+  /**
+   * Synthesize a `functionResponse` for every dangling `model[functionCall]`
+   * in chat history whose corresponding tool_result never landed. Inverse of
+   * {@link stripOrphanedUserEntriesFromHistory}, which only handles trailing
+   * `user` entries.
+   *
+   * Called from three points:
+   *   1. After {@link startChat} loads transcript (covers `--resume` of a
+   *      session that crashed between partial-tool_use push and tool
+   *      completion).
+   *   2. After `stripOrphanedUserEntriesFromHistory` on the Retry submit path
+   *      (covers Ctrl+Y race — user retries while an in-flight tool's
+   *      `tool_result` has not yet been submitted, leaving a trailing
+   *      `model[functionCall]` without matching `functionResponse`).
+   *   3. Defensively at the start of UserQuery / Cron sends, so any state
+   *      that slipped past 1+2 still gets fixed before hitting the wire.
+   *
+   * Synthesizes an `error` `functionResponse`. The React tool scheduler
+   * (`useGeminiStream.handleCompletedTools`) MUST dedupe by `callId` against
+   * the live history before submitting its own `tool_result` — otherwise a
+   * late real result lands as a second `user[tool_result]` block (orphan
+   * because the synthetic already consumed the matching `tool_use`).
+   */
+  repairOrphanedToolUseTurnsInHistory(reason?: string): {
+    injected: Array<{ callId: string; name: string }>;
+  } {
+    const result = this.getChat().repairOrphanedToolUseTurns(reason);
+    if (result.injected.length > 0) {
+      debugLogger.warn(
+        `[REPAIR] Synthesized ${result.injected.length} functionResponse(s) ` +
+          `for dangling tool_use(s): ${result.injected
+            .map((e) => `${e.name}(${e.callId})`)
+            .join(', ')}`,
+      );
+    }
+    return result;
+  }
+
   setHistory(history: Content[]) {
     this.getChat().setHistory(history);
     // Replacing history wholesale drops any prior read_file tool
@@ -655,6 +693,16 @@ export class GeminiClient {
         this.config.getChatRecordingService(),
         uiTelemetryService,
       );
+
+      // Repair any dangling `model[functionCall]` whose `functionResponse`
+      // never made it back into the transcript before we wrote the JSONL.
+      // The common cause is a process crash / OOM / SIGKILL between the
+      // partial-tool_use push (see `processStreamResponse`) and the React
+      // scheduler's tool_result submission. Without this pass, the first
+      // API call on a resumed session would 400 with the same
+      // `tool_use_id ... corresponding tool_use` error this whole subsystem
+      // is trying to escape.
+      this.chat.repairOrphanedToolUseTurns();
 
       const sessionStartAdditionalContext =
         await this.fireSessionStartHook(sessionStartSource);
@@ -1043,6 +1091,22 @@ export class GeminiClient {
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
+      // Close any dangling `model[functionCall]` whose tool_result never
+      // landed before composing the retry payload. Ctrl+Y race: the user
+      // retried while a tool was still running on a partial-tool_use turn
+      // pushed by `processStreamResponse`'s mid-stream error path. The
+      // scheduler's `onAllToolCallsComplete` is single-shot and gated on
+      // `isResponding` (`useGeminiStream:1971`), so the eventual
+      // `tool_result` would otherwise be silently swallowed and the next
+      // API call would 400 with "tool_use_id ... corresponding tool_use"
+      // anyway. The synthesized `error` `functionResponse` keeps the wire
+      // invariant intact; the live scheduler dedupes against history in
+      // `handleCompletedTools` before submitting its real result so the
+      // synthetic doesn't collide with a late real one.
+      //
+      // Restricted to the Retry branch to mirror `stripOrphanedUserEntries`
+      // scope. Crash-resume's path is covered separately in `startChat()`.
+      this.repairOrphanedToolUseTurnsInHistory();
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)

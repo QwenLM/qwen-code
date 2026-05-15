@@ -3312,6 +3312,277 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('repairOrphanedToolUseTurns', () => {
+    // Verifies the inverse-of-strip pass: every `model[functionCall]`
+    // without a matching `user[functionResponse]` in the next turn gets
+    // a synthesized error functionResponse. This closes the
+    // tool_use ↔ tool_result wire invariant for the residual races
+    // (`--resume` of a crashed session, Ctrl+Y before in-flight tool
+    // finishes, scheduler abort before submitQuery, manual JSONL edits).
+
+    it('injects a synthetic functionResponse for a trailing tool_use (Race B/C)', () => {
+      // --resume of a session that crashed after the partial-tool_use push
+      // in `processStreamResponse` but before the scheduler submitted the
+      // tool_result. First API call would 400 without repair.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'open /tmp/a.txt' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_crash_A',
+                name: 'read_file',
+                args: { path: '/tmp/a.txt' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      expect(result.injected).toEqual([
+        { callId: 'call_crash_A', name: 'read_file' },
+      ]);
+      const history = chat.getHistory();
+      expect(history.length).toBe(3);
+      expect(history[2]!.role).toBe('user');
+      const fr = history[2]!.parts![0]!.functionResponse;
+      expect(fr?.id).toBe('call_crash_A');
+      expect(fr?.name).toBe('read_file');
+      expect((fr?.response as { error?: string })?.error).toMatch(
+        /interrupted/i,
+      );
+    });
+
+    it('appends synthetic functionResponse onto an existing user turn (Race A)', () => {
+      // Ctrl+Y race: the user retried while the in-flight tool was still
+      // running. `stripOrphanedUserEntriesFromHistory` leaves the
+      // model[functionCall] in place (trailing entry is model), then the
+      // Retry pushes a fresh user turn with the user prompt. Repair must
+      // splice the synthetic response onto that user turn so it sits
+      // immediately after the model[tool_use] — NOT create a stray
+      // synthetic user turn between them.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'open /tmp/a.txt' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_race_A',
+                name: 'read_file',
+                args: { path: '/tmp/a.txt' },
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'retry prompt' }] },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      expect(result.injected.map((e) => e.callId)).toEqual(['call_race_A']);
+      const history = chat.getHistory();
+      // No new turn inserted — synthetic merges into existing user turn.
+      expect(history.length).toBe(3);
+      expect(history[2]!.role).toBe('user');
+      expect(history[2]!.parts!.length).toBe(2);
+      expect(history[2]!.parts![0]).toEqual({ text: 'retry prompt' });
+      expect(history[2]!.parts![1]!.functionResponse?.id).toBe('call_race_A');
+    });
+
+    it('handles parallel tool_use turns with only some responses present', () => {
+      // Common shape after #4176's partial-history push: the stream
+      // emitted multiple `content_block_stop`s for parallel tool_uses,
+      // but the React scheduler only submitted some before the user hit
+      // Ctrl+Y. The Retry path's repair must close every missing pair —
+      // the present `functionResponse` for A must NOT be duplicated.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'batch read' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_A',
+                name: 'read_file',
+                args: { path: '/a' },
+              },
+            },
+            {
+              functionCall: {
+                id: 'call_B',
+                name: 'read_file',
+                args: { path: '/b' },
+              },
+            },
+            {
+              functionCall: {
+                id: 'call_C',
+                name: 'read_file',
+                args: { path: '/c' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_A',
+                name: 'read_file',
+                response: { output: 'a-content' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      const injectedIds = result.injected.map((e) => e.callId);
+      expect(injectedIds.sort()).toEqual(['call_B', 'call_C']);
+      const history = chat.getHistory();
+      // Same shape — synthetics merge into the existing user turn.
+      expect(history.length).toBe(3);
+      const fr = history[2]!.parts!.map((p) => p.functionResponse?.id);
+      expect(fr).toEqual(['call_A', 'call_B', 'call_C']);
+      // The pre-existing `call_A` response is untouched (real result kept).
+      expect(
+        (
+          history[2]!.parts![0]!.functionResponse?.response as {
+            output?: string;
+          }
+        )?.output,
+      ).toBe('a-content');
+    });
+
+    it('is a no-op when every tool_use already has a matching response', () => {
+      // Happy path: don't churn history when the invariant already holds.
+      const happy = [
+        { role: 'user' as const, parts: [{ text: 'q' }] },
+        {
+          role: 'model' as const,
+          parts: [
+            {
+              functionCall: {
+                id: 'call_ok',
+                name: 'read_file',
+                args: {},
+              },
+            },
+          ],
+        },
+        {
+          role: 'user' as const,
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_ok',
+                name: 'read_file',
+                response: { output: 'fine' },
+              },
+            },
+          ],
+        },
+      ];
+      chat.setHistory(structuredClone(happy));
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      expect(result.injected).toEqual([]);
+      expect(chat.getHistory()).toEqual(happy);
+    });
+
+    it('repairs multiple non-adjacent dangling tool_uses across history', () => {
+      // Stress case for the forward-walk algorithm: dangling turn near the
+      // start AND another near the end. Both should be repaired and the
+      // outer loop must not re-scan synthetic user turns it just inserted.
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'early_orphan',
+                name: 'glob',
+                args: {},
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'second user prompt' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'late_orphan',
+                name: 'read_file',
+                args: { path: '/x' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      const injectedIds = result.injected.map((e) => e.callId);
+      expect(injectedIds.sort()).toEqual(['early_orphan', 'late_orphan']);
+      const history = chat.getHistory();
+      // early_orphan got the synthetic spliced into the existing user turn
+      // between the two model entries; late_orphan got a brand-new
+      // trailing user turn appended after the second model entry.
+      expect(history.length).toBe(4);
+      expect(history[0]!.role).toBe('model');
+      expect(history[1]!.role).toBe('user');
+      expect(
+        history[1]!.parts!.some(
+          (p) => p.functionResponse?.id === 'early_orphan',
+        ),
+      ).toBe(true);
+      expect(history[2]!.role).toBe('model');
+      expect(history[3]!.role).toBe('user');
+      expect(history[3]!.parts![0]!.functionResponse?.id).toBe('late_orphan');
+    });
+
+    it('ignores model turns with no functionCall parts', () => {
+      const plain = [
+        { role: 'user' as const, parts: [{ text: 'hi' }] },
+        { role: 'model' as const, parts: [{ text: 'hello' }] },
+      ];
+      chat.setHistory(structuredClone(plain));
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      expect(result.injected).toEqual([]);
+      expect(chat.getHistory()).toEqual(plain);
+    });
+
+    it('uses caller-provided reason text', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'q' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'cid', name: 'read_file', args: {} },
+            },
+          ],
+        },
+      ]);
+
+      chat.repairOrphanedToolUseTurns('custom reason');
+
+      const fr = chat.getHistory()[2]!.parts![0]!.functionResponse;
+      expect((fr?.response as { error?: string })?.error).toBe('custom reason');
+    });
+  });
+
   describe('output token recovery', () => {
     function makeChunk(
       parts: Array<{ text?: string; functionCall?: unknown }>,

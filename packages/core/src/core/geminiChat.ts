@@ -379,6 +379,101 @@ export class InvalidStreamError extends Error {
 }
 
 /**
+ * Default error text used when a synthesized `functionResponse` has to stand
+ * in for a real tool result that never made it back into history (e.g. the
+ * process crashed between the partial-tool_use push and tool completion, or
+ * the user hit Ctrl+Y before the in-flight tool finished and the scheduler's
+ * `onAllToolCallsComplete` was a single-shot that already fired into an
+ * `isResponding` early-return).
+ */
+const ORPHAN_TOOL_USE_REPAIR_REASON =
+  'Tool execution result was not recorded — likely interrupted by network ' +
+  'failure, abort, or process exit. Treat as failure and retry if needed.';
+
+/**
+ * Walk `history` left-to-right and close every dangling tool_use ↔ tool_result
+ * pair by synthesizing a `functionResponse` with an `error` field for any
+ * `functionCall` part whose `id` is not echoed back in the immediately
+ * following user turn.
+ *
+ * Mutates `history` in place and returns the set of injected `(callId, name)`
+ * tuples so callers (the React tool scheduler) can dedupe a real `tool_result`
+ * if the in-flight tool completes after the repair.
+ *
+ * The synthesis target follows this rule:
+ *  - If the next entry is a `user` turn → append synthetic parts to it.
+ *  - If the next entry is a `model` turn or end-of-history → insert a new
+ *    `user` turn between them carrying just the synthetic parts.
+ *
+ * This is the qwen-code analogue of upstream Claude Code's
+ * `yieldMissingToolResultBlocks` (`query.ts:123-149`). Upstream can call it
+ * unconditionally at every error path because their `StreamingToolExecutor`
+ * is in-band — they atomically `.discard()` in-flight tools at the synthesis
+ * point. Our React scheduler runs out-of-band, so the caller pairs this with
+ * dedup in `handleCompletedTools` (which skips submission for any callId
+ * already present in history). See PR review thread on #4176 for the full
+ * race-class analysis.
+ */
+export function repairOrphanedToolUseTurns(
+  history: Content[],
+  reason: string = ORPHAN_TOOL_USE_REPAIR_REASON,
+): { injected: Array<{ callId: string; name: string }> } {
+  const injected: Array<{ callId: string; name: string }> = [];
+
+  // Forward walk: i mutates as we splice, so use index-based iteration
+  // and skip the freshly-inserted user turn to avoid re-scanning it.
+  for (let i = 0; i < history.length; i++) {
+    const turn = history[i];
+    if (turn.role !== 'model') continue;
+
+    // Collect (id → name) for every functionCall in this model turn.
+    const expected = new Map<string, string>();
+    for (const part of turn.parts ?? []) {
+      const fc = part.functionCall;
+      if (fc?.id) {
+        expected.set(fc.id, fc.name ?? 'unknown');
+      }
+    }
+    if (expected.size === 0) continue;
+
+    const next = history[i + 1];
+    const matched = new Set<string>();
+    if (next?.role === 'user') {
+      for (const part of next.parts ?? []) {
+        const id = part.functionResponse?.id;
+        if (id) matched.add(id);
+      }
+    }
+
+    const missing = [...expected.entries()].filter(([id]) => !matched.has(id));
+    if (missing.length === 0) continue;
+
+    const syntheticParts: Part[] = missing.map(([callId, name]) => ({
+      functionResponse: {
+        id: callId,
+        name,
+        response: { error: reason },
+      },
+    }));
+
+    if (next?.role === 'user') {
+      next.parts = [...(next.parts ?? []), ...syntheticParts];
+    } else {
+      history.splice(i + 1, 0, { role: 'user', parts: syntheticParts });
+      // Skip the freshly-inserted user turn so the outer loop doesn't
+      // visit it as a model turn (it isn't) and stays linear-time.
+      i++;
+    }
+
+    for (const [callId, name] of missing) {
+      injected.push({ callId, name });
+    }
+  }
+
+  return { injected };
+}
+
+/**
  * Chat session that enables sending messages to the model with previous
  * conversation context.
  *
@@ -1206,6 +1301,22 @@ export class GeminiChat {
     ) {
       this.history.pop();
     }
+  }
+
+  /**
+   * Repair the inverse of `stripOrphanedUserEntriesFromHistory`: close every
+   * dangling `model[functionCall]` whose corresponding `user[functionResponse]`
+   * never landed (e.g. process crash between the partial-tool_use push and
+   * tool completion, or Ctrl+Y race before in-flight scheduler completed).
+   *
+   * Returns the list of synthesized `(callId, name)` tuples so the React
+   * tool scheduler can dedupe its eventual real `tool_result` for those
+   * callIds (see `handleCompletedTools` in `useGeminiStream.ts`).
+   */
+  repairOrphanedToolUseTurns(reason?: string): {
+    injected: Array<{ callId: string; name: string }>;
+  } {
+    return repairOrphanedToolUseTurns(this.history, reason);
   }
 
   setTools(tools: Tool[]): void {

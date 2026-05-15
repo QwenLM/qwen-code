@@ -1453,6 +1453,7 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn().mockReturnValue([]),
         getHistoryLength,
         stripOrphanedUserEntriesFromHistory,
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
       } as unknown as GeminiChat;
       mockTurnRunFn.mockReturnValue(
         (async function* () {
@@ -4205,6 +4206,7 @@ Other open files:
           getHistoryLength: vi.fn().mockReturnValueOnce(3).mockReturnValue(2),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -4237,6 +4239,7 @@ Other open files:
           getHistoryLength: vi.fn().mockReturnValue(0),
           setHistory: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
         };
         client['chat'] = mockChat as GeminiChat;
 
