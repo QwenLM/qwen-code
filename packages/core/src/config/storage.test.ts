@@ -219,6 +219,13 @@ describe('Storage – getPlansDir', () => {
     );
   });
 
+  it('expands tilde in configured plansDirectory values', () => {
+    const projectInHome = path.join(os.homedir(), 'workspace', 'project');
+    expect(
+      Storage.getPlansDir(projectInHome, '~/workspace/project/plans'),
+    ).toBe(path.join(projectInHome, 'plans'));
+  });
+
   it('allows absolute plansDirectory values inside the project root', () => {
     const plansDir = path.join(projectRoot, 'nested', 'plans');
     expect(Storage.getPlansDir(projectRoot, plansDir)).toBe(plansDir);
@@ -324,6 +331,12 @@ describe('Storage – getPlansDir', () => {
     expect(Storage.getPlanFilePath('session-123', projectRoot, './plans')).toBe(
       path.join(projectRoot, 'plans', 'session-123.md'),
     );
+  });
+
+  it('sanitizes session IDs when building plan file paths', () => {
+    expect(
+      Storage.getPlanFilePath('../../../escape', projectRoot, './plans'),
+    ).toBe(path.join(projectRoot, 'plans', 'escape.md'));
   });
 });
 

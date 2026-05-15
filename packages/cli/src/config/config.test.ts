@@ -2202,6 +2202,17 @@ describe('loadCliConfig with includeDirectories', () => {
       ToolNames.SHELL,
     ]);
   });
+
+  it('should preserve plansDirectory in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      plansDirectory: './project-plans',
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPlansDir()).toContain('project-plans');
+  });
 });
 
 describe('loadCliConfig chatCompression', () => {

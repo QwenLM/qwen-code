@@ -2429,6 +2429,18 @@ export class Config {
     );
   }
 
+  private assertPlanFilePathWithinTargetDir(filePath: string): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      filePath,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
   private addLegacyPlanLocationWarning(): void {
     try {
       if (!this.plansDirectoryConfigured) {
@@ -2456,10 +2468,11 @@ export class Config {
           `using them.`,
       );
     } catch (err: unknown) {
-      this.debugLogger.warn(
-        'Failed to check legacy plan directory migration warning:',
-        err,
-      );
+      const message = `Failed to check legacy plan directory migration warning: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      this.warnings.push(message);
+      this.debugLogger.warn(message, err);
     }
   }
 
@@ -2467,7 +2480,16 @@ export class Config {
     try {
       return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
     } catch (err: unknown) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        return [];
+      }
+      if (code === 'EACCES' || code === 'EPERM') {
+        const message = `Failed to read plan directory ${plansDir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        this.warnings.push(message);
+        this.debugLogger.warn(message, err);
         return [];
       }
       throw err;
@@ -2478,7 +2500,10 @@ export class Config {
    * Returns the file path for this session's plan file.
    */
   getPlanFilePath(): string {
-    return path.join(this.plansDir, `${this.sessionId}.md`);
+    return path.join(
+      this.plansDir,
+      `${Storage.sanitizePlanSessionId(this.sessionId)}.md`,
+    );
   }
 
   /**
@@ -2493,7 +2518,26 @@ export class Config {
     // leaving a corrupted file if the process crashes mid-write.
     const tmpPath = filePath + '.tmp';
     fs.writeFileSync(tmpPath, plan, 'utf-8');
-    fs.renameSync(tmpPath, filePath);
+    try {
+      fs.renameSync(tmpPath, filePath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw err;
+      }
+
+      fs.copyFileSync(tmpPath, filePath);
+      fs.unlinkSync(tmpPath);
+    }
+    try {
+      this.assertPlanFilePathWithinTargetDir(filePath);
+    } catch (err) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Ignore rollback errors; the containment check already failed.
+      }
+      throw err;
+    }
   }
 
   /**
@@ -2502,6 +2546,7 @@ export class Config {
   loadPlan(): string | undefined {
     this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
+    this.assertPlanFilePathWithinTargetDir(filePath);
     try {
       return fs.readFileSync(filePath, 'utf-8');
     } catch (error: unknown) {

@@ -64,6 +64,22 @@ export class Storage {
     return resolved;
   }
 
+  /**
+   * Sanitizes a session id for use as a plan filename.
+   *
+   * Plan files are keyed by session id, but the raw id is public SDK input.
+   * Strip directory separators and Windows-invalid filename characters so a
+   * hostile value cannot escape the plans directory.
+   */
+  static sanitizePlanSessionId(sessionId: string): string {
+    const safeName = path
+      .basename(sessionId.replace(/\\/g, '/'))
+      .replace(/^\.+/g, '_')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[<>:"|?*\x00-\x1F]/g, '_');
+    return safeName || '_';
+  }
+
   private static resolveRuntimeBaseDir(
     dir: string | null | undefined,
     cwd?: string,
@@ -247,9 +263,10 @@ export class Storage {
       }
 
       const resolvedProjectRoot = path.resolve(projectRoot);
-      const resolvedPlansDirectory = path.isAbsolute(configuredPlansDirectory)
-        ? path.resolve(configuredPlansDirectory)
-        : path.resolve(resolvedProjectRoot, configuredPlansDirectory);
+      const resolvedPlansDirectory = Storage.resolvePath(
+        configuredPlansDirectory,
+        resolvedProjectRoot,
+      );
 
       Storage.assertPathWithinDirectory(
         resolvedPlansDirectory,
@@ -268,9 +285,10 @@ export class Storage {
     projectRoot?: string | null,
     plansDirectory?: string | null,
   ): string {
+    // Kept for tests and SDK callers that still use Storage helpers directly.
     return path.join(
       Storage.getPlansDir(projectRoot, plansDirectory),
-      `${sessionId}.md`,
+      `${Storage.sanitizePlanSessionId(sessionId)}.md`,
     );
   }
 

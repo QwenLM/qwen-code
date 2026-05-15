@@ -69,6 +69,8 @@ vi.mock('node:fs', async (importOriginal) => {
     mkdirSync: vi.fn(),
     writeFileSync: vi.fn(),
     renameSync: vi.fn(),
+    copyFileSync: vi.fn(),
+    unlinkSync: vi.fn(),
     readFileSync: vi.fn(),
   };
   return {
@@ -292,6 +294,18 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    (fs.existsSync as Mock).mockReturnValue(true);
+    (fs.readdirSync as Mock).mockReturnValue([]);
+    (fs.statSync as Mock).mockReturnValue({
+      isDirectory: vi.fn().mockReturnValue(true),
+    });
+    vi.mocked(fs.realpathSync).mockImplementation((path) => path.toString());
+    (fs.mkdirSync as Mock).mockImplementation(() => undefined);
+    (fs.writeFileSync as Mock).mockImplementation(() => undefined);
+    (fs.renameSync as Mock).mockImplementation(() => undefined);
+    (fs.copyFileSync as Mock).mockImplementation(() => undefined);
+    (fs.unlinkSync as Mock).mockImplementation(() => undefined);
+    (fs.readFileSync as Mock).mockImplementation(() => undefined);
     vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
     vi.spyOn(QwenLogger.prototype, 'logStartSessionEvent').mockImplementation(
       async () => undefined,
@@ -2121,6 +2135,22 @@ describe('setApprovalMode with folder trust', () => {
       expect(filePath).toMatch(/\.md$/);
     });
 
+    it('should sanitize session ID when building plan file path', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: '../../../escape',
+        plansDirectory: './project-plans',
+      });
+
+      expect(config.getPlanFilePath()).toBe(
+        path.join(
+          path.resolve(baseParams.targetDir),
+          'project-plans',
+          'escape.md',
+        ),
+      );
+    });
+
     it('should use configured plansDirectory for plan file path', () => {
       const config = new Config({
         ...baseParams,
@@ -2138,6 +2168,149 @@ describe('setApprovalMode with folder trust', () => {
           'test-session-123.md',
         ),
       );
+    });
+
+    it('should save and load plan from configured plansDirectory', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const tmpPath = `${filePath}.tmp`;
+      const storedFiles = new Map<string, string>();
+      (fs.writeFileSync as Mock).mockImplementation((pathToWrite, contents) => {
+        storedFiles.set(pathToWrite.toString(), contents.toString());
+      });
+      (fs.renameSync as Mock).mockImplementation((fromPath, toPath) => {
+        const contents = storedFiles.get(fromPath.toString());
+        if (contents === undefined) {
+          throw new Error(`missing temp file: ${fromPath.toString()}`);
+        }
+        storedFiles.set(toPath.toString(), contents);
+        storedFiles.delete(fromPath.toString());
+      });
+      (fs.readFileSync as Mock).mockImplementation((pathToRead) => {
+        const contents = storedFiles.get(pathToRead.toString());
+        if (contents === undefined) {
+          const enoent = new Error('ENOENT') as NodeJS.ErrnoException;
+          enoent.code = 'ENOENT';
+          throw enoent;
+        }
+        return contents;
+      });
+
+      config.savePlan('# My Plan');
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(plansDir, { recursive: true });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        tmpPath,
+        '# My Plan',
+        'utf-8',
+      );
+      expect(fs.renameSync).toHaveBeenCalledWith(tmpPath, filePath);
+      expect(config.loadPlan()).toBe('# My Plan');
+      expect(fs.readFileSync).toHaveBeenCalledWith(filePath, 'utf-8');
+    });
+
+    it('should fall back to copyFileSync when renameSync hits EXDEV', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const exdevError = new Error('EXDEV') as NodeJS.ErrnoException;
+      exdevError.code = 'EXDEV';
+      (fs.renameSync as Mock).mockImplementation(() => {
+        throw exdevError;
+      });
+
+      config.savePlan('# My Plan');
+
+      expect(fs.copyFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('.tmp'),
+        expect.stringContaining('project-plans'),
+      );
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('.tmp'),
+      );
+    });
+
+    it('should remove plan file when post-write containment check fails', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const outsideFilePath = path.resolve(
+        path.dirname(targetDir),
+        'outside-plans',
+        'test-session-123.md',
+      );
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir || resolvedPath === plansDir) {
+          return resolvedPath;
+        }
+        if (resolvedPath === filePath) {
+          return outsideFilePath;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(() => config.savePlan('# My Plan')).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(fs.unlinkSync).toHaveBeenCalledWith(filePath);
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
+      }
+    });
+
+    it('should reject loading a plan when final file path escapes targetDir', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+        plansDirectory: './project-plans',
+      });
+      const targetDir = path.resolve(baseParams.targetDir);
+      const plansDir = path.join(targetDir, 'project-plans');
+      const filePath = path.join(plansDir, 'test-session-123.md');
+      const outsideFilePath = path.resolve(
+        path.dirname(targetDir),
+        'outside-plans',
+        'test-session-123.md',
+      );
+      vi.mocked(fs.readFileSync).mockClear();
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir || resolvedPath === plansDir) {
+          return resolvedPath;
+        }
+        if (resolvedPath === filePath) {
+          return outsideFilePath;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(() => config.loadPlan()).toThrow(
+          'plansDirectory must resolve within the project root',
+        );
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
+      }
     });
 
     it('should warn when configured plansDirectory hides a legacy plan file', () => {
@@ -2195,6 +2368,34 @@ describe('setApprovalMode with folder trust', () => {
 
         expect(config.getWarnings()).toContainEqual(
           expect.stringContaining(legacyPlansDir),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should surface legacy plan directory read failures as warnings', () => {
+      const legacyError = new Error('EACCES') as NodeJS.ErrnoException;
+      legacyError.code = 'EACCES';
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (
+          resolvedPath ===
+          path.join(path.resolve(baseParams.targetDir), 'project-plans')
+        ) {
+          return [];
+        }
+        throw legacyError;
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          plansDirectory: './project-plans',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining('Failed to read plan directory'),
         );
       } finally {
         (fs.readdirSync as Mock).mockReturnValue([]);

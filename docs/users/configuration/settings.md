@@ -73,7 +73,7 @@ When both legacy settings are present with different values, the migration follo
 
 ### Available settings in `settings.json`
 
-Settings are organized into categories. All settings should be placed within their corresponding top-level category object in your `settings.json` file.
+Settings are organized into categories. Most settings should be placed within their corresponding top-level category object in your `settings.json` file. A few top-level settings like `proxy` and `plansDirectory` remain direct root keys for compatibility.
 
 #### general
 
