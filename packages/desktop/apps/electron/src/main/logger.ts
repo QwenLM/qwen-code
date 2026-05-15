@@ -70,22 +70,23 @@ function resolveDebugMode(): boolean {
 
 export const isDebugMode = resolveDebugMode()
 
-// Configure transports based on debug mode
+// Always keep a local file log for support/debugging. Capture every
+// electron-log level so packaged builds retain the same diagnostic detail as
+// dev/debug runs.
+log.transports.file.format = ({ message }) => [
+  JSON.stringify({
+    timestamp: message.date.toISOString(),
+    level: message.level,
+    scope: message.scope,
+    message: message.data,
+  }),
+]
+log.transports.file.maxSize = 5 * 1024 * 1024 // 5MB
+log.transports.file.level = 'silly'
+
+// Console output is useful in dev/debug mode. Packaged production keeps the
+// terminal clean and relies on the file log above.
 if (isDebugMode) {
-  // JSON format for file (agent-parseable)
-  // Note: format expects (params: FormatParams) => any[], where params.message has the LogMessage fields
-  log.transports.file.format = ({ message }) => [
-    JSON.stringify({
-      timestamp: message.date.toISOString(),
-      level: message.level,
-      scope: message.scope,
-      message: message.data,
-    }),
-  ]
-
-  log.transports.file.maxSize = 5 * 1024 * 1024 // 5MB
-
-  // Console output in debug mode with readable format
   // Note: format must return an array - electron-log's transformStyles calls .reduce() on it
   log.transports.console.format = ({ message }) => {
     const timestamp = colorize(message.date.toISOString(), ANSI_DIM)
@@ -98,8 +99,6 @@ if (isDebugMode) {
   }
   log.transports.console.level = 'debug'
 } else {
-  // Disable file and console transports in production
-  log.transports.file.level = false
   log.transports.console.level = false
 }
 
@@ -242,7 +241,6 @@ export const messagingGatewayLog: MessagingLogger = new StructuredMessagingGatew
  * Returns undefined if file logging is disabled.
  */
 export function getLogFilePath(): string | undefined {
-  if (!isDebugMode) return undefined
   return log.transports.file.getFile()?.path
 }
 

@@ -1100,8 +1100,9 @@ app.whenReady().then(async () => {
 
     mainLog.info('App initialized successfully')
     if (isDebugMode) {
-      mainLog.info('Debug mode enabled - logs at:', getLogFilePath())
+      mainLog.info('Debug mode enabled')
     }
+    mainLog.info('Application log path:', getLogFilePath())
     mainLog.info('Messaging gateway log path:', getMessagingGatewayLogFilePath())
   } catch (error) {
     mainLog.error('Failed to initialize app:', error instanceof Error ? error.message : error, (error as any)?.stack)
