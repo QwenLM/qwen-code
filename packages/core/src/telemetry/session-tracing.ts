@@ -22,6 +22,7 @@ import {
   SPAN_TOOL_EXECUTION,
 } from './constants.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
+import { getSessionContext } from './session-context.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SESSION_TRACING');
@@ -193,9 +194,13 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   }
 
   const parentCtx = interactionContext.getStore();
+  // Fall back to session root context (deterministic traceId from sessionId)
+  // for side-query LLM calls (auto-title, recap, etc.) that run outside an
+  // interaction. Without this, those spans start a fresh trace and lose
+  // correlation with the session.
   const ctx = parentCtx
     ? trace.setSpan(otelContext.active(), parentCtx.span)
-    : otelContext.active();
+    : (getSessionContext() ?? otelContext.active());
 
   const attributes: Attributes = {
     'qwen-code.model': model,
@@ -284,9 +289,10 @@ export function startToolSpan(
   }
 
   const parentCtx = interactionContext.getStore();
+  // Same session-root fallback as startLLMRequestSpan.
   const ctx = parentCtx
     ? trace.setSpan(otelContext.active(), parentCtx.span)
-    : otelContext.active();
+    : (getSessionContext() ?? otelContext.active());
 
   const attributes: Attributes = {
     'tool.name': toolName,
@@ -396,7 +402,7 @@ export function startToolExecutionSpan(): Span {
   }
   const ctx = parentCtx
     ? trace.setSpan(otelContext.active(), parentCtx.span)
-    : otelContext.active();
+    : (getSessionContext() ?? otelContext.active());
 
   const span = getTracer().startSpan(
     SPAN_TOOL_EXECUTION,

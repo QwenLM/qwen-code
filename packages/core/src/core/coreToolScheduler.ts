@@ -1949,6 +1949,15 @@ export class CoreToolScheduler {
     // Introduce a generic callbacks object for the execute method to handle
     // things like `onPid` and `onLiveOutput`. This will make the scheduler
     // agnostic to the invocation type.
+    //
+    // Start the execution sub-span BEFORE invocation.execute() so its
+    // synchronous setup (shell command preprocessing, child_process.spawn,
+    // etc.) is bracketed by the span. We don't manually activate the span
+    // as OTel context here because the surrounding tool span is already
+    // active via runInToolSpanContext, and tool implementations don't
+    // currently emit nested OTel spans of their own — the span boundary
+    // is purely for timing/attribution.
+    const execSpan = startToolExecutionSpan();
     let promise: Promise<ToolResult>;
     if (invocation instanceof ShellToolInvocation) {
       const setPidCallback = (pid: number) => {
@@ -1985,7 +1994,6 @@ export class CoreToolScheduler {
       );
     }
 
-    const execSpan = startToolExecutionSpan();
     try {
       const toolResult: ToolResult = await promise;
       endToolExecutionSpan(execSpan, {
