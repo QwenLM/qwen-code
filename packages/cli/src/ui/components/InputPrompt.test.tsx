@@ -252,26 +252,29 @@ describe('InputPrompt', () => {
   const wait = (ms = 150) => new Promise((resolve) => setTimeout(resolve, ms));
 
   describe('prompt suggestions', () => {
-    // createFollowupController.setSuggestion debounces the visibility
-    // transition by SUGGESTION_DELAY_MS (300ms) before flipping
-    // followup.state.isVisible to true. The Enter handler reads that flag
-    // synchronously, so we must wait for the timer to fire before pressing
-    // Enter — otherwise the suggestion path is skipped and onSubmit never
-    // runs. 350ms left only ~50ms margin and was eaten by ink 7 / React 19.2
-    // mount overhead on slow Windows CI runners. Keep this wait > 300ms +
-    // generous buffer (renderWithProviders cold start can be 100-200ms).
-    const SUGGESTION_VISIBLE_WAIT_MS = 700;
+    const waitForPromptSuggestion = async (
+      lastFrame: () => string | undefined,
+      suggestion: string,
+    ) => {
+      await waitFor(
+        () => {
+          expect(stripAnsi(lastFrame() ?? '')).toContain(suggestion);
+        },
+        { timeout: 3000 },
+      );
+    };
 
     it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
-      const { stdin, unmount } = renderWithProviders(
+      const { stdin, unmount, lastFrame } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(SUGGESTION_VISIBLE_WAIT_MS);
+      await waitForPromptSuggestion(lastFrame, 'commit this');
 
       stdin.write('\r');
-      await wait();
 
-      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+      await waitFor(() => {
+        expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+      });
       // Enter path must NOT call buffer.insert — it passes text directly to
       // handleSubmitAndClear. Calling insert would re-fill the buffer after
       // it was already cleared (the microtask race bug).
@@ -280,10 +283,10 @@ describe('InputPrompt', () => {
     });
 
     it('does not accept the prompt suggestion on shift+tab', async () => {
-      const { stdin, unmount } = renderWithProviders(
+      const { stdin, unmount, lastFrame } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(SUGGESTION_VISIBLE_WAIT_MS);
+      await waitForPromptSuggestion(lastFrame, 'commit this');
 
       stdin.write('\x1b[Z'); // shift+tab
       await wait();
@@ -302,10 +305,10 @@ describe('InputPrompt', () => {
         },
       ] as UseCommandCompletionReturn['suggestions'];
 
-      const { stdin, unmount } = renderWithProviders(
+      const { stdin, unmount, lastFrame } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
-      await wait(SUGGESTION_VISIBLE_WAIT_MS);
+      await waitForPromptSuggestion(lastFrame, 'commit this');
 
       stdin.write('\t');
       await wait();
