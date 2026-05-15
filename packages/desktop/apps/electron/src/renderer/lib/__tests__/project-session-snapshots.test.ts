@@ -42,7 +42,7 @@ describe('loadProjectWorkspaceSessionSnapshot', () => {
 
     const metas = await loadProjectWorkspaceSessionSnapshot(makeWorkspace(), api)
 
-    expect(calls).toEqual([['getSessionsForWorkspace', 'workspace-local', { refreshExternal: false }]])
+    expect(calls).toEqual([['getSessionsForWorkspace', 'workspace-local', { refreshExternal: true }]])
     expect(metas.map(meta => meta.id)).toEqual(['session-1'])
   })
 
@@ -74,7 +74,7 @@ describe('loadProjectWorkspaceSessionSnapshot', () => {
       'token',
       RPC_CHANNELS.sessions.GET_FOR_WORKSPACE,
       'remote-workspace',
-      { refreshExternal: false },
+      { refreshExternal: true },
     ]])
     expect(metas.map(meta => meta.id)).toEqual(['remote-session'])
     expect(metas[0]?.workspaceId).toBe('remote-workspace')

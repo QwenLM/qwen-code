@@ -17,9 +17,9 @@ export async function loadProjectWorkspaceSessionSnapshot(
         workspace.remoteServer.token,
         RPC_CHANNELS.sessions.GET_FOR_WORKSPACE,
         workspace.remoteServer.remoteWorkspaceId,
-        { refreshExternal: false },
+        { refreshExternal: true },
       ) as Session[]
-    : await api.getSessionsForWorkspace(workspace.id, { refreshExternal: false })
+    : await api.getSessionsForWorkspace(workspace.id, { refreshExternal: true })
 
   return sessions.map(extractSessionMeta)
 }

@@ -1945,18 +1945,21 @@ export default function App() {
       let loadedSessions: Session[] | null = null
       const workspaceSessions = store.get(workspaceSessionsAtom)
       const cachedMetas = getWorkspaceSessionMetas(workspaceSessions, workspaceId)
-      if (cachedMetas.length > 0) {
+      if (targetWorkspace?.remoteServer && cachedMetas.length > 0) {
         loadedSessions = cachedMetas.map(meta => sessionFromMeta(meta, targetWorkspace?.name))
       }
 
       // Local workspaces can be read before the active window context changes.
       // That lets us commit the target workspace and its session list together.
-      if (!loadedSessions && !targetWorkspace?.remoteServer) {
+      if (!targetWorkspace?.remoteServer) {
         try {
-          loadedSessions = await window.electronAPI.getSessionsForWorkspace(workspaceId, { refreshExternal: false })
+          loadedSessions = await window.electronAPI.getSessionsForWorkspace(workspaceId, { refreshExternal: true })
           cacheWorkspaceSessionMetas(workspaceId, loadedSessions)
         } catch (error) {
           console.warn(`[App] Failed to preload sessions for workspace ${workspaceId}:`, error)
+          if (cachedMetas.length > 0) {
+            loadedSessions = cachedMetas.map(meta => sessionFromMeta(meta, targetWorkspace?.name))
+          }
         }
       }
 
