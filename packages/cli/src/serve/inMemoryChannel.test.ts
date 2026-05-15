@@ -6,7 +6,10 @@
 
 import { describe, it, expect } from 'vitest';
 import type { AnyMessage } from '@agentclientprotocol/sdk';
-import { createInMemoryChannel } from './inMemoryChannel.js';
+// Import via the barrel rather than the source file so the public API
+// surface (serve/index.ts) is exercised by CI — a typo or missing
+// re-export would otherwise go undetected.
+import { createInMemoryChannel } from './index.js';
 
 /**
  * Push one JSON-RPC notification onto a `Stream.writable`. The SDK's
@@ -158,5 +161,64 @@ describe('createInMemoryChannel', () => {
     } finally {
       reader.releaseLock();
     }
+  });
+
+  it('abort() settles pending readers on both sides (teardown invariant)', async () => {
+    // Key teardown invariant: after abort(), pending read() calls do
+    // NOT hang. The exact settlement (resolve-with-{done:true} vs
+    // reject) depends on the SDK's ndJsonStream wrapper translation —
+    // see the helper's JSDoc. What matters is that consumers can
+    // GC-reclaim and shut down without leaking.
+    const { clientStream, agentStream, abort } = createInMemoryChannel();
+    const clientReader = clientStream.readable.getReader();
+    const agentReader = agentStream.readable.getReader();
+
+    // Race each read against a 100ms timeout; if abort works, both
+    // settle near-instantly. If abort doesn't propagate, the timeout
+    // wins and the test fails with `'hung'`.
+    const wrap = <T>(p: Promise<T>) =>
+      Promise.race<'settled' | 'hung'>([
+        p.then(
+          () => 'settled' as const,
+          () => 'settled' as const,
+        ),
+        new Promise<'hung'>((res) => setTimeout(() => res('hung'), 100)),
+      ]);
+
+    const clientReadP = wrap(clientReader.read());
+    const agentReadP = wrap(agentReader.read());
+
+    abort(new Error('shutdown'));
+
+    expect(await clientReadP).toBe('settled');
+    expect(await agentReadP).toBe('settled');
+
+    clientReader.releaseLock();
+    agentReader.releaseLock();
+  });
+
+  it('abort() is idempotent (calling twice is safe)', () => {
+    const { abort } = createInMemoryChannel();
+    expect(() => {
+      abort('first');
+      abort('second');
+    }).not.toThrow();
+  });
+
+  it('abort() with no reason still tears down', async () => {
+    const { agentStream, abort } = createInMemoryChannel();
+    const reader = agentStream.readable.getReader();
+    const readP = reader.read().then(
+      () => 'settled' as const,
+      () => 'settled' as const,
+    );
+    abort();
+    expect(
+      await Promise.race([
+        readP,
+        new Promise<'hung'>((res) => setTimeout(() => res('hung'), 100)),
+      ]),
+    ).toBe('settled');
+    reader.releaseLock();
   });
 });

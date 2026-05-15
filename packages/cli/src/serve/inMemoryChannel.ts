@@ -20,30 +20,54 @@ import { ndJsonStream, type Stream } from '@agentclientprotocol/sdk';
  * in-process bridge (issue #4156) when that lands, to wrap an in-process
  * `QwenAgent` without spawning a `qwen --acp` child.
  *
- * The helper is intentionally bare — it returns only the stream pair, no
- * lifecycle / teardown surface. Two reasons:
+ * `abort(reason?)` is the universal teardown primitive. It calls
+ * `WritableStream.abort()` on both underlying byte-level
+ * `TransformStream`s, which immediately settles any pending `read()` /
+ * `write()` operations on both sides so the channel can be reclaimed.
+ * Use this to terminate the channel during shutdown / crash simulation
+ * / daemon teardown.
  *
- *   1. Consumer behavior diverges widely (stuck channel, crashable
- *      child simulation, no-op, real in-process termination). A
- *      one-size-fits-all `close()` would either pull test-fixture
- *      concerns into a production module or force a single shape on
- *      consumers that don't want it.
+ * **Settlement shape**: at the inner byte-level layer the pending read
+ * rejects with the supplied reason; at the outer SDK-wrapped `Stream`
+ * layer (what callers actually see) the SDK's `ndJsonStream` translates
+ * that error into a clean end-of-stream signal — `read()` resolves with
+ * `{value: undefined, done: true}` rather than rejecting. The exact
+ * shape depends on how deep the consumer is in the wrapper chain, but
+ * the key invariant — **pending operations no longer hang** — holds
+ * either way. Consumers wanting to distinguish "graceful close" from
+ * "aborted" should track the call themselves.
  *
- *   2. The SDK's `ndJsonStream` outer wrapper does not reliably
- *      propagate close on `Stream.writable` to the opposite
- *      `Stream.readable`. Consumers needing to simulate a child exit
- *      (like the inline `makeChannel` in `httpAcpBridge.test.ts`) hold
- *      onto their own underlying `TransformStream` references and
- *      close those directly. A `close()` on this helper would have to
- *      either expose the same internals or be silently incomplete.
+ * We expose `abort` rather than `close` because `close()` only reaches
+ * the opposite `ReadableStream` after pending writes flush, and in
+ * practice the SDK's `ndJsonStream` outer wrapper does not reliably
+ * propagate close at all. `abort` is forceful and synchronous-by-spec,
+ * so it is the safe primitive for lifecycle teardown across an
+ * `ndJsonStream`-wrapped pair.
+ *
+ * Consumers that don't need teardown (most test sites, which let the
+ * channel die with the test scope) can ignore `abort`. `abort` is a
+ * platform-level primitive (not a test-fixture concern), so exposing
+ * it does not pull fixture machinery into this production module.
  */
 export function createInMemoryChannel(): {
   clientStream: Stream;
   agentStream: Stream;
+  abort(reason?: unknown): void;
 } {
   const ab = new TransformStream<Uint8Array, Uint8Array>();
   const ba = new TransformStream<Uint8Array, Uint8Array>();
   const clientStream = ndJsonStream(ab.writable, ba.readable);
   const agentStream = ndJsonStream(ba.writable, ab.readable);
-  return { clientStream, agentStream };
+  return {
+    clientStream,
+    agentStream,
+    abort(reason?: unknown) {
+      // Fire-and-forget; both `abort()` calls return promises that we
+      // intentionally do not await (callers want the synchronous
+      // "tear it down now" semantic) and which may reject if the
+      // stream is already in errored state — both are expected.
+      ab.writable.abort(reason).catch(() => {});
+      ba.writable.abort(reason).catch(() => {});
+    },
+  };
 }
