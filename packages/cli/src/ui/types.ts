@@ -95,7 +95,7 @@ export interface HistoryItemBase {
     /**
      * If true, the item is kept in history for turn mapping but not
      * rendered in the restored transcript. Set by ui.history.collapseOnResume
-     * or the /history collapse command.
+     * when resuming a session.
      */
     suppressOnRestore?: boolean;
     /**

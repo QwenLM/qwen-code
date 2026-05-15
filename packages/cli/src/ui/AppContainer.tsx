@@ -65,6 +65,7 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
 } from './utils/resumeHistoryUtils.js';
+import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
