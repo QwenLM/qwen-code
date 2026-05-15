@@ -340,6 +340,22 @@ describe('installation scripts', () => {
     expect(env.Path).toMatch(/^C:\\qwen-test-bin;/);
   });
 
+  it('creates a fake Windows curl command script', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-curl-helper-'));
+
+    try {
+      const fakeCurl = createFakeWindowsCurlCommand(tmpDir);
+
+      expect(fakeCurl).toBe(path.join(tmpDir, 'curl.cmd'));
+      expect(readScript(fakeCurl)).toContain('QWEN_FAKE_CURL_LOG');
+      expect(readScript(fakeCurl)).toContain(
+        '/releases/qwen-code/latest/VERSION',
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it('creates PowerShell validation scripts with a ps1 extension', () => {
     const script = readScript(
       'scripts/installation/install-qwen-standalone.bat',
@@ -2774,6 +2790,7 @@ function createFakeWindowsCurlCommand(fakeBin) {
   mkdirSync(fakeBin, { recursive: true });
   const outputPath = path.join(fakeBin, 'curl.cmd');
   writeFileSync(
+    outputPath,
     [
       '@echo off',
       'setlocal EnableExtensions EnableDelayedExpansion',
