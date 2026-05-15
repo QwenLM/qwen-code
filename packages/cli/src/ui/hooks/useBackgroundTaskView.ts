@@ -223,21 +223,44 @@ export function useBackgroundTaskView(
               : undefined,
         };
       });
-      // Merge by startTime descending so the most recently launched task
-      // sits at the top of the dialog. The dialog opens with
-      // `selectedIndex = 0` (top row), so this puts the cursor on the
-      // newest entry by default — matching the user's expectation when
-      // they open the dialog right after launching a task. Older
-      // entries fall to the bottom and are eventually pruned by each
-      // registry's terminal-entry cap (see
+      // Two-bucket merge so "new OR running tasks should appear at the
+      // top" (the literal phrasing of the issue this view-model serves).
+      // A pure startTime DESC sort surfaces the newest LAUNCH but lets
+      // an older long-running / paused entry fall below a batch of
+      // newer terminal entries — the user opens the dialog wanting to
+      // check the running work, and finds it buried under noise.
+      //
+      //   bucket 1 — active (running + paused), sorted by startTime DESC
+      //              so the most recent launch sits at the very top.
+      //   bucket 2 — terminal (completed / failed / cancelled), sorted
+      //              by endTime DESC so the most recently FINISHED entry
+      //              is the first terminal row (matches "what changed
+      //              while I wasn't looking" intuition; startTime would
+      //              put a long-running task that just settled below an
+      //              old quick task that finished hours ago).
+      //
+      // Entries falling out the bottom of bucket 2 are eventually
+      // pruned by each registry's terminal-entry cap (see
       // `MAX_RETAINED_TERMINAL_AGENTS` / `MAX_RETAINED_TERMINAL_SHELLS`
       // / `MAX_RETAINED_TERMINAL_MONITORS`).
+      const isActive = (entry: DialogEntry): boolean =>
+        entry.status === 'running' || entry.status === 'paused';
       const merged = [
         ...agentEntries,
         ...shellEntries,
         ...monitorEntries,
         ...dreamEntries,
-      ].sort((a, b) => b.startTime - a.startTime);
+      ].sort((a, b) => {
+        const aActive = isActive(a);
+        const bActive = isActive(b);
+        if (aActive !== bActive) return aActive ? -1 : 1;
+        if (aActive) return b.startTime - a.startTime;
+        // Terminal bucket: fall back to startTime when an entry has no
+        // endTime yet (defensive — the registries stamp endTime on
+        // every running → terminal transition, so this only matters
+        // for synthetic / partially-restored entries).
+        return (b.endTime ?? b.startTime) - (a.endTime ?? a.startTime);
+      });
       // Cache the dream signature derived from the freshly-built
       // entries — the memory listener uses this to skip redundant
       // setEntries calls when an extract notify fires (extract has no
