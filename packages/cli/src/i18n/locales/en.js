@@ -144,6 +144,12 @@ export default {
   'Restored {{count}} file(s).': 'Restored {{count}} file(s).',
   'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
   'Rewind failed: {{error}}': 'Rewind failed: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Cannot rewind conversation: no active model client.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code restored, but conversation could not be rewound (no active client).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversation rewound. Edit your prompt and press Enter to continue.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Failed to restore {{count}} file(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

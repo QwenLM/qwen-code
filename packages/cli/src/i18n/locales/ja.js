@@ -104,6 +104,12 @@ export default {
   'Failed to restore files: {{error}}':
     'ファイルの復元に失敗しました：{{error}}',
   'Rewind failed: {{error}}': '巻き戻しに失敗しました：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '会話を巻き戻せません：アクティブなモデルクライアントがありません。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'コードは復元されましたが、会話は巻き戻せませんでした（モデルクライアントがアクティブではありません）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '会話を巻き戻しました。プロンプトを編集して Enter キーで続行してください。',
   'Failed to restore {{count}} file(s): {{files}}':
     '{{count}} 個のファイルの復元に失敗しました：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

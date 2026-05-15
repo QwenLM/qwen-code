@@ -315,6 +315,9 @@ describe('FileHistoryService', () => {
   });
 
   describe('snapshot eviction', () => {
+    const backupPath = (name: string) =>
+      join(storageDir, 'file-history', 'test-session', name);
+
     it('should keep at most MAX_SNAPSHOTS (100) snapshots', async () => {
       for (let i = 0; i < 105; i++) {
         await service.makeSnapshot(`p${i}`);
@@ -322,6 +325,91 @@ describe('FileHistoryService', () => {
       const snapshots = service.getSnapshots();
       expect(snapshots.length).toBeLessThanOrEqual(100);
       expect(snapshots[snapshots.length - 1].promptId).toBe('p104');
+    });
+
+    it('should delete orphaned backup files on overflow', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'v0');
+
+      await service.makeSnapshot('p0');
+      await service.trackEdit(file); // version 1, content 'v0'
+
+      const evictedNames: string[] = [];
+      // Capture v1 from p0 before it gets evicted.
+      evictedNames.push(
+        service.getSnapshots()[0].trackedFileBackups['a.txt']!.backupFileName!,
+      );
+
+      // 104 more snapshots, each with new content → fresh backup per snapshot.
+      for (let i = 1; i < 105; i++) {
+        await writeFile(file, `v${i}`);
+        await service.makeSnapshot(`p${i}`);
+        if (i < 5) {
+          evictedNames.push(
+            service.getSnapshots()[i].trackedFileBackups['a.txt']!
+              .backupFileName!,
+          );
+        }
+      }
+
+      // p0..p4 (versions 1..5) were dropped by slice(-100); their backups should be gone.
+      for (const name of evictedNames) {
+        expect(existsSync(backupPath(name))).toBe(false);
+      }
+      // The surviving snapshots' backups must still exist.
+      const survivors = service.getSnapshots();
+      for (const s of survivors) {
+        const bn = s.trackedFileBackups['a.txt']?.backupFileName;
+        if (bn) expect(existsSync(backupPath(bn))).toBe(true);
+      }
+    });
+
+    it('should preserve deduplicated backup files referenced by survivors', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'unchanged');
+
+      await service.makeSnapshot('p0');
+      await service.trackEdit(file);
+      const sharedName =
+        service.getSnapshots()[0].trackedFileBackups['a.txt']!.backupFileName!;
+
+      // Content never changes → makeSnapshot reuses the same backup reference.
+      for (let i = 1; i < 105; i++) {
+        await service.makeSnapshot(`p${i}`);
+      }
+
+      // Same backupFileName is held by every survivor → must NOT be deleted.
+      expect(existsSync(backupPath(sharedName))).toBe(true);
+    });
+  });
+
+  describe('rewind cleanup', () => {
+    it('should delete backups orphaned by truncation', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'v0');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      const v1 =
+        service.getSnapshots()[0].trackedFileBackups['a.txt']!.backupFileName!;
+
+      await writeFile(file, 'v1');
+      await service.makeSnapshot('p2');
+      const v2 =
+        service.getSnapshots()[1].trackedFileBackups['a.txt']!.backupFileName!;
+
+      await writeFile(file, 'v2');
+      await service.makeSnapshot('p3');
+      const v3 =
+        service.getSnapshots()[2].trackedFileBackups['a.txt']!.backupFileName!;
+
+      await service.rewind('p1', true);
+
+      const backupsDir = join(storageDir, 'file-history', 'test-session');
+      // p1's backup is still referenced; p2 and p3's unique-version backups are gone.
+      expect(existsSync(join(backupsDir, v1))).toBe(true);
+      expect(existsSync(join(backupsDir, v2))).toBe(false);
+      expect(existsSync(join(backupsDir, v3))).toBe(false);
     });
   });
 

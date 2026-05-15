@@ -138,6 +138,12 @@ export default {
   'Failed to restore files: {{error}}':
     'Falha ao restaurar arquivos: {{error}}',
   'Rewind failed: {{error}}': 'Falha ao retroceder: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Não é possível retroceder a conversa: nenhum cliente de modelo ativo.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Código restaurado, mas a conversa não pôde ser retrocedida (sem cliente ativo).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversa retrocedida. Edite seu prompt e pressione Enter para continuar.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Falha ao restaurar {{count}} arquivo(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

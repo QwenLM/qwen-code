@@ -118,14 +118,10 @@ async function safeCopyFile(
 }
 
 async function createBackup(
-  filePath: string | null,
+  filePath: string,
   version: number,
   sessionId: string,
 ): Promise<FileHistoryBackup> {
-  if (filePath === null) {
-    return { backupFileName: null, version, backupTime: new Date() };
-  }
-
   const backupFileName = getBackupFileName(filePath, version);
   const backupPath = resolveBackupPath(backupFileName, sessionId);
 
@@ -320,13 +316,7 @@ export class FileHistoryService {
       return;
     }
 
-    let maxVersion = 0;
-    for (const snapshot of this.state.snapshots) {
-      const existing = snapshot.trackedFileBackups[trackingPath];
-      if (existing && existing.version > maxVersion) {
-        maxVersion = existing.version;
-      }
-    }
+    const maxVersion = this.getMaxVersion(trackingPath);
 
     let backup: FileHistoryBackup;
     try {
@@ -358,12 +348,7 @@ export class FileHistoryService {
           try {
             const filePath = this.maybeExpandFilePath(trackingPath);
             const latestBackup = mostRecent.trackedFileBackups[trackingPath];
-            let maxVersion = 0;
-            for (const s of this.state.snapshots) {
-              const b = s.trackedFileBackups[trackingPath];
-              if (b && b.version > maxVersion) maxVersion = b.version;
-            }
-            const nextVersion = maxVersion + 1;
+            const nextVersion = this.getMaxVersion(trackingPath) + 1;
 
             let fileStats: Stats | undefined;
             try {
@@ -423,7 +408,10 @@ export class FileHistoryService {
 
     this.state.snapshots.push(newSnapshot);
     if (this.state.snapshots.length > MAX_SNAPSHOTS) {
-      this.state.snapshots = this.state.snapshots.slice(-MAX_SNAPSHOTS);
+      const overflow = this.state.snapshots.length - MAX_SNAPSHOTS;
+      const removed = this.state.snapshots.slice(0, overflow);
+      this.state.snapshots = this.state.snapshots.slice(overflow);
+      await this.cleanupOrphanedBackups(removed);
     }
 
     debugLogger.debug(
@@ -448,12 +436,14 @@ export class FileHistoryService {
     if (truncateHistory && result.filesFailed.length === 0) {
       const targetIdx = this.state.snapshots.indexOf(targetSnapshot);
       if (targetIdx >= 0) {
+        const removed = this.state.snapshots.slice(targetIdx + 1);
         this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
         this.state.trackedFiles = new Set(
           this.state.snapshots.flatMap((s) =>
             Object.keys(s.trackedFileBackups),
           ),
         );
+        await this.cleanupOrphanedBackups(removed);
       }
     }
 
@@ -591,6 +581,53 @@ export class FileHistoryService {
       }
     }
     return undefined;
+  }
+
+  private getMaxVersion(trackingPath: string): number {
+    let maxVersion = 0;
+    for (const snapshot of this.state.snapshots) {
+      const existing = snapshot.trackedFileBackups[trackingPath];
+      if (existing && existing.version > maxVersion) {
+        maxVersion = existing.version;
+      }
+    }
+    return maxVersion;
+  }
+
+  // Best-effort: delete on-disk backup files referenced only by `removedSnapshots`
+  // and not by any surviving snapshot. Backup files are content-deduplicated
+  // across snapshots (see makeSnapshot's reuse of latestBackup), so we must
+  // skip any name still in the live set.
+  private async cleanupOrphanedBackups(
+    removedSnapshots: FileHistorySnapshot[],
+  ): Promise<void> {
+    const liveBackups = new Set<string>();
+    for (const s of this.state.snapshots) {
+      for (const b of Object.values(s.trackedFileBackups)) {
+        if (b.backupFileName !== null) liveBackups.add(b.backupFileName);
+      }
+    }
+
+    const toDelete = new Set<string>();
+    for (const s of removedSnapshots) {
+      for (const b of Object.values(s.trackedFileBackups)) {
+        if (b.backupFileName !== null && !liveBackups.has(b.backupFileName)) {
+          toDelete.add(b.backupFileName);
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from(toDelete, async (name) => {
+        try {
+          await unlink(resolveBackupPath(name, this.sessionId));
+        } catch (e: unknown) {
+          if (!isENOENT(e)) {
+            debugLogger.error(`FileHistory: cleanup failed for ${name}: ${e}`);
+          }
+        }
+      }),
+    );
   }
 
   private maybeShortenFilePath(filePath: string): string {

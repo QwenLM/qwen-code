@@ -147,6 +147,12 @@ export default {
   'Failed to restore files: {{error}}':
     'Не удалось восстановить файлы: {{error}}',
   'Rewind failed: {{error}}': 'Сбой отката: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Невозможно откатить разговор: нет активного клиента модели.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Код восстановлен, но разговор не удалось откатить (нет активного клиента).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Разговор откатили. Отредактируйте подсказку и нажмите Enter, чтобы продолжить.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Не удалось восстановить {{count}} файл(ов): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

@@ -144,6 +144,12 @@ export default {
   'Failed to restore files: {{error}}':
     'Error en restaurar els fitxers: {{error}}',
   'Rewind failed: {{error}}': 'Error en retrocedir: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'No es pot retrocedir la conversa: cap client de model actiu.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Codi restaurat, però la conversa no s’ha pogut retrocedir (cap client actiu).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversa retrocedida. Edita la teva indicació i prem Retorn per continuar.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Error en restaurar {{count}} fitxer(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

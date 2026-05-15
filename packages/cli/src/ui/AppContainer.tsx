@@ -1988,10 +1988,24 @@ export const AppContainer = (props: AppContainerProps) => {
           ? config.getGeminiClient()
           : null;
         let apiTruncateIndex = -1;
+        let conversationSkippedNoClient = false;
         if (needsConversation) {
           if (!geminiClient) {
-            if (option === 'conversation') return;
-            // 'both' with no client: skip conversation, still try files
+            if (option === 'conversation') {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Cannot rewind conversation: no active model client.',
+                  ),
+                },
+                Date.now(),
+              );
+              return;
+            }
+            // 'both' with no client: skip conversation, still try files,
+            // and surface a warning after the restore output.
+            conversationSkippedNoClient = true;
           } else {
             apiTruncateIndex = computeApiTruncationIndex(
               historyManager.history,
@@ -2094,7 +2108,9 @@ export const AppContainer = (props: AppContainerProps) => {
           historyManager.addItem(
             {
               type: 'info',
-              text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
+              text: t(
+                'Conversation rewound. Edit your prompt and press Enter to continue.',
+              ),
             },
             Date.now(),
           );
@@ -2115,6 +2131,17 @@ export const AppContainer = (props: AppContainerProps) => {
         if (fileRestoreError) {
           historyManager.addItem(
             { type: 'error', text: fileRestoreError },
+            Date.now(),
+          );
+        }
+        if (conversationSkippedNoClient) {
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Code restored, but conversation could not be rewound (no active client).',
+              ),
+            },
             Date.now(),
           );
         }

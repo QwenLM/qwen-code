@@ -144,6 +144,12 @@ export default {
   'Failed to restore files: {{error}}':
     'Échec de la restauration des fichiers : {{error}}',
   'Rewind failed: {{error}}': 'Échec du retour en arrière : {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Impossible de revenir en arrière sur la conversation : aucun client de modèle actif.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code restauré, mais la conversation n’a pas pu être ramenée en arrière (aucun client actif).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversation ramenée en arrière. Modifiez votre invite et appuyez sur Entrée pour continuer.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Échec de la restauration de {{count}} fichier(s) : {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

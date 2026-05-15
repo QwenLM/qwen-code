@@ -123,6 +123,12 @@ export default {
   'Failed to restore files: {{error}}':
     'Fehler beim Wiederherstellen der Dateien: {{error}}',
   'Rewind failed: {{error}}': 'Zurückspulen fehlgeschlagen: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Konversation kann nicht zurückgespult werden: kein aktiver Modell-Client.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code wiederhergestellt, aber Konversation konnte nicht zurückgespult werden (kein aktiver Client).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Konversation zurückgespult. Bearbeite deinen Prompt und drücke Enter, um fortzufahren.',
   'Failed to restore {{count}} file(s): {{files}}':
     '{{count}} Datei(en) konnten nicht wiederhergestellt werden: {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

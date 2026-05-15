@@ -138,6 +138,12 @@ export default {
   'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
   'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
   'Rewind failed: {{error}}': '回退失败：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '无法回退对话：模型客户端未激活。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    '代码已恢复，但对话无法回退（模型客户端未激活）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '对话已回退。修改你的提示后按回车继续。',
   'Failed to restore {{count}} file(s): {{files}}':
     '恢复 {{count}} 个文件失败：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
