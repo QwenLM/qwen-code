@@ -3793,6 +3793,7 @@ Other open files:
         .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModelAcrossAuthTypes,
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       await client.generateContent(
@@ -3849,6 +3850,7 @@ Other open files:
         .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModelAcrossAuthTypes,
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       // Override createContentGenerator to return our test double (success path)
@@ -3893,6 +3895,7 @@ Other open files:
         .mockReturnValue(undefined);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModelAcrossAuthTypes,
+        getResolvedModel: vi.fn(),
       } as unknown as ModelsConfig);
 
       await client.generateContent(
@@ -3974,6 +3977,7 @@ Other open files:
         .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModelAcrossAuthTypes,
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       // Main config uses a different authType
@@ -4020,6 +4024,7 @@ Other open files:
         .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModelAcrossAuthTypes,
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
@@ -4063,6 +4068,7 @@ Other open files:
 
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModelAcrossAuthTypes,
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       // Main config uses QWEN_OAUTH — fast model registered under USE_OPENAI
@@ -4109,6 +4115,7 @@ Other open files:
         .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
         getResolvedModelAcrossAuthTypes,
+        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
       } as unknown as ModelsConfig);
 
       vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);

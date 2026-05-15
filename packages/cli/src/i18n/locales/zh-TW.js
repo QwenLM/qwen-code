@@ -156,6 +156,7 @@ export default {
   '(new, partial)': '（新增，部分統計）',
   '(deleted)': '（已刪除）',
   '(binary, deleted)': '（二進位，已刪除）',
+
   'Manage subagents for specialized task delegation.':
     '管理用於專門任務委派的子智能體',
   'Manage existing subagents (view, edit, delete).':

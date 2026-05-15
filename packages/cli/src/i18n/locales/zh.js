@@ -168,9 +168,10 @@ export default {
   '(new)': '（新增）',
   '(new, partial)': '（新增，部分统计）',
   '(deleted)': '（已删除）',
-  '(binary, deleted)': '（二进制，已删除）',
+  '(binary, deleted)': '（已删除）',
 
   // ============================================================================
+
   // Commands - Agents
   // ============================================================================
   'Manage subagents for specialized task delegation.':
