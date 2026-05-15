@@ -113,7 +113,7 @@ interface Harness {
   monitorCancel: ReturnType<typeof vi.fn>;
   dreamCancelTask: ReturnType<typeof vi.fn>;
   setEntries: (next: readonly DialogEntry[]) => void;
-  pressKey: (key: { name?: string; sequence?: string }) => void;
+  pressKey: (key: { name?: string; sequence?: string; ctrl?: boolean }) => void;
   call: (fn: () => void) => void;
   lastFrame: () => string | undefined;
   probe: { current: ProbeHandle | null };
@@ -425,6 +425,23 @@ describe('BackgroundTasksDialog', () => {
     expect(h.probe.current!.state.selectedIndex).toBe(0);
 
     h.setEntries([]);
+    expect(h.probe.current!.state.selectedIndex).toBe(0);
+  });
+
+  it('moves list selection with Ctrl+N/P readline aliases', () => {
+    const h = setup([
+      entry({ agentId: 'a' }),
+      entry({ agentId: 'b' }),
+      entry({ agentId: 'c' }),
+    ]);
+
+    h.call(() => h.probe.current!.actions.openDialog());
+    expect(h.probe.current!.state.selectedIndex).toBe(0);
+
+    h.pressKey({ name: 'n', sequence: '\u000E', ctrl: true });
+    expect(h.probe.current!.state.selectedIndex).toBe(1);
+
+    h.pressKey({ name: 'p', sequence: '\u0010', ctrl: true });
     expect(h.probe.current!.state.selectedIndex).toBe(0);
   });
 
