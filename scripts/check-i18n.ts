@@ -87,6 +87,13 @@ export function shouldWriteUnusedKeysJson(): boolean {
  *   - 文件 — contextual (can legitimately mean "document").
  *   - 打開 — colloquially common in Taiwan even if 開啟 is preferred for UI.
  *   - Bare 鏈 — valid in 區塊鏈 etc.; only the bigram 鏈接 is flagged.
+ *
+ * Known limitation: matching is plain substring (`includes()`) and does not
+ * respect Chinese word boundaries. Bigram patterns can therefore false-positive
+ * across compound-word boundaries — e.g. `區塊鏈接口` (= `區塊鏈` + `接口`)
+ * contains the substring `鏈接` even though neither word is wrong. When this
+ * happens, add the affected translation key to ZH_TW_ALLOWED_EXCEPTIONS below
+ * with a brief justification, rather than weakening the pattern list.
  */
 const ZH_TW_FORBIDDEN_PATTERNS_RAW: ReadonlyArray<{
   pattern: string;

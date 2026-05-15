@@ -164,6 +164,10 @@ If you are not a Traditional Chinese speaker and need to bootstrap a value, **do
 
 The `check-i18n` script (run in CI via `npm run check-i18n`) will fail the build if any of the CI-enforced substrings above end up in a `zh-TW` value. See `scripts/check-i18n.ts → ZH_TW_FORBIDDEN_PATTERNS` for the full list. If a translation legitimately needs to contain a CI-forbidden substring, add its key to `ZH_TW_ALLOWED_EXCEPTIONS` in the same file with a brief justification.
 
+> [!note]
+>
+> The check uses plain substring matching, which does not understand Chinese word boundaries. A bigram pattern can therefore false-positive across compound-word boundaries — for example, `區塊鏈接口` (= `區塊鏈` + `接口`) contains the substring `鏈接` even though neither word is incorrect. If you hit a surprising CI failure of this kind, add the translation key to `ZH_TW_ALLOWED_EXCEPTIONS` rather than removing the pattern.
+
 ### Language Pack Format
 
 ```javascript
