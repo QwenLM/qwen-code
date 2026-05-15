@@ -55,6 +55,8 @@ export interface WorktreeSession {
   worktreeBranch: string;
   originalCwd: string;
   originalBranch: string;
+  /** HEAD commit SHA at the moment the worktree was created. Used by WorktreeExitDialog to count new commits. */
+  originalHeadCommit: string;
 }
 
 export async function readWorktreeSession(
@@ -268,11 +270,37 @@ npx vitest run src/services/gitWorktreeService.test.ts -t "configures core.hooks
 
 ```typescript
 // Configure hooksPath so commits inside this worktree run the main
-// repo's hooks instead of the (absent) per-worktree hooks directory.
+// repo's hooks. Priority: .husky/ (common) → .git/hooks (fallback).
+// Mirrors claude-code's performPostCreationSetup() logic.
 try {
-  const worktreeGit = simpleGit(worktreePath);
-  const mainHooksPath = path.join(this.sourceRepoPath, '.git', 'hooks');
-  await worktreeGit.raw(['config', 'core.hooksPath', mainHooksPath]);
+  const huskyPath = path.join(this.sourceRepoPath, '.husky');
+  const gitHooksPath = path.join(this.sourceRepoPath, '.git', 'hooks');
+  let hooksPath: string | null = null;
+  for (const candidate of [huskyPath, gitHooksPath]) {
+    try {
+      await fs.stat(candidate);
+      hooksPath = candidate;
+      break;
+    } catch {
+      // Not found — try next.
+    }
+  }
+  if (hooksPath) {
+    const worktreeGit = simpleGit(worktreePath);
+    // Skip the subprocess if core.hooksPath is already set to the same value
+    // (~14ms spawn overhead per claude-code's comment on parseGitConfigValue).
+    let existing = '';
+    try {
+      existing = (
+        await worktreeGit.raw(['config', '--local', 'core.hooksPath'])
+      ).trim();
+    } catch {
+      // Key not set — empty string means "proceed".
+    }
+    if (existing !== hooksPath) {
+      await worktreeGit.raw(['config', 'core.hooksPath', hooksPath]);
+    }
+  }
 } catch (hookError) {
   debugLogger.warn(
     `createUserWorktree: failed to set core.hooksPath: ${hookError}`,
@@ -281,7 +309,7 @@ try {
 }
 ```
 
-`this.sourceRepoPath` 是 `GitWorktreeService` 构造函数赋值的私有字段（`this.sourceRepoPath = path.resolve(sourceRepoPath)`，约行 224）。
+`this.sourceRepoPath` 是 `GitWorktreeService` 构造函数赋值的私有字段（`this.sourceRepoPath = path.resolve(sourceRepoPath)`，约行 224）。需要在文件顶部确认已 `import * as fs from 'node:fs/promises'`。
 
 - [ ] **Step 4: 对 `createAgentWorktree` 做相同修改**
 
@@ -337,6 +365,7 @@ it('writes WorktreeSession sidecar after creating worktree', async () => {
   expect(session!.worktreeBranch).toBe('worktree-session-test');
   expect(session!.originalCwd).toBeTruthy();
   expect(session!.originalBranch).toBeTruthy();
+  expect(session!.originalHeadCommit).toMatch(/^[0-9a-f]{7,40}$/);
 });
 ```
 
@@ -357,7 +386,32 @@ npx vitest run src/tools/enter-worktree.test.ts -t "writes WorktreeSession"
 import { writeWorktreeSession } from '../services/worktreeSessionService.js';
 ```
 
-在 `execute()` 方法中，`writeWorktreeSessionMarker(...)` 调用之后，新增：
+在 `execute()` 方法中，获取 baseBranch 之后、`createUserWorktree()` 调用之前，先抓取当前 HEAD commit SHA：
+
+```typescript
+// Capture HEAD before branching — WorktreeExitDialog uses this to count
+// new commits created inside the worktree (mirrors claude-code approach).
+let originalHeadCommit = '';
+try {
+  originalHeadCommit = await service.getHeadCommit();
+} catch {
+  // Non-fatal.
+}
+```
+
+同时在 `GitWorktreeService` 中新增公开方法（`gitWorktreeService.ts`，放在 `getCurrentBranch()` 附近）：
+
+```typescript
+async getHeadCommit(): Promise<string> {
+  try {
+    return (await this.git.raw(['rev-parse', '--short', 'HEAD'])).trim();
+  } catch {
+    return '';
+  }
+}
+```
+
+在 `writeWorktreeSessionMarker(...)` 调用之后，新增：
 
 ```typescript
 // Persist worktree session so --resume can restore context.
@@ -372,6 +426,7 @@ try {
       worktreeBranch: result.worktree.branch,
       originalCwd: projectRoot,
       originalBranch: baseBranch ?? 'HEAD',
+      originalHeadCommit,
     },
   );
 } catch (error) {
@@ -527,6 +582,9 @@ activeWorktree: {
   slug: string;
   branch: string;
   path: string;
+  originalCwd: string;
+  originalBranch: string;
+  originalHeadCommit: string;
 } | null;
 ```
 
@@ -614,6 +672,9 @@ activeWorktree: worktreeSession
       slug: worktreeSession.slug,
       branch: worktreeSession.worktreeBranch,
       path: worktreeSession.worktreePath,
+      originalCwd: worktreeSession.originalCwd,
+      originalBranch: worktreeSession.originalBranch,
+      originalHeadCommit: worktreeSession.originalHeadCommit,
     }
   : null,
 ```
@@ -652,21 +713,36 @@ git commit -m "feat(worktree): add useWorktreeSession hook and UIState.activeWor
 
 ```typescript
 worktree?: {
-  slug: string;
+  /** worktree slug（短名称，如 "my-feature"） */
+  name: string;
+  /** worktree 物理路径 */
+  path: string;
+  /** git 分支名（如 "worktree-my-feature"） */
   branch: string;
+  /** 进入 worktree 前的工作目录 */
+  original_cwd: string;
+  /** 进入 worktree 前的分支 */
+  original_branch: string;
 };
 ```
+
+字段名和 claude-code 保持一致，方便用户在 qwen-code 和 claude-code 之间复用 statusline 脚本。
 
 找到 `doUpdate` 回调中构造 `input: StatusLineCommandInput` 对象的地方（约行 225），在 `...(ui.branchName && { git: { branch: ui.branchName } })` 之后新增：
 
 ```typescript
 ...(uiStateRef.current.activeWorktree && {
   worktree: {
-    slug: uiStateRef.current.activeWorktree.slug,
+    name: uiStateRef.current.activeWorktree.slug,
+    path: uiStateRef.current.activeWorktree.path,
     branch: uiStateRef.current.activeWorktree.branch,
+    original_cwd: uiStateRef.current.activeWorktree.originalCwd,
+    original_branch: uiStateRef.current.activeWorktree.originalBranch,
   },
 }),
 ```
+
+注意：`UIState.activeWorktree` 需要也包含 `originalCwd` 和 `originalBranch` 字段（在 Task 5 的 AppContainer 映射中补充）。
 
 - [ ] **Step 2: 在 `Footer.tsx` 新增 worktree 内置展示行**
 
@@ -852,26 +928,29 @@ import React from 'react';
 import { WorktreeExitDialog } from './WorktreeExitDialog.js';
 
 describe('WorktreeExitDialog', () => {
-  it('renders worktree slug and options', () => {
+  it('shows loading state initially', () => {
     const { lastFrame } = render(
       <WorktreeExitDialog
         slug="my-feature"
         branch="worktree-my-feature"
+        worktreePath="/tmp/repo/.qwen/worktrees/my-feature"
+        originalHeadCommit="abc1234"
         onKeep={vi.fn()}
         onRemove={vi.fn()}
         onCancel={vi.fn()}
       />,
     );
-    expect(lastFrame()).toContain('my-feature');
-    expect(lastFrame()).toContain('Keep');
-    expect(lastFrame()).toContain('Remove');
+    // Should show loading spinner immediately before git status resolves
+    expect(lastFrame()).toContain('Checking');
   });
 
-  it('calls onKeep when Keep is selected', async () => {
-    const onKeep = vi.fn();
-    // Key navigation test — follow pattern from MemoryDialog.test.tsx
-    // render → send Enter on first option → verify onKeep called
-    expect(onKeep).not.toHaveBeenCalled(); // placeholder until nav is wired
+  it('renders slug, branch, and options after loading (no changes)', async () => {
+    // Use vi.mock to stub execFileNoThrow / execFile so git status returns empty
+    // and rev-list returns "0". See existing dialog tests for the mock pattern.
+    // After async effect resolves:
+    //   - shows "my-feature" and "worktree-my-feature"
+    //   - shows Keep and Remove options
+    //   - shows "no uncommitted changes" or similar
   });
 });
 ```
@@ -887,12 +966,13 @@ npx vitest run src/ui/components/WorktreeExitDialog.test.tsx
 
 - [ ] **Step 4: 新建 `WorktreeExitDialog.tsx`**
 
-参考 `WelcomeBackDialog.tsx` 的 RadioSelect 模式：
+参考 `WelcomeBackDialog.tsx` 的 RadioSelect 模式，加入 mount 时的脏状态检查（对齐 claude-code `WorktreeExitDialog.tsx` 的 `loadChanges` 逻辑）：
 
 ```tsx
 // packages/cli/src/ui/components/WorktreeExitDialog.tsx
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
+import { execa } from 'execa';
 import { RadioSelect } from '../shared/RadioSelect.js';
 import type { RadioSelectItem } from '../shared/RadioSelect.js';
 import { theme } from '../semantic-colors.js';
@@ -900,6 +980,8 @@ import { theme } from '../semantic-colors.js';
 interface WorktreeExitDialogProps {
   slug: string;
   branch: string;
+  worktreePath: string;
+  originalHeadCommit: string;
   onKeep: () => void;
   onRemove: () => void;
   onCancel: () => void;
@@ -907,47 +989,111 @@ interface WorktreeExitDialogProps {
 
 type Choice = 'keep' | 'remove' | 'cancel';
 
-const options: Array<RadioSelectItem<Choice>> = [
-  {
-    key: 'keep',
-    label: 'Keep worktree (exit without deleting)',
-    value: 'keep',
-  },
-  { key: 'remove', label: 'Remove worktree and branch', value: 'remove' },
-  { key: 'cancel', label: 'Cancel (stay in session)', value: 'cancel' },
-];
-
 export const WorktreeExitDialog: React.FC<WorktreeExitDialogProps> = ({
   slug,
   branch,
+  worktreePath,
+  originalHeadCommit,
   onKeep,
   onRemove,
   onCancel,
 }) => {
+  const [loading, setLoading] = useState(true);
+  const [changedFiles, setChangedFiles] = useState<string[]>([]);
+  const [commitCount, setCommitCount] = useState(0);
   const [selected, setSelected] = useState<Choice>('keep');
 
-  const handleSelect = (value: Choice) => {
-    if (value === 'keep') onKeep();
-    else if (value === 'remove') onRemove();
-    else onCancel();
-  };
+  useEffect(() => {
+    async function loadDirtyState() {
+      try {
+        // Uncommitted changes (tracked + untracked)
+        const { stdout: statusOut } = await execa(
+          'git',
+          ['status', '--porcelain'],
+          { cwd: worktreePath },
+        );
+        const files = statusOut.split('\n').filter((l) => l.trim().length > 0);
+        setChangedFiles(files);
+
+        // New commits since worktree was created
+        if (originalHeadCommit) {
+          const { stdout: countOut } = await execa(
+            'git',
+            ['rev-list', '--count', `${originalHeadCommit}..HEAD`],
+            { cwd: worktreePath },
+          );
+          setCommitCount(parseInt(countOut.trim(), 10) || 0);
+        }
+      } catch {
+        // If git fails, show dialog without counts.
+      } finally {
+        setLoading(false);
+      }
+    }
+    void loadDirtyState();
+  }, [worktreePath, originalHeadCommit]);
+
+  const options: Array<RadioSelectItem<Choice>> = [
+    {
+      key: 'keep',
+      label: 'Keep worktree (exit without deleting)',
+      value: 'keep',
+    },
+    {
+      key: 'remove',
+      label:
+        changedFiles.length > 0 || commitCount > 0
+          ? `Remove worktree and branch (discards ${commitCount} commit(s), ${changedFiles.length} file(s))`
+          : 'Remove worktree and branch',
+      value: 'remove',
+    },
+    { key: 'cancel', label: 'Cancel (stay in session)', value: 'cancel' },
+  ];
+
+  if (loading) {
+    return (
+      <Box marginY={1} paddingX={2}>
+        <Text color={theme.text.secondary}>Checking worktree status…</Text>
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column" marginY={1} paddingX={2}>
       <Text color={theme.status.warning}>
         {`Active worktree: "${slug}" (${branch})`}
       </Text>
+      {(changedFiles.length > 0 || commitCount > 0) && (
+        <Box flexDirection="column" marginBottom={1}>
+          {commitCount > 0 && (
+            <Text color={theme.text.secondary}>
+              {`  ${commitCount} new commit(s) on ${branch}`}
+            </Text>
+          )}
+          {changedFiles.length > 0 && (
+            <Text color={theme.text.secondary}>
+              {`  ${changedFiles.length} uncommitted file(s)`}
+            </Text>
+          )}
+        </Box>
+      )}
       <Text color={theme.text.secondary}>What would you like to do?</Text>
       <RadioSelect
         items={options}
         selectedValue={selected}
-        onSelect={handleSelect}
+        onSelect={(value) => {
+          if (value === 'keep') onKeep();
+          else if (value === 'remove') onRemove();
+          else onCancel();
+        }}
         onChange={setSelected}
       />
     </Box>
   );
 };
 ```
+
+注意：`execa` 是项目已有依赖（或用 `execFileNoThrow`，参考 claude-code 的方式）。检查 `packages/cli/package.json` 确认可用的 exec 工具；如果无 `execa`，改用 Node.js 内置 `execFile` 包装。
 
 - [ ] **Step 5: 运行测试确认通过**
 
@@ -956,7 +1102,7 @@ cd packages/cli
 npx vitest run src/ui/components/WorktreeExitDialog.test.tsx
 ```
 
-期望：基本渲染测试通过（onKeep 的键导航测试暂时跳过，视 RadioSelect API 而定）。
+期望：loading 状态测试通过。
 
 - [ ] **Step 6: 在 `DialogManager.tsx` 注册**
 
@@ -971,6 +1117,8 @@ import { WorktreeExitDialog } from './WorktreeExitDialog.js';
     <WorktreeExitDialog
       slug={uiState.activeWorktree.slug}
       branch={uiState.activeWorktree.branch}
+      worktreePath={uiState.activeWorktree.path}
+      originalHeadCommit={uiState.activeWorktree.originalHeadCommit}
       onKeep={() => {
         setShowWorktreeExitDialog(false);
         handleSlashCommand('/quit');
