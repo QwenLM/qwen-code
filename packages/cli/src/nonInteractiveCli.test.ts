@@ -204,6 +204,10 @@ describe('runNonInteractive', () => {
         .fn()
         .mockReturnValue(mockBackgroundTaskRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
+      // Phase C: headless --resume reads the resumed session + sidecar to
+      // restore worktree context. These tests don't exercise resume, so
+      // return undefined to short-circuit the helper.
+      getResumedSessionData: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     mockSettings = {
