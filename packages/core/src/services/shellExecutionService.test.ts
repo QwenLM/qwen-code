@@ -1948,7 +1948,7 @@ describe('ShellExecutionService child_process fallback', () => {
       // postPromote handler is set, and the flush helper runs whenever
       // onData is set independent of onSettle.
       mockPlatform.mockReturnValue('linux');
-      const dataChunks: Array<{ type: string; chunk: unknown }> = [];
+      const dataChunks: ShellOutputEvent[] = [];
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
@@ -1976,7 +1976,9 @@ describe('ShellExecutionService child_process fallback', () => {
       // the multibyte sequence; flush at close ensures any remainder
       // is surfaced.
       const joined = dataChunks
-        .map((d) => (typeof d.chunk === 'string' ? d.chunk : ''))
+        .map((d) =>
+          d.type === 'data' && typeof d.chunk === 'string' ? d.chunk : '',
+        )
         .join('');
       expect(joined).toContain('€');
     });
@@ -1989,7 +1991,7 @@ describe('ShellExecutionService child_process fallback', () => {
       // unhandled-error crash. Fix attaches an error listener
       // whenever ANY postPromote handler is set.
       mockPlatform.mockReturnValue('linux');
-      const dataChunks: Array<{ type: string; chunk: unknown }> = [];
+      const dataChunks: ShellOutputEvent[] = [];
       const { result } = await simulateExecution(
         'cmd',
         (cp, ac) => {
