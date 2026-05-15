@@ -33,6 +33,9 @@ describe('Prompt Hook Integration', () => {
     mockConfig = {
       getFastModel: vi.fn().mockReturnValue('qwen-turbo'),
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'qwen-plus',
+      }),
       getContentGenerator: vi.fn().mockReturnValue({
         generateContent: mockGenerateContent,
         generateContentStream: vi.fn(),
