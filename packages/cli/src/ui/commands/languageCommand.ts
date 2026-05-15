@@ -96,7 +96,7 @@ async function setUiLanguage(
     }
   }
 
-  // Reload commands to update localized descriptions
+  // Reload commands so `t()` lookups in their metadata re-resolve under the new language.
   context.ui.reloadCommands();
 
   return {

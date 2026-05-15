@@ -115,7 +115,6 @@ export function createSlashCommandFromDefinition(
     name: baseCommandName,
     description,
     modelDescription: description,
-    localizeDescription: true,
     kind: CommandKind.FILE,
     extensionName,
     source: (extensionName
