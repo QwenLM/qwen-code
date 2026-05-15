@@ -149,6 +149,18 @@ function wrapIdeContext(contextText: string): string {
   return `<system-reminder>\n${safeContextText}\n</system-reminder>`;
 }
 
+/**
+ * Handle for a non-blocking auto-memory recall prefetch.
+ *
+ * Lifecycle:
+ *  1. Created on UserQuery/Cron — the recall promise fires immediately,
+ *     `pendingMemoryPrefetch` is set to this handle.
+ *  2. Consumed at either of two opportunistic points: a zero-wait
+ *     `settledAt !== null` poll just before the UserQuery main request,
+ *     or — if recall hadn't settled yet — on the first ToolResult turn.
+ *  3. Aborted-and-discarded by every cleanup path (resetChat,
+ *     MaxSessionTurns, etc.) or replaced when a new UserQuery arrives.
+ */
 type MemoryPrefetchHandle = {
   promise: Promise<RelevantAutoMemoryPromptResult>;
   /** Set by promise.finally(). null until the promise settles. */
@@ -1327,6 +1339,11 @@ export class GeminiClient {
           this.pendingMemoryPrefetch = undefined;
           const result = await prefetchHandle.promise; // already settled, returns immediately
           if (result.prompt) {
+            // Unshift to the front of systemReminders: on a UserQuery turn
+            // requestToSend leads with user text, so positioning memory at
+            // the very start of the system-reminder block keeps it close to
+            // the user prompt. Contrast the ToolResult path below, which
+            // must append to avoid splitting functionCall / functionResponse.
             systemReminders.unshift(result.prompt);
             for (const doc of result.selectedDocs) {
               this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
@@ -1350,11 +1367,12 @@ export class GeminiClient {
           if (result.prompt) {
             // Append (not prepend): on a ToolResult turn, requestToSend leads
             // with functionResponse parts that must immediately follow the
-            // model's functionCall (Qwen API constraint, see lines 1209-1213).
-            // Putting the memory text after the functionResponse parts keeps
-            // the call/response pairing intact under native Gemini, while the
-            // OpenAI converter still emits the text as a separate user message
-            // after the tool messages.
+            // model's functionCall (Qwen API constraint — same reason the
+            // IDE-context block above is skipped while a tool call is pending,
+            // see the `hasPendingToolCall` guard). Putting the memory text
+            // after the functionResponse parts keeps the call/response pairing
+            // intact under native Gemini; the OpenAI converter then emits the
+            // text as a separate user message after the tool messages.
             requestToSend = [...requestToSend, result.prompt];
             for (const doc of result.selectedDocs) {
               this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);

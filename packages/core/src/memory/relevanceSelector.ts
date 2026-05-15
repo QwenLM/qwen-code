@@ -91,6 +91,10 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
+    // No inline timeout — caller (`GeminiClient.MemoryPrefetchHandle`)
+    // owns cancellation and aborts via its controller on cleanup paths.
+    // A bare unsignalled AbortController fills the type when the caller
+    // doesn't pass one, since runSideQuery's `abortSignal` is required.
     abortSignal: callerAbortSignal ?? new AbortController().signal,
 
     // Uses runSideQuery's default side-query model policy: fast model first,
