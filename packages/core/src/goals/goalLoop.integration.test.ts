@@ -18,10 +18,10 @@
  *   - `registerGoalHook` wires a Function hook into the session's hook system
  *     under the `Stop` event with a wildcard matcher (so it matches any Stop).
  *   - When the hook callback runs and the judge says "not met", the response
- *     shape is `{continue:false, stopReason}` — which `client.ts:1342`'s
- *     `isBlockingDecision() || shouldStopExecution()` interprets as a
- *     continuation request. We assert the contract that hook here, then defer
- *     to the existing client-level test suite for the recursive call itself.
+ *     shape is `{decision:'block', reason:<controlled prompt>}` — which
+ *     `client.ts`'s `isBlockingDecision() || shouldStopExecution()` interprets
+ *     as a continuation request. The judge's free-form diagnostic stays in
+ *     active-goal state and must not become the next model instruction.
  *   - When the judge says "met" on a later iteration, the hook returns
  *     `{continue:true}`, clears the store, and notifies the terminal observer
  *     with stats (iterations, durationMs) — exactly what the UI needs.
@@ -126,8 +126,17 @@ describe('/goal Stop hook integration', () => {
     const out1 = await callback(makeStopInput('t'), undefined);
     expect(out1).toMatchObject({
       decision: 'block',
-      reason: 'still missing letters e, s, t',
     });
+    expect(
+      typeof out1 === 'object' && out1 !== null && 'reason' in out1
+        ? out1.reason
+        : undefined,
+    ).toContain('Goal condition: write test letter sequence');
+    expect(
+      typeof out1 === 'object' && out1 !== null && 'reason' in out1
+        ? out1.reason
+        : undefined,
+    ).not.toContain('still missing letters e, s, t');
     // Store reflects increment and lastReason.
     const after1 = getActiveGoal(SESSION);
     expect(after1?.iterations).toBe(1);
