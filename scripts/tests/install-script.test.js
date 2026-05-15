@@ -331,6 +331,15 @@ describe('installation scripts', () => {
     expect(bareLfLines).toHaveLength(0);
   });
 
+  it('prepends fake Windows tools to both PATH casings', () => {
+    const fakeBin = 'C:\\qwen-test-bin';
+
+    const env = prependWindowsPath(fakeBin);
+
+    expect(env.PATH).toMatch(/^C:\\qwen-test-bin;/);
+    expect(env.Path).toMatch(/^C:\\qwen-test-bin;/);
+  });
+
   it('creates PowerShell validation scripts with a ps1 extension', () => {
     const script = readScript(
       'scripts/installation/install-qwen-standalone.bat',
@@ -2835,8 +2844,11 @@ function prependWindowsPath(directory) {
   const pathKey =
     Object.keys(process.env).find((key) => key.toLowerCase() === 'path') ||
     'Path';
+  const value = `${directory};${process.env[pathKey] || ''}`;
   return {
-    [pathKey]: `${directory};${process.env[pathKey] || ''}`,
+    PATH: value,
+    Path: value,
+    [pathKey]: value,
   };
 }
 
