@@ -19,6 +19,12 @@ import { t } from '../../i18n/index.js';
 
 const MEMORY_SUBCOMMAND = 'memory';
 const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND] as const;
+const HEAP_SNAPSHOT_SENSITIVE_DATA_WARNING =
+  'Heap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.';
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export const doctorCommand: SlashCommand = {
   name: 'doctor',
@@ -61,6 +67,7 @@ export const doctorCommand: SlashCommand = {
       }
 
       let report = formatMemoryDiagnostics(diagnostics);
+      let messageType: 'info' | 'error' = 'info';
 
       if (abortSignal?.aborted) {
         return;
@@ -80,8 +87,13 @@ export const doctorCommand: SlashCommand = {
       }
 
       if (shouldWriteHeapSnapshot) {
-        const heapSnapshotPath = writeMemoryHeapSnapshot();
-        report = `${report}\n\nHeap snapshot written: ${heapSnapshotPath}`;
+        try {
+          const heapSnapshotPath = writeMemoryHeapSnapshot();
+          report = `${report}\n\nHeap snapshot written: ${heapSnapshotPath}\n${HEAP_SNAPSHOT_SENSITIVE_DATA_WARNING}`;
+        } catch (error) {
+          messageType = 'error';
+          report = `${report}\n\nHeap snapshot failed: ${formatErrorMessage(error)}`;
+        }
       }
 
       if (abortSignal?.aborted) {
@@ -101,7 +113,7 @@ export const doctorCommand: SlashCommand = {
 
       return {
         type: 'message' as const,
-        messageType: 'info' as const,
+        messageType,
         content: report,
       };
     }

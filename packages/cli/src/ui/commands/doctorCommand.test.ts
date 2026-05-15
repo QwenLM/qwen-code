@@ -224,7 +224,34 @@ describe('doctorCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nHeap snapshot written: /tmp/qwen-code-heap.heapsnapshot',
+        'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nHeap snapshot written: /tmp/qwen-code-heap.heapsnapshot\nHeap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.',
+    });
+  });
+
+  it('should report heap snapshot failures without dropping memory diagnostics', async () => {
+    vi.mocked(
+      memoryDiagnosticsModule.writeMemoryHeapSnapshot,
+    ).mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await doctorCommand.action!(
+      mockContext,
+      'memory --snapshot',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nHeap snapshot failed: disk full',
     });
   });
 
