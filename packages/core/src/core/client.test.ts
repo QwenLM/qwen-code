@@ -4429,6 +4429,7 @@ Other open files:
         'Override prompt',
         'Saved memory',
         undefined,
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -4460,6 +4461,7 @@ Other open files:
         '',
         'test-model',
         'Be extra concise.',
+        undefined,
       );
     });
 
@@ -4491,6 +4493,7 @@ Other open files:
         'Override prompt',
         'Saved memory',
         'Focus on findings only.',
+        undefined,
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
