@@ -26,19 +26,24 @@ Signs of a stuck session:
 
 ## Argument validation
 
-If the user gave an argument, first check whether it is a positive integer (PID). If it contains shell metacharacters (`$`, `;`, `|`, `&`, `` ` ``, `(`, `)`, `<`, `>`, `*`, `?`, backslash, quote, whitespace, etc.), refuse to proceed and tell the user the argument does not look like a valid PID. Treat free-text symptom descriptions as guidance for the report, not as values to substitute into shell commands.
+If the user gave an argument, treat it as a PID **only if it consists entirely of digits 0-9**. Anything else — letters, whitespace, punctuation — fails the check, in which case treat it as a free-text symptom description (guidance for the report only, never substituted into shell commands). The strict digit-only whitelist is safer than enumerating shell metacharacters.
 
 ## Investigation steps
 
-1. **Enumerate live sessions via the runtime sidecar (preferred, reliable)**:
+1. **Resolve the runtime base directory**, then enumerate live sessions via the runtime sidecar (preferred, reliable):
 
-   Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The default `<runtime-base>` is `~/.qwen` (overridable by `QWEN_RUNTIME_DIR`, `QWEN_HOME`, or the `advanced.runtimeOutputDir` setting). Each file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}`. Use this as the authoritative source of `(pid, session_id, work_dir)` mappings:
+   Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The base directory is taken from (in priority order): `QWEN_RUNTIME_DIR`, `QWEN_HOME`, the `advanced.runtimeOutputDir` setting, and finally `~/.qwen`. Use the resolved value in every command below — substituting the literal default would silently miss sessions on machines that override it.
 
    ```
-   ls -1 ~/.qwen/projects/*/chats/*.runtime.json 2>/dev/null
+   RUNTIME_DIR="${QWEN_RUNTIME_DIR:-${QWEN_HOME:-$HOME/.qwen}}"
+   ls -1 "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
    ```
+
+   (If the user has set `advanced.runtimeOutputDir` in `settings.json`, ask them or read it from settings; otherwise the env-var resolution above is correct.) Each sidecar file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
 
    For each file, read it and check whether the recorded `pid` is still alive (`kill -0 <pid>` returns 0). Stale files where the PID is gone mean the session has exited — skip them silently. PID reuse is rare but possible, so when you cross-reference with `ps` in step 2, also skip records whose live PID's command line no longer looks like a Qwen Code process.
+
+   **If no sidecar files are found** (empty output, or the directory does not exist), fall through to step 2 — `ps` is the working fallback.
 
 2. **List Qwen Code processes via `ps`** (macOS/Linux) — used to enrich each live session with CPU/RSS/state/uptime, and to catch sessions that may have started before the sidecar feature existed:
 
@@ -50,15 +55,17 @@ If the user gave an argument, first check whether it is a positive integer (PID)
 
    Note: `ps` reports `rss` in **kilobytes** on both macOS and Linux. Divide by 1024 before comparing to the >=4GB threshold or reporting in MB.
 
+   Note: full command lines may contain credentials passed as CLI args (e.g., `--openai-api-key=sk-…`). Redact such values to `***` before quoting them in the report.
+
 3. **For anything suspicious**, gather more context. Substitute `<pid>` only after the validation in "Argument validation" above (or after taking it from `ps` / sidecar output, which is trusted):
    - Child processes (with state, so a hung `git` / `node` shows up): `pgrep -P <pid>` to get child PIDs, then `ps -p <child_pids> -o pid=,ppid=,pcpu=,state=,etime=,command=` for their state
    - If high CPU: sample again after 1-2s to confirm it's sustained
-   - Check the session's debug log if you can infer the session ID (from the sidecar): `~/.qwen/debug/<session-id>.txt` (the last few hundred lines often show what it was doing before hanging). If `QWEN_RUNTIME_DIR` or `QWEN_HOME` is set, the debug directory is `$QWEN_RUNTIME_DIR/debug/` or `$QWEN_HOME/debug/` instead of the default. Debug logs may contain prompts, file contents, or tokens from other sessions — paste only the lines relevant to the hang, and never quote secrets/API keys you happen to see.
-   - The `~/.qwen/debug/latest` symlink points to the most recent session's log
+   - Check the session's debug log if you can infer the session ID (from the sidecar): `"$RUNTIME_DIR"/debug/<session-id>.txt` using the same `RUNTIME_DIR` resolved in step 1. The last few hundred lines often show what it was doing before hanging. Debug logs may contain prompts, file contents, or tokens from other sessions — paste only the lines relevant to the hang, and never quote secrets/API keys you happen to see.
+   - The `"$RUNTIME_DIR"/debug/latest` symlink points to the most recent session's log
 
 4. **Consider a stack dump** for a truly frozen process (advanced, optional):
-   - macOS: `sample <pid> 3` gives a 3-second native stack sample
-   - Linux: `cat /proc/<pid>/stack` for kernel stack, or `strace -p <pid> -c -f` for syscall profile
+   - macOS: `sample <pid> 3` gives a 3-second native stack sample. Stack frames may include function arguments containing API keys or tokens held in memory — redact such values to `***` before including the dump in the report.
+   - Linux: `cat /proc/<pid>/stack` for kernel stack (read-only, no `ptrace` permissions needed). Avoid `strace -p` for this purpose: it requires `CAP_SYS_PTRACE` (often denied under `kernel.yama.ptrace_scope=1`), and `strace -c` blocks until the target exits — it would hang on the very kind of stuck process you are diagnosing.
    - This is big — only grab it if the process is clearly hung and you want to know _why_
 
 ## Report
@@ -75,6 +82,8 @@ Present a structured diagnostic report directly to the user with these sections:
 - Suggested next step for the user to decide (e.g., "user may consider `kill <pid>` if the session is unresponsive", "likely waiting on I/O — check disk", "accidentally stopped — user can resume with `kill -CONT <pid>`"). Do not execute these actions yourself — present them as options for the user.
 
 **If every session looks healthy**, tell the user directly — no diagnostic dump needed. Mention how many sessions you checked and that none showed signs of being stuck.
+
+**If no sessions are found at all** (zero sidecars and zero matching `ps` rows), say so explicitly: which `RUNTIME_DIR` you searched and that `ps` returned no qwen-related processes for the current user. Suggest the session may have already exited.
 
 ## Notes
 
