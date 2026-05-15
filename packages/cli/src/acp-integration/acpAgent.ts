@@ -135,9 +135,9 @@ export async function runAcpAgent(
     sessionEndFired = true;
 
     const configs = new Set<Config>([config]);
-    const sessions = agentInstance?.['sessions'];
-    if (sessions instanceof Map) {
-      for (const session of sessions.values()) {
+    const sessions = agentInstance?.getActiveSessions();
+    if (sessions) {
+      for (const session of sessions) {
         const sessionConfig = session.getConfig?.();
         if (sessionConfig) {
           configs.add(sessionConfig);
@@ -233,6 +233,10 @@ export function toHttpServer(
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
+
+  getActiveSessions(): Session[] {
+    return [...this.sessions.values()];
+  }
 
   constructor(
     private config: Config,

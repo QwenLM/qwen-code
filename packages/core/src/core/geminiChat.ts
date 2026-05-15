@@ -385,22 +385,34 @@ export class InvalidStreamError extends Error {
  * @remarks
  * The session maintains all the turns between user and model.
  */
-const SESSION_START_CONTEXT_DELIMITER = '\n\n---\n\n';
+const SESSION_START_CONTEXT_SENTINEL_START =
+  '<qwen:session-start-context hidden="true">';
+const SESSION_START_CONTEXT_SENTINEL_END = '</qwen:session-start-context>';
 const SESSION_START_CONTEXT_HEADER = 'SessionStart additional context';
 
 function buildSessionStartContextBlock(extraInstruction: string): string {
-  return `${SESSION_START_CONTEXT_DELIMITER}${SESSION_START_CONTEXT_HEADER}:\n${extraInstruction}`;
+  return `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n${extraInstruction}\n${SESSION_START_CONTEXT_SENTINEL_END}`;
 }
 
 function stripTrailingSessionStartContextBlock(
   systemInstruction: string,
 ): string {
-  const marker = `${SESSION_START_CONTEXT_DELIMITER}${SESSION_START_CONTEXT_HEADER}:\n`;
-  const lastMarkerIndex = systemInstruction.lastIndexOf(marker);
-  if (lastMarkerIndex === -1) {
+  const startIndex = systemInstruction.lastIndexOf(
+    `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n`,
+  );
+  if (startIndex === -1) {
     return systemInstruction;
   }
-  return systemInstruction.slice(0, lastMarkerIndex);
+
+  const endIndex = systemInstruction.indexOf(
+    `\n${SESSION_START_CONTEXT_SENTINEL_END}`,
+    startIndex,
+  );
+  if (endIndex === -1) {
+    return systemInstruction;
+  }
+
+  return systemInstruction.slice(0, startIndex);
 }
 
 export class GeminiChat {
