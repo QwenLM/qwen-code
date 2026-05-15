@@ -182,6 +182,15 @@ export class SessionService {
   }
 
   /**
+   * Returns the absolute path to the sidecar JSON file that stores
+   * worktree session state for the given session id. The file may not
+   * exist yet — consumers must handle ENOENT as "no active worktree".
+   */
+  getWorktreeSessionPath(sessionId: string): string {
+    return path.join(this.getChatsDir(), `${sessionId}.worktree.json`);
+  }
+
+  /**
    * Reads the session title from a JSONL file.
    *
    * Delegates to {@link readLastJsonStringFieldSync}, which scans the tail
