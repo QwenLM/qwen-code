@@ -1439,28 +1439,30 @@ describe('GET /demo', () => {
     expect(res.text).toContain('<!DOCTYPE html>');
   });
 
-  it('is protected by bearer auth (401 without token)', async () => {
+  it('is accessible without bearer token even when --token is set (before bearerAuth)', async () => {
+    // /demo is registered BEFORE bearerAuth so browsers can reach the
+    // page via address-bar navigation (which cannot attach Authorization
+    // headers). The in-page token input authenticates subsequent API calls.
     const app = createServeApp(
       { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
       () => 4170,
       { bridge: fakeBridge() },
     );
     const res = await request(app).get('/demo').set('Host', '0.0.0.0:4170');
-    expect(res.status).toBe(401);
-  });
-
-  it('is accessible with valid bearer token', async () => {
-    const app = createServeApp(
-      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
-      () => 4170,
-      { bridge: fakeBridge() },
-    );
-    const res = await request(app)
-      .get('/demo')
-      .set('Host', '0.0.0.0:4170')
-      .set('Authorization', 'Bearer secret');
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('is still guarded by CORS and Host allowlist', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    // Cross-origin request should be rejected by denyBrowserOriginCors
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://evil.example.com');
+    expect(res.status).toBe(403);
   });
 });
 

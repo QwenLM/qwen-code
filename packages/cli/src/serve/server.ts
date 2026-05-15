@@ -96,6 +96,24 @@ export function createServeApp(
   app.use(denyBrowserOriginCors);
   app.use(hostAllowlist(opts.hostname, getPort));
 
+  // --- Demo page: registered AFTER CORS and Host allowlist but BEFORE
+  // bearerAuth. Browsers cannot attach an Authorization header on
+  // address-bar navigation, so a bearer-protected /demo would be
+  // unreachable — the in-page token input field would never load.
+  // Serving only the static HTML shell here is safe: the page itself
+  // contains no secrets, and all daemon API/SSE routes remain behind
+  // bearerAuth so the token field authenticates subsequent calls.
+  app.get('/demo', (_req, res) => {
+    try {
+      res.type('html').send(getDemoHtml(getPort()));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({ error: 'Failed to render demo page' });
+    }
+  });
+
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
   // carry the daemon's bearer; round-tripping a 401 just to know
@@ -152,21 +170,6 @@ export function createServeApp(
   }
 
   app.use(bearerAuth(opts.token));
-
-  // --- Demo page: registered AFTER CORS, Host allowlist, and bearer auth
-  // so the debug UI is protected by the same guards as all other routes.
-  // The same-origin Origin-stripping middleware above ensures the demo
-  // page's own API calls pass through denyBrowserOriginCors.
-  app.get('/demo', (_req, res) => {
-    try {
-      res.type('html').send(getDemoHtml(getPort()));
-    } catch (err) {
-      writeStderrLine(
-        `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({ error: 'Failed to render demo page' });
-    }
-  });
 
   app.use(express.json({ limit: '10mb' }));
 
