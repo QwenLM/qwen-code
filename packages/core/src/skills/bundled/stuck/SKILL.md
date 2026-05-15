@@ -30,6 +30,16 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 
 ## Investigation steps
 
+**Fast path for targeted diagnosis** — if a digit-only PID argument was given, skip steps 1-2 (enumeration). Verify the PID is alive, grab its stats, and jump to step 3:
+
+```
+kill -0 <pid> 2>/dev/null && \
+  ps -p <pid> -o pid=,pcpu=,rss=,etime=,state=,comm=,command= -ww \
+  || echo "PID <pid> is not running"
+```
+
+Otherwise (no arg, or symptom-only arg), run the general path below:
+
 1. **Resolve the runtime base directory**, then enumerate live sessions via the runtime sidecar (preferred, reliable):
 
    Qwen Code writes a `runtime.json` sidecar for each interactive session at `<runtime-base>/projects/<sanitized-cwd>/chats/<sessionId>.runtime.json`. The base directory is taken from (in priority order): `QWEN_RUNTIME_DIR` env var, the `advanced.runtimeOutputDir` setting, `QWEN_HOME` env var, and finally `~/.qwen`. Use the resolved value in every command below — substituting the literal default would silently miss sessions on machines that override it.
@@ -43,7 +53,16 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 
    (The `jq` line gracefully degrades — if `jq` isn't installed or `settings.json` doesn't exist, the next line falls back to `QWEN_HOME` or the default.) Each sidecar file contains `{schema_version, pid, session_id, work_dir, hostname, started_at, qwen_version}` — the authoritative source of `(pid, session_id, work_dir)` mappings.
 
-   For each file, read it and check whether the recorded `pid` is still alive (`kill -0 <pid>` returns 0). Stale files where the PID is gone mean the session has exited — skip them silently. PID reuse is rare but possible, so when you cross-reference with `ps` in step 2, also skip records whose live PID's command line no longer looks like a Qwen Code process.
+   Then filter to live PIDs in one pass (avoids reading every stale sidecar individually):
+
+   ```
+   for f in "$RUNTIME_DIR"/projects/*/chats/*.runtime.json; do
+     pid=$(jq -r .pid "$f" 2>/dev/null)
+     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && echo "$pid $f"
+   done
+   ```
+
+   Only the live `(pid, sidecar-path)` pairs reach the report. PID reuse is rare but possible — when you cross-reference with `ps` in step 2, skip pairs whose live PID's command line no longer looks like a Qwen Code process.
 
    **If no sidecar files are found** (empty output, or the directory does not exist), fall through to step 2 — `ps` is the working fallback.
 
@@ -59,11 +78,11 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 
    Note: full command lines may contain credentials passed as CLI args (e.g., `--openai-api-key=sk-…`). Redact such values to `***` before quoting them in the report.
 
-3. **For anything suspicious**, gather more context. If the process state alone explains the problem (`T` = accidentally stopped, `Z` = parent not reaping), skip directly to the report — child / log / stack inspection adds nothing. Otherwise, substitute `<pid>` only after the validation in "Argument validation" above (or after taking it from `ps` / sidecar output, which is trusted):
-   - Child processes (with state, so a hung `git` / `node` shows up): `pgrep -P <pid>` to get child PIDs, then `ps -p <child_pids> -o pid=,ppid=,pcpu=,state=,etime=,command=` for their state
+3. **For anything suspicious**, gather more context. If the process state alone explains the problem (`T` = accidentally stopped, `Z` = parent not reaping), skip directly to the report — child / log / stack inspection adds nothing. Otherwise:
+   - Child processes (with state, so a hung `git` / `node` shows up): `pgrep -P <pid> | xargs -I{} ps -p {} -o pid=,ppid=,pcpu=,state=,etime=,command=`
    - If high CPU: sample again after 1-2s to confirm it's sustained
-   - Check the session's debug log if you can infer the session ID (from the sidecar): `"$RUNTIME_DIR"/debug/<session-id>.txt` using the same `RUNTIME_DIR` resolved in step 1. The last few hundred lines often show what it was doing before hanging. Debug logs may contain prompts, file contents, or tokens from other sessions — paste only the lines relevant to the hang, and never quote secrets/API keys you happen to see.
-   - The `"$RUNTIME_DIR"/debug/latest` symlink points to the most recent session's log
+   - **Network hang** — if CPU is low and state is `S` despite the user reporting "stuck", the most likely cause is a hung HTTPS request to the model API. macOS: `lsof -i -p <pid> 2>/dev/null | head -20`. Linux: `ss -tnp 2>/dev/null | grep "pid=<pid>,"`. A long-lived `ESTABLISHED` connection to a model host (dashscope, openai, anthropic, etc.) with no recent traffic is the smoking gun.
+   - **Debug log** — start with `"$RUNTIME_DIR"/debug/latest` (symlink to the most recent session); if it matches the suspicious PID's session, that's usually the right one. Otherwise infer the session ID from the sidecar and read `"$RUNTIME_DIR"/debug/<session-id>.txt`. Bound the read with `tail -n 200 <path>` — debug logs can be GB-sized. The last few hundred lines typically show what the session was doing before hanging. Debug logs may contain prompts, file contents, or tokens from other sessions — paste only lines relevant to the hang, and never quote secrets/API keys you happen to see.
 
 4. **Consider a stack dump** for a truly frozen process (advanced, optional):
    - macOS: `sample <pid> 3` gives a 3-second native stack sample. Stack frames may include function arguments containing API keys or tokens held in memory — redact such values to `***` before including the dump in the report.
