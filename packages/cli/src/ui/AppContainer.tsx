@@ -62,6 +62,7 @@ import {
   ToolNames,
   readWorktreeSession,
   clearWorktreeSession,
+  GitWorktreeService,
 } from '@qwen-code/qwen-code-core';
 import * as fsPromises from 'node:fs/promises';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
@@ -434,9 +435,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
-  // showWorktreeExitDialog setter is wired in Task 8 (WorktreeExitDialog).
-  // For now, keep the value `false` so Footer / DialogManager type-check.
-  const showWorktreeExitDialog = false;
+  const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
   const activeWorktree = useMemo(
     () =>
       worktreeSession
@@ -451,6 +450,7 @@ export const AppContainer = (props: AppContainerProps) => {
         : null,
     [worktreeSession],
   );
+
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const originalTitleRef = useRef(
@@ -1097,6 +1097,36 @@ export const AppContainer = (props: AppContainerProps) => {
       config.getDebugLogger().debug(message);
     },
     [config],
+  );
+
+  const handleWorktreeExit = useCallback(
+    async (choice: 'keep' | 'remove' | 'cancel') => {
+      if (choice === 'cancel') {
+        setShowWorktreeExitDialog(false);
+        return;
+      }
+      setShowWorktreeExitDialog(false);
+      if (choice === 'remove' && activeWorktree) {
+        try {
+          const svc = new GitWorktreeService(config.getTargetDir());
+          await svc.removeUserWorktree(activeWorktree.slug, {
+            deleteBranch: true,
+          });
+          // ExitWorktreeTool would normally clear the sidecar; we bypass
+          // the tool here so do it explicitly.
+          await clearWorktreeSession(
+            config
+              .getSessionService()
+              .getWorktreeSessionPath(config.getSessionId()),
+          );
+        } catch {
+          // Non-fatal: the worktree directory may be in an inconsistent
+          // state, but the user explicitly asked to exit so we proceed.
+        }
+      }
+      handleSlashCommand('/quit');
+    },
+    [activeWorktree, config, handleSlashCommand],
   );
 
   const performMemoryRefresh = useCallback(async () => {
@@ -2451,10 +2481,18 @@ export const AppContainer = (props: AppContainerProps) => {
       setPressedOnce: (value: boolean) => void,
       timerRef: React.MutableRefObject<NodeJS.Timeout | null>,
     ) => {
-      // Fast double-press: Direct quit (preserve user habit)
+      // Fast double-press: Direct quit (preserve user habit) — unless the
+      // session is inside an active worktree, in which case intercept and
+      // show WorktreeExitDialog so the user explicitly decides keep vs
+      // remove before the process exits.
       if (pressedOnce) {
         if (timerRef.current) {
           clearTimeout(timerRef.current);
+        }
+        if (activeWorktree) {
+          setShowWorktreeExitDialog(true);
+          setPressedOnce(false);
+          return;
         }
         // Exit directly
         handleSlashCommand('/quit');
@@ -2515,6 +2553,7 @@ export const AppContainer = (props: AppContainerProps) => {
       streamingState,
       cancelOngoingRequest,
       buffer,
+      activeWorktree,
     ],
   );
 
@@ -3135,6 +3174,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
+      // Worktree exit dialog
+      handleWorktreeExit,
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
@@ -3207,6 +3248,7 @@ export const AppContainer = (props: AppContainerProps) => {
       popAllMessages,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
+      handleWorktreeExit,
       // Subagent dialogs
       closeSubagentCreateDialog,
       closeAgentsManagerDialog,
