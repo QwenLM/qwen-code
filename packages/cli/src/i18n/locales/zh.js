@@ -1260,16 +1260,12 @@ export default {
     '无法移除初始工作区目录：{{directory}}',
   'Directory not found in workspace: {{directory}}':
     '在工作区中找不到目录：{{directory}}',
-  'Directory removed from workspace but error updating settings: {{error}}':
-    '目录已从工作区移除，但更新设置时出错：{{error}}',
   'Error updating settings: {{error}}': '更新设置时出错：{{error}}',
   'Removed directory: {{directory}}': '已移除目录：{{directory}}',
   'Directory removed from settings but could not be removed from the active workspace. It may still be accessible in this session.':
     '目录已从设置中移除，但无法从活动工作区中移除。在当前会话中可能仍然可以访问。',
   'The /directory remove command is not supported in restrictive sandbox profiles.':
     '限制性沙箱配置不支持 /directory remove 命令。',
-  'Directory removed from workspace memory but no matching persisted entry was found. It may reappear on restart if stored under a different path format.':
-    '目录已从工作区内存中移除，但未找到匹配的持久化条目。如果以不同路径格式存储，可能会在重启后重新出现。',
 
   // ============================================================================
   // Status Bar
