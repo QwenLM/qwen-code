@@ -1141,6 +1141,17 @@ export class GitWorktreeService {
         base,
       ]);
 
+      // Configure core.hooksPath so commits inside the worktree run the
+      // main repo's hooks (the new worktree's .git directory has no hooks
+      // of its own). Priority: .husky/ first (common for JS projects),
+      // .git/hooks fallback. Mirrors claude-code's performPostCreationSetup.
+      // Best-effort: hook failures must not abort worktree creation.
+      await this.configureHooksPath(worktreePath).catch((error) => {
+        debugLogger.warn(
+          `createUserWorktree: failed to configure core.hooksPath for ${slug}: ${error}`,
+        );
+      });
+
       const worktree: WorktreeInfo = {
         id: slug,
         name: slug,
@@ -1154,6 +1165,45 @@ export class GitWorktreeService {
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
       return { success: false, error: message };
+    }
+  }
+
+  /**
+   * Configures `core.hooksPath` inside `worktreePath` to point at the main
+   * repository's hooks directory. Prefers `.husky/` over `.git/hooks/` to
+   * match the convention most JS projects use (husky's prepare script
+   * configures `core.hooksPath=.husky` in the main repo).
+   *
+   * Skips the subprocess write when the value already matches the desired
+   * one — saves ~14ms of spawn overhead on every worktree creation when
+   * `core.hooksPath` happens to be inherited from the parent.
+   */
+  private async configureHooksPath(worktreePath: string): Promise<void> {
+    const huskyPath = path.join(this.sourceRepoPath, '.husky');
+    const gitHooksPath = path.join(this.sourceRepoPath, '.git', 'hooks');
+    let hooksPath: string | null = null;
+    for (const candidate of [huskyPath, gitHooksPath]) {
+      try {
+        await fs.stat(candidate);
+        hooksPath = candidate;
+        break;
+      } catch {
+        // Not found — try next candidate.
+      }
+    }
+    if (!hooksPath) return;
+
+    const worktreeGit = simpleGit(worktreePath);
+    let existing = '';
+    try {
+      existing = (
+        await worktreeGit.raw(['config', '--local', 'core.hooksPath'])
+      ).trim();
+    } catch {
+      // Key not set — empty string means "proceed with the write".
+    }
+    if (existing !== hooksPath) {
+      await worktreeGit.raw(['config', 'core.hooksPath', hooksPath]);
     }
   }
 
