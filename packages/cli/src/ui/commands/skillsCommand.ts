@@ -54,12 +54,10 @@ export const skillsCommand: SlashCommand = {
     }
 
     if (!skillName) {
-      const sortedSkills = [...skills].sort((left, right) =>
-        left.name.localeCompare(right.name),
-      );
+      // listSkills() already returns priority-desc, name-asc; preserve that.
       const skillsListItem: HistoryItemSkillsList = {
         type: MessageType.SKILLS_LIST,
-        skills: sortedSkills.map((skill) => ({ name: skill.name })),
+        skills: skills.map((skill) => ({ name: skill.name })),
       };
       context.ui.addItem(skillsListItem, Date.now());
       return;

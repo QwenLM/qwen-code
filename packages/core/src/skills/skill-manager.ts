@@ -230,12 +230,10 @@ export class SkillManager {
       }
     }
 
-    // Sort by priority desc, then by name for consistent ordering
+    // Sort by priority desc (unspecified treated as 0), then by name.
     skills.sort(
       (a, b) =>
-        (b.priority ?? Number.NEGATIVE_INFINITY) -
-          (a.priority ?? Number.NEGATIVE_INFINITY) ||
-        a.name.localeCompare(b.name),
+        (b.priority ?? 0) - (a.priority ?? 0) || a.name.localeCompare(b.name),
     );
 
     debugLogger.info(`Listed ${skills.length} unique skills`);

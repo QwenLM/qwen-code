@@ -115,7 +115,7 @@ export interface SkillConfig {
   /**
    * Optional display priority for this skill. Higher values sort first in
    * the skill listing. Parsed from the `priority` frontmatter field in
-   * SKILL.md. When omitted or equal, skills fall back to alphabetical order.
+   * SKILL.md. When omitted, treated as 0; ties fall back to alphabetical order.
    */
   priority?: number;
 }
