@@ -1350,7 +1350,6 @@ export class Session implements SessionContext {
         this.config,
         abortController.signal,
         'acp',
-        this.settings,
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.

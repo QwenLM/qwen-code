@@ -83,6 +83,8 @@ export interface SubagentConfig {
   /**
    * Optional model selector.
    * - Omitted or 'inherit': use the main conversation model
+   * - 'fast': use Config.getFastModel() under the parent authType when
+   *   configured and valid; silently inherit the parent model otherwise
    * - 'model-id': use the given model with the main conversation authType
    * - 'authType:model-id': use the given authType and model ID
    */

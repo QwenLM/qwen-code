@@ -95,7 +95,7 @@ jobs:
       - name: 'Comment on Issue if Information is Missing'
         if: |-
           ${{ steps.check_info.outputs.info_complete == 'false' }}
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # ratchet:actions/github-script@v7
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'  # v9.0.0
         env:
           MISSING_INFO: '${{ steps.check_info.outputs.missing_info }}'
         with:
@@ -164,7 +164,7 @@ jobs:
       - name: 'Add status/need-information Label'
         if: |-
           ${{ steps.check_info.outputs.info_complete == 'false' }}
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # ratchet:actions/github-script@v7
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'  # v9.0.0
         with:
           github-token: '${{ secrets.GITHUB_TOKEN }}'
           script: |
@@ -179,7 +179,7 @@ jobs:
       - name: 'Remove status/need-information Label if Complete'
         if: |-
           ${{ steps.check_info.outputs.info_complete == 'true' }}
-        uses: 'actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea' # ratchet:actions/github-script@v7
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'  # v9.0.0
         continue-on-error: true
         with:
           github-token: '${{ secrets.GITHUB_TOKEN }}'

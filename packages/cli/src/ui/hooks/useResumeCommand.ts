@@ -9,8 +9,6 @@ import {
   SessionService,
   type Config,
   type SessionListItem,
-  SessionStartSource,
-  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -138,18 +136,8 @@ export function useResumeCommand(
         );
       }
 
-      // Fire SessionStart event after resuming session
-      try {
-        await config
-          .getHookSystem()
-          ?.fireSessionStartEvent(
-            SessionStartSource.Resume,
-            config.getModel() ?? '',
-            String(config.getApprovalMode()) as PermissionMode,
-          );
-      } catch (err) {
-        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
-      }
+      // SessionStart hook is handled during chat initialization so its
+      // additionalContext can be injected into the resumed model context.
 
       // Refresh terminal UI.
       remount?.();

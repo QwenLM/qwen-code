@@ -119,11 +119,6 @@
           "type": "string",
           "default": "auto"
         },
-        "dynamicCommandTranslation": {
-          "description": "Enable AI translation for dynamic slash command descriptions. When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.",
-          "type": "boolean",
-          "default": false
-        },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
           "type": "boolean",
@@ -643,6 +638,17 @@
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
           "type": "string"
         },
+        "toolSearch": {
+          "description": "Settings for the ToolSearch discovery mechanism.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.",
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
         "shell": {
           "description": "Settings for shell execution.",
           "type": "object",
@@ -921,7 +927,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -930,6 +937,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1024,7 +1039,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1033,6 +1049,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1127,7 +1151,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1136,6 +1161,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1230,7 +1263,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1239,6 +1273,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1333,7 +1375,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1342,6 +1385,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1436,7 +1487,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1445,6 +1497,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1539,7 +1599,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1548,6 +1609,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1642,7 +1711,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1651,6 +1721,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1745,7 +1823,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1754,6 +1833,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1848,7 +1935,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1857,6 +1945,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -1951,7 +2047,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -1960,6 +2057,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {
@@ -2054,7 +2159,8 @@
                       "type": "string",
                       "enum": [
                         "command",
-                        "http"
+                        "http",
+                        "prompt"
                       ]
                     },
                     "command": {
@@ -2063,6 +2169,14 @@
                     },
                     "url": {
                       "description": "The URL to send the POST request to. Required for \"http\" type.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The prompt template to send to the LLM. Required for \"prompt\" type. Use $ARGUMENTS as placeholder for hook input JSON.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model override for \"prompt\" type hooks. Defaults to your current model.",
                       "type": "string"
                     },
                     "headers": {

@@ -137,6 +137,10 @@ async function selectByModel(
       },
     ] as Content[],
     schema: FORGET_SELECTION_RESPONSE_SCHEMA,
+    // /forget acts on the selection without confirmation, so pin selection to
+    // the main model rather than the runSideQuery fast-model default — a
+    // weaker fast model could pick the wrong entries and silently delete.
+    model: config.getModel(),
     abortSignal: AbortSignal.timeout(8_000),
     config: {
       temperature: 0,

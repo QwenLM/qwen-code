@@ -87,6 +87,27 @@ describe('EnhancedErrorHandler', () => {
       }).toThrow(stringError);
     });
 
+    it('should redact proxy credentials before throwing request-time errors', () => {
+      const proxyError = new Error(
+        'connect ECONNREFUSED token@proxy.local:8080',
+      );
+
+      expect(() => {
+        errorHandler.handle(proxyError, mockContext, mockRequest);
+      }).toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+      expect(proxyError.message).not.toContain('token@');
+    });
+
+    it('should redact proxy credentials from string errors', () => {
+      expect(() => {
+        errorHandler.handle(
+          '407 via http://user:pass@proxy.local',
+          mockContext,
+          mockRequest,
+        );
+      }).toThrow('407 via http://<redacted>@proxy.local');
+    });
+
     it('should handle null/undefined errors', () => {
       expect(() => {
         errorHandler.handle(null, mockContext, mockRequest);

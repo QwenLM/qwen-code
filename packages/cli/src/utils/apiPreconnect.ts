@@ -19,6 +19,7 @@ import {
   createDebugLogger,
   detectRuntime,
   getOrCreateSharedDispatcher,
+  redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
 
 import { getAllProviderBaseUrls } from '../auth/allProviders.js';
@@ -166,6 +167,16 @@ export function preconnectApi(
     return;
   }
 
+  // Skip dispatcher creation when no proxy configured - SDK uses built-in fetch
+  // with its own connection pool, so warming undici dispatcher provides no benefit.
+  // This mirrors the logic in buildFetchOptionsWithDispatcher() which also skips
+  // custom dispatcher creation when no proxy is set, ensuring consistent behavior.
+  if (!options.proxy) {
+    debugLogger.debug('Skipping preconnect dispatcher: no proxy configured');
+    return;
+  }
+  const proxy = options.proxy;
+
   const targetUrl = getPreconnectTargetUrl(authType, options.resolvedBaseUrl);
 
   if (!targetUrl) {
@@ -173,13 +184,15 @@ export function preconnectApi(
     return;
   }
 
+  // Mark as fired before async operation — prevents duplicate fires.
+  // If the request fails, we don't retry (fire-and-forget semantics).
   preconnectFired = true;
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
   try {
     // Use the same shared undici dispatcher that SDK clients will use,
     // so the warmed TCP+TLS connection is reused by subsequent API calls.
-    const dispatcher = getOrCreateSharedDispatcher(options.proxy);
+    const dispatcher = getOrCreateSharedDispatcher(proxy);
 
     // Fire HEAD request to warm connection (fire-and-forget)
     fetch(targetUrl, {
@@ -194,11 +207,13 @@ export function preconnectApi(
         debugLogger.debug('Preconnect completed');
       })
       .catch((error) => {
-        debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+        const redactedError = redactProxyCredentials(String(error));
+        debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
       });
   } catch (error) {
     // Preconnect failure doesn't affect main flow
-    debugLogger.debug(`Preconnect failed (ignored): ${error}`);
+    const redactedError = redactProxyCredentials(String(error));
+    debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
   }
 }
 
