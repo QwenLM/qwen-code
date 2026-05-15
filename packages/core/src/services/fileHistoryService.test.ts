@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, stat, writeFile, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -93,6 +93,24 @@ describe('FileHistoryService', () => {
       const backups = snapshots[0].trackedFileBackups;
       const key = Object.keys(backups)[0];
       expect(backups[key].backupFileName).toBeNull();
+    });
+
+    // trackEdit must swallow createBackup failures so that the calling tool
+    // (edit / write_file) is never broken by file-history-side I/O errors.
+    it('does not throw and records nothing when createBackup fails', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+      await service.makeSnapshot('p1');
+
+      // Replace the backup storage root with a regular file so the recursive
+      // `mkdir(dirname(backupPath))` inside `safeCopyFile` fails with
+      // ENOTDIR — a non-ENOENT error that propagates back into `trackEdit`'s
+      // catch.
+      await rm(storageDir, { recursive: true, force: true });
+      await writeFile(storageDir, '');
+
+      await expect(service.trackEdit(file)).resolves.toBeUndefined();
+      expect(service.getSnapshots()[0].trackedFileBackups).toEqual({});
     });
   });
 
@@ -266,6 +284,30 @@ describe('FileHistoryService', () => {
       // Timeline must stay intact so the user can retry without losing state.
       const after = service.getSnapshots();
       expect(after.map((s) => s.promptId)).toEqual(['p1', 'p2', 'p3']);
+    });
+
+    // checkOriginFileChanged short-circuits the restore when the file on
+    // disk already matches the target backup. Cover it explicitly so a
+    // future regression in stat/content comparison surfaces here instead
+    // of as silent extra writes (or skipped writes) to user files.
+    it('does not touch a file whose content matches the target snapshot', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'unchanged');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await service.makeSnapshot('p2');
+
+      // File content has not changed since p1 was tracked. Capture mtime so
+      // we can verify the file is not rewritten by the rewind.
+      const mtimeBefore = (await stat(file)).mtimeMs;
+
+      const result = await service.rewind('p1');
+
+      expect(result.filesChanged).toEqual([]);
+      expect(result.filesFailed).toEqual([]);
+      expect(await readFile(file, 'utf-8')).toBe('unchanged');
+      expect((await stat(file)).mtimeMs).toBe(mtimeBefore);
     });
   });
 
