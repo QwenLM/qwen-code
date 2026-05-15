@@ -95,6 +95,7 @@ vi.mock('@opentelemetry/api', async () => {
     },
     context: {
       active: () => ({}),
+      with: <T>(_ctx: unknown, fn: () => T): T => fn(),
     },
   };
 });

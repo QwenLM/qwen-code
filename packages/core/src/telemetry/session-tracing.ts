@@ -255,7 +255,14 @@ export function endLLMRequestSpan(
         message: metadata.error ?? 'unknown error',
       });
     }
-
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update LLM request span attributes/status: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // span.end() must run even if attribute/status updates threw,
+  // otherwise the span leaks (never exported, never cleared from activeSpans).
+  try {
     span.end();
   } catch (error) {
     debugLogger.warn(
@@ -306,15 +313,20 @@ export function startToolSpan(
 }
 
 /**
- * Runs a callback within the tool span's AsyncLocalStorage context.
- * Use this instead of enterWith() to scope the context to a single
- * async call tree — safe for concurrent tool calls.
+ * Runs a callback within the tool span's AsyncLocalStorage context AND
+ * OpenTelemetry context. Use this instead of enterWith() to scope the
+ * context to a single async call tree — safe for concurrent tool calls.
+ *
+ * Setting the OTel context ensures any nested OTel spans/logs emitted
+ * during the callback (HTTP instrumentation, hooks, log-bridge spans)
+ * inherit the tool span as parent.
  */
 export function runInToolSpanContext<T>(span: Span, fn: () => T): T {
   const spanId = getSpanId(span);
   const spanCtx = activeSpans.get(spanId)?.deref();
   if (!spanCtx) return fn();
-  return toolContext.run(spanCtx, fn);
+  const otelCtxWithSpan = trace.setSpan(otelContext.active(), span);
+  return toolContext.run(spanCtx, () => otelContext.with(otelCtxWithSpan, fn));
 }
 
 /**
@@ -352,7 +364,13 @@ export function endToolSpan(span: Span, metadata?: ToolSpanMetadata): void {
         });
       }
     }
-
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update tool span attributes/status: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // span.end() must run even if attribute/status updates threw.
+  try {
     spanCtx.span.end();
   } catch (error) {
     debugLogger.warn(
@@ -432,7 +450,13 @@ export function endToolExecutionSpan(
         message: metadata?.error ?? 'tool execution error',
       });
     }
-
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to update tool execution span attributes/status: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // span.end() must run even if attribute/status updates threw.
+  try {
     spanCtx.span.end();
   } catch (error) {
     debugLogger.warn(

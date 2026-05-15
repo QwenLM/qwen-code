@@ -209,62 +209,72 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch {
       /* best-effort */
     }
+    // Capture span context so the API call and logging activate it via
+    // context.with(). Without this, nested OTel spans (HTTP instrumentation,
+    // log-bridge spans) parent to session root instead of llm_request.
+    const spanContext = trace.setSpan(context.active(), llmSpan);
+
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
     try {
-      if (!isInternal) {
-        this.logApiRequest(
-          this.toContents(req.contents),
-          req.model,
-          userPromptId,
+      const response = await context.with(spanContext, async () => {
+        if (!isInternal) {
+          this.logApiRequest(
+            this.toContents(req.contents),
+            req.model,
+            userPromptId,
+          );
+        }
+        const result = await session.wrap(() =>
+          this.wrapped.generateContent(req, userPromptId),
         );
-      }
-      const response = await session.wrap(() =>
-        this.wrapped.generateContent(req, userPromptId),
-      );
-      const durationMs = Date.now() - startTime;
-      const responseText = isInternal
-        ? undefined
-        : this.extractResponseText(response);
-      this.safelyLogApiResponse(
-        response.responseId ?? '',
-        durationMs,
-        response.modelVersion || req.model,
-        userPromptId,
-        response.usageMetadata,
-        responseText,
-      );
-      try {
-        await this.safelyLogOpenAIInteraction(
-          await session.resolve(req),
-          response,
-          undefined,
+        const durationMs = Date.now() - startTime;
+        const responseText = isInternal
+          ? undefined
+          : this.extractResponseText(result);
+        this.safelyLogApiResponse(
+          result.responseId ?? '',
+          durationMs,
+          result.modelVersion || req.model,
           userPromptId,
+          result.usageMetadata,
+          responseText,
         );
-      } catch (loggingError) {
-        debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
-      }
+        try {
+          await this.safelyLogOpenAIInteraction(
+            await session.resolve(req),
+            result,
+            undefined,
+            userPromptId,
+          );
+        } catch (loggingError) {
+          debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+        }
+        return result;
+      });
       endLLMRequestSpan(llmSpan, {
         success: true,
         inputTokens: response.usageMetadata?.promptTokenCount,
         outputTokens: response.usageMetadata?.candidatesTokenCount,
-        durationMs,
+        durationMs: Date.now() - startTime,
       });
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
-      try {
-        await this.safelyLogOpenAIInteraction(
-          await session.resolve(req),
-          undefined,
-          error,
-          userPromptId,
-        );
-      } catch (loggingError) {
-        debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
-      }
+      await context.with(spanContext, async () => {
+        this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
+        try {
+          await this.safelyLogOpenAIInteraction(
+            await session.resolve(req),
+            undefined,
+            error,
+            userPromptId,
+          );
+        } catch (loggingError) {
+          debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+        }
+      });
       endLLMRequestSpan(llmSpan, {
         success: false,
         durationMs,
