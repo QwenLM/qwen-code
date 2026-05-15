@@ -45,6 +45,8 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  type ShellConfiguration,
+  type ShellType,
   splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
@@ -3516,16 +3518,126 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 }
 
+function getExecutableBasename(executable: string): string {
+  return path.basename(path.win32.basename(executable));
+}
+
+function getShellDisplayName({
+  executable,
+  shell,
+}: ShellConfiguration): string {
+  switch (shell) {
+    case 'cmd':
+      return 'cmd.exe';
+    case 'powershell': {
+      const basename = getExecutableBasename(executable).toLowerCase();
+      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
+    }
+    case 'bash':
+      return 'bash';
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
+function getShellExecutionWrapper(
+  shellConfiguration = getShellConfiguration(),
+): string {
+  const executable = getShellDisplayName(shellConfiguration);
+  return `${executable} ${shellConfiguration.argsPrefix.join(' ')} <command>`;
+}
+
+function getShellQuotingGuidance(shell: ShellType): string {
+  switch (shell) {
+    case 'bash':
+      return `- **Shell argument quoting and special characters**: The active shell is Bash. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent Bash from misinterpreting them as shell syntax:
+  - **Single quotes** \`'...'\` pass everything literally, but cannot contain a literal single quote.
+  - **ANSI-C quoting** \`$'...'\` supports escape sequences (e.g. \`\\n\` for newline, \`\\'\` for single quote) and is the safest approach for multi-line strings or strings with single quotes.
+  - **Heredoc** is the most robust approach for large, multi-line text with mixed quotes:
+    \`\`\`bash
+    gh pr create --title "My Title" --body "$(cat <<'HEREDOC'
+    Multi-line body with (parentheses), \`backticks\`, and 'single-quotes'.
+    HEREDOC
+    )"
+    \`\`\`
+  - NEVER use unescaped single quotes inside single-quoted strings (e.g. \`'it\\'s'\` is wrong; use \`$'it\\'s'\` or \`"it's"\` instead).
+  - If unsure, prefer double-quoting arguments and escape inner double-quotes as \`\\"\`.`;
+    case 'powershell':
+      return `- **Shell argument quoting and special characters**: The active shell is PowerShell. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent PowerShell from misinterpreting them as shell syntax:
+  - **Single quotes** \`'...'\` pass everything literally. To include a literal single quote, double it (e.g. \`'it''s'\`).
+  - **Double quotes** \`"..."\` expand variables and subexpressions; use them only when that expansion is intended.
+  - Escape PowerShell metacharacters with the backtick escape character when they must be literal.
+  - For large, multi-line text, prefer a single-quoted here-string (\`@' ... '@\`) so content is not interpolated.
+  - Do NOT use Bash-only forms such as ANSI-C quoting (\`$'...'\`) or Bash heredocs.`;
+    case 'cmd':
+      return `- **Shell argument quoting and special characters**: The active shell is cmd.exe. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent cmd.exe from misinterpreting them as shell syntax:
+  - Use double quotes around arguments that contain spaces or metacharacters.
+  - Escape literal cmd.exe metacharacters such as \`&\`, \`|\`, \`<\`, \`>\`, and \`^\` with caret (\`^\`).
+  - Single quotes do not quote arguments in cmd.exe.
+  - Be careful with \`%VAR%\` environment-variable expansion; avoid literal \`%...%\` unless expansion is intended.
+  - Do NOT use Bash-only forms such as ANSI-C quoting (\`$'...'\`) or Bash heredocs.`;
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
+function getShellCommandSequencingGuidance({
+  executable,
+  shell,
+}: ShellConfiguration): string {
+  const independentGuidance =
+    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.';
+
+  switch (shell) {
+    case 'bash':
+      return `- When issuing multiple commands:
+  ${independentGuidance}
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
+  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
+    case 'cmd':
+      return `- When issuing multiple commands:
+  ${independentGuidance}
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
+  - Use '&' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use ';' or newlines to separate commands in cmd.exe.`;
+    case 'powershell': {
+      const executableBasename =
+        getExecutableBasename(executable).toLowerCase();
+      if (executableBasename === 'pwsh.exe') {
+        return `- When issuing multiple commands:
+  ${independentGuidance}
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
+  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
+      }
+
+      return `- When issuing multiple commands:
+  ${independentGuidance}
+  - Windows PowerShell does not support '&&'. If commands must run sequentially and stop on failure, use explicit PowerShell control flow (for example, check \`$LASTEXITCODE\` before running the next external command) or run the next command only after seeing the previous run_shell_command result.
+  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
+    }
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
 function getShellToolDescription(): string {
+  const shellConfiguration = getShellConfiguration();
+  const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   const isWindows = os.platform() === 'win32';
-  const executionWrapper = isWindows
-    ? 'cmd.exe /c <command>'
-    : 'bash -c <command>';
   const processGroupNote = isWindows
     ? ''
     : '\n  - Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.';
 
-  return `Executes a given shell command (as \`${executionWrapper}\`) in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+  return `Executes a given shell command (as \`${executionWrapper}\`) in a subprocess with optional timeout, ensuring proper handling and security measures.
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
@@ -3541,23 +3653,8 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO N
   - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
   - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
   - Communication: Output text directly (NOT echo/printf)
-- **Shell argument quoting and special characters**: When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent the shell from misinterpreting them as shell syntax:
-  - **Single quotes** \`'...'\` pass everything literally, but cannot contain a literal single quote.
-  - **ANSI-C quoting** \`$'...'\` supports escape sequences (e.g. \`\\n\` for newline, \`\\'\` for single quote) and is the safest approach for multi-line strings or strings with single quotes.
-  - **Heredoc** is the most robust approach for large, multi-line text with mixed quotes:
-    \`\`\`bash
-    gh pr create --title "My Title" --body "$(cat <<'HEREDOC'
-    Multi-line body with (parentheses), \`backticks\`, and 'single-quotes'.
-    HEREDOC
-    )"
-    \`\`\`
-  - NEVER use unescaped single quotes inside single-quoted strings (e.g. \`'it\\'s'\` is wrong; use \`$'it\\'s'\` or \`"it's"\` instead).
-  - If unsure, prefer double-quoting arguments and escape inner double-quotes as \`\\"\`.
-- When issuing multiple commands:
-  - If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
-  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-  - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+${getShellQuotingGuidance(shellConfiguration.shell)}
+${getShellCommandSequencingGuidance(shellConfiguration)}
 - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of \`cd\`. You may use \`cd\` if the User explicitly requests it.
   <good-example>
   pytest /foo/bar/tests
@@ -3585,10 +3682,19 @@ ${processGroupNote}
 }
 
 function getCommandDescription(): string {
-  if (os.platform() === 'win32') {
-    return 'Exact command to execute as `cmd.exe /c <command>`';
-  } else {
-    return 'Exact bash command to execute as `bash -c <command>`';
+  const shellConfiguration = getShellConfiguration();
+  const executionWrapper = getShellExecutionWrapper(shellConfiguration);
+  switch (shellConfiguration.shell) {
+    case 'cmd':
+      return `Exact cmd.exe command to execute as \`${executionWrapper}\``;
+    case 'powershell':
+      return `Exact PowerShell command to execute as \`${executionWrapper}\``;
+    case 'bash':
+      return `Exact bash command to execute as \`${executionWrapper}\``;
+    default: {
+      const _exhaustive: never = shellConfiguration.shell;
+      return _exhaustive;
+    }
   }
 }
 
