@@ -2445,13 +2445,71 @@ hello
         // consume
       }
 
-      expect(mockTurnRunFn).toHaveBeenLastCalledWith(
-        'test-model',
-        expect.arrayContaining([
-          '## Relevant memory\n\nDeferred memory result.',
-        ]),
-        expect.any(AbortSignal),
+      // Memory must come AFTER the functionResponse part so the Qwen API
+      // call/response pairing isn't broken (see client.ts:1209-1213).
+      const lastCallArgs = mockTurnRunFn.mock.lastCall;
+      const requestArr = lastCallArgs![1] as unknown[];
+      const functionResponseIdx = requestArr.findIndex(
+        (p) => typeof p === 'object' && p !== null && 'functionResponse' in p,
       );
+      const memoryIdx = requestArr.findIndex(
+        (p) => p === '## Relevant memory\n\nDeferred memory result.',
+      );
+      expect(functionResponseIdx).toBeGreaterThanOrEqual(0);
+      expect(memoryIdx).toBeGreaterThan(functionResponseIdx);
+    });
+
+    it('should abort the previous prefetch when a new UserQuery arrives mid-flight', async () => {
+      // Pending recall on first UserQuery — never resolves on its own.
+      const abortSignals: AbortSignal[] = [];
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        abortSignals.push(opts.abortSignal as AbortSignal);
+        return new Promise(() => {});
+      });
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      };
+      client['chat'] = mockChat as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      // First UserQuery — installs prefetch #1
+      const stream1 = client.sendMessageStream(
+        [{ text: 'first' }],
+        new AbortController().signal,
+        'prompt-id-1',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream1) {
+        // consume
+      }
+      expect(abortSignals.length).toBe(1);
+      expect(abortSignals[0].aborted).toBe(false);
+
+      // Second UserQuery — should abort #1 before installing #2
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello again' };
+        })(),
+      );
+      const stream2 = client.sendMessageStream(
+        [{ text: 'second' }],
+        new AbortController().signal,
+        'prompt-id-2',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream2) {
+        // consume
+      }
+
+      expect(abortSignals.length).toBe(2);
+      expect(abortSignals[0].aborted).toBe(true);
+      expect(abortSignals[1].aborted).toBe(false);
     });
 
     it('should proceed without auto-memory when managed auto-memory is disabled', async () => {

@@ -1057,6 +1057,11 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         if (this.config.getManagedAutoMemoryEnabled()) {
+          // A previous recall may still be pending (slow side-query, new user
+          // turn arrived before it settled). Abort it before installing the
+          // new handle so the orphan doesn't keep running indefinitely.
+          this.pendingMemoryPrefetch?.controller.abort();
+          this.pendingMemoryPrefetch = undefined;
           const controller = new AbortController();
           const promise = this.config
             .getMemoryManager()
@@ -1274,24 +1279,6 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
-        // Zero-wait poll: consume only if the prefetch has already settled.
-        // If not settled yet, skip — the ToolResult inject point will retry.
-        const prefetchHandle = this.pendingMemoryPrefetch;
-        if (
-          prefetchHandle &&
-          prefetchHandle.settledAt !== null &&
-          !prefetchHandle.consumed
-        ) {
-          prefetchHandle.consumed = true;
-          this.pendingMemoryPrefetch = undefined;
-          const result = await prefetchHandle.promise; // already settled, returns immediately
-          if (result.prompt) {
-            systemReminders.push(result.prompt);
-            for (const doc of result.selectedDocs) {
-              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
-            }
-          }
-        }
 
         // add subagent system reminder if there are subagents
         const hasAgentTool = await this.config
@@ -1326,6 +1313,27 @@ export class GeminiClient {
           }
         }
 
+        // Zero-wait poll: consume only if the prefetch has already settled.
+        // Done AFTER the async reminder setup above so recall settling during
+        // those awaits still gets caught here. If still not settled, skip —
+        // the ToolResult inject point will retry on the next turn.
+        const prefetchHandle = this.pendingMemoryPrefetch;
+        if (
+          prefetchHandle &&
+          prefetchHandle.settledAt !== null &&
+          !prefetchHandle.consumed
+        ) {
+          prefetchHandle.consumed = true;
+          this.pendingMemoryPrefetch = undefined;
+          const result = await prefetchHandle.promise; // already settled, returns immediately
+          if (result.prompt) {
+            systemReminders.unshift(result.prompt);
+            for (const doc of result.selectedDocs) {
+              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+            }
+          }
+        }
+
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
@@ -1340,7 +1348,14 @@ export class GeminiClient {
           this.pendingMemoryPrefetch = undefined;
           const result = await prefetchHandle.promise;
           if (result.prompt) {
-            requestToSend = [result.prompt, ...requestToSend];
+            // Append (not prepend): on a ToolResult turn, requestToSend leads
+            // with functionResponse parts that must immediately follow the
+            // model's functionCall (Qwen API constraint, see lines 1209-1213).
+            // Putting the memory text after the functionResponse parts keeps
+            // the call/response pairing intact under native Gemini, while the
+            // OpenAI converter still emits the text as a separate user message
+            // after the tool messages.
+            requestToSend = [...requestToSend, result.prompt];
             for (const doc of result.selectedDocs) {
               this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
             }
