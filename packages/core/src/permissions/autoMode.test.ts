@@ -5,7 +5,6 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import * as path from 'node:path';
 import {
   SAFE_TOOL_ALLOWLIST,
   evaluateAutoMode,
@@ -108,10 +107,10 @@ describe('isInSafeToolAllowlist', () => {
 function makeConfig(workspaceRoots: string[]): Config {
   return {
     getWorkspaceContext: () => ({
+      // Test fixture: roots and paths in this file use POSIX-style separators
+      // regardless of OS, so hard-code '/' (not path.sep) for the prefix check.
       isPathWithinWorkspace: (p: string) =>
-        workspaceRoots.some(
-          (root) => p === root || p.startsWith(root + path.sep),
-        ),
+        workspaceRoots.some((root) => p === root || p.startsWith(root + '/')),
     }),
   } as unknown as Config;
 }
