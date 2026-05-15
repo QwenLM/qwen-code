@@ -152,6 +152,8 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                |
 | `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`) |
 | `PermissionRequest`  | When permission dialog is shown           | Tool name                                                 |
+| `TodoCreated`        | When a new todo item is created           | None (always fires)                                       |
+| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                       |
 
 ### Matcher Patterns
 
@@ -165,6 +167,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 | Session Events      | `SessionEnd`                                                           | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.     |
 | Notification Events | `Notification`                                                         | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success` |
 | Compact Events      | `PreCompact`                                                           | ✅ Exact match  | Trigger: `manual`, `auto`                                |
+| Todo Events         | `TodoCreated`, `TodoCompleted`                                         | ❌ No           | N/A                                                      |
 | Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                      |
 | Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                      |
 
@@ -753,6 +756,204 @@ Hook output supports three categories of fields:
   }
 }
 ```
+
+#### TodoCreated
+
+**Purpose**: Executed when a new todo item is created via the `todo_write` tool. Allows validation, logging, or blocking of todo creation.
+
+Todo hooks run in two phases:
+
+- `validation`: runs before persistence. Use this phase for validation only; returning `block` or `deny` prevents the write.
+- `postWrite`: runs after persistence. Use this phase for side effects such as logging or syncing; `block` or `deny` is ignored in this phase.
+
+**Event-specific fields**:
+
+```json
+{
+  "todo_id": "unique identifier for the todo item",
+  "todo_content": "content/description of the todo item",
+  "todo_status": "pending | in_progress | completed",
+  "all_todos": "array of all todo items in the current list",
+  "phase": "validation | postWrite"
+}
+```
+
+**Output Options**:
+
+- `decision`: "allow", "block", or "deny"
+- `reason`: human-readable explanation for the decision (required when blocking)
+
+**Blocking Behavior**:
+
+During the `validation` phase, when `decision` is `block` or `deny` (exit code 2), todo creation is prevented. The todo list remains unchanged, and the reason is provided as feedback to the model.
+
+During the `postWrite` phase, the todo has already been persisted. Hooks may still return output, but `block` / `deny` does not undo the write and should not be used for validation.
+
+**Example Output (Allow)**:
+
+```json
+{
+  "decision": "allow",
+  "reason": "Todo content validated successfully"
+}
+```
+
+**Example Output (Block)**:
+
+```json
+{
+  "decision": "block",
+  "reason": "Todo content too short. Minimum 5 characters required."
+}
+```
+
+**Example Hook Script**:
+
+```bash
+#!/bin/bash
+# ~/.qwen/hooks/todo-validator.sh
+# Validates todo content before creation
+
+INPUT=$(cat)
+CONTENT=$(echo "$INPUT" | jq -r '.todo_content')
+
+# Check minimum length
+if [ ${#CONTENT} -lt 5 ]; then
+  echo '{"decision": "block", "reason": "Todo content must be at least 5 characters"}'
+  exit 2
+fi
+
+# Block test-related todos
+if [[ "$CONTENT" =~ "test" ]]; then
+  echo '{"decision": "block", "reason": "Test todos are not allowed in production"}'
+  exit 2
+fi
+
+echo '{"decision": "allow"}'
+exit 0
+```
+
+**Example Configuration**:
+
+```json
+{
+  "hooks": {
+    "TodoCreated": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.qwen/hooks/todo-validator.sh",
+            "name": "todo-validator",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### TodoCompleted
+
+**Purpose**: Executed when a todo item is marked as completed. Allows validation, logging, or blocking of todo completion.
+
+Todo hooks run in two phases:
+
+- `validation`: runs before persistence. Use this phase for validation only; returning `block` or `deny` prevents the write.
+- `postWrite`: runs after persistence. Use this phase for side effects such as logging or syncing; `block` or `deny` is ignored in this phase.
+
+**Event-specific fields**:
+
+```json
+{
+  "todo_id": "unique identifier for the todo item",
+  "todo_content": "content/description of the todo item",
+  "previous_status": "pending | in_progress (status before completion)",
+  "all_todos": "array of all todo items in the current list",
+  "phase": "validation | postWrite"
+}
+```
+
+**Output Options**:
+
+- `decision`: "allow", "block", or "deny"
+- `reason`: human-readable explanation for the decision (required when blocking)
+
+**Blocking Behavior**:
+
+During the `validation` phase, when `decision` is `block` or `deny` (exit code 2), todo completion is prevented. The todo item remains in its previous status, and the reason is provided as feedback to the model.
+
+During the `postWrite` phase, the todo has already been persisted. Hooks may still return output, but `block` / `deny` does not undo the write and should not be used for validation.
+
+**Example Output (Allow)**:
+
+```json
+{
+  "decision": "allow",
+  "reason": "Todo completion approved"
+}
+```
+
+**Example Output (Block)**:
+
+```json
+{
+  "decision": "block",
+  "reason": "Cannot complete this todo until dependent tasks are finished."
+}
+```
+
+**Example Hook Script**:
+
+```bash
+#!/bin/bash
+# ~/.qwen/hooks/todo-completion-validator.sh
+# Validates todo completion conditions
+
+INPUT=$(cat)
+TODO_ID=$(echo "$INPUT" | jq -r '.todo_id')
+ALL_TODOS=$(echo "$INPUT" | jq -r '.all_todos')
+
+# Check if there are incomplete dependent todos (example logic)
+INCOMPLETE_COUNT=$(echo "$ALL_TODOS" | jq '[.[] | select(.status != "completed")] | length')
+
+if [ "$INCOMPLETE_COUNT" -gt 5 ]; then
+  echo '{"decision": "block", "reason": "Too many incomplete todos. Complete other tasks first."}'
+  exit 2
+fi
+
+echo '{"decision": "allow"}'
+exit 0
+```
+
+**Example Configuration**:
+
+```json
+{
+  "hooks": {
+    "TodoCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.qwen/hooks/todo-completion-validator.sh",
+            "name": "completion-validator",
+            "timeout": 5000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**Use Cases**:
+
+- **Logging**: Track todo creation and completion for audit or analytics
+- **Validation**: Enforce content quality standards (minimum length, required keywords)
+- **Workflow Control**: Block completion until prerequisites are met
+- **Integration**: Sync todos with external task management systems (Jira, Trello, etc.)
 
 ## Hook Configuration
 

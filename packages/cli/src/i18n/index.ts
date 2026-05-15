@@ -13,7 +13,6 @@ import {
   type SupportedLanguage,
   SUPPORTED_LANGUAGES,
   getLanguageNameFromLocale,
-  getLanguageNameForTranslationTarget,
   resolveSupportedLanguage,
 } from './languages.js';
 import {
@@ -24,11 +23,7 @@ import {
 export { MUST_TRANSLATE_KEYS } from './mustTranslateKeys.js';
 
 export type { SupportedLanguage };
-export {
-  SUPPORTED_LANGUAGES,
-  getLanguageNameFromLocale,
-  getLanguageNameForTranslationTarget,
-};
+export { SUPPORTED_LANGUAGES, getLanguageNameFromLocale };
 
 // State
 let currentLanguage: SupportedLanguage = 'en';

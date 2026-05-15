@@ -20,6 +20,7 @@
  * in `qwen-serve-streaming.test.ts` and skip when no auth is set.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -60,6 +61,14 @@ beforeAll(async () => {
       TOKEN,
       '--hostname',
       '127.0.0.1',
+      // Per #3803 §02 (1 daemon = 1 workspace), pin the bound
+      // workspace so test assertions that POST `workspaceCwd:
+      // REPO_ROOT` succeed regardless of where the test runner
+      // happens to be cwd'd. Without this the daemon would inherit
+      // the test runner's cwd, which is brittle across CI / local
+      // / IDE-launcher environments.
+      '--workspace',
+      REPO_ROOT,
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );
@@ -221,20 +230,82 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     // Tearing the session down on model-switch failure would force
     // the caller into a 500 with no way to recover. The
     // `model_switch_failed` SSE event is the visible failure signal.
-    const cwd = '/tmp';
+    //
+    // Use REPO_ROOT (the daemon's bound workspace) — under #3803 §02
+    // any other cwd would return 400 workspace_mismatch before the
+    // session is even spawned.
+    const cwd = REPO_ROOT;
     const session = await client.createOrAttachSession({
       workspaceCwd: cwd,
       modelServiceId: 'definitely-not-a-real-model',
     });
     expect(session.sessionId).toBeTypeOf('string');
-    expect(session.attached).toBe(false);
+    // `attached` may be true or false depending on whether earlier
+    // tests in this file already created a REPO_ROOT session. The
+    // shape of the response is what matters here (sessionId present,
+    // listWorkspaceSessions sees it).
+    expect(typeof session.attached).toBe('boolean');
     const sessions = await client.listWorkspaceSessions(cwd);
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0]?.sessionId).toBe(session.sessionId);
+    expect(sessions.some((s) => s.sessionId === session.sessionId)).toBe(true);
     // No teardown — Stage 1 has no DELETE /session route, and the
-    // session persists in `byId` until daemon shutdown. The other
-    // tests in this file use unique workspace cwds so the surviving
-    // session here doesn't interfere.
+    // session persists in `byId` until daemon shutdown.
+  });
+
+  it('rejects cross-workspace cwd with 400 workspace_mismatch (#3803 §02)', async () => {
+    // The daemon is bound to REPO_ROOT (via `--workspace` in beforeAll).
+    // A POST /session with `cwd: '/tmp'` (or any other absolute path
+    // that doesn't canonicalize to REPO_ROOT) must reject with 400
+    // `workspace_mismatch`, carrying both paths in the body so an
+    // orchestrator-aware client can spawn / route to the right
+    // daemon.
+    const res = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ cwd: '/tmp' }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      code?: string;
+      boundWorkspace?: string;
+      requestedWorkspace?: string;
+    };
+    expect(body.code).toBe('workspace_mismatch');
+    expect(body.boundWorkspace).toBe(REPO_ROOT);
+    // The bridge canonicalizes the requested cwd via `realpathSync.native`
+    // so the response carries the on-disk canonical form, NOT the literal
+    // we POSTed. On macOS `/tmp` is a symlink to `/private/tmp`, so the
+    // hardcoded `/tmp` literal would diverge there. Resolve the same way
+    // the bridge does to keep the assertion portable.
+    expect(body.requestedWorkspace).toBe(realpathSync.native('/tmp'));
+  });
+
+  it('omits cwd → falls back to bound workspace (#3803 §02)', async () => {
+    // The route accepts an empty body and falls back to the daemon's
+    // bound workspace. Asserting this end-to-end through a real
+    // daemon process verifies the runQwenServe → createServeApp →
+    // bridge plumbing for the fallback path.
+    const res = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(200);
+    const session = (await res.json()) as {
+      sessionId?: string;
+      workspaceCwd?: string;
+    };
+    expect(session.workspaceCwd).toBe(REPO_ROOT);
+  });
+
+  it('GET /capabilities surfaces workspaceCwd (#3803 §02)', async () => {
+    const caps = await client.capabilities();
+    expect(caps.workspaceCwd).toBe(REPO_ROOT);
   });
 });
 

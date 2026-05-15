@@ -6,7 +6,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { SessionStartSource } from '@qwen-code/qwen-code-core';
 import { useBranchCommand } from './useBranchCommand.js';
 
 describe('useBranchCommand', () => {
@@ -17,7 +16,6 @@ describe('useBranchCommand', () => {
   let startNewSessionUI: ReturnType<typeof vi.fn>;
   let recordCustomTitle: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
-  let fireSessionStartEvent: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
   let loadHistory: ReturnType<typeof vi.fn>;
   let setSessionName: ReturnType<typeof vi.fn>;
@@ -64,7 +62,6 @@ describe('useBranchCommand', () => {
     finalize = vi.fn();
     recordCustomTitle = vi.fn().mockReturnValue(true);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
-    fireSessionStartEvent = vi.fn();
     startNewSessionConfig = vi.fn();
     startNewSessionUI = vi.fn();
     clearItems = vi.fn();
@@ -81,10 +78,7 @@ describe('useBranchCommand', () => {
       }),
       getChatRecordingService: () => ({ finalize, recordCustomTitle }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
-      getHookSystem: () => ({ fireSessionStartEvent }),
       startNewSession: startNewSessionConfig,
-      getModel: () => 'test-model',
-      getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
   });
@@ -242,17 +236,17 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('fires SessionStart with SessionStartSource.Branch (not Resume)', async () => {
+  it('initializes GeminiClient with SessionStartSource.Branch', async () => {
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    config.getGeminiClient = () => ({ initialize });
+
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
-    expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);
-    expect(fireSessionStartEvent).toHaveBeenCalledWith(
-      SessionStartSource.Branch,
-      expect.any(String),
-      expect.any(String),
-    );
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(initialize).toHaveBeenCalledWith('branch');
   });
 
   it('omits the quoted-title fragment when no name is provided', async () => {

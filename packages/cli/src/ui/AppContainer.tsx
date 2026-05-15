@@ -42,7 +42,6 @@ import {
   ShellExecutionService,
   Storage,
   SessionEndReason,
-  SessionStartSource,
   generatePromptSuggestion,
   logPromptSuggestion,
   PromptSuggestionEvent,
@@ -56,7 +55,6 @@ import {
   ApprovalMode,
   ConditionalRulesRegistry,
   MCPDiscoveryState,
-  type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
   ToolNames,
@@ -486,32 +484,6 @@ export const AppContainer = (props: AppContainerProps) => {
         if (title) {
           setSessionName(title);
         }
-      }
-
-      // Fire SessionStart event after config is initialized
-      const sessionStartSource = resumedSessionData
-        ? SessionStartSource.Resume
-        : SessionStartSource.Startup;
-
-      const hookSystem = config.getHookSystem();
-
-      if (hookSystem) {
-        hookSystem
-          .fireSessionStartEvent(
-            sessionStartSource,
-            config.getModel() ?? '',
-            String(config.getApprovalMode()) as PermissionMode,
-          )
-          .then(() => {
-            debugLogger.debug('SessionStart event completed successfully');
-          })
-          .catch((err) => {
-            debugLogger.warn(`SessionStart hook failed: ${err}`);
-          });
-      } else {
-        debugLogger.debug(
-          'SessionStart: HookSystem not available, skipping event',
-        );
       }
     })();
 

@@ -9,8 +9,10 @@ In one terminal:
 ```bash
 cd your-project/
 qwen serve --port 4170
-# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge)
+# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge, workspace=/path/to/your-project)
 ```
+
+Per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02 each daemon binds to one workspace at boot (the current `cwd`, or override with `--workspace /path/to/dir`). The daemon's bound path is advertised on `/capabilities.workspaceCwd` so clients can pre-flight check + omit `cwd` from `POST /session`.
 
 In another:
 
@@ -28,13 +30,23 @@ const client = new DaemonClient({
   // token: process.env.QWEN_SERVER_TOKEN, // required for non-loopback binds
 });
 
-// 1. Confirm we can reach the daemon and gate UI on its features.
+// 1. Confirm we can reach the daemon, gate UI on its features, and
+//    read back the daemon's bound workspace (#3803 §02).
 const caps = await client.capabilities();
 console.log('Daemon features:', caps.features);
+console.log('Daemon workspace:', caps.workspaceCwd); // canonical bound path
 
-// 2. Spawn-or-attach a session for the current workspace.
+// 2. Spawn-or-attach a session. Two equally-valid shapes:
+//    (a) pass `workspaceCwd: caps.workspaceCwd` to be explicit, or
+//    (b) omit `workspaceCwd` entirely — the SDK then sends no `cwd`
+//        field and the daemon route falls back to its bound
+//        workspace. The (b) shape is concise but assumes you trust
+//        `caps.workspaceCwd` to be whatever you intended.
+//    A non-empty `workspaceCwd` that doesn't canonicalize to the
+//    daemon's bound path yields `400 workspace_mismatch` (see
+//    "Workspace mismatch" below).
 const session = await client.createOrAttachSession({
-  workspaceCwd: process.cwd(),
+  workspaceCwd: caps.workspaceCwd,
 });
 console.log(`session=${session.sessionId} attached=${session.attached}`);
 
@@ -139,9 +151,12 @@ case 'permission_request': {
 
 ## Shared-session collaboration
 
-Two clients pointed at the same daemon and `cwd` end up on the same session:
+Two clients pointed at the **same daemon** end up on the same session. Per #3803 §02 each daemon is bound to ONE workspace at boot, so the daemon launched as `qwen serve --workspace /work/repo` (or `cd /work/repo && qwen serve`) is what both clients connect to:
 
 ```ts
+// Daemon was launched as `qwen serve --workspace /work/repo` so
+// `caps.workspaceCwd === '/work/repo'` for both clients.
+
 // Client A (e.g. an IDE plugin)
 const a = await clientA.createOrAttachSession({ workspaceCwd: '/work/repo' });
 console.log(a.attached); // false — A spawned the agent
@@ -153,6 +168,35 @@ console.log(a.sessionId === b.sessionId); // true
 ```
 
 Both clients see the same `session_update` / `permission_request` stream. Either can send a prompt; they FIFO-queue per the agent's "one active prompt per session" guarantee.
+
+## Workspace mismatch
+
+If `workspaceCwd` doesn't match the daemon's bound workspace, `createOrAttachSession` rejects with `DaemonHttpError` carrying status `400` and a structured body:
+
+```ts
+import { DaemonHttpError } from '@qwen-code/sdk';
+
+try {
+  await client.createOrAttachSession({ workspaceCwd: '/some/other/project' });
+} catch (err) {
+  if (err instanceof DaemonHttpError && err.status === 400) {
+    const body = err.body as {
+      code?: string;
+      boundWorkspace?: string;
+      requestedWorkspace?: string;
+    };
+    if (body.code === 'workspace_mismatch') {
+      console.error(
+        `This daemon is bound to ${body.boundWorkspace}, ` +
+          `not ${body.requestedWorkspace}. Start a separate daemon ` +
+          `for that workspace, or route to the right one.`,
+      );
+    }
+  }
+}
+```
+
+Multi-workspace deployments run one daemon per workspace on separate ports — there's no intra-daemon routing under §02. An orchestrator (or the user's launcher) picks the right daemon based on the project the client wants to talk to.
 
 ## Authentication
 

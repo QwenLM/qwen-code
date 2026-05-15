@@ -19,9 +19,7 @@ import {
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
-  SessionStartSource,
   SessionEndReason,
-  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -81,9 +79,10 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
-  // Initialize config to set up hookSystem (required for SessionStart/SessionEnd hooks)
-  // This is needed because gemini.tsx calls runAcpAgent without calling config.initialize()
-  await config.initialize();
+  // Initialize config to set up ACP bootstrap services (hooks, tools, MCP)
+  // without creating a chat session. The real per-session Config will own
+  // GeminiClient.initialize() and any SessionStart hook execution.
+  await config.initialize({ skipGeminiInitialization: true });
   // ACP forwards session messages straight to the model; under progressive
   // MCP availability `initialize()` returns before MCP servers settle, so
   // we wait here to keep the first session's tool surface consistent with
@@ -116,10 +115,11 @@ export async function runAcpAgent(
   console.debug = console.error;
 
   const stream = ndJsonStream(stdout, stdin);
-  const connection = new AgentSideConnection(
-    (conn) => new QwenAgent(config, settings, argv, conn),
-    stream,
-  );
+  let agentInstance: QwenAgent | undefined;
+  const connection = new AgentSideConnection((conn) => {
+    agentInstance = new QwenAgent(config, settings, argv, conn);
+    return agentInstance;
+  }, stream);
 
   // Handle SIGTERM/SIGINT for graceful shutdown.
   // Without this, signal handlers registered elsewhere in the CLI
@@ -133,9 +133,28 @@ export async function runAcpAgent(
   const fireSessionEndOnce = async (reason: SessionEndReason) => {
     if (sessionEndFired) return;
     sessionEndFired = true;
-    const hookSystem = config.getHookSystem?.();
-    const hooksEnabled = !config.getDisableAllHooks?.();
-    if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
+
+    const configs = new Set<Config>([config]);
+    const sessions = agentInstance?.getActiveSessions();
+    if (sessions) {
+      for (const session of sessions) {
+        const sessionConfig = session.getConfig?.();
+        if (sessionConfig) {
+          configs.add(sessionConfig);
+        }
+      }
+    }
+
+    for (const cfg of configs) {
+      const hookSystem = cfg.getHookSystem?.();
+      const hooksEnabled = !cfg.getDisableAllHooks?.();
+      if (
+        !hooksEnabled ||
+        !hookSystem ||
+        !cfg.hasHooksForEvent?.('SessionEnd')
+      ) {
+        continue;
+      }
       try {
         await hookSystem.fireSessionEndEvent(reason);
       } catch (err) {
@@ -214,6 +233,10 @@ export function toHttpServer(
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
+
+  getActiveSessions(): Session[] {
+    return [...this.sessions.values()];
+  }
 
   constructor(
     private config: Config,
@@ -795,8 +818,9 @@ class QwenAgent implements Agent {
   ): Promise<Session> {
     const sessionId = config.getSessionId();
     const geminiClient = config.getGeminiClient();
+    const needsInitialize = !geminiClient.isInitialized();
 
-    if (!geminiClient.isInitialized()) {
+    if (needsInitialize) {
       await geminiClient.initialize();
     }
 
@@ -807,24 +831,6 @@ class QwenAgent implements Agent {
       this.settings,
     );
     this.sessions.set(sessionId, session);
-
-    // Fire SessionStart hook (aligned with core path)
-    const hookSystem = config.getHookSystem();
-    const hooksEnabled = !config.getDisableAllHooks();
-    if (hooksEnabled && hookSystem && config.hasHooksForEvent('SessionStart')) {
-      const source = conversation
-        ? SessionStartSource.Resume
-        : SessionStartSource.Startup;
-      const model = config.getModel();
-      const permissionMode = String(config.getApprovalMode()) as PermissionMode;
-      try {
-        await hookSystem.fireSessionStartEvent(source, model, permissionMode);
-      } catch (err) {
-        debugLogger.warn(
-          `SessionStart hook failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-    }
 
     setTimeout(async () => {
       await session.sendAvailableCommandsUpdate();
