@@ -59,13 +59,20 @@ export const useMessageHandling = () => {
     setMessages((prev) => {
       // Record index of the placeholder to update on chunks
       streamingMessageIndexRef.current = prev.length;
+      const maxExistingTimestamp = prev.reduce(
+        (max, message) => Math.max(max, message.timestamp || 0),
+        0,
+      );
+      const placeholderTimestamp = Math.max(
+        typeof timestamp === 'number' ? timestamp : Date.now(),
+        maxExistingTimestamp + 2,
+      );
       return [
         ...prev,
         {
           role: 'assistant',
           content: '',
-          // Use provided timestamp (from extension) to keep ordering stable
-          timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+          timestamp: placeholderTimestamp,
         },
       ];
     });

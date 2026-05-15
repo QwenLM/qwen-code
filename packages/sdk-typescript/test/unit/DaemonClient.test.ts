@@ -11,6 +11,11 @@ import {
   abortTimeout,
   composeAbortSignals,
 } from '../../src/daemon/DaemonClient.js';
+import {
+  DaemonCapabilityMissingError,
+  requireWorkspaceCwd,
+} from '../../src/daemon/types.js';
+import type { DaemonCapabilities } from '../../src/daemon/types.js';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -96,11 +101,15 @@ describe('DaemonClient', () => {
         mode: 'http-bridge' as const,
         features: ['health', 'capabilities'],
         modelServices: [],
+        workspaceCwd: '/work/bound',
       };
       const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const caps = await client.capabilities();
       expect(caps).toEqual(envelope);
+      // #3803 §02: clients use `workspaceCwd` to pre-flight check +
+      // omit `cwd` from `POST /session` (route falls back).
+      expect(caps.workspaceCwd).toBe('/work/bound');
     });
   });
 
@@ -145,6 +154,40 @@ describe('DaemonClient', () => {
       expect(calls[0]?.method).toBe('POST');
       expect(calls[0]?.url).toBe('http://daemon/session');
       expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+    });
+
+    it('omits cwd when workspaceCwd is not provided (#3803 §02)', async () => {
+      // Per #3803 §02 the daemon route falls back to its bound
+      // workspace when `cwd` is absent. The SDK relies on
+      // JSON.stringify stripping `undefined` values, so an
+      // omitted `workspaceCwd` ends up as "no `cwd` key" on the
+      // wire — exactly the fallback shape the server expects.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/bound',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.createOrAttachSession({});
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('forwards empty-string workspaceCwd verbatim so the server can 400 it', async () => {
+      // `workspaceCwd: ""` is a likely client-side bug shape. A
+      // truthy-guard SDK would silently drop the field and let the
+      // server's fallback bind the session — masking the bug. We
+      // forward it verbatim so the server's
+      // `cwd must be an absolute path when provided` 400 surfaces.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(400, { error: 'bad cwd' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.createOrAttachSession({ workspaceCwd: '' }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '' });
     });
 
     it('forwards modelServiceId when supplied', async () => {
@@ -633,6 +676,59 @@ describe('DaemonClient', () => {
       // Generous tolerance — just checking the timer fires.
       expect(elapsed).toBeGreaterThanOrEqual(30);
       expect(elapsed).toBeLessThan(2000);
+    });
+  });
+
+  describe('requireWorkspaceCwd', () => {
+    // Helper: build a `DaemonCapabilities`-shaped envelope without
+    // having to spell out the unrelated fields on every call.
+    const caps = (overrides: Partial<DaemonCapabilities>): DaemonCapabilities =>
+      ({
+        v: 1,
+        mode: 'http-bridge',
+        features: [],
+        modelServices: [],
+        ...overrides,
+      }) as DaemonCapabilities;
+
+    it('returns the workspaceCwd when populated', () => {
+      expect(requireWorkspaceCwd(caps({ workspaceCwd: '/work/bound' }))).toBe(
+        '/work/bound',
+      );
+    });
+
+    it('throws DaemonCapabilityMissingError when the field is undefined (pre-§02 daemon)', () => {
+      // Pre-§02 daemons emit v=1 envelopes without `workspaceCwd`.
+      // The helper exists so SDK consumers get an actionable error
+      // instead of a downstream `Cannot read properties of undefined`.
+      expect(() => requireWorkspaceCwd(caps({}))).toThrow(
+        DaemonCapabilityMissingError,
+      );
+      const err = (() => {
+        try {
+          requireWorkspaceCwd(caps({}));
+          return null;
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(DaemonCapabilityMissingError);
+      expect((err as DaemonCapabilityMissingError).capability).toBe(
+        'workspaceCwd',
+      );
+      expect((err as DaemonCapabilityMissingError).message).toMatch(
+        /predates the feature|workspaceCwd/,
+      );
+    });
+
+    it('treats empty-string as missing (defensive)', () => {
+      // A daemon that erroneously sends `workspaceCwd: ""` would
+      // otherwise satisfy `typeof === 'string'` while still being
+      // useless to consumers. Treat it like a missing field so the
+      // call site lands in the same error branch.
+      expect(() => requireWorkspaceCwd(caps({ workspaceCwd: '' }))).toThrow(
+        DaemonCapabilityMissingError,
+      );
     });
   });
 });

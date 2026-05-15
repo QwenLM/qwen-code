@@ -1280,7 +1280,7 @@ export function replayUiTelemetryFromConversation(
 /**
  * Returns the best available prompt token count for resuming telemetry.
  * Walks backward through messages and returns the first valid value:
- * - The latest assistant's non-zero usage (totalTokenCount ?? promptTokenCount).
+ * - The latest assistant's non-zero usage (promptTokenCount ?? totalTokenCount).
  * - The most recent chat compression checkpoint's newTokenCount.
  */
 export function getResumePromptTokenCount(
@@ -1291,7 +1291,7 @@ export function getResumePromptTokenCount(
 
     if (record.type === 'assistant') {
       const usage = record.usageMetadata;
-      const candidate = usage?.totalTokenCount ?? usage?.promptTokenCount;
+      const candidate = usage?.promptTokenCount ?? usage?.totalTokenCount;
       if (candidate) {
         return candidate;
       }

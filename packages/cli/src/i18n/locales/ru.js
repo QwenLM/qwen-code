@@ -640,6 +640,9 @@ export default {
   'Before conversation compaction': 'Перед сжатием разговора',
   'When a session is ending': 'При завершении сессии',
   'When a permission dialog is displayed': 'При отображении диалога разрешений',
+  'When a new todo item is created': 'При создании новой задачи',
+  'When a todo item is marked as completed':
+    'При отметке задачи как выполненной',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'Ввод в команду — это JSON аргументов вызова инструмента.',
@@ -663,6 +666,10 @@ export default {
     'Ввод в команду — это JSON с деталями сжатия.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Ввод в команду — это JSON с tool_name, tool_input и tool_use_id. Вывод — JSON с hookSpecificOutput, содержащим решение о разрешении или отказе.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Ввод в команду — это JSON с todo_id, todo_content, todo_status, all_todos и phase. В validation вывод — JSON с decision (allow/block/deny) и reason. В postWrite block/deny игнорируется.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Ввод в команду — это JSON с todo_id, todo_content, previous_status, all_todos и phase. В validation вывод — JSON с decision (allow/block/deny) и reason. В postWrite block/deny игнорируется.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr не отображаются',
   'show stderr to model and continue conversation':
@@ -689,6 +696,12 @@ export default {
     'показать stderr только пользователю, но продолжить сжатие',
   'use hook decision if provided':
     'использовать решение хука, если предоставлено',
+  'allow todo creation': 'разрешить создание задачи',
+  'block todo creation and show reason to model':
+    'заблокировать создание задачи и показать причину модели',
+  'allow todo completion': 'разрешить выполнение задачи',
+  'block todo completion and show reason to model':
+    'заблокировать выполнение задачи и показать причину модели',
   // Hooks - Messages
   'Config not loaded.': 'Конфигурация не загружена.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -1703,7 +1716,6 @@ export default {
   Tools: 'Инструменты',
   prompts: 'Подсказки',
   tools: 'инструменты',
-  'Manage dynamic translation cache': 'Управлять кешем динамического перевода',
   'Open MCP management dialog': 'Открыть диалог управления MCP',
   'Manage MCP servers': 'Управление MCP servers',
   'Manage extension settings': 'Управление настройками расширения',
@@ -1740,24 +1752,6 @@ export default {
   'update available': 'доступно обновление',
   'checking...': 'проверка...',
   'not updatable': 'обновление недоступно',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Перевести загруженные описания динамических слеш-команд для текущего языка интерфейса',
-  'Clear cached translations for the current UI language':
-    'Очистить кешированные переводы для текущего языка интерфейса',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Управлять AI-переводом описаний динамических слеш-команд',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Включить AI-перевод описаний динамических слеш-команд',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Отключить AI-перевод описаний динамических слеш-команд',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Показать статус AI-перевода описаний динамических слеш-команд',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'AI-перевод описаний динамических слеш-команд {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'AI-перевод описаний динамических слеш-команд теперь включен.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'AI-перевод описаний динамических слеш-команд теперь отключен.',
   'Ask a quick side question without affecting the main conversation':
     'Задать быстрый побочный вопрос, не затрагивая основной разговор',
   'Manage Arena sessions': 'Управлять сессиями Arena',

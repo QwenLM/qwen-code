@@ -19,6 +19,7 @@ import type { ContentGenerator } from './contentGenerator.js';
 import { AuthType, createContentGenerator } from './contentGenerator.js';
 import type { ResolvedModelConfig } from '../models/types.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
+import { resolveModelId, type ResolvedModelId } from '../utils/modelId.js';
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
@@ -41,6 +42,7 @@ const debugLogger = createDebugLogger('BASE_LLM_CLIENT');
 export interface ResolvedGeneratorForModel {
   contentGenerator: ContentGenerator;
   retryAuthType: string | undefined;
+  model: string;
 }
 
 /**
@@ -173,14 +175,17 @@ export class BaseLlmClient {
       },
     ];
 
-    const { contentGenerator, retryAuthType } =
-      await this.resolveForModel(model);
+    const {
+      contentGenerator,
+      retryAuthType,
+      model: requestModel,
+    } = await this.resolveForModel(model);
 
     try {
       const apiCall = () =>
         contentGenerator.generateContent(
           {
-            model,
+            model: requestModel,
             config: {
               ...requestConfig,
               tools,
@@ -265,14 +270,17 @@ export class BaseLlmClient {
       ...(systemInstruction && { systemInstruction }),
     };
 
-    const { contentGenerator, retryAuthType } =
-      await this.resolveForModel(model);
+    const {
+      contentGenerator,
+      retryAuthType,
+      model: requestModel,
+    } = await this.resolveForModel(model);
 
     try {
       const apiCall = () =>
         contentGenerator.generateContent(
           {
-            model,
+            model: requestModel,
             config: requestConfig,
             contents,
           },
@@ -363,23 +371,35 @@ export class BaseLlmClient {
    * or generator creation fails (e.g. tests without full auth setup).
    */
   async resolveForModel(model: string): Promise<ResolvedGeneratorForModel> {
+    const selector = this.resolveModelSelector(model);
+    const requestModel = selector?.modelId ?? this.config.getModel() ?? model;
     const mainModel = this.config.getModel() ?? model;
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
 
-    if (model === mainModel) {
+    if (
+      requestModel === mainModel &&
+      (!selector?.authType || selector.authType === mainAuthType)
+    ) {
       return {
         contentGenerator: this.contentGenerator,
         retryAuthType: mainAuthType,
+        model: requestModel,
       };
     }
 
-    const contentGenerator = await this.createContentGeneratorForModel(model);
+    const contentGenerator = await this.createContentGeneratorForModel(
+      model,
+      selector,
+    );
+    const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
     const retryAuthType =
-      this.resolveModelAcrossAuthTypes(model)?.authType ??
-      mainAuthType ??
-      AuthType.USE_OPENAI;
+      resolvedModel?.authType ?? mainAuthType ?? AuthType.USE_OPENAI;
 
-    return { contentGenerator, retryAuthType };
+    return {
+      contentGenerator,
+      retryAuthType,
+      model: resolvedModel?.id ?? requestModel,
+    };
   }
 
   /**
@@ -397,9 +417,16 @@ export class BaseLlmClient {
    */
   private resolveModelAcrossAuthTypes(
     model: string,
+    selector: ResolvedModelId | undefined,
   ): ResolvedModelConfig | undefined {
     const modelsConfig = this.config.getModelsConfig?.();
     if (!modelsConfig) return undefined;
+    if (!selector) return undefined;
+    const modelId = selector.modelId;
+
+    if (selector.authType) {
+      return modelsConfig.getResolvedModel(selector.authType, modelId);
+    }
 
     const allAuthTypes: AuthType[] = [
       AuthType.QWEN_OAUTH,
@@ -411,13 +438,13 @@ export class BaseLlmClient {
 
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
     if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, model);
+      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
       if (resolved) return resolved;
     }
 
     for (const authType of allAuthTypes) {
       if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, model);
+      const resolved = modelsConfig.getResolvedModel(authType, modelId);
       if (resolved) return resolved;
     }
 
@@ -426,13 +453,17 @@ export class BaseLlmClient {
 
   private async createContentGeneratorForModel(
     model: string,
+    selector: ResolvedModelId | undefined,
   ): Promise<ContentGenerator> {
-    const cached = this.perModelGeneratorCache.get(model);
+    const cacheKey = selector
+      ? `${selector.authType ?? ''}:${selector.modelId}`
+      : model;
+    const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
 
     const generatorPromise = (async () => {
       try {
-        const resolvedModel = this.resolveModelAcrossAuthTypes(model);
+        const resolvedModel = this.resolveModelAcrossAuthTypes(model, selector);
 
         if (!resolvedModel) {
           debugLogger.warn(
@@ -441,9 +472,10 @@ export class BaseLlmClient {
           return this.contentGenerator;
         }
 
+        const targetModel = resolvedModel.id ?? selector?.modelId ?? model;
         const targetConfig = buildAgentContentGeneratorConfig(
           this.config,
-          model,
+          targetModel,
           {
             authType: resolvedModel.authType,
             apiKey: resolvedModel.envKey
@@ -459,12 +491,22 @@ export class BaseLlmClient {
           `Failed to create content generator for model "${model}", falling back to main generator.`,
           err instanceof Error ? err.message : String(err),
         );
-        this.perModelGeneratorCache.delete(model);
+        this.perModelGeneratorCache.delete(cacheKey);
         return this.contentGenerator;
       }
     })();
 
-    this.perModelGeneratorCache.set(model, generatorPromise);
+    this.perModelGeneratorCache.set(cacheKey, generatorPromise);
     return generatorPromise;
+  }
+
+  private resolveModelSelector(model: string): ResolvedModelId | undefined {
+    return resolveModelId(model, {
+      currentModel: this.config.getModel(),
+      currentAuthType: this.config.getContentGeneratorConfig()?.authType,
+      fastModel:
+        this.config.getFastModelForSideQuery?.() ??
+        this.config.getFastModel?.(),
+    });
   }
 }

@@ -38,9 +38,17 @@ import {
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
   buildChildMessage,
+  buildWorktreeNotice,
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
+import {
+  generateAgentWorktreeSlug,
+  GitWorktreeService,
+  writeWorktreeSessionMarker,
+} from '../../services/gitWorktreeService.js';
+import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
+import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
   getCurrentAgentId,
   runWithAgentContext,
@@ -145,6 +153,15 @@ export interface AgentParams {
   prompt: string;
   subagent_type?: string;
   run_in_background?: boolean;
+  /**
+   * When set to `'worktree'`, spins up a temporary git worktree under
+   * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
+   * confine all file operations to that path. After the agent completes:
+   * - if no changes were made, the worktree is auto-removed;
+   * - if changes were made, the worktree is preserved and its path/branch
+   *   are returned in the agent's result.
+   */
+  isolation?: 'worktree';
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -345,6 +362,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description:
             'Set to true to run this agent in the background. You will be notified when it completes.',
         },
+        isolation: {
+          type: 'string',
+          enum: ['worktree'],
+          description:
+            "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
+        },
       },
       required: ['description', 'prompt'],
       additionalProperties: false,
@@ -434,6 +457,7 @@ Usage notes:
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 - You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
+- You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 
 Example usage:
 
@@ -526,6 +550,19 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
       if (!subagentExists) {
         const availableNames = this.availableSubagents.map((s) => s.name);
         return `Subagent "${params.subagent_type}" not found. Available subagents: ${availableNames.join(', ')}`;
+      }
+    }
+
+    if (params.isolation !== undefined) {
+      if (params.isolation !== 'worktree') {
+        return 'Parameter "isolation" must be "worktree" when set.';
+      }
+      // Forks (no subagent_type) reuse the parent's full conversation
+      // context — putting them in a separate worktree would split
+      // intent from working tree and confuse path resolution. Require
+      // an explicit subagent_type when requesting isolation.
+      if (!params.subagent_type) {
+        return 'Parameter "isolation" requires "subagent_type" to be set.';
       }
     }
 
@@ -1079,6 +1116,137 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // ── Isolation state hoisted to the outermost scope ────────────
+    // The outer try/catch in this method is the last line of defence
+    // against pre-execution failures (e.g. createApprovalModeOverride
+    // throws). If `worktreeIsolation` and `cleanupWorktreeIsolation`
+    // lived inside the try, the catch would have no way to reach them,
+    // and a provisioned worktree would leak until the 30-day startup
+    // sweep — review #4073 round 2.
+    let worktreeIsolation: {
+      slug: string;
+      path: string;
+      branch: string;
+      repoRoot: string;
+    } | null = null;
+
+    const cleanupWorktreeIsolation = async (): Promise<{
+      preservedPath?: string;
+      preservedBranch?: string;
+    }> => {
+      if (!worktreeIsolation) return {};
+      const isolation = worktreeIsolation;
+      // Null the closure var BEFORE doing any work so any concurrent
+      // re-entry (e.g. the foreground-finally fallback firing in
+      // parallel with the outer catch on a thrown rejection) sees no
+      // isolation and bails. Without this, the second caller would
+      // operate on a worktree directory the first caller has already
+      // removed and `hasWorktreeChanges()` would fail-closed and
+      // produce a bogus `[worktree preserved: <missing path>]` suffix.
+      worktreeIsolation = null;
+      const wtService = new GitWorktreeService(isolation.repoRoot);
+      // The two checks have no data dependency on each other and each
+      // spawns its own `git` invocation. Run them concurrently so
+      // cleanup wall-clock on the common case is the slower of the two
+      // instead of their sum.
+      const [hasChanges, hasUnmerged] = await Promise.all([
+        wtService.hasWorktreeChanges(isolation.path).catch((error) => {
+          debugLogger.warn(
+            `[Agent] hasWorktreeChanges failed for ${isolation.path}: ${error}`,
+          );
+          // Fail-closed: assume changes exist so we preserve.
+          return true;
+        }),
+        wtService.hasUnmergedWorktreeCommits(isolation.slug).catch((error) => {
+          debugLogger.warn(
+            `[Agent] hasUnmergedWorktreeCommits failed for ${isolation.slug}: ${error}`,
+          );
+          // Fail-closed: assume uncovered work exists so we preserve.
+          return true;
+        }),
+      ]);
+      if (hasChanges || hasUnmerged) {
+        debugLogger.info(
+          `[Agent] Preserving isolation worktree ${isolation.path} ` +
+            `(branch ${isolation.branch}, hasChanges=${hasChanges}, hasUnmerged=${hasUnmerged})`,
+        );
+        return {
+          preservedPath: isolation.path,
+          preservedBranch: isolation.branch,
+        };
+      }
+      try {
+        const result = await wtService.removeUserWorktree(isolation.slug, {
+          deleteBranch: true,
+        });
+        if (!result.success) {
+          // Removal itself failed (could not delete the directory). The
+          // worktree is still on disk — do NOT silently drop it from
+          // the user's view. Surface as preserved so they can recover.
+          debugLogger.warn(
+            `[Agent] Failed to remove ephemeral worktree ${isolation.path}: ${result.error}`,
+          );
+          return {
+            preservedPath: isolation.path,
+            preservedBranch: isolation.branch,
+          };
+        }
+        if (result.branchPreserved) {
+          // Status check said "clean" and the unmerged check said "fully
+          // covered", but the safe-delete still refused — most likely a
+          // race where commits landed between the checks and the delete.
+          // Be loud rather than silently force-deleting.
+          //
+          // Critical: do NOT return `preservedPath` here. The worktree
+          // *directory* is already gone (removeUserWorktree removes the
+          // dir before attempting `git branch -d`). The branch alone is
+          // what's preserved. Reporting the old path as preserved would
+          // tell the parent model / user the worktree is recoverable at
+          // a location that no longer exists.
+          debugLogger.warn(
+            `[Agent] Removed worktree directory ${isolation.path} but kept ` +
+              `branch ${isolation.branch} (unmerged commits at delete time)`,
+          );
+          return {
+            preservedBranch: isolation.branch,
+          };
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `[Agent] Failed to remove ephemeral worktree ${isolation.path}: ${error}`,
+        );
+        return {
+          preservedPath: isolation.path,
+          preservedBranch: isolation.branch,
+        };
+      }
+      return {};
+    };
+
+    const formatWorktreeSuffix = (info: {
+      preservedPath?: string;
+      preservedBranch?: string;
+    }): string => {
+      if (info.preservedPath) {
+        return (
+          `\n\n[worktree preserved: ${info.preservedPath} ` +
+          `(branch ${info.preservedBranch ?? 'unknown'})]`
+        );
+      }
+      if (info.preservedBranch) {
+        // Worktree directory was removed but the branch was kept (race:
+        // unmerged commits landed after the pre-checks passed). Tell
+        // the user which branch holds the work so they can recover via
+        // `git worktree add <new-path> <branch>` or by force-deleting
+        // it if they really meant to discard.
+        return (
+          `\n\n[worktree directory removed; branch ${info.preservedBranch} ` +
+          `preserved — recover with \`git worktree add <path> ${info.preservedBranch}\`]`
+        );
+      }
+      return '';
+    };
+
     try {
       const isFork = !this.params.subagent_type;
       let subagentConfig: SubagentConfig;
@@ -1138,6 +1306,143 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
+      // ── Optional worktree isolation (Phase 1: provision) ──────────
+      // Provision the worktree BEFORE creating the agent Config so the
+      // override below can rebind `getTargetDir()` to the worktree path
+      // before the subagent's tools are registered. Without this,
+      // tools that resolve relative paths via `config.getTargetDir()`
+      // (Shell default cwd, Edit/Write/Read workspace checks, Glob /
+      // Grep / Ls roots) would silently operate on the parent project
+      // tree and the cleanup helper would then see a "clean" worktree
+      // and remove it — destroying any evidence of the leak.
+      const failWorktreeProvisioning = (reason: string): ToolResult => {
+        debugLogger.warn(`[Agent] worktree isolation failed: ${reason}`);
+        this.currentDisplay = {
+          ...this.currentDisplay!,
+          status: 'failed' as const,
+          terminateReason: reason,
+        };
+        return {
+          llmContent: reason,
+          returnDisplay: this.currentDisplay,
+        };
+      };
+
+      if (this.params.isolation === 'worktree') {
+        const cwd = this.config.getTargetDir();
+        // Refuse nested isolation. If the parent itself is already
+        // running inside a worktree (cwd contains `.qwen/worktrees/`),
+        // creating a sibling isolation worktree at the repo root
+        // would leave the model's mental map pointing at the outer
+        // worktree while the override aimed it at the inner one.
+        // Same guard `enter_worktree` uses.
+        if (/\.qwen[\\/]worktrees[\\/]/.test(cwd)) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent is already inside ` +
+              `a worktree (${cwd}). Nested isolation worktrees are not ` +
+              `supported — the model's inherited paths would still reference ` +
+              `the outer worktree.`,
+          );
+        }
+        const probe = new GitWorktreeService(cwd);
+        const gitCheck = await probe.checkGitAvailable();
+        if (!gitCheck.available) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: ${gitCheck.error ?? 'git is not available'}`,
+          );
+        }
+        if (!(await probe.isGitRepository())) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: ${cwd} is not a git repository.`,
+          );
+        }
+        // Anchor the worktree at the repo top-level so monorepo subdir
+        // launches still gather worktrees under `<repoRoot>/.qwen/...`,
+        // which is also the path the startup sweep scans.
+        const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+        const wtService =
+          projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+
+        // Refuse isolation when the parent has uncommitted changes.
+        // `git worktree add -b <branch> <path> <base>` checks out the
+        // base branch's tip — uncommitted edits in the parent's
+        // working tree do NOT propagate to the new worktree. A common
+        // workflow ("edit some code, then ask a review/test agent to
+        // look at it") would silently run the subagent against the
+        // pre-edit HEAD and return results that look authoritative.
+        // Refusing forces the user to commit / stash first; the
+        // alternative (overlaying dirty state à la Arena) is
+        // out of scope for Phase B.
+        let parentDirty = false;
+        try {
+          parentDirty = await wtService.hasWorktreeChanges(projectRoot);
+        } catch (error) {
+          debugLogger.warn(
+            `[Agent] hasWorktreeChanges failed at ${projectRoot}: ${error}`,
+          );
+          // Fail-closed: assume dirty so we refuse rather than
+          // silently launch a subagent against a possibly-stale tree.
+          parentDirty = true;
+        }
+        if (parentDirty) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent working tree at ` +
+              `${projectRoot} has uncommitted changes that would not ` +
+              `propagate into the isolated worktree. The subagent would ` +
+              `see the prior HEAD instead of your current state. Commit ` +
+              `or stash the changes, then call the agent again.`,
+          );
+        }
+
+        const slug = generateAgentWorktreeSlug();
+        // Anchor the isolation worktree to the parent's currently
+        // checked-out branch. Without an explicit base,
+        // `createUserWorktree` falls back to whichever branch the main
+        // working tree happens to be on — which silently becomes `main`
+        // when the user invoked the agent from a feature branch, from
+        // inside another user worktree, or from a detached HEAD set up
+        // by the test harness. The subagent would then see the wrong
+        // code and produce diffs against an unrelated baseline.
+        let parentBranch: string | undefined;
+        try {
+          parentBranch = await wtService.getCurrentBranch();
+        } catch (error) {
+          // Best-effort: leave undefined so createUserWorktree's own
+          // fallback runs. A debug log lets operators see when we hit
+          // the fallback path.
+          debugLogger.warn(
+            `[Agent] getCurrentBranch failed at ${projectRoot}: ${error}`,
+          );
+        }
+        const created = await wtService.createUserWorktree(slug, parentBranch);
+        if (!created.success || !created.worktree) {
+          return failWorktreeProvisioning(
+            `Failed to create isolation worktree: ${created.error ?? 'unknown error'}`,
+          );
+        }
+        worktreeIsolation = {
+          slug,
+          path: created.worktree.path,
+          branch: created.worktree.branch,
+          repoRoot: projectRoot,
+        };
+
+        // Tag the isolation worktree with the parent session id for
+        // consistency with `enter_worktree` (ownership-aware
+        // `exit_worktree` refuses to drop worktrees from other
+        // sessions). Best-effort.
+        try {
+          await writeWorktreeSessionMarker(
+            created.worktree.path,
+            this.config.getSessionId(),
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `[Agent] failed to write session marker at ${created.worktree.path}: ${error}`,
+          );
+        }
+      }
+
       // Resolve the subagent's permission mode before creating it
       const resolvedMode = resolveSubagentApprovalMode(
         this.config.getApprovalMode(),
@@ -1166,6 +1471,37 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         resolvedApprovalMode,
       );
 
+      // ── Optional worktree isolation (Phase 2: rebind cwd) ─────────
+      // Rebind every "where am I?" surface on the agent's Config
+      // override to the worktree path so the subagent's tools cannot
+      // leak into the parent project tree.
+      //
+      // We override at two layers because Config getters mix direct
+      // field reads and getter calls. Shadowing only the methods would
+      // leave call sites like `this.targetDir` (e.g. inside
+      // `getProjectRoot`, `getFileService`) resolving via the
+      // prototype chain to the parent's `targetDir` — JS does not
+      // promote a getter assignment to a field shadow. Setting both
+      // `ov.targetDir` (own-property field) AND `ov.getTargetDir`
+      // (own-property method) covers both lookup paths.
+      if (worktreeIsolation) {
+        const wtPath = worktreeIsolation.path;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ov = agentConfig as any;
+        ov.targetDir = wtPath;
+        ov.cwd = wtPath;
+        ov.getTargetDir = () => wtPath;
+        ov.getCwd = () => wtPath;
+        ov.getWorkingDir = () => wtPath;
+        ov.getProjectRoot = () => wtPath;
+        const wtFileService = new FileDiscoveryService(wtPath);
+        ov.fileDiscoveryService = wtFileService;
+        ov.getFileService = () => wtFileService;
+        const wtWorkspace = new WorkspaceContext(wtPath);
+        ov.workspaceContext = wtWorkspace;
+        ov.getWorkspaceContext = () => wtWorkspace;
+      }
+
       // Create the subagent. Fork bypasses SubagentManager because its
       // runtime configs are synthesized from the parent's cache-safe params.
       let subagent: AgentHeadless;
@@ -1182,6 +1518,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           { eventEmitter: this.eventEmitter },
         );
         taskPrompt = this.params.prompt;
+      }
+
+      // ── Optional worktree isolation (Phase 3: notice to prompt) ───
+      // Prepend a notice to the task prompt telling the subagent it is
+      // operating in an isolated worktree. The mechanical isolation
+      // above guarantees correctness; the notice reduces user-visible
+      // surprises when the model summarises file paths.
+      //
+      // "parent cwd" is the parent agent's actual `getTargetDir()` —
+      // the directory the inherited conversation context speaks from.
+      // Using the repo top-level here would mistranslate paths the
+      // parent referenced as `./packages/core/foo` when the parent
+      // was running from `packages/core/`. Round-5 review caught this:
+      // the model's mental map is the parent's cwd, not the repo root.
+      if (worktreeIsolation) {
+        const notice = buildWorktreeNotice(
+          this.config.getTargetDir(),
+          worktreeIsolation.path,
+        );
+        taskPrompt = `${notice}\n\n${taskPrompt}`;
       }
 
       const contextState = new ContextState();
@@ -1432,7 +1788,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // the parent model (and the UI) don't treat incomplete runs as
             // completed.
             const terminateMode = bgSubagent.getTerminateMode();
-            const finalText = bgSubagent.getFinalText();
+            const wtSuffix = formatWorktreeSuffix(
+              await cleanupWorktreeIsolation(),
+            );
+            const finalText = bgSubagent.getFinalText() + wtSuffix;
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
@@ -1466,9 +1825,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               });
             }
           } catch (error) {
-            const errorMsg =
+            const baseErrorMsg =
               error instanceof Error ? error.message : String(error);
-            debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
+            debugLogger.error(
+              `[Agent] Background agent failed: ${baseErrorMsg}`,
+            );
+
+            // Preserve or remove the isolation worktree, AND surface the
+            // preserved path/branch in the registry message. Without
+            // this, an agent that crashed mid-edit would have its
+            // worktree preserved on disk but the user would never see
+            // its location in the failure notification — they would
+            // assume nothing was left behind.
+            let wtSuffix = '';
+            try {
+              wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
+            } catch {
+              // Helper logs its own failures; don't mask the original
+              // crash message.
+            }
+            const errorMsg = baseErrorMsg + wtSuffix;
 
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
@@ -1673,9 +2049,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         await runFramed();
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
+        const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {
-            llmContent: finalText || 'Subagent execution failed.',
+            llmContent: (finalText || 'Subagent execution failed.') + wtSuffix,
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -1693,17 +2070,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           return {
             llmContent: [
               {
-                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}`,
+                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}${wtSuffix}`,
               },
             ],
             returnDisplay: this.currentDisplay!,
           };
         }
         return {
-          llmContent: [{ text: finalText }],
+          llmContent: [{ text: finalText + wtSuffix }],
           returnDisplay: this.currentDisplay!,
         };
       } finally {
+        // Mirror the background path: ensure the isolation worktree is
+        // reaped on every termination shape (success, failure, cancel,
+        // and any uncaught throw inside runFramed). The helper itself
+        // nulls `worktreeIsolation` on its first call (see the comment
+        // at its definition), so this fallback fires once at most even
+        // when the success path already ran it.
+        try {
+          await cleanupWorktreeIsolation();
+        } catch {
+          // Helper logs its own failures; never mask the original
+          // error path with cleanup noise.
+        }
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
         signal?.removeEventListener('abort', onParentAbort);
@@ -1730,6 +2119,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);
 
+      // Final fallback for the isolation worktree: if the failure
+      // happened between provisioning and the inner try (e.g. inside
+      // `createApprovalModeOverride`, the agent constructor, or
+      // anywhere else upstream of the foreground/background try blocks
+      // that own cleanup), the worktree is still on disk. Reap or
+      // preserve it here, and surface the preserved path/branch in the
+      // failure message so the user can recover it.
+      let wtSuffix = '';
+      if (worktreeIsolation) {
+        try {
+          wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
+        } catch (cleanupError) {
+          debugLogger.warn(
+            `[AgentTool] Worktree cleanup after error failed: ${cleanupError}`,
+          );
+        }
+      }
+
       const errorDisplay: AgentResultDisplay = {
         ...this.currentDisplay!,
         status: 'failed',
@@ -1737,7 +2144,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
 
       return {
-        llmContent: `Failed to run subagent: ${errorMessage}`,
+        llmContent: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
         returnDisplay: errorDisplay,
       };
     }

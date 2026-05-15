@@ -403,12 +403,41 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let terminalStatusAttempted = false;
+    let spanEnded = false;
 
     // Helper to run code within the span context during iteration.
     // This ensures debug log lines emitted during stream processing
     // see the stream span as the active span.
     const runInSpan = <T>(fn: () => T): T =>
       spanContext ? context.with(spanContext, fn) : fn();
+
+    // Idle timeout: if no chunks arrive for this duration the consumer has
+    // likely abandoned the generator without calling .return(). Close the
+    // span so it doesn't leak forever.  The timer resets on every chunk,
+    // so legitimately long-running streams are never affected.
+    const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000; // 5 minutes
+    let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
+    const resetSpanTimeout = span
+      ? () => {
+          if (spanEnded) return;
+          if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
+          spanEndTimeout = setTimeout(() => {
+            try {
+              safeSetStatus(span, {
+                code: SpanStatusCode.ERROR,
+                message: 'Stream span timed out (idle)',
+              });
+              spanEnded = true;
+              span.setAttribute('stream.timed_out', true);
+              span.end();
+            } catch {
+              // OTel errors must not interrupt the consumer.
+            }
+          }, STREAM_IDLE_TIMEOUT_MS);
+          spanEndTimeout.unref();
+        }
+      : undefined;
+    resetSpanTimeout?.();
 
     try {
       for await (const response of stream) {
@@ -424,7 +453,12 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
+        resetSpanTimeout?.();
         yield response;
+      }
+      if (spanEndTimeout !== undefined) {
+        clearTimeout(spanEndTimeout);
+        spanEndTimeout = undefined;
       }
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
@@ -483,15 +517,20 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     } finally {
-      if (!terminalStatusAttempted) {
-        if (span) {
-          safeSetStatus(span, { code: SpanStatusCode.OK });
-        }
+      if (spanEndTimeout !== undefined) {
+        clearTimeout(spanEndTimeout);
       }
-      try {
-        span?.end();
-      } catch {
-        // OTel errors must not mask the original API error
+      if (!spanEnded) {
+        if (!terminalStatusAttempted) {
+          if (span) {
+            safeSetStatus(span, { code: SpanStatusCode.OK });
+          }
+        }
+        try {
+          span?.end();
+        } catch {
+          // OTel errors must not mask the original API error
+        }
       }
     }
   }

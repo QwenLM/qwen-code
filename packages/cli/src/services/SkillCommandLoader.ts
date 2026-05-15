@@ -80,7 +80,6 @@ export class SkillCommandLoader implements ICommandLoader {
           name: skill.name,
           description: skill.description,
           modelDescription: skill.description,
-          localizeDescription: true,
           kind: CommandKind.SKILL,
           source: (isExtension
             ? 'plugin-command'

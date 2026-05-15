@@ -1048,6 +1048,32 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContent', () => {
+    it('redacts proxy credentials from request-time SDK errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockRejectedValue(
+        new Error('connect ECONNREFUSED token@proxy.local:8080'),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await expect(
+        generator.generateContent({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters),
+      ).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+    });
+
     it('builds request with config sampling params (config overrides request) and thinking budget', async () => {
       const { AnthropicContentConverter } = await importConverter();
       const { AnthropicContentGenerator } = await importGenerator();
@@ -2112,6 +2138,68 @@ describe('AnthropicContentGenerator', () => {
   });
 
   describe('generateContentStream', () => {
+    it('redacts proxy credentials from stream creation errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockRejectedValue(
+        new Error('407 via http://user:pass@proxy.local'),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      await expect(
+        generator.generateContentStream({
+          model: 'models/ignored',
+          contents: 'Hello',
+        } as unknown as GenerateContentParameters),
+      ).rejects.toThrow('407 via http://<redacted>@proxy.local');
+    });
+
+    it('redacts proxy credentials from stream iteration errors', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        [Symbol.asyncIterator]: () => ({
+          next: vi
+            .fn()
+            .mockRejectedValue(
+              new Error('connect ECONNREFUSED token@proxy.local:8080'),
+            ),
+        }),
+      });
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      await expect(async () => {
+        for await (const _ of stream) {
+          // consume stream
+        }
+      }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
+    });
+
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       anthropicState.createImpl.mockResolvedValue(
@@ -2181,8 +2269,8 @@ describe('AnthropicContentGenerator', () => {
             delta: { stop_reason: 'end_turn' },
             usage: {
               output_tokens: 5,
-              input_tokens: 7,
-              cache_read_input_tokens: 2,
+              input_tokens: 2,
+              cache_read_input_tokens: 7,
             },
           };
           yield { type: 'message_stop' };
@@ -2243,10 +2331,87 @@ describe('AnthropicContentGenerator', () => {
       const last = chunks[chunks.length - 1]!;
       expect(last.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(last.usageMetadata).toEqual({
-        cachedContentTokenCount: 2,
-        promptTokenCount: 9, // cached(2) + input(7)
+        cachedContentTokenCount: 7,
+        promptTokenCount: 9, // input(2) + cached(7) — Anthropic-true (input < cache_read)
         candidatesTokenCount: 5,
         totalTokenCount: 14,
+      });
+    });
+
+    it('accumulates cache_creation_input_tokens through the streaming pipeline', async () => {
+      // Real Anthropic mid-conversation: `message_start` reports the warm
+      // prefix bucket (cache_read), the new cache write bucket
+      // (cache_creation), and the fresh tail (input). The streaming
+      // accumulator must hold onto cache_creation alongside the other
+      // buckets so the final chunk's usageMetadata reflects the full
+      // prompt size — otherwise the cache_creation portion is silently
+      // dropped from the displayed total and the Footer under-reports by
+      // exactly that many tokens.
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'msg-1',
+              model: 'claude-test',
+              usage: {
+                input_tokens: 2_500,
+                cache_read_input_tokens: 32_088,
+                cache_creation_input_tokens: 8_700,
+              },
+            },
+          };
+          yield {
+            type: 'content_block_start',
+            index: 0,
+            content_block: { type: 'text' },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'ok' },
+          };
+          yield { type: 'content_block_stop', index: 0 };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 400 },
+          };
+          yield { type: 'message_stop' };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) {
+        chunks.push(chunk);
+      }
+
+      const last = chunks[chunks.length - 1]!;
+      expect(last.usageMetadata).toEqual({
+        // Sum of all three prompt buckets: 2,500 + 32,088 + 8,700 = 43,288.
+        // cachedContentTokenCount reports cache_read only.
+        promptTokenCount: 43_288,
+        candidatesTokenCount: 400,
+        totalTokenCount: 43_688,
+        cachedContentTokenCount: 32_088,
       });
     });
   });

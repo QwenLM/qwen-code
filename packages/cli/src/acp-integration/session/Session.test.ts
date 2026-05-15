@@ -455,7 +455,6 @@ describe('Session', () => {
         mockConfig,
         expect.any(AbortSignal),
         'acp',
-        mockSettings,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
@@ -480,7 +479,7 @@ describe('Session', () => {
       });
     });
 
-    it('forwards localized command descriptions from getAvailableCommands()', async () => {
+    it('forwards command descriptions from getAvailableCommands()', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
           name: 'review',
@@ -499,7 +498,6 @@ describe('Session', () => {
         mockConfig,
         expect.any(AbortSignal),
         'acp',
-        mockSettings,
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',

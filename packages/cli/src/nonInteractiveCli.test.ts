@@ -26,11 +26,7 @@ import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
 import type { LoadedSettings } from './config/settings.js';
-import {
-  CommandKind,
-  type ExecutionMode,
-  type SlashCommand,
-} from './ui/commands/types.js';
+import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { _resetCleanupFunctionsForTest } from './utils/cleanup.js';
 import {
@@ -66,11 +62,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 const mockGetCommands = vi.hoisted(() => vi.fn());
 const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
-const mockCommandServiceFromCommands = vi.hoisted(() => vi.fn());
 vi.mock('./services/CommandService.js', () => ({
   CommandService: {
     create: mockCommandServiceCreate,
-    fromCommands: mockCommandServiceFromCommands,
   },
 }));
 
@@ -115,17 +109,6 @@ describe('runNonInteractive', () => {
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
-    );
-    mockCommandServiceFromCommands.mockImplementation(
-      (commands: readonly SlashCommand[]) => ({
-        getCommands: () => commands,
-        getCommandsForMode: (mode: ExecutionMode) =>
-          filterCommandsForMode(commands, mode),
-        getModelInvocableCommands: () =>
-          commands.filter(
-            (command) => !command.hidden && command.modelInvocable === true,
-          ),
-      }),
     );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,

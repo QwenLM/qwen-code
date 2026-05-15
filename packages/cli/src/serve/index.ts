@@ -35,3 +35,4 @@ export {
   type BridgeEvent,
   type SubscribeOptions,
 } from './eventBus.js';
+export { createInMemoryChannel } from './inMemoryChannel.js';
