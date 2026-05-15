@@ -63,6 +63,7 @@ import {
   evaluateAutoMode,
   recordAllow,
   recordBlock,
+  recordFallbackApprove,
   recordUnavailable,
   shouldFallback,
   shouldRunAutoModeForCall,
@@ -1898,13 +1899,20 @@ export class Session implements SessionContext {
         );
       }
 
+      // Explicit allow (user rule matched, or tool's L3 default is 'allow')
+      // is authoritative — AUTO classifier must not be allowed to override
+      // it. Parallels coreToolScheduler.ts:1318-1326; without this, an ACP
+      // session in AUTO mode could see a user-written `Bash(git push *)`
+      // allow rule reach the classifier and get blocked by a conservative
+      // Stage-1 verdict.
+      let autoModeAllowed = finalPermission === 'allow';
+
       // ── L5: AUTO mode three-layer filter (duplicated from
       // coreToolScheduler.ts; ACP routes through this Session path).
       // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
       // allowed skips requestPermission; fallback drops through to the
       // existing manual-approval flow below.
-      let autoModeAllowed = false;
-      if (shouldRunAutoModeForCall(approvalMode, fc.name)) {
+      if (!autoModeAllowed && shouldRunAutoModeForCall(approvalMode, fc.name)) {
         const denialState = this.config.getAutoModeDenialState();
         const messages =
           this.config.getGeminiClient?.()?.getHistory(false) ?? [];
@@ -2064,6 +2072,27 @@ export class Session implements SessionContext {
               : z
                   .nativeEnum(ToolConfirmationOutcome)
                   .parse(output.outcome.optionId);
+
+          // Reset the AUTO-mode fallback streak when the user manually
+          // approves a prompt that was raised because denialTracking forced
+          // fallback. Without this, a single block-streak permanently
+          // downgrades the rest of the session to manual approval until the
+          // mode is toggled. Parallels coreToolScheduler.ts:1705-1717.
+          // Cancel / abort do NOT reset — treating rejection as a signal
+          // the classifier was right to block.
+          if (approvalMode === ApprovalMode.AUTO) {
+            const isApproveOutcome =
+              outcome === ToolConfirmationOutcome.ProceedOnce ||
+              outcome === ToolConfirmationOutcome.ProceedAlways ||
+              outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+              outcome === ToolConfirmationOutcome.ProceedAlwaysUser ||
+              outcome === ToolConfirmationOutcome.ModifyWithEditor;
+            if (isApproveOutcome) {
+              this.config.setAutoModeDenialState(
+                recordFallbackApprove(this.config.getAutoModeDenialState()),
+              );
+            }
+          }
 
           await confirmationDetails.onConfirm(outcome, {
             answers: output.answers,
