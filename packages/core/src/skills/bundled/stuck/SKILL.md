@@ -22,7 +22,7 @@ Signs of a stuck session:
 - **Process state `T` (stopped)** — user probably hit Ctrl+Z by accident.
 - **Process state `Z` (zombie)** — parent isn't reaping.
 - **Very high RSS (>=4GB)** — possible memory leak making the session sluggish.
-- **Stuck child process** — a hung `git`, `node`, or shell subprocess can freeze the parent. Check `pgrep -lP <pid>` for each session.
+- **Stuck child process** — a hung `git`, `node`, or shell subprocess can freeze the parent. Check `pgrep -P <pid>` (then `ps -p` for state — see step 3) for each session.
 
 ## Argument validation
 
@@ -57,7 +57,7 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 
    Note: full command lines may contain credentials passed as CLI args (e.g., `--openai-api-key=sk-…`). Redact such values to `***` before quoting them in the report.
 
-3. **For anything suspicious**, gather more context. Substitute `<pid>` only after the validation in "Argument validation" above (or after taking it from `ps` / sidecar output, which is trusted):
+3. **For anything suspicious**, gather more context. If the process state alone explains the problem (`T` = accidentally stopped, `Z` = parent not reaping), skip directly to the report — child / log / stack inspection adds nothing. Otherwise, substitute `<pid>` only after the validation in "Argument validation" above (or after taking it from `ps` / sidecar output, which is trusted):
    - Child processes (with state, so a hung `git` / `node` shows up): `pgrep -P <pid>` to get child PIDs, then `ps -p <child_pids> -o pid=,ppid=,pcpu=,state=,etime=,command=` for their state
    - If high CPU: sample again after 1-2s to confirm it's sustained
    - Check the session's debug log if you can infer the session ID (from the sidecar): `"$RUNTIME_DIR"/debug/<session-id>.txt` using the same `RUNTIME_DIR` resolved in step 1. The last few hundred lines often show what it was doing before hanging. Debug logs may contain prompts, file contents, or tokens from other sessions — paste only the lines relevant to the hang, and never quote secrets/API keys you happen to see.
