@@ -2132,7 +2132,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
-    bgTasksDialogOpen;
+    bgTasksDialogOpen ||
+    showWorktreeExitDialog;
   dialogsVisibleRef.current = dialogsVisible;
   const shouldShowStickyTodos =
     stickyTodos !== null &&
