@@ -15,7 +15,7 @@ import {
 } from '@craft-agent/server-core/runtime';
 import { basename, join } from 'path';
 import { existsSync } from 'fs';
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { randomUUID } from 'node:crypto';
 import {
   setPermissionMode,
@@ -2362,6 +2362,89 @@ export class SessionManager implements ISessionManager {
     );
   }
 
+  private resolveQwenCanonicalCwd(managed: ManagedSession): string {
+    const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath);
+    return (
+      managed.workingDirectory ||
+      managed.sdkCwd ||
+      workspaceConfig?.defaults?.workingDirectory ||
+      managed.workspace.rootPath
+    );
+  }
+
+  private async canonicalizeQwenManagedSessionId(
+    workspace: Workspace,
+    managed: ManagedSession,
+    sdkSessionId: string,
+  ): Promise<ManagedSession> {
+    if (managed.id === sdkSessionId) return managed;
+    if (
+      this.resolveExternalSessionConnectionSlug(managed) !==
+      QWEN_CODE_CONNECTION_SLUG
+    )
+      return managed;
+    if (managed.isProcessing) return managed;
+
+    const existing = this.sessions.get(sdkSessionId);
+    if (existing && existing !== managed) {
+      if (existing.isProcessing) return managed;
+      this.removeExternalListedLocalMirror(workspace, existing);
+    } else if (
+      existsSync(getSessionStoragePath(workspace.rootPath, sdkSessionId))
+    ) {
+      deleteStoredSession(workspace.rootPath, sdkSessionId);
+    }
+
+    const previousId = managed.id;
+    const previousPath = getSessionStoragePath(workspace.rootPath, previousId);
+    const nextPath = getSessionStoragePath(workspace.rootPath, sdkSessionId);
+
+    await sessionPersistenceQueue.flush(previousId).catch((error) => {
+      sessionLog.debug(
+        `Failed to flush session ${previousId} before Qwen id canonicalization:`,
+        error,
+      );
+    });
+
+    managed.id = sdkSessionId;
+    managed.sdkSessionId = sdkSessionId;
+    this.sessions.delete(previousId);
+    this.sessions.set(sdkSessionId, managed);
+
+    if (existsSync(previousPath)) {
+      await rename(previousPath, nextPath);
+    } else {
+      ensureSessionDir(workspace.rootPath, sdkSessionId);
+    }
+
+    const automationSystem = this.automationSystems.get(workspace.rootPath);
+    automationSystem?.removeSessionMetadata(previousId);
+    automationSystem?.setInitialSessionMetadata(sdkSessionId, {
+      permissionMode: managed.permissionMode,
+      labels: managed.labels,
+      isFlagged: managed.isFlagged,
+      sessionStatus: managed.sessionStatus,
+      sessionName: managed.name,
+    });
+
+    this.persistSession(managed);
+    await sessionPersistenceQueue.flush(sdkSessionId);
+
+    this.sendEvent(
+      { type: 'session_deleted', sessionId: previousId },
+      workspace.id,
+    );
+    this.sendEvent(
+      { type: 'session_created', sessionId: sdkSessionId },
+      workspace.id,
+    );
+    sessionLog.info(
+      `Canonicalized Qwen session id ${previousId} -> ${sdkSessionId}`,
+    );
+
+    return managed;
+  }
+
   private externalSessionDeleteKey(
     workspaceId: string,
     sdkSessionId: string,
@@ -2400,10 +2483,7 @@ export class SessionManager implements ISessionManager {
         async (agent) => {
           if (!agent.renameBackendSession) return false;
           return agent.renameBackendSession(managed.sdkSessionId!, title, {
-            cwd:
-              managed.workingDirectory ||
-              managed.sdkCwd ||
-              managed.workspace.rootPath,
+            cwd: this.resolveQwenCanonicalCwd(managed),
           });
         },
       );
@@ -2466,10 +2546,7 @@ export class SessionManager implements ISessionManager {
       await this.withExternalSessionAgent(managed, async (agent) => {
         if (!agent.deleteBackendSession) return false;
         return agent.deleteBackendSession(managed.sdkSessionId!, {
-          cwd:
-            managed.workingDirectory ||
-            managed.sdkCwd ||
-            managed.workspace.rootPath,
+          cwd: this.resolveQwenCanonicalCwd(managed),
         });
       });
     } catch (error) {
@@ -2556,6 +2633,29 @@ export class SessionManager implements ISessionManager {
     const loadedMessageCount = managed.messages.length;
     const persistedMessageCount = managed.messageCount ?? loadedMessageCount;
     return loadedMessageCount === 0 && persistedMessageCount === 0;
+  }
+
+  private isUnresolvedQwenCanonicalMirror(managed: ManagedSession): boolean {
+    if (managed.isProcessing) return false;
+    if (!managed.sdkSessionId || managed.id !== managed.sdkSessionId)
+      return false;
+    if (
+      this.resolveExternalSessionConnectionSlug(managed) !==
+      QWEN_CODE_CONNECTION_SLUG
+    )
+      return false;
+    if (managed.messages.length > 0) return false;
+    if (managed.name && !this.isExternalSessionPlaceholderTitle(managed.name))
+      return false;
+    if (managed.preview || managed.lastMessageRole) return false;
+    if (
+      [managed.createdAt, managed.lastUsedAt, managed.lastMessageAt].some(
+        (timestamp) => typeof timestamp === 'number' && timestamp > 0,
+      )
+    )
+      return false;
+
+    return true;
   }
 
   private shouldInspectExternalPlaceholderSession(
@@ -2759,7 +2859,7 @@ export class SessionManager implements ISessionManager {
       parseOptionalTimestamp(info.createdAt) ??
       parseOptionalTimestamp(info.startTime);
     let title = info.title?.trim() || EXTERNAL_SESSION_PLACEHOLDER_TITLE;
-    const managed = this.selectManagedSessionBySdkSessionId(
+    let managed = this.selectManagedSessionBySdkSessionId(
       workspace.id,
       info.sessionId,
     );
@@ -2769,6 +2869,13 @@ export class SessionManager implements ISessionManager {
         managed,
         info.sessionId,
       );
+      if (connectionSlug === QWEN_CODE_CONNECTION_SLUG) {
+        managed = await this.canonicalizeQwenManagedSessionId(
+          workspace,
+          managed,
+          info.sessionId,
+        );
+      }
     }
     let inspectedResult: BackendSessionMessagesResult | undefined;
 
@@ -3409,6 +3516,7 @@ export class SessionManager implements ISessionManager {
     }
 
     return sessions
+      .filter((m) => !this.isUnresolvedQwenCanonicalMirror(m))
       .sort(compareManagedSessionsByActivityDesc)
       .map((m) => managedToSession(m));
   }
@@ -3712,10 +3820,7 @@ export class SessionManager implements ISessionManager {
         await this.withExternalSessionAgent(managed, async (agent) => {
           if (!agent.loadSessionMessages) return undefined;
           return agent.loadSessionMessages(managed.sdkSessionId!, {
-            cwd:
-              managed.sdkCwd ||
-              managed.workingDirectory ||
-              managed.workspace.rootPath,
+            cwd: this.resolveQwenCanonicalCwd(managed),
           });
         }),
       );

@@ -64,7 +64,7 @@ describe('extractSessionMeta', () => {
 })
 
 describe('mergeStableSessionMetaList', () => {
-  it('preserves existing project tree order and appends newly discovered sessions', () => {
+  it('refreshes metadata and orders sessions by activity time', () => {
     const previous = [
       extractSessionMeta(makeSession({ id: 'old-a', lastMessageAt: 100 })),
       extractSessionMeta(makeSession({ id: 'old-b', lastMessageAt: 90 })),
@@ -77,9 +77,9 @@ describe('mergeStableSessionMetaList', () => {
 
     const merged = mergeStableSessionMetaList(previous, incoming)
 
-    expect(merged.map(session => session.id)).toEqual(['old-a', 'old-b', 'newer'])
-    expect(merged[0]?.name).toBe('Updated A')
-    expect(merged[1]?.name).toBe('Updated B')
+    expect(merged.map(session => session.id)).toEqual(['newer', 'old-a', 'old-b'])
+    expect(merged[1]?.name).toBe('Updated A')
+    expect(merged[2]?.name).toBe('Updated B')
   })
 })
 
@@ -419,7 +419,7 @@ describe('initializeWorkspaceSessionsAtom', () => {
       .toEqual(['b-one'])
   })
 
-  it('preserves existing workspace order when refreshed metadata changes activity times', () => {
+  it('orders refreshed workspace metadata by activity time', () => {
     const store = createStore()
 
     store.set(initializeWorkspaceSessionsAtom, {
@@ -440,8 +440,8 @@ describe('initializeWorkspaceSessionsAtom', () => {
     })
 
     const metas = getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a')
-    expect(metas.map(session => session.id)).toEqual(['a-new', 'a-old', 'a-added'])
-    expect(metas.find(session => session.id === 'a-old')?.name).toBe('Updated old')
+    expect(metas.map(session => session.id)).toEqual(['a-added', 'a-old', 'a-new'])
+    expect(metas[1]?.name).toBe('Updated old')
   })
 
   it('updates workspace-scoped metadata without reordering existing sessions', () => {

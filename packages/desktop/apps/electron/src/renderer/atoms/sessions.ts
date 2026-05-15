@@ -107,15 +107,13 @@ export function mergeStableSessionMetaList(previous: SessionMeta[] | undefined, 
   }
 
   const incomingById = new Map(incoming.map(session => [session.id, session]))
-  const previousIds = new Set(previous.map(session => session.id))
-  const stableExisting = previous
+  const previouslySeen = previous
     .map(session => incomingById.get(session.id))
     .filter((session): session is SessionMeta => !!session)
-  const added = incoming
-    .filter(session => !previousIds.has(session.id))
-    .sort(compareSessionsByActivityDesc)
+  const previousIds = new Set(previous.map(session => session.id))
+  const added = incoming.filter(session => !previousIds.has(session.id))
 
-  return [...stableExisting, ...added]
+  return [...previouslySeen, ...added].sort(compareSessionsByActivityDesc)
 }
 
 function areSessionMetasShallowEqual(a: SessionMeta, b: SessionMeta): boolean {
