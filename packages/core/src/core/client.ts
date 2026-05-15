@@ -1276,18 +1276,22 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
-        // The recall promise was already raced against the 2.5s deadline at
-        // initiation time; this await just collects the result.
-        this.pendingRecallAbortController = undefined;
-        const relevantAutoMemory = relevantAutoMemoryPromise
-          ? await relevantAutoMemoryPromise
-          : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-        const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
-
-        if (relevantAutoMemoryPrompt) {
-          systemReminders.push(relevantAutoMemoryPrompt);
-          for (const doc of relevantAutoMemory.selectedDocs) {
-            this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        // Zero-wait poll: consume only if the prefetch has already settled.
+        // If not settled yet, skip — the ToolResult inject point will retry.
+        const prefetchHandle = this.pendingMemoryPrefetch;
+        if (
+          prefetchHandle &&
+          prefetchHandle.settledAt !== null &&
+          !prefetchHandle.consumed
+        ) {
+          prefetchHandle.consumed = true;
+          this.pendingMemoryPrefetch = undefined;
+          const result = await prefetchHandle.promise; // already settled, returns immediately
+          if (result.prompt) {
+            systemReminders.push(result.prompt);
+            for (const doc of result.selectedDocs) {
+              this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+            }
           }
         }
 
