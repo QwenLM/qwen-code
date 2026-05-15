@@ -12,6 +12,7 @@ import {
   readWorktreeSession,
   writeWorktreeSession,
   clearWorktreeSession,
+  restoreWorktreeContext,
   type WorktreeSession,
 } from './worktreeSessionService.js';
 
@@ -82,5 +83,60 @@ describe('clearWorktreeSession', () => {
 
   it('is a no-op when file does not exist', async () => {
     await expect(clearWorktreeSession(filePath)).resolves.not.toThrow();
+  });
+});
+
+describe('restoreWorktreeContext', () => {
+  it('returns nulls when no sidecar exists', async () => {
+    const result = await restoreWorktreeContext(filePath);
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+  });
+
+  it('returns context message + session when worktree dir is alive', async () => {
+    // Point sample at a real existing directory (tmpDir itself).
+    const live: WorktreeSession = { ...sample, worktreePath: tmpDir };
+    await writeWorktreeSession(filePath, live);
+    const result = await restoreWorktreeContext(filePath);
+
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain(`"${live.slug}"`);
+    expect(result.contextMessage).toContain(live.worktreePath);
+    expect(result.contextMessage).toContain(live.worktreeBranch);
+    // Sidecar should remain on disk so subsequent reads still see it.
+    expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('cleans up stale sidecar when worktree dir is gone', async () => {
+    // sample.worktreePath points at /repo/.qwen/... which does not exist.
+    await writeWorktreeSession(filePath, sample);
+    expect(await readWorktreeSession(filePath)).toEqual(sample);
+
+    const result = await restoreWorktreeContext(filePath);
+    expect(result.session).toBeNull();
+    expect(result.contextMessage).toBeNull();
+    // Sidecar should be deleted.
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('treats a regular file at worktreePath as not-a-worktree', async () => {
+    const filePathTarget = path.join(tmpDir, 'pretend-worktree');
+    await fs.writeFile(filePathTarget, 'not a dir', 'utf-8');
+    const bogus: WorktreeSession = { ...sample, worktreePath: filePathTarget };
+    await writeWorktreeSession(filePath, bogus);
+
+    const result = await restoreWorktreeContext(filePath);
+    expect(result.session).toBeNull();
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('forwards warning when sidecar JSON is malformed', async () => {
+    await fs.writeFile(filePath, 'not valid json {', 'utf-8');
+    const warnings: unknown[] = [];
+    const result = await restoreWorktreeContext(filePath, (e) =>
+      warnings.push(e),
+    );
+    expect(result.session).toBeNull();
+    expect(warnings.length).toBe(1);
   });
 });

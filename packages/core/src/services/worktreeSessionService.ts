@@ -59,3 +59,69 @@ export async function clearWorktreeSession(filePath: string): Promise<void> {
     throw error;
   }
 }
+
+export interface WorktreeRestoreResult {
+  /**
+   * When non-null, the worktree directory is still alive — callers should
+   * surface this one-line context message so the model continues using
+   * the worktree path for file operations after a `--resume`.
+   *
+   * Each entry point chooses its own injection mechanism:
+   * - TUI: `historyManager.addItem({ type: INFO, text })`
+   * - Headless: prepend as a `<system-reminder>` block to the user prompt
+   * - ACP: emit as a `system` message and prepend to the next prompt
+   */
+  contextMessage: string | null;
+  /** Active worktree session, or null when no sidecar / sidecar was stale. */
+  session: WorktreeSession | null;
+}
+
+/**
+ * Reads the WorktreeSession sidecar for the current session, validates
+ * that the worktree directory still exists on disk, and either:
+ *
+ * - returns a context message + the live session, or
+ * - deletes the stale sidecar and returns nulls.
+ *
+ * Shared by TUI / headless / ACP entry points so all three behave
+ * consistently on `--resume`. Failures are logged via the supplied
+ * `onWarn` callback but never thrown — worktree restore is best-effort,
+ * the session itself must still load.
+ */
+export async function restoreWorktreeContext(
+  sidecarPath: string,
+  onWarn?: (error: unknown) => void,
+): Promise<WorktreeRestoreResult> {
+  let session: WorktreeSession | null = null;
+  try {
+    session = await readWorktreeSession(sidecarPath);
+  } catch (error) {
+    onWarn?.(error);
+    return { contextMessage: null, session: null };
+  }
+  if (!session) return { contextMessage: null, session: null };
+
+  let worktreeAlive = false;
+  try {
+    const stat = await fs.stat(session.worktreePath);
+    worktreeAlive = stat.isDirectory();
+  } catch {
+    worktreeAlive = false;
+  }
+
+  if (!worktreeAlive) {
+    try {
+      await clearWorktreeSession(sidecarPath);
+    } catch (error) {
+      onWarn?.(error);
+    }
+    return { contextMessage: null, session: null };
+  }
+
+  return {
+    session,
+    contextMessage:
+      `[Resumed] Active worktree: "${session.slug}" at ${session.worktreePath} ` +
+      `(branch: ${session.worktreeBranch}). Continue using this path for all file operations.`,
+  };
+}

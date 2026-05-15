@@ -158,6 +158,16 @@ export class Session implements SessionContext {
   // Message rewrite middleware (optional, installed after history replay)
   messageRewriter?: MessageRewriteMiddleware;
 
+  /**
+   * Phase C worktree restore notice. Set by acpAgent.loadSession when a
+   * resumed session has a live worktree sidecar; prepended to the next
+   * #executePrompt call as a <system-reminder>, then cleared. TUI uses
+   * historyManager.addItem(INFO) for the equivalent UX hint and headless
+   * prepends to the single shot prompt — all three modes share the
+   * `restoreWorktreeContext` helper that produces this string.
+   */
+  pendingWorktreeNotice: string | null = null;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -528,6 +538,20 @@ export class Session implements SessionContext {
         const systemReminders = await this.#buildInitialSystemReminders();
         if (systemReminders.length > 0) {
           parts = [...systemReminders, ...parts];
+        }
+
+        // Phase C: one-shot worktree restore notice, set by acpAgent on
+        // --resume / loadSession when the session's worktree is still alive.
+        // Prepended exactly once, then cleared so it doesn't repeat on
+        // subsequent turns.
+        if (this.pendingWorktreeNotice) {
+          parts = [
+            {
+              text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+            },
+            ...parts,
+          ];
+          this.pendingWorktreeNotice = null;
         }
 
         let nextMessage: Content | null = { role: 'user', parts };

@@ -22,6 +22,7 @@ import {
   SessionStartSource,
   SessionEndReason,
   type PermissionMode,
+  restoreWorktreeContext,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -325,7 +326,26 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    await this.createAndStoreSession(config, sessionData?.conversation);
+    const session = await this.createAndStoreSession(
+      config,
+      sessionData?.conversation,
+    );
+
+    // Phase C: restore worktree context on --resume. Cleans up stale
+    // sidecars (worktree dir deleted out-of-band) and queues a notice for
+    // the next prompt when the worktree is alive. Best-effort: failures
+    // don't block session load.
+    try {
+      const sessionPath = config
+        .getSessionService()
+        .getWorktreeSessionPath(config.getSessionId());
+      const restored = await restoreWorktreeContext(sessionPath);
+      if (restored.contextMessage) {
+        session.pendingWorktreeNotice = restored.contextMessage;
+      }
+    } catch (error) {
+      debugLogger.warn(`ACP worktree restore failed: ${error}`);
+    }
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
