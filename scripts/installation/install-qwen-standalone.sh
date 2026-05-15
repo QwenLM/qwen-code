@@ -811,6 +811,7 @@ verify_checksum() {
 
 validate_archive_entry_path() {
     local entry="$1"
+    entry="${entry//\\//}"
 
     while [[ "${entry}" == ./* ]]; do
         entry="${entry#./}"
@@ -826,7 +827,7 @@ validate_archive_entry_path() {
     esac
 
     case "${entry}" in
-        ""|/*|..|../*|*/..|*/../*|*\\*)
+        ""|/*|..|../*|*/..|*/../*)
             log_error "Archive contains unsafe path: ${entry:-<empty>}"
             return 1
             ;;
@@ -920,6 +921,24 @@ ensure_managed_install_dir() {
     fi
 
     log_error "Failed to back up ${install_dir}. Move or remove it manually, then rerun the installer."
+    return 1
+}
+
+restore_stale_install_backup() {
+    local old_install_dir="$1"
+    local current_install_dir="$2"
+
+    if [[ -e "${current_install_dir}" || ! -e "${old_install_dir}" ]]; then
+        return 0
+    fi
+
+    log_warning "Found previous install backup without an active install: ${old_install_dir}"
+    log_warning "Restoring backup to ${current_install_dir} before continuing."
+    if mv "${old_install_dir}" "${current_install_dir}"; then
+        return 0
+    fi
+
+    log_error "Failed to restore previous install from ${old_install_dir}."
     return 1
 }
 
@@ -1113,7 +1132,18 @@ install_standalone() {
         rm -rf "${temp_dir}"
         return 1
     fi
-    rm -rf "${new_install_dir}" "${old_install_dir}" "${wrapper_tmp}"
+    if ! restore_stale_install_backup "${old_install_dir}" "${INSTALL_LIB_DIR}"; then
+        rm -rf "${temp_dir}"
+        return 1
+    fi
+    if [[ -e "${old_install_dir}" ]]; then
+        rm -rf "${old_install_dir}" || {
+            rm -rf "${temp_dir}"
+            log_error "Failed to remove stale install backup: ${old_install_dir}"
+            return 1
+        }
+    fi
+    rm -rf "${new_install_dir}" "${wrapper_tmp}"
     mv "${extract_dir}/qwen-code" "${new_install_dir}"
 
     if ! write_unix_wrapper "${wrapper_tmp}" "${INSTALL_LIB_DIR}/bin/qwen"; then

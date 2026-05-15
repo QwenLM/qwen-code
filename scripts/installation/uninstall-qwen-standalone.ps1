@@ -320,9 +320,8 @@ $installDir = Get-QwenInstallDir
 $installBinDir = Get-QwenInstallBinDir
 $installWasManaged = Test-QwenStandaloneInstallDir -InstallDir $installDir
 
-Remove-CurrentCmdPathShim
-
 if ($installWasManaged) {
+    Remove-CurrentCmdPathShim
     Remove-Item -LiteralPath $installDir -Recurse -Force
     Write-Success "Removed $installDir"
 } elseif (Test-Path -LiteralPath $installDir) {

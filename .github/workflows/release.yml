@@ -485,6 +485,7 @@ jobs:
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
           ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          IS_STABLE_RELEASE: "${{ needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}"
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           set -euo pipefail
@@ -504,36 +505,45 @@ jobs:
 
           upload_release_assets "releases/qwen-code/${RELEASE_TAG}"
 
-          upload_asset "dist/installation/install-qwen-standalone.sh" "installation/install-qwen-standalone.sh"
-          upload_asset "dist/installation/install-qwen-standalone.ps1" "installation/install-qwen-standalone.ps1"
-          upload_asset "dist/installation/install-qwen-standalone.bat" "installation/install-qwen-standalone.bat"
-          upload_asset "dist/installation/uninstall-qwen-standalone.sh" "installation/uninstall-qwen-standalone.sh"
-          upload_asset "dist/installation/uninstall-qwen-standalone.ps1" "installation/uninstall-qwen-standalone.ps1"
-          upload_asset "dist/installation/SHA256SUMS" "installation/SHA256SUMS"
+          if [[ "${IS_STABLE_RELEASE}" == "true" ]]; then
+            upload_asset "dist/installation/install-qwen-standalone.sh" "installation/install-qwen-standalone.sh"
+            upload_asset "dist/installation/install-qwen-standalone.ps1" "installation/install-qwen-standalone.ps1"
+            upload_asset "dist/installation/install-qwen-standalone.bat" "installation/install-qwen-standalone.bat"
+            upload_asset "dist/installation/uninstall-qwen-standalone.sh" "installation/uninstall-qwen-standalone.sh"
+            upload_asset "dist/installation/uninstall-qwen-standalone.ps1" "installation/uninstall-qwen-standalone.ps1"
+            upload_asset "dist/installation/SHA256SUMS" "installation/SHA256SUMS"
+          else
+            echo "Skipping hosted installation asset upload for prerelease ${RELEASE_TAG}."
+          fi
 
       - name: 'Verify Aliyun OSS Release Assets'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
           ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          IS_STABLE_RELEASE: "${{ needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}"
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           set -euo pipefail
 
           npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
 
-          hosted_tmp_dir="$(mktemp -d)"
-          trap 'rm -rf "${hosted_tmp_dir}"' EXIT
-          for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat uninstall-qwen-standalone.sh uninstall-qwen-standalone.ps1 SHA256SUMS; do
-            url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${asset}"
-            curl -fsSL "${url}" -o "${hosted_tmp_dir}/${asset}"
-          done
-          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/SHA256SUMS" || {
-            echo "::error::Hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
-            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/SHA256SUMS" || true
-            exit 1
-          }
-          (cd "${hosted_tmp_dir}" && sha256sum -c SHA256SUMS)
+          if [[ "${IS_STABLE_RELEASE}" == "true" ]]; then
+            hosted_tmp_dir="$(mktemp -d)"
+            trap 'rm -rf "${hosted_tmp_dir}"' EXIT
+            for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat uninstall-qwen-standalone.sh uninstall-qwen-standalone.ps1 SHA256SUMS; do
+              url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${asset}"
+              curl -fsSL "${url}" -o "${hosted_tmp_dir}/${asset}"
+            done
+            cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/SHA256SUMS" || {
+              echo "::error::Hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
+              diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/SHA256SUMS" || true
+              exit 1
+            }
+            (cd "${hosted_tmp_dir}" && sha256sum -c SHA256SUMS)
+          else
+            echo "Skipping hosted installation asset verification for prerelease ${RELEASE_TAG}."
+          fi
 
       - name: 'Publish Aliyun OSS Latest VERSION'
         if: |-

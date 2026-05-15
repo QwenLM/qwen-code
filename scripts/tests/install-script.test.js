@@ -143,6 +143,14 @@ describe('installation scripts', () => {
     expect(script).toContain('/latest/VERSION');
     expect(script).toContain('resolve_aliyun_version_path()');
     expect(script).toContain('retrying GitHub mirror');
+    expect(script).toContain('entry="${entry//\\\\//}"');
+    expect(script).toContain('restore_stale_install_backup()');
+    expect(script).toContain(
+      'restore_stale_install_backup "${old_install_dir}" "${INSTALL_LIB_DIR}"',
+    );
+    expect(script).not.toContain(
+      'rm -rf "${new_install_dir}" "${old_install_dir}" "${wrapper_tmp}"',
+    );
     expect(script).not.toContain('-print -quit');
   });
 
@@ -252,6 +260,15 @@ describe('installation scripts', () => {
     expect(script).toContain(':ResolveAliyunVersionPath');
     expect(script).toContain(':UseGithubFallbackBaseUrl');
     expect(script).toContain('retrying GitHub mirror');
+    expect(script).toContain('endlocal & set "PATH=%INSTALL_BIN_DIR%;%PATH%"');
+    expect(script).not.toContain(
+      'endlocal & set "PATH=!INSTALL_BIN_DIR!;%PATH%"',
+    );
+    expect(script).toContain(':RestoreStaleInstallBackup');
+    expect(script).toContain('call :RestoreStaleInstallBackup');
+    expect(script).not.toContain(
+      'ERROR: Failed to remove stale backup directory',
+    );
     expect(script).not.toContain('%RANDOM%');
   });
 
@@ -1341,6 +1358,14 @@ describe('standalone release packaging', () => {
     expect(workflow.slice(publishLatestStepIndex)).toContain(
       'releases/qwen-code/latest/VERSION',
     );
+    const syncStep = workflow.slice(syncStepIndex, verifyStepIndex);
+    expect(syncStep).toContain('IS_STABLE_RELEASE');
+    expect(syncStep).toContain(
+      'if [[ "${IS_STABLE_RELEASE}" == "true" ]]; then',
+    );
+    expect(syncStep).toContain(
+      'Skipping hosted installation asset upload for prerelease',
+    );
     expect(workflow).toContain('installation/install-qwen-standalone.sh');
     expect(workflow).toContain('installation/install-qwen-standalone.bat');
     expect(workflow).toContain('installation/install-qwen-standalone.ps1');
@@ -1355,6 +1380,14 @@ describe('standalone release packaging', () => {
     );
     expect(workflow).not.toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"',
+    );
+    const verifyStep = workflow.slice(verifyStepIndex, publishLatestStepIndex);
+    expect(verifyStep).toContain('IS_STABLE_RELEASE');
+    expect(verifyStep).toContain(
+      'if [[ "${IS_STABLE_RELEASE}" == "true" ]]; then',
+    );
+    expect(verifyStep).toContain(
+      'Skipping hosted installation asset verification for prerelease',
     );
     expect(workflow).toContain('hosted_tmp_dir="$(mktemp -d)"');
     expect(workflow).toContain(
@@ -1421,6 +1454,12 @@ describe('standalone release packaging', () => {
     );
     expect(uninstallPowerShellSource).toContain('QWEN_UNINSTALL_PURGE');
     expect(uninstallPowerShellSource).toContain('Preserving');
+    expect(uninstallPowerShellSource).toMatch(
+      /if \(\$installWasManaged\) \{\n\s+Remove-CurrentCmdPathShim\n\s+Remove-Item/,
+    );
+    expect(uninstallPowerShellSource).not.toMatch(
+      /\$installWasManaged = Test-QwenStandaloneInstallDir[^\n]*\n\nRemove-CurrentCmdPathShim\n\nif \(\$installWasManaged\)/,
+    );
   });
 });
 
@@ -1747,6 +1786,46 @@ describe('Linux/macOS installer end-to-end', () => {
       }
     }
   });
+
+  itOnUnix(
+    'removes only installer-owned shell rc PATH lines during uninstall',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-uninstall-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        runUnixInstaller(archive, installRoot, home);
+
+        const rcFile = path.join(home, '.zshrc');
+        writeFileSync(
+          rcFile,
+          [
+            'before',
+            '# Added by qwen-code installer (multi-qwen shadow fix)   ',
+            `export PATH='${installRoot}/bin':$PATH`,
+            'middle',
+            '# Added by qwen-code installer (multi-qwen shadow fix)',
+            'echo keep-me',
+            'after',
+          ].join('\n') + '\n',
+        );
+
+        runUnixUninstaller(installRoot, home);
+
+        expect(readScript(rcFile)).toBe(
+          ['before', 'middle', 'echo keep-me', 'after'].join('\n') + '\n',
+        );
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        if (createdDist) {
+          rmSync('dist', { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   itOnUnix('shell-quotes custom install paths in the generated wrapper', () => {
     const createdDist = ensureMinimalDist();

@@ -241,7 +241,7 @@ if /i "!METHOD!"=="standalone" (
     call :InstallStandalone
     if !ERRORLEVEL! NEQ 0 exit /b !ERRORLEVEL!
     call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
-    endlocal & set "PATH=!INSTALL_BIN_DIR!;%PATH%"
+    endlocal & set "PATH=%INSTALL_BIN_DIR%;%PATH%"
     exit /b 0
 )
 
@@ -257,7 +257,7 @@ call :InstallStandalone
 set "STANDALONE_STATUS=!ERRORLEVEL!"
 if !STANDALONE_STATUS! EQU 0 (
     call :PrintFinalInstructions "!INSTALL_BIN_DIR!"
-    endlocal & set "PATH=!INSTALL_BIN_DIR!;%PATH%"
+    endlocal & set "PATH=%INSTALL_BIN_DIR%;%PATH%"
     exit /b 0
 )
 
@@ -906,6 +906,12 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
+call :RestoreStaleInstallBackup
+if !ERRORLEVEL! NEQ 0 (
+    if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
+    exit /b 1
+)
+
 if exist "!NEW_INSTALL_DIR!" (
     rmdir /S /Q "!NEW_INSTALL_DIR!" >nul 2>&1
     if !ERRORLEVEL! NEQ 0 (
@@ -918,7 +924,7 @@ if exist "!OLD_INSTALL_DIR!" (
     rmdir /S /Q "!OLD_INSTALL_DIR!" >nul 2>&1
     if !ERRORLEVEL! NEQ 0 (
         if exist "!TEMP_DIR!" rmdir /S /Q "!TEMP_DIR!" >nul 2>&1
-        echo ERROR: Failed to remove stale backup directory: !OLD_INSTALL_DIR!.
+        echo ERROR: Failed to remove stale install backup: !OLD_INSTALL_DIR!.
         exit /b 1
     )
 )
@@ -1053,6 +1059,18 @@ if not exist "!OLD_INSTALL_DIR!" exit /b 0
 move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
 if !ERRORLEVEL! NEQ 0 (
     echo WARNING: Failed to restore previous install from !OLD_INSTALL_DIR! to !INSTALL_DIR!.
+    exit /b 1
+)
+exit /b 0
+
+:RestoreStaleInstallBackup
+if exist "!INSTALL_DIR!" exit /b 0
+if not exist "!OLD_INSTALL_DIR!" exit /b 0
+echo WARNING: Found previous install backup without an active install: !OLD_INSTALL_DIR!
+echo WARNING: Restoring backup to !INSTALL_DIR! before continuing.
+move /Y "!OLD_INSTALL_DIR!" "!INSTALL_DIR!" >nul
+if !ERRORLEVEL! NEQ 0 (
+    echo ERROR: Failed to restore previous install from !OLD_INSTALL_DIR!.
     exit /b 1
 )
 exit /b 0

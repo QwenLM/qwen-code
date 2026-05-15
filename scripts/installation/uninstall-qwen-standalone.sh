@@ -193,8 +193,14 @@ remove_shell_path_entry() {
         }
 
         awk -v marker="${marker}" '
-            $0 == marker { skip_next = 1; next }
-            skip_next == 1 { skip_next = 0; next }
+            index($0, marker) { check_next = 1; next }
+            check_next == 1 {
+                check_next = 0
+                if ($0 ~ /^[[:space:]]*export PATH=/ ||
+                    $0 ~ /^[[:space:]]*set -gx PATH /) {
+                    next
+                }
+            }
             { print }
         ' "${rc_file}" > "${temp_file}" && mv "${temp_file}" "${rc_file}" || {
             rm -f "${temp_file}"
