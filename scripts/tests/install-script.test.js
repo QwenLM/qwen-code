@@ -356,6 +356,27 @@ describe('installation scripts', () => {
     }
   });
 
+  it('injects Windows processor overrides directly into cmd commands', () => {
+    const prepared = prepareWindowsCommand(
+      'call "C:\\tools\\install-qwen-standalone.bat"',
+      {
+        Path: 'C:\\fake-bin',
+        PROCESSOR_ARCHITECTURE: 'AMD64',
+        PROCESSOR_ARCHITEW6432: '',
+      },
+      {
+        Path: 'C:\\Windows\\System32',
+        processor_architecture: 'ARM64',
+        PROCESSOR_ARCHITEW6432: 'ARM64',
+      },
+    );
+
+    expect(prepared.command).toBe(
+      'set "PROCESSOR_ARCHITECTURE=AMD64" && set "PROCESSOR_ARCHITEW6432=" && call "C:\\tools\\install-qwen-standalone.bat"',
+    );
+    expect(prepared.env).toEqual({ Path: 'C:\\fake-bin' });
+  });
+
   it('creates PowerShell validation scripts with a ps1 extension', () => {
     const script = readScript(
       'scripts/installation/install-qwen-standalone.bat',
@@ -3034,15 +3055,47 @@ function runWindowsInstaller(
 }
 
 function runWindowsCommand(command, env = {}) {
-  return execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/c', command], {
-    env: {
-      ...process.env,
-      ...env,
+  const prepared = prepareWindowsCommand(command, env);
+  return execFileSync(
+    process.env.ComSpec || 'cmd.exe',
+    ['/d', '/c', prepared.command],
+    {
+      env: {
+        ...prepared.env,
+      },
+      stdio: 'pipe',
+      // cmd.exe parses the command string itself; preserve quoted paths.
+      windowsVerbatimArguments: true,
     },
-    stdio: 'pipe',
-    // cmd.exe parses the command string itself; preserve quoted paths.
-    windowsVerbatimArguments: true,
-  });
+  );
+}
+
+const WINDOWS_COMMAND_ENV_OVERRIDES = [
+  'PROCESSOR_ARCHITECTURE',
+  'PROCESSOR_ARCHITEW6432',
+];
+
+function prepareWindowsCommand(command, env = {}, baseEnv = process.env) {
+  const commandEnv = { ...baseEnv, ...env };
+  const commandPrefix = [];
+
+  for (const key of WINDOWS_COMMAND_ENV_OVERRIDES) {
+    if (!Object.prototype.hasOwnProperty.call(env, key)) {
+      continue;
+    }
+
+    for (const existingKey of Object.keys(commandEnv)) {
+      if (existingKey.toLowerCase() === key.toLowerCase()) {
+        delete commandEnv[existingKey];
+      }
+    }
+    commandPrefix.push(`set "${key}=${env[key] ?? ''}"`);
+  }
+
+  return {
+    command: [...commandPrefix, command].join(' && '),
+    env: commandEnv,
+  };
 }
 
 function createSymlinkStandaloneArchive(tmpDir) {
