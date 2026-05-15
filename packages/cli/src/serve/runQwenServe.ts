@@ -270,6 +270,21 @@ export async function runQwenServe(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
       );
+      // Operator log on stderr too (systemd/docker/k8s default
+      // captures only stderr for service diagnostics, and the
+      // workspace= breadcrumb is the single piece of information
+      // operators need most when triaging §02 migration issues —
+      // "did the daemon bind to the right workspace?"). The stdout
+      // line above stays put so integration tests + scripts that
+      // parse stdout for the listening URL keep working;
+      // `JSON.stringify(boundWorkspace)` quotes the value
+      // symmetrically with the workspace_mismatch log (defends
+      // against control-char log injection if `boundWorkspace`
+      // somehow contained one — operator-controlled today, but
+      // cheap defense-in-depth).
+      writeStderrLine(
+        `qwen serve: bound to workspace ${JSON.stringify(boundWorkspace)}`,
+      );
       if (!token) {
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,

@@ -35,6 +35,7 @@ import type {
 import {
   createHttpAcpBridge,
   InvalidPermissionOptionError,
+  MAX_WORKSPACE_PATH_LENGTH,
   SessionNotFoundError,
   WorkspaceMismatchError,
   type AcpChannel,
@@ -305,6 +306,40 @@ describe('createHttpAcpBridge', () => {
     expect(bridge.sessionCount).toBe(1);
 
     await bridge.shutdown();
+  });
+
+  it('WorkspaceMismatchError truncates oversized `requested` to MAX_WORKSPACE_PATH_LENGTH (defense-in-depth)', () => {
+    // The route-level cap in `server.ts` rejects oversized `cwd`
+    // bodies before reaching the bridge, but `WorkspaceMismatchError`
+    // can be constructed directly by other callers (tests, embeds,
+    // future entry points) or by passing pre-validated paths that
+    // somehow grew. The constructor interpolates `requested` into
+    // `.message` twice + downstream code echoes it on stderr +
+    // `res.json` — without truncation a 10 MB string amplifies
+    // ~6× per request. The truncation here is the cross-caller
+    // belt-and-suspenders defense.
+    const oversized = '/' + 'a'.repeat(MAX_WORKSPACE_PATH_LENGTH * 2);
+    const err = new WorkspaceMismatchError('/work/bound', oversized);
+    expect(err.requested.length).toBeLessThanOrEqual(
+      MAX_WORKSPACE_PATH_LENGTH + 32, // truncation marker overhead
+    );
+    expect(err.requested.endsWith('…[truncated]')).toBe(true);
+    // `.message` interpolates `requested` twice; both go through the
+    // truncated form, so the message is bounded too.
+    expect(err.message.length).toBeLessThan(
+      MAX_WORKSPACE_PATH_LENGTH * 2 + 1024,
+    );
+    // Bound is operator-controlled — not truncated.
+    expect(err.bound).toBe('/work/bound');
+  });
+
+  it('WorkspaceMismatchError passes through `requested` shorter than MAX_WORKSPACE_PATH_LENGTH untouched', () => {
+    // Common case: legitimate `requested` paths (PATH_MAX is 4096 on
+    // Linux, 1024 on macOS) should not be modified.
+    const normal = '/work/different';
+    const err = new WorkspaceMismatchError('/work/bound', normal);
+    expect(err.requested).toBe(normal);
+    expect(err.requested.endsWith('…[truncated]')).toBe(false);
   });
 
   it('creates fresh session per call under sessionScope:thread (Stage 1.5 multi-session: shares channel)', async () => {

@@ -14,6 +14,7 @@ import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
   InvalidPermissionOptionError,
+  MAX_WORKSPACE_PATH_LENGTH,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -231,6 +232,25 @@ export function createServeApp(
       res
         .status(400)
         .json({ error: '`cwd` must be a string absolute path when provided' });
+      return;
+    }
+    // Length cap BEFORE assignment so a multi-MB `cwd` body can't
+    // amplify through downstream interpolations
+    // (`WorkspaceMismatchError`'s `.message` echoes `requested` twice;
+    // `sendBridgeError` writes it to stderr; `res.json` echoes it
+    // again). On the loopback-default-no-token deployment shape this
+    // is pre-auth, so a 10 MB cwd body — right under
+    // `express.json({limit: '10mb'})` — would otherwise cost
+    // ~60 MB per request × `maxConnections` (default 256). The
+    // `MAX_WORKSPACE_PATH_LENGTH` constant matches Linux's PATH_MAX
+    // (4096); legitimate filesystem paths fit well under it. The
+    // `WorkspaceMismatchError` constructor also truncates as a
+    // belt-and-suspenders defense for non-route callers (tests,
+    // embeds, future entry points that throw the error directly).
+    if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
+      res.status(400).json({
+        error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+      });
       return;
     }
     const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;

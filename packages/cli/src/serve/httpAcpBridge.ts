@@ -259,18 +259,45 @@ export class WorkspaceMismatchError extends Error {
   readonly bound: string;
   readonly requested: string;
   constructor(bound: string, requested: string) {
+    // Truncate `requested` to PATH_MAX so a malicious or buggy client
+    // can't amplify a multi-MB `cwd` body through this error. The
+    // constructor interpolates `requested` into `.message` TWICE, the
+    // route's `sendBridgeError` echoes it in stderr (now JSON.stringify
+    // -wrapped per the log-injection fix), and `res.json` echoes it in
+    // the 400 body — without truncation a ~10 MB cwd (right under the
+    // `express.json({limit: '10mb'})` cap) becomes ~20 MB message +
+    // ~10 MB stderr + ~30 MB JSON response per request, ×
+    // `maxConnections` (default 256). The route also caps `cwd.length`
+    // at this same limit upstream (POST /session); this is
+    // defense-in-depth for non-HTTP callers (tests, embeds, future
+    // entry points that throw the error directly).
+    const safeRequested =
+      requested.length > MAX_WORKSPACE_PATH_LENGTH
+        ? `${requested.slice(0, MAX_WORKSPACE_PATH_LENGTH)}…[truncated]`
+        : requested;
     super(
       `Workspace mismatch: daemon is bound to "${bound}" but ` +
-        `request asked for "${requested}". Each \`qwen serve\` ` +
+        `request asked for "${safeRequested}". Each \`qwen serve\` ` +
         `daemon binds to exactly one workspace; start a separate ` +
-        `daemon for "${requested}" (or route the request to one ` +
+        `daemon for "${safeRequested}" (or route the request to one ` +
         `via an orchestrator).`,
     );
     this.name = 'WorkspaceMismatchError';
     this.bound = bound;
-    this.requested = requested;
+    this.requested = safeRequested;
   }
 }
+
+/**
+ * PATH_MAX on Linux is 4096; macOS / BSD is 1024. We use the Linux
+ * value as a generous ceiling — anything bigger is either a
+ * malformed client request (memory amplification attack against the
+ * 400 / stderr / error-message echo paths) or a synthetic test
+ * input. The route's POST /session pre-check rejects bodies past
+ * this; `WorkspaceMismatchError` truncates for any caller that
+ * skips the pre-check.
+ */
+export const MAX_WORKSPACE_PATH_LENGTH = 4096;
 
 /**
  * One ACP NDJSON channel to a single agent. Tests inject a fake by replacing
@@ -377,14 +404,24 @@ export interface BridgeOptions {
    */
   maxPendingPermissionsPerSession?: number;
   /**
-   * Absolute path this daemon is bound to (per #3803 §02: 1 daemon =
-   * 1 workspace). `spawnOrAttach` calls whose `workspaceCwd` doesn't
-   * canonicalize to this same value throw `WorkspaceMismatchError`
-   * (route → 400 with code `workspace_mismatch`).
+   * Absolute, **already-canonical** path this daemon is bound to (per
+   * #3803 §02: 1 daemon = 1 workspace). `spawnOrAttach` calls whose
+   * `workspaceCwd` doesn't canonicalize to this same value throw
+   * `WorkspaceMismatchError` (route → 400 with code `workspace_mismatch`).
    *
-   * The bound path is canonicalized once at boot time so subsequent
-   * request comparisons are canonical-vs-canonical (mixed casing /
-   * symlink resolution / etc. already accounted for).
+   * **Caller contract**: pass the result of
+   * `canonicalizeWorkspace(path)`. `runQwenServe` does this at boot
+   * and threads the same canonical value into the bridge AND
+   * `createServeApp` (via `deps.boundWorkspace`) so all three —
+   * `/capabilities.workspaceCwd`, the `POST /session` cwd fallback,
+   * and this bridge's mismatch check — share one canonical form. The
+   * constructor only checks `path.isAbsolute`; it does NOT
+   * re-canonicalize (a redundant `realpathSync.native` could
+   * theoretically diverge from the runQwenServe canonicalize on
+   * NFS-transient / mid-rename filesystems, landing the bridge with
+   * one canonical form while `/capabilities` advertises another).
+   * Direct embeds / tests calling `createHttpAcpBridge` themselves
+   * MUST canonicalize before passing.
    */
   boundWorkspace: string;
 }
@@ -418,22 +455,39 @@ interface ChannelInfo {
   /**
    * Live session ids multiplexed on this channel. Updated when
    * `doSpawn` registers a new session and when `killSession` /
-   * `channel.exited` removes one. When the set drops to empty AND no
-   * session is mid-attach, the channel is killed and `channelInfo`
-   * is cleared.
+   * `channel.exited` removes one. When the set drops to empty under
+   * `killSession`, the channel is marked `isDying = true` and its
+   * `channel.kill()` is awaited; `channelInfo` itself is left
+   * pointing at the dying channel until `channel.exited` fires (see
+   * BkUyD invariant on `isDying` below).
    */
   sessionIds: Set<string>;
   /**
-   * Set synchronously by `killSession` / `doSpawn`-newSession-failure
-   * BEFORE awaiting `channel.kill()`. `ensureChannel` treats a dying
-   * channel as absent and spawns a fresh one. Without this flag a
-   * concurrent `spawnOrAttach` arriving during the SIGTERM grace
-   * window (up to 10s) would attach to a transport about to close,
-   * landing the caller with a sessionId that 404s on every follow-up
-   * request. We don't clear `channelInfo` eagerly because the
-   * tanzhenxin BkUyD invariant requires `killAllSync` to still find
-   * the channel mid-grace for force-kill — `isDying` is the
-   * "available-for-new-spawns" half of the two-bit state.
+   * MUST be set to `true` synchronously by any teardown path BEFORE
+   * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
+   * as absent and spawns a fresh one — without this flag a concurrent
+   * `spawnOrAttach` arriving during the SIGTERM grace window (up to
+   * 10s) would attach to a transport about to close, landing the
+   * caller with a sessionId that 404s on every follow-up request.
+   *
+   * **Set-sites (5)** — any new teardown path MUST call into one of
+   * these or replicate the pattern:
+   *
+   *   1. `ensureChannel`: `initialize`-failure catch.
+   *   2. `ensureChannel`: late-shutdown re-check (shuttingDown flipped
+   *      during handshake).
+   *   3. `doSpawn`: newSession-failure on an empty channel
+   *      (sessionIds.size === 0).
+   *   4. `killSession`: last session leaving (sessionIds.size === 0
+   *      after the delete).
+   *   5. `shutdown`: bulk-mark every entry in `aliveChannels`.
+   *
+   * **BkUyD invariant (why we don't clear `channelInfo` here)**:
+   * `killAllSync` must still find the channel during the SIGTERM
+   * grace window to fire SIGKILL on `process.exit(1)`. `aliveChannels`
+   * holds the dying entry until `channel.exited` fires (OS-level
+   * reap); `isDying` is the "available-for-new-spawns" half of the
+   * two-bit (alive, dying) state.
    */
   isDying: boolean;
 }
@@ -990,16 +1044,31 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     maxPendingRaw > 0 && Number.isFinite(maxPendingRaw)
       ? maxPendingRaw
       : Infinity;
-  // #3803 §02: canonicalize the bound path once at boot so subsequent
-  // `spawnOrAttach` comparisons are canonical-vs-canonical (mixed
-  // casing / symlink resolution / etc. already accounted for).
+  // #3803 §02: the bound path is the canonical form `spawnOrAttach`
+  // compares incoming `workspaceCwd` against. The caller MUST pass an
+  // already-canonical value (via `canonicalizeWorkspace`). `runQwenServe`
+  // does this at boot and threads the same value into both
+  // `createHttpAcpBridge` and `createServeApp` (via
+  // `deps.boundWorkspace`); direct embeds / tests that construct the
+  // bridge themselves must call `canonicalizeWorkspace` first.
+  //
+  // Pre-fix the bridge re-canonicalized defensively here. The fix
+  // (deepseek-v4-pro review) drops the redundant `realpathSync.native`:
+  // (a) on case-insensitive / symlinked filesystems two independent
+  // `realpathSync.native` calls could theoretically disagree if the FS
+  // mutates between them (NFS transient, operator rename), landing
+  // the bridge with one canonical form while `runQwenServe` advertises
+  // another and `/capabilities` clients see `workspace_mismatch` on
+  // every POST; (b) it's a syscall removed from the boot path. The
+  // `path.isAbsolute` guard stays — it's a structural input check, not
+  // a syscall.
   if (!path.isAbsolute(opts.boundWorkspace)) {
     throw new TypeError(
       `Invalid boundWorkspace: "${opts.boundWorkspace}". Must be an ` +
         `absolute path.`,
     );
   }
-  const boundWorkspace = canonicalizeWorkspace(opts.boundWorkspace);
+  const boundWorkspace = opts.boundWorkspace;
 
   // #3803 §02 single-workspace model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
@@ -1008,13 +1077,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // same-workspace attach under `single` scope reuses). Thread-scope
   // sessions add to `byId` but don't displace `defaultEntry`.
   let defaultEntry: SessionEntry | undefined;
-  // `channelInfo` is the SINGLE attach-available channel. Cleared when
-  // `killSession` marks the last session leaving (via `isDying`),
-  // when `doSpawn`'s newSession fails on an empty channel, or when
-  // `channel.exited` fires for the channel currently in this slot.
-  // Race-aware code paths (`ensureChannel`, `killAllSync`) gate on
-  // `isDying` rather than presence — see ChannelInfo.isDying for the
-  // BkUyD invariant.
+  // `channelInfo` is the SINGLE attach-available channel. Cleared
+  // ONLY by the `channel.exited` handler (see below) when the OS
+  // reaps the underlying child process. Teardown initiators
+  // (`killSession` last-session-leaving, `doSpawn`-newSession-failure
+  // on an empty channel, `ensureChannel` init-failure /
+  // late-shutdown, `shutdown`) set `isDying = true` but LEAVE
+  // `channelInfo` pointing at the dying channel until OS reap — that
+  // asymmetry IS the BkUyD invariant. It lets `killAllSync` reach a
+  // mid-SIGTERM-grace channel through `aliveChannels` while a
+  // concurrent `spawnOrAttach` can already start spawning a fresh
+  // replacement (which overwrites `channelInfo` when its
+  // handshake completes). Race-aware code paths (`ensureChannel`,
+  // `killAllSync`) gate on `isDying` rather than presence; see
+  // `ChannelInfo.isDying` for the per-set-site rationale.
   let channelInfo: ChannelInfo | undefined;
   // tanzhenxin BkUyD: superset of `channelInfo` covering channels
   // that are dying but not yet OS-reaped. `killSession` /
