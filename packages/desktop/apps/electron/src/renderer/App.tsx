@@ -227,29 +227,6 @@ function SessionLoadErrorScreen({
   )
 }
 
-function getRequestedSessionIdsFromLocation(): Set<string> {
-  const params = new URLSearchParams(window.location.search)
-  const requestedSessionIds = new Set<string>()
-
-  const addRoute = (rawRoute: string | null | undefined) => {
-    if (!rawRoute) return
-
-    const colonIndex = rawRoute.lastIndexOf(':')
-    const route = colonIndex > 0 ? rawRoute.slice(0, colonIndex) : rawRoute
-    const segments = route.split('/').filter(Boolean)
-    const sessionIndex = segments.indexOf('session')
-    const sessionId = sessionIndex >= 0 ? segments[sessionIndex + 1] : undefined
-    if (sessionId) {
-      requestedSessionIds.add(sessionId)
-    }
-  }
-
-  addRoute(params.get('route'))
-  params.get('panels')?.split(',').forEach(addRoute)
-
-  return requestedSessionIds
-}
-
 export default function App() {
   const { t } = useTranslation()
 
@@ -373,7 +350,6 @@ export default function App() {
 
   // Splash screen state - tracks when app is fully ready (all data loaded)
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
-  const [sessionListInitialSnapshotReady, setSessionListInitialSnapshotReady] = useState(false)
   const [sessionListLoading, setSessionListLoading] = useState(false)
   const [projectSessionSnapshotsReady, setProjectSessionSnapshotsReady] = useState(false)
   const [sessionLoadError, setSessionLoadError] = useState<string | null>(null)
@@ -388,7 +364,7 @@ export default function App() {
   const skills = useAtomValue(skillsAtom)
 
   // Compute if app is fully ready (all data loaded)
-  const isFullyReady = appState === 'ready' && (sessionsLoaded || sessionListInitialSnapshotReady) && (sessionLoadError || projectSessionSnapshotsReady)
+  const isFullyReady = appState === 'ready' && sessionsLoaded && (sessionLoadError || projectSessionSnapshotsReady)
 
   // Trigger splash exit animation when fully ready
   useEffect(() => {
@@ -591,14 +567,6 @@ export default function App() {
       }
 
       applyLoadedSessions(fastSessions, workspaceId, undefined)
-      setSessionListInitialSnapshotReady(true)
-
-      const requestedSessionIds = getRequestedSessionIdsFromLocation()
-      const canRestoreNavigationFromSnapshot = requestedSessionIds.size === 0
-        || fastSessions.some(session => requestedSessionIds.has(session.id))
-      if (fastSessions.length > 0 && canRestoreNavigationFromSnapshot) {
-        setSessionsLoaded(true)
-      }
     } catch (error) {
       console.warn(`[App] Failed to load fast session snapshot for workspace ${workspaceId}:`, error)
     }
@@ -636,7 +604,6 @@ export default function App() {
       }
 
       applyLoadedSessions(loadedSessions, requestWorkspaceId, windowRemoteWorkspaceId)
-      setSessionListInitialSnapshotReady(true)
       setSessionsLoaded(true)
       setSessionListLoading(false)
       void reconcileLoadedSessionPermissionModes(loadedSessions)
@@ -661,14 +628,12 @@ export default function App() {
 
       if (shouldTreatSessionLoadFailureAsTransportFallback(transportState)) {
         console.error('[App] Treating session load failure as transport fallback:', transportState)
-        setSessionListInitialSnapshotReady(true)
         setSessionsLoaded(true)
         setSessionLoadError(null)
         return
       }
 
       setSessionLoadError(formatSessionLoadFailure(err))
-      setSessionListInitialSnapshotReady(true)
       setSessionsLoaded(true)
     } finally {
       if (requestSeq === sessionListRequestSeqRef.current && requestWorkspaceId === windowWorkspaceIdRef.current) {

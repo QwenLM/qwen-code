@@ -106,6 +106,68 @@ describe('Qwen native history loading', () => {
     expect(secondAgent).toBe(fakeAgent);
   });
 
+  it('hides unresolved stripped Qwen canonical mirrors from session lists', () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    tempRoots.push(workspaceRoot);
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: Date.now(),
+    };
+    const unresolvedSdkSessionId = '8390af4d-5db6-4e4c-b7e8-040d002690c7';
+    const placeholderSdkSessionId = 'bbc6bd08-a4f7-4b50-b605-51dbe51ea2de';
+    const resolvedSdkSessionId = '12eb7d24-4c31-4ff5-8a9b-f243f9fd1b28';
+    const manager = new SessionManager();
+
+    const unresolved = createManagedSession(
+      {
+        id: unresolvedSdkSessionId,
+        sdkSessionId: unresolvedSdkSessionId,
+        llmConnection: 'qwen-code',
+      },
+      workspace,
+    );
+    const placeholder = createManagedSession(
+      {
+        id: placeholderSdkSessionId,
+        sdkSessionId: placeholderSdkSessionId,
+        name: '新聊天',
+        messageCount: 0,
+        llmConnection: 'qwen-code',
+      },
+      workspace,
+    );
+    const resolved = createManagedSession(
+      {
+        id: resolvedSdkSessionId,
+        sdkSessionId: resolvedSdkSessionId,
+        name: 'Qwen code 现在有心跳机制吗',
+        lastMessageAt: Date.parse('2026-05-08T09:30:02.013Z'),
+        llmConnection: 'qwen-code',
+      },
+      workspace,
+    );
+
+    (
+      manager as unknown as { sessions: Map<string, typeof unresolved> }
+    ).sessions.set(unresolved.id, unresolved);
+    (
+      manager as unknown as { sessions: Map<string, typeof placeholder> }
+    ).sessions.set(placeholder.id, placeholder);
+    (
+      manager as unknown as { sessions: Map<string, typeof resolved> }
+    ).sessions.set(resolved.id, resolved);
+
+    expect(
+      manager.getSessions(workspace.id).map((session) => session.id),
+    ).toEqual([resolvedSdkSessionId]);
+  });
+
   it('lists provider-native sessions from the workspace default working directory', async () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),
@@ -406,12 +468,15 @@ describe('Qwen native history loading', () => {
     ).doRefreshExternalSessionsForWorkspace(workspace);
 
     const sessions = manager.getSessions(workspace.id);
-    expect(sessions.map((session) => session.id)).toContain(craftSessionId);
-    expect(sessions.map((session) => session.id)).not.toContain(sdkSessionId);
+    expect(sessions.map((session) => session.id)).not.toContain(craftSessionId);
+    expect(sessions.map((session) => session.id)).toContain(sdkSessionId);
     expect(sessions.filter((session) => session.name === '无敌')).toHaveLength(
       1,
     );
-    expect(loadSession(workspaceRoot, sdkSessionId)).toBeNull();
+    expect(loadSession(workspaceRoot, craftSessionId)).toBeNull();
+    expect(loadSession(workspaceRoot, sdkSessionId)?.sdkSessionId).toBe(
+      sdkSessionId,
+    );
   });
 
   it('syncs Craft session titles to Qwen custom titles through the provider rename hook', async () => {
@@ -757,6 +822,87 @@ describe('Qwen native history loading', () => {
     await manager.getSession(sessionId);
 
     expect(loadCalls).toBe(1);
+  });
+
+  it('uses workspace default cwd when opening a stripped Qwen canonical session', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const sessionId = '260508-你好-2';
+    const sdkSessionId = '8390af4d-5db6-4e4c-b7e8-040d002690c7';
+    const timestamp = Date.parse('2026-05-08T09:30:02.013Z');
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    let observedCwd: string | undefined;
+    const nativeMessages: Message[] = [
+      {
+        id: 'qwen-user-1',
+        role: 'user',
+        content: '你好',
+        timestamp,
+      },
+    ];
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          loadSessionMessages: async (
+            _sessionId: string,
+            options?: { cwd?: string },
+          ) => {
+            observedCwd = options?.cwd;
+            return nativeMessages;
+          },
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId,
+        name: '新聊天',
+        createdAt: timestamp,
+        lastUsedAt: timestamp,
+        lastMessageAt: timestamp,
+        messageCount: 0,
+        llmConnection: 'qwen-code',
+        thinkingLevel: 'medium',
+      },
+      workspace,
+    );
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    const loaded = await manager.getSession(sessionId);
+
+    expect(observedCwd).toBe(projectRoot);
+    expect(loaded?.messages.map((message) => message.content)).toEqual([
+      '你好',
+    ]);
+    expect(loaded?.messageCount).toBeUndefined();
   });
 
   it('removes existing empty placeholder mirrors from provider-native sync', async () => {
