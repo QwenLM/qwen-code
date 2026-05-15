@@ -9,7 +9,7 @@ import { PromptHookRunner } from './promptHookRunner.js';
 import { HookEventName, HookType } from './types.js';
 import type { PromptHookConfig, HookInput } from './types.js';
 import type { Config } from '../config/config.js';
-import type { GenerateContentResponse } from '@google/genai';
+import { FinishReason, type GenerateContentResponse } from '@google/genai';
 
 describe('PromptHookRunner', () => {
   let promptRunner: PromptHookRunner;
@@ -26,6 +26,9 @@ describe('PromptHookRunner', () => {
     mockConfig = {
       getFastModel: vi.fn().mockReturnValue('qwen-turbo'),
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'qwen-plus',
+      }),
       getContentGenerator: vi.fn().mockReturnValue({
         generateContent: mockGenerateContent,
         generateContentStream: vi.fn(),
@@ -254,6 +257,37 @@ describe('PromptHookRunner', () => {
       expect(result.output?.continue).toBe(true);
     });
 
+    it('should treat truncated MAX_TOKENS response as non-blocking error', async () => {
+      const mockResponse = createMockResponse('{"ok": false, "reason": "Bloc', {
+        candidates: [
+          {
+            content: {
+              parts: [{ text: '{"ok": false, "reason": "Bloc' }],
+              role: 'assistant',
+            },
+            finishReason: FinishReason.MAX_TOKENS,
+          },
+        ],
+      });
+      mockGenerateContent.mockResolvedValue(mockResponse);
+
+      const config = createMockConfig();
+      const input = createMockInput();
+
+      const result = await promptRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('non_blocking_error');
+      expect(result.output?.continue).toBe(true);
+      expect(result.error?.message).toContain(
+        'Response truncated due to token limit',
+      );
+    });
+
     it('should handle ContentGenerator not available', async () => {
       vi.mocked(mockConfig.getContentGenerator).mockReturnValue(
         undefined as unknown as ReturnType<
@@ -389,7 +423,7 @@ describe('PromptHookRunner', () => {
       expect(systemInstruction?.parts?.[0]?.text).toContain('ok');
     });
 
-    it('should pass deterministic generation config (temperature 0, capped output, no thoughts)', async () => {
+    it('should pass deterministic generation config for non-reasoning models', async () => {
       const mockResponse = createMockResponse('{"ok": true}');
       mockGenerateContent.mockResolvedValue(mockResponse);
 
@@ -405,7 +439,33 @@ describe('PromptHookRunner', () => {
       // Output is a tiny JSON object — cap tokens to avoid runaway
       // generations and unnecessary cost.
       expect(callArg.config?.maxOutputTokens).toBe(500);
+      // Prompt hooks must explicitly disable inherited reasoning.
+      expect(callArg.config?.reasoning).toBe(false);
       // Thoughts are stripped post-hoc; don't pay to generate them.
+      expect(callArg.config?.thinkingConfig).toEqual({
+        includeThoughts: false,
+      });
+    });
+
+    it('should omit temperature override for reasoning models', async () => {
+      vi.mocked(mockConfig.getModel).mockReturnValue('o3');
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'o3',
+        reasoning: { effort: 'high' },
+      });
+
+      const mockResponse = createMockResponse('{"ok": true}');
+      mockGenerateContent.mockResolvedValue(mockResponse);
+
+      const config = createMockConfig();
+      const input = createMockInput();
+
+      await promptRunner.execute(config, HookEventName.PreToolUse, input);
+
+      const callArg = mockGenerateContent.mock.calls[0][0];
+      expect(callArg.config?.temperature).toBeUndefined();
+      expect(callArg.config?.maxOutputTokens).toBe(500);
+      expect(callArg.config?.reasoning).toBe(false);
       expect(callArg.config?.thinkingConfig).toEqual({
         includeThoughts: false,
       });

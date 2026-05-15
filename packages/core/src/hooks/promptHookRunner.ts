@@ -100,7 +100,7 @@ export class PromptHookRunner {
       );
       debugLogger.debug(`Prompt hook full prompt:\n${processedPrompt}`);
 
-      // Get model to use (fastModel or main model)
+      // Get model to use (user's current model)
       const model = hookConfig.model ?? this.getModel();
       debugLogger.debug(`Prompt hook using model: ${model}`);
 
@@ -183,6 +183,24 @@ export class PromptHookRunner {
   }
 
   /**
+   * Check whether the current prompt hook model should be treated as a
+   * reasoning model for request-shaping compatibility.
+   */
+  private isReasoningModel(model: string): boolean {
+    const reasoningConfig = this.config.getContentGeneratorConfig().reasoning;
+    if (reasoningConfig !== undefined && reasoningConfig !== false) {
+      return true;
+    }
+
+    const normalizedModel = model.toLowerCase();
+    return (
+      normalizedModel.startsWith('o1') ||
+      normalizedModel.startsWith('o3') ||
+      normalizedModel.includes('reasoner')
+    );
+  }
+
+  /**
    * Execute LLM query with timeout support
    */
   private async executeWithTimeout(
@@ -236,33 +254,52 @@ export class PromptHookRunner {
     });
 
     try {
+      const isReasoningModel = this.isReasoningModel(model);
+      const requestConfig = {
+        abortSignal: internalSignal,
+        systemInstruction: {
+          parts: [{ text: LLM_HOOK_SYSTEM_PROMPT }],
+        },
+        ...(isReasoningModel
+          ? {}
+          : {
+              // Deterministic allow/block decisions — same input must
+              // produce the same gating outcome to keep security checks
+              // reliable.
+              temperature: 0,
+            }),
+        // Responses are tiny JSON objects; cap output to avoid
+        // runaway generations on misbehaving models.
+        maxOutputTokens: 500,
+        // Explicitly disable inherited reasoning so providers do not spend
+        // output budget on hidden thoughts for hook evaluation.
+        reasoning: false,
+        // Thoughts are filtered out post-hoc anyway; skip generating
+        // them so we don't pay for reasoning tokens we discard.
+        thinkingConfig: { includeThoughts: false },
+      };
+
       // Race between LLM call and timeout
       const response = await Promise.race([
         generator.generateContent(
           {
             model,
             contents,
-            config: {
-              abortSignal: internalSignal,
-              systemInstruction: {
-                parts: [{ text: LLM_HOOK_SYSTEM_PROMPT }],
-              },
-              // Deterministic allow/block decisions — same input must
-              // produce the same gating outcome to keep security checks
-              // reliable.
-              temperature: 0,
-              // Responses are tiny JSON objects; cap output to avoid
-              // runaway generations on misbehaving models.
-              maxOutputTokens: 500,
-              // Thoughts are filtered out post-hoc anyway; skip generating
-              // them so we don't pay for reasoning tokens we discard.
-              thinkingConfig: { includeThoughts: false },
-            },
+            config: requestConfig,
           },
           'prompt_hook',
         ),
         timeoutPromise,
       ]);
+
+      const finishReason = (response as GenerateContentResponse).candidates?.[0]
+        ?.finishReason;
+      if (finishReason === 'MAX_TOKENS') {
+        debugLogger.warn(
+          'LLM response truncated at maxOutputTokens — treating as unreliable',
+        );
+        throw new Error('Response truncated due to token limit');
+      }
 
       // Extract text from response
       const text = (
