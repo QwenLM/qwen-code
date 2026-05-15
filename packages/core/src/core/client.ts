@@ -974,9 +974,6 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
-    let relevantAutoMemoryPromise:
-      | Promise<RelevantAutoMemoryPromptResult>
-      | undefined;
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
@@ -1062,24 +1059,18 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         if (this.config.getManagedAutoMemoryEnabled()) {
-          const recallAbortController = new AbortController();
-          const rawRecallPromise = this.config
+          const controller = new AbortController();
+          const promise = this.config
             .getMemoryManager()
             .recall(this.config.getProjectRoot(), partToString(request), {
               config: this.config,
               excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-              abortSignal: recallAbortController.signal,
+              abortSignal: controller.signal,
             })
             .catch((error: unknown) => {
               if (
-                error instanceof DOMException &&
-                error.name === 'AbortError'
+                !(error instanceof DOMException && error.name === 'AbortError')
               ) {
-                debugLogger.debug(
-                  'Auto-memory recall aborted by deadline.',
-                  error,
-                );
-              } else {
                 debugLogger.warn(
                   'Managed auto-memory recall prefetch failed.',
                   error,
@@ -1087,14 +1078,16 @@ export class GeminiClient {
               }
               return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
             });
-          this.pendingRecallAbortController = recallAbortController;
-          // Race the recall against the deadline at initiation time so the 2.5s
-          // budget is not consumed by intermediate work (microcompact, compression,
-          // token checks, IDE context) between initiation and consumption.
-          relevantAutoMemoryPromise = resolveAutoMemoryWithDeadline(
-            rawRecallPromise,
-            () => recallAbortController.abort(),
-          );
+          const handle: MemoryPrefetchHandle = {
+            promise,
+            settledAt: null,
+            consumed: false,
+            controller,
+          };
+          void promise.finally(() => {
+            handle.settledAt = Date.now();
+          });
+          this.pendingMemoryPrefetch = handle;
         }
 
         // Track prompt count for commit attribution. Only the user typing a
