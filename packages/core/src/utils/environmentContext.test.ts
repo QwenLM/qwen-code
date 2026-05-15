@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import type { Content } from '@google/genai';
 import {
+  buildAddedMcpToolsReminder,
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
   getEnvironmentContext,
@@ -439,6 +440,27 @@ describe('startup reminder builders', () => {
 
     expect(reminder).toContain(
       '- "`evil`": "normal text \\" with quote and ` backtick and \\\\ slash"',
+    );
+  });
+
+  it('renders added MCP tools without bundled tools', () => {
+    const reminder = buildAddedMcpToolsReminder([
+      { name: 'write_report', description: 'Write a report.' },
+      {
+        name: 'mcp__schedule-server__cron_list',
+        description: 'List scheduled jobs.\nSecond line ignored.',
+        serverName: 'schedule-server',
+      },
+    ]);
+
+    expect(reminder).toMatch(/^<system-reminder>[\s\S]*<\/system-reminder>$/);
+    expect(reminder).toContain('became available after startup');
+    expect(reminder).not.toContain('### Bundled');
+    expect(reminder).not.toContain('write_report');
+    expect(reminder).toContain('### MCP servers');
+    expect(reminder).toContain('#### schedule-server');
+    expect(reminder).toContain(
+      '- "mcp__schedule-server__cron_list": "List scheduled jobs."',
     );
   });
 

@@ -74,10 +74,12 @@ import {
 
 // Utilities
 import {
+  buildAddedMcpToolsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
 } from '../utils/environmentContext.js';
+import type { DeferredToolSummary } from '../tools/tool-registry.js';
 import {
   buildApiHistoryFromConversation,
   replayUiTelemetryFromConversation,
@@ -208,6 +210,8 @@ export class GeminiClient {
   private pendingRecallAbortController: AbortController | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
+  private announcedDeferredToolNames = new Set<string>();
+  private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -394,32 +398,11 @@ export class GeminiClient {
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
-    const deferredTools = this.resolveDeferredToolsForSystemPrompt();
+    const deferredTools = this.resolveDeferredToolsForReminder();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
-    // Rebuild the system instruction so its "Deferred Tools" section
-    // matches the registry's current state. Without this refresh, MCP
-    // tools that land in the registry after startChat() (progressive
-    // discovery — see Config.startMcpDiscoveryInBackground) stay invisible
-    // to the model: they're filtered out of `toolDeclarations` by
-    // `shouldDefer`, and the prompt's deferred listing was frozen at the
-    // built-in-only snapshot taken inside startChat(). The model then has
-    // no signal that an MCP tool exists and never invokes ToolSearch to
-    // reveal it — silently regressing non-interactive `--prompt` runs.
-    this.getChat().setSystemInstruction(
-      this.getMainSessionSystemInstruction(deferredTools),
-    );
-    // setSystemInstruction overwrites the chat's systemInstruction wholesale,
-    // dropping any SessionStart additionalContext that startChat() (or a
-    // prior Compact) appended via applySessionStartContext. Re-apply it so
-    // a SessionStart hook's context survives the progressive-MCP refresh.
-    if (this.lastSessionStartContext && this.lastSessionStartSource) {
-      this.getChat().applySessionStartContext(
-        this.lastSessionStartContext,
-        this.lastSessionStartSource,
-      );
-    }
+    this.queueAddedMcpToolsReminder(deferredTools ?? []);
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
@@ -468,9 +451,7 @@ export class GeminiClient {
     });
   }
 
-  private getMainSessionSystemInstruction(
-    deferredTools?: Array<{ name: string; description: string }>,
-  ): string {
+  private getMainSessionSystemInstruction(): string {
     const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
@@ -480,7 +461,6 @@ export class GeminiClient {
         overrideSystemPrompt,
         userMemory,
         appendSystemPrompt,
-        deferredTools,
       );
     }
 
@@ -488,7 +468,6 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
-      deferredTools,
     );
   }
 
@@ -523,10 +502,7 @@ export class GeminiClient {
       return;
     }
     await this.config.getToolRegistry().warmAll();
-    const deferredTools = this.resolveDeferredToolsForSystemPrompt();
-    this.chat.setSystemInstruction(
-      this.getMainSessionSystemInstruction(deferredTools),
-    );
+    this.chat.setSystemInstruction(this.getMainSessionSystemInstruction());
     if (this.lastSessionStartContext && this.lastSessionStartSource) {
       this.chat.applySessionStartContext(
         this.lastSessionStartContext,
@@ -536,10 +512,8 @@ export class GeminiClient {
   }
 
   /**
-   * Computes the deferred-tools list passed to the system prompt. Shared by
-   * {@link startChat}, {@link setTools}, and {@link refreshSystemInstruction}
-   * so all three render the same "Deferred Tools" section for a given
-   * registry state.
+   * Computes the deferred-tools list that should be announced through
+   * user-role system reminders.
    *
    * Caller MUST `await toolRegistry.warmAll()` first — this method only
    * inspects the registry's eager state and would otherwise miss factory-
@@ -552,13 +526,10 @@ export class GeminiClient {
    * `undefined` is returned in that branch) — a silent disappearance that's
    * harder to diagnose than seeing the tool name absent from `/mcp` output.
    *
-   * Returns `undefined` when ToolSearch is unavailable: the prompt's
-   * deferred-tools section must not advertise tools the model has no way to
-   * load on demand.
+   * Returns `undefined` when ToolSearch is unavailable: reminders must not
+   * advertise tools the model has no way to load on demand.
    */
-  private resolveDeferredToolsForSystemPrompt():
-    | Array<{ name: string; description: string }>
-    | undefined {
+  private resolveDeferredToolsForReminder(): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
     const deferredSummary = toolRegistry.getDeferredToolSummary();
     const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
@@ -573,6 +544,54 @@ export class GeminiClient {
     return deferredSummary.filter(
       (t) => !toolRegistry.isDeferredToolRevealed(t.name),
     );
+  }
+
+  private rememberAnnouncedDeferredTools(
+    deferredTools: readonly DeferredToolSummary[] | undefined,
+  ): void {
+    this.announcedDeferredToolNames = new Set(
+      (deferredTools ?? []).map((tool) => tool.name),
+    );
+    this.pendingAddedMcpTools.clear();
+  }
+
+  private queueAddedMcpToolsReminder(
+    deferredTools: readonly DeferredToolSummary[],
+  ): void {
+    const currentDeferredNames = new Set(
+      deferredTools.map((tool) => tool.name),
+    );
+    for (const name of this.pendingAddedMcpTools.keys()) {
+      if (!currentDeferredNames.has(name)) {
+        this.pendingAddedMcpTools.delete(name);
+      }
+    }
+
+    for (const tool of deferredTools) {
+      if (tool.serverName && !this.announcedDeferredToolNames.has(tool.name)) {
+        this.pendingAddedMcpTools.set(tool.name, tool);
+      }
+      this.announcedDeferredToolNames.add(tool.name);
+    }
+  }
+
+  private drainPendingAddedMcpToolsReminder(): void {
+    if (this.pendingAddedMcpTools.size === 0) {
+      return;
+    }
+
+    const addedMcpTools = Array.from(this.pendingAddedMcpTools.values());
+    const reminder = buildAddedMcpToolsReminder(addedMcpTools);
+    this.pendingAddedMcpTools.clear();
+
+    if (!reminder) {
+      return;
+    }
+
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
   }
 
   private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
@@ -640,9 +659,8 @@ export class GeminiClient {
       // the declaration list. Without this, the model sees history like
       // "I called foo_tool, got result" but the API rejects a follow-up
       // call to foo_tool because the schema is absent. This must happen
-      // BEFORE `resolveDeferredToolsForSystemPrompt()` runs so the resumed
-      // tools are correctly filtered out of both the system prompt's
-      // deferred-summary list and the startup reminder built below.
+      // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
+      // are correctly filtered out of the startup reminder built below.
       if (extraHistory && extraHistory.length > 0) {
         const deferredNames = new Set(
           toolRegistry.getDeferredToolSummary().map((t) => t.name),
@@ -658,10 +676,10 @@ export class GeminiClient {
           }
         }
       }
-      const deferredTools = this.resolveDeferredToolsForSystemPrompt();
+      const deferredTools = this.resolveDeferredToolsForReminder();
+      this.rememberAnnouncedDeferredTools(deferredTools);
       history = await getInitialChatHistory(this.config, extraHistory);
-      const systemInstruction =
-        this.getMainSessionSystemInstruction(deferredTools);
+      const systemInstruction = this.getMainSessionSystemInstruction();
 
       this.chat = new GeminiChat(
         this.config,
@@ -1341,6 +1359,14 @@ export class GeminiClient {
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return new Turn(this.getChat(), prompt_id);
         }
+      }
+
+      if (
+        !hasPendingToolCall &&
+        (messageType === SendMessageType.UserQuery ||
+          messageType === SendMessageType.Cron)
+      ) {
+        this.drainPendingAddedMcpToolsReminder();
       }
 
       const turn = new Turn(this.getChat(), prompt_id);
