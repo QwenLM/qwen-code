@@ -139,10 +139,42 @@ export const useSlashCommandProcessor = (
     ReadonlyMap<string, RecentSlashCommand>
   >(new Map());
   const [reloadTrigger, setReloadTrigger] = useState(0);
+  const commandReloadResolversRef = useRef<
+    Array<{ trigger: number; resolve: () => void }>
+  >([]);
 
-  const reloadCommands = useCallback(() => {
-    setReloadTrigger((v) => v + 1);
+  const resolveCommandReloads = useCallback((completedTrigger: number) => {
+    if (commandReloadResolversRef.current.length === 0) {
+      return;
+    }
+
+    const remaining: Array<{ trigger: number; resolve: () => void }> = [];
+    for (const request of commandReloadResolversRef.current) {
+      if (request.trigger <= completedTrigger) {
+        request.resolve();
+      } else {
+        remaining.push(request);
+      }
+    }
+    commandReloadResolversRef.current = remaining;
   }, []);
+
+  const reloadCommands = useCallback((): Promise<void> => {
+    if (!config) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      setReloadTrigger((v) => {
+        const nextTrigger = v + 1;
+        commandReloadResolversRef.current.push({
+          trigger: nextTrigger,
+          resolve,
+        });
+        return nextTrigger;
+      });
+    });
+  }, [config]);
   const [shellConfirmationRequest, setShellConfirmationRequest] =
     useState<null | {
       commands: string[];
@@ -411,10 +443,7 @@ export const useSlashCommandProcessor = (
           config.setModelInvocableCommandsProvider(() =>
             commandService.getModelInvocableCommands().map((cmd) => ({
               name: cmd.name,
-              description:
-                typeof cmd.description === 'string'
-                  ? cmd.description
-                  : cmd.description,
+              description: cmd.modelDescription ?? cmd.description,
             })),
           );
           // Register executor so SkillTool can actually invoke model-invocable
@@ -455,6 +484,10 @@ export const useSlashCommandProcessor = (
         setCommands(commandService.getCommandsForMode('interactive'));
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
+      } finally {
+        if (!controller.signal.aborted) {
+          resolveCommandReloads(reloadTrigger);
+        }
       }
     };
 
@@ -463,7 +496,14 @@ export const useSlashCommandProcessor = (
     return () => {
       controller.abort();
     };
-  }, [config, reloadTrigger, isConfigInitialized, settings, gitService]);
+  }, [
+    config,
+    reloadTrigger,
+    isConfigInitialized,
+    settings,
+    gitService,
+    resolveCommandReloads,
+  ]);
 
   const handleSlashCommand = useCallback(
     async (

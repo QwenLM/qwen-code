@@ -31,7 +31,8 @@ describe('keyMatchers', () => {
     [Command.KILL_LINE_LEFT]: (key: Key) => key.ctrl && key.name === 'u',
     [Command.CLEAR_INPUT]: (key: Key) => key.ctrl && key.name === 'c',
     [Command.DELETE_WORD_BACKWARD]: (key: Key) =>
-      (key.ctrl || key.meta) && key.name === 'backspace',
+      ((key.ctrl || key.meta) && key.name === 'backspace') ||
+      key.sequence === '\x1f',
     [Command.CLEAR_SCREEN]: (key: Key) => key.ctrl && key.name === 'l',
     [Command.HISTORY_UP]: (key: Key) => key.ctrl && key.name === 'p',
     [Command.HISTORY_DOWN]: (key: Key) => key.ctrl && key.name === 'n',
@@ -62,6 +63,8 @@ describe('keyMatchers', () => {
     [Command.RETRY_LAST]: (key: Key) => key.ctrl && key.name === 'y',
     [Command.TOGGLE_COMPACT_MODE]: (key: Key) => key.ctrl && key.name === 'o',
     [Command.TOGGLE_RENDER_MODE]: (key: Key) => key.meta && key.name === 'm',
+    [Command.PROMOTE_SHELL_TO_BACKGROUND]: (key: Key) =>
+      key.ctrl && key.name === 'b',
     [Command.REVERSE_SEARCH]: (key: Key) => key.ctrl && key.name === 'r',
     [Command.SUBMIT_REVERSE_SEARCH]: (key: Key) =>
       key.name === 'return' && !key.ctrl,
@@ -128,6 +131,10 @@ describe('keyMatchers', () => {
       positive: [
         createKey('backspace', { ctrl: true }),
         createKey('backspace', { meta: true }),
+        // MinTTY (Git Bash on Windows) emits a bare \x1f byte for
+        // Ctrl+Backspace — see the matching comment in keyBindings.ts
+        // on the DELETE_WORD_BACKWARD default-binding array.
+        createKey('', { sequence: '\x1f' }),
       ],
       negative: [createKey('backspace'), createKey('delete', { ctrl: true })],
     },
@@ -295,6 +302,17 @@ describe('keyMatchers', () => {
         createKey('m', { ctrl: true }),
         createKey('', { sequence: 'µ' }),
         createKey('', { sequence: 'µ', paste: true }),
+      ],
+    },
+    {
+      command: Command.PROMOTE_SHELL_TO_BACKGROUND,
+      positive: [createKey('b', { ctrl: true })],
+      // No bare `b`, no Ctrl+other, no meta+b — Ctrl is required so
+      // typing `b` mid-prompt isn't accidentally swallowed.
+      negative: [
+        createKey('b'),
+        createKey('b', { meta: true }),
+        createKey('a', { ctrl: true }),
       ],
     },
   ];

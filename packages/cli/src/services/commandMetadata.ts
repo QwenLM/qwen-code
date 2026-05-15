@@ -14,19 +14,21 @@ export type CommandSourceGroup = {
 };
 
 export function getCommandSourceBadge(
-  command: Pick<SlashCommand, 'source' | 'sourceLabel'>,
+  command: Pick<SlashCommand, 'source' | 'sourceDetail'>,
 ): string | null {
   switch (command.source) {
     case 'bundled-skill':
       return '[Skill]';
     case 'skill-dir-command':
-      if (command.sourceLabel === 'User') return '[User]';
-      if (command.sourceLabel === 'Project') return '[Project]';
+      if (command.sourceDetail === 'user') {
+        return '[User]';
+      }
+      if (command.sourceDetail === 'project') {
+        return '[Project]';
+      }
       return '[Custom]';
     case 'plugin-command':
-      return command.sourceLabel?.startsWith('Extension:')
-        ? '[Extension]'
-        : '[Plugin]';
+      return command.sourceDetail === 'extension' ? '[Extension]' : '[Plugin]';
     case 'mcp-prompt':
       return '[MCP]';
     case 'builtin-command':

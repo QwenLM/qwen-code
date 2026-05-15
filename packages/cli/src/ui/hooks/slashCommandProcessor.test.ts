@@ -122,7 +122,7 @@ describe('useSlashCommandProcessor', () => {
   mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
     recordSlashCommand: vi.fn(),
   });
-  const mockSettings = {} as LoadedSettings;
+  const mockSettings = { merged: {} } as LoadedSettings;
 
   const createMockActions = (): SlashCommandProcessorActions => ({
     openAuthDialog: mockOpenAuthDialog,
@@ -136,6 +136,7 @@ describe('useSlashCommandProcessor', () => {
     openTrustDialog: vi.fn(),
     openPermissionsDialog: vi.fn(),
     openApprovalModeDialog: vi.fn(),
+    openHelpDialog: vi.fn(),
     openResumeDialog: vi.fn(),
     handleResume: vi.fn(),
     handleBranch: vi.fn().mockResolvedValue(undefined),
@@ -167,6 +168,7 @@ describe('useSlashCommandProcessor', () => {
     fileCommands: SlashCommand[] = [],
     mcpCommands: SlashCommand[] = [],
     setIsProcessing = vi.fn(),
+    settings: LoadedSettings = mockSettings,
   ) => {
     mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
@@ -175,7 +177,7 @@ describe('useSlashCommandProcessor', () => {
     const { result } = renderHook(() =>
       useSlashCommandProcessor(
         mockConfig,
-        mockSettings,
+        settings,
         mockAddItem,
         mockClearItems,
         mockLoadHistory,

@@ -53,6 +53,14 @@ export enum Command {
   RETRY_LAST = 'retryLast',
   TOGGLE_COMPACT_MODE = 'toggleCompactMode',
   TOGGLE_RENDER_MODE = 'toggleRenderMode',
+  /**
+   * Promote the running foreground shell command to a background task.
+   * The child process keeps running and the agent's turn unblocks; the
+   * shell becomes a regular `BackgroundShellEntry` visible in `/tasks`,
+   * the Background tasks dialog, and stoppable via `task_stop`.
+   * No-op when no foreground shell is currently executing.
+   */
+  PROMOTE_SHELL_TO_BACKGROUND = 'promoteShellToBackground',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
@@ -112,6 +120,14 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.DELETE_WORD_BACKWARD]: [
     { key: 'backspace', ctrl: true },
     { key: 'backspace', command: true },
+    // MinTTY (Git Bash on Windows) emits the byte \x1f (ASCII Unit
+    // Separator, rendered as "^_" by `cat -v`) for Ctrl+Backspace under
+    // its standard Ctrl-modifies-meta-keys convention. The same byte is
+    // the historical Ctrl-mapping of the Unit Separator on traditional
+    // ANSI/VT terminals (Ctrl+_ and Ctrl+/ also emit it), but qwen-code
+    // doesn't bind those keystrokes elsewhere so this entry is additive
+    // and non-conflicting on every platform.
+    { sequence: '\x1f' },
   ],
 
   // Screen control
@@ -176,6 +192,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
   [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
+  [Command.PROMOTE_SHELL_TO_BACKGROUND]: [{ key: 'b', ctrl: true }],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],

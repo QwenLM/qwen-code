@@ -269,6 +269,7 @@ export * from './followup/index.js';
 // ============================================================================
 
 export * from './utils/browser.js';
+export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
@@ -286,6 +287,7 @@ export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiscovery.js';
+export * from './utils/modelId.js';
 export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
 export type { RuleFile } from './utils/rulesDiscovery.js';
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
@@ -306,7 +308,9 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
+  redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
+export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';
@@ -369,3 +373,14 @@ export {
   type PostToolUseFailureHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+
+// ============================================================================
+// Startup profiler — cross-package event sink (first-screen perf observability)
+// ============================================================================
+
+export {
+  setStartupEventSink,
+  recordStartupEvent,
+  type StartupEventSink,
+  type StartupEventAttrs,
+} from './utils/startupEventSink.js';

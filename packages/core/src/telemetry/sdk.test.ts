@@ -12,6 +12,7 @@ import {
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   resolveHttpOtlpUrl,
+  refreshSessionContext,
 } from './sdk.js';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
@@ -20,7 +21,6 @@ import { OTLPTraceExporter as OTLPTraceExporterHttp } from '@opentelemetry/expor
 import { OTLPLogExporter as OTLPLogExporterHttp } from '@opentelemetry/exporter-logs-otlp-http';
 import { OTLPMetricExporter as OTLPMetricExporterHttp } from '@opentelemetry/exporter-metrics-otlp-http';
 import { NodeSDK } from '@opentelemetry/sdk-node';
-import { TelemetryTarget } from './index.js';
 
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -29,6 +29,21 @@ import {
   resetDebugLoggingState,
   setDebugLogSession,
 } from '../utils/debugLogger.js';
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function expectOtelDebugLogLine(
+  level: 'ERROR' | 'WARN',
+  message: string,
+): ReturnType<typeof expect.stringMatching> {
+  return expect.stringMatching(
+    new RegExp(
+      `\\[${level}\\] \\[OTEL\\]( \\[trace_id=[0-9a-f]{32} span_id=[0-9a-f]{16}\\])? ${escapeRegExp(message)}`,
+    ),
+  );
+}
 
 vi.mock('@opentelemetry/exporter-trace-otlp-grpc');
 vi.mock('@opentelemetry/exporter-logs-otlp-grpc');
@@ -39,8 +54,14 @@ vi.mock('@opentelemetry/exporter-metrics-otlp-http');
 vi.mock('@opentelemetry/sdk-node');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
+vi.mock('./session-context.js');
+vi.mock('./tracer.js', () => ({
+  createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
+}));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
+import { setSessionContext } from './session-context.js';
+import { createSessionRootContext } from './tracer.js';
 
 describe('resolveHttpOtlpUrl', () => {
   it('appends signal path to base collector URL', () => {
@@ -114,7 +135,6 @@ describe('Telemetry SDK', () => {
       getTelemetryOtlpLogsEndpoint: () => undefined,
       getTelemetryOtlpMetricsEndpoint: () => undefined,
       getTelemetryTarget: () => 'local',
-      getTelemetryUseCollector: () => false,
       getTelemetryOutfile: () => undefined,
       getTelemetryIncludeSensitiveSpanAttributes: () => false,
       getDebugMode: () => false,
@@ -185,21 +205,20 @@ describe('Telemetry SDK', () => {
       expect(mkdirSpy).toHaveBeenCalled();
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
-        expect.stringContaining(
-          '[ERROR] [OTEL] {"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
+        expectOtelDebugLogLine(
+          'ERROR',
+          '{"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
         ),
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
-        expect.stringContaining(
-          '[ERROR] [OTEL] A different OpenTelemetry diagnostic',
-        ),
+        expectOtelDebugLogLine('ERROR', 'A different OpenTelemetry diagnostic'),
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
         expect.stringContaining('otel-diag-test-session'),
-        expect.stringContaining('[WARN] [OTEL] An OpenTelemetry warning'),
+        expectOtelDebugLogLine('WARN', 'An OpenTelemetry warning'),
         'utf8',
       );
     } finally {
@@ -361,28 +380,6 @@ describe('Telemetry SDK', () => {
     }
   });
 
-  it('should use OTLP exporters when target is gcp but useCollector is true', () => {
-    vi.spyOn(mockConfig, 'getTelemetryTarget').mockReturnValue(
-      TelemetryTarget.GCP,
-    );
-    vi.spyOn(mockConfig, 'getTelemetryUseCollector').mockReturnValue(true);
-
-    initializeTelemetry(mockConfig);
-
-    expect(OTLPTraceExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPLogExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-    expect(OTLPMetricExporter).toHaveBeenCalledWith({
-      url: 'http://localhost:4317',
-      compression: 'gzip',
-    });
-  });
-
   it('should not use OTLP exporters when telemetryOutfile is set', () => {
     vi.spyOn(mockConfig, 'getTelemetryOutfile').mockReturnValue(
       path.join(os.tmpdir(), 'test.log'),
@@ -514,5 +511,63 @@ describe('Telemetry SDK', () => {
       attributes: Record<string, string>;
     };
     expect(resource.attributes['service.version']).toBe('unknown');
+  });
+});
+
+describe('refreshSessionContext', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig = {
+      getTelemetryEnabled: () => true,
+      getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
+      getTelemetryOtlpProtocol: () => 'grpc',
+      getTelemetryOtlpTracesEndpoint: () => undefined,
+      getTelemetryOtlpLogsEndpoint: () => undefined,
+      getTelemetryOtlpMetricsEndpoint: () => undefined,
+      getTelemetryTarget: () => 'local',
+      getTelemetryOutfile: () => undefined,
+      getDebugMode: () => false,
+      getSessionId: () => 'test-session',
+      getCliVersion: () => '1.0.0-test',
+    } as unknown as Config;
+  });
+
+  afterEach(async () => {
+    await shutdownTelemetry();
+  });
+
+  it('should update session context when telemetry is initialized', () => {
+    initializeTelemetry(mockConfig);
+
+    refreshSessionContext('new-session-id');
+
+    expect(createSessionRootContext).toHaveBeenCalledWith('new-session-id');
+    expect(setSessionContext).toHaveBeenCalledWith(
+      { __sessionId: 'new-session-id' },
+      'new-session-id',
+    );
+  });
+
+  it('should be a no-op when telemetry is not initialized', () => {
+    // Do NOT call initializeTelemetry — telemetryInitialized remains false
+    refreshSessionContext('some-session');
+
+    expect(createSessionRootContext).not.toHaveBeenCalled();
+    expect(setSessionContext).not.toHaveBeenCalled();
+  });
+
+  it('should not throw when refreshing session context fails', () => {
+    initializeTelemetry(mockConfig);
+    vi.clearAllMocks();
+    vi.mocked(createSessionRootContext).mockImplementationOnce(() => {
+      throw new Error('session context failed');
+    });
+
+    expect(() => refreshSessionContext('bad-session')).not.toThrow();
+
+    expect(createSessionRootContext).toHaveBeenCalledWith('bad-session');
+    expect(setSessionContext).not.toHaveBeenCalled();
   });
 });

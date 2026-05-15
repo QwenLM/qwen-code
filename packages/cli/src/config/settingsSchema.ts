@@ -185,7 +185,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
-            enum: ['command', 'http'],
+            enum: ['command', 'http', 'prompt'],
             required: true,
           },
           command: {
@@ -197,6 +197,16 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The URL to send the POST request to. Required for "http" type.',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'The prompt template to send to the LLM. Required for "prompt" type. Use $ARGUMENTS as placeholder for hook input JSON.',
+          },
+          model: {
+            type: 'string',
+            description:
+              'Optional model override for "prompt" type hooks. Defaults to your current model.',
           },
           headers: {
             type: 'object',
@@ -1449,6 +1459,27 @@ const SETTINGS_SCHEMA = {
         description:
           'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
         showInDialog: false,
+      },
+      toolSearch: {
+        type: 'object',
+        label: 'Tool Search',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings for the ToolSearch discovery mechanism.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable ToolSearch',
+            category: 'Tools',
+            requiresRestart: true,
+            default: true,
+            description:
+              'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
+            showInDialog: true,
+          },
+        },
       },
       shell: {
         type: 'object',

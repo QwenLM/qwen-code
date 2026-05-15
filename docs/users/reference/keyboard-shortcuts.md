@@ -4,17 +4,18 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## General
 
-| Shortcut                       | Description                                                                                                                 |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
-| `Esc`                          | Close dialogs and suggestions.                                                                                              |
-| `Ctrl+C`                       | Cancel the ongoing request and clear the input. Press twice to exit the application.                                        |
-| `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                         |
-| `Ctrl+L`                       | Clear the screen.                                                                                                           |
-| `Ctrl+O`                       | Toggle compact mode (hide/show tool output and thinking).                                                                   |
-| `Ctrl+S`                       | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output.       |
-| `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                                    |
-| `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta. |
-| `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `yolo`)                                                            |
+| Shortcut                       | Description                                                                                                                                                                                                                                                                                               |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Esc`                          | Close dialogs and suggestions.                                                                                                                                                                                                                                                                            |
+| `Ctrl+C`                       | Cancel the ongoing request and clear the input. Press twice to exit the application.                                                                                                                                                                                                                      |
+| `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                                                                                                                                                                                                       |
+| `Ctrl+L`                       | Clear the screen.                                                                                                                                                                                                                                                                                         |
+| `Ctrl+O`                       | Toggle compact mode (hide/show tool output and thinking).                                                                                                                                                                                                                                                 |
+| `Ctrl+S`                       | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output.                                                                                                                                                                                     |
+| `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                                                                                                                                                                                                                  |
+| `Ctrl+B`                       | While a foreground shell command is running: promote it to a background task. The child keeps running, the agent's turn unblocks, and the shell appears in `/tasks` + the Background tasks dialog. No-op when no shell is executing — Ctrl+B then falls through to its prompt-area binding (cursor-left). |
+| `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta.                                                                                                                                                                               |
+| `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `yolo`)                                                                                                                                                                                                                                          |
 
 ## Input Prompt
 

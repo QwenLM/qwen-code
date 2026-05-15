@@ -34,6 +34,8 @@ import {
   tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -51,8 +53,45 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
+import type { SessionStartSource } from '../hooks/types.js';
+import { getCustomSystemPrompt } from './prompts.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+/**
+ * Replaces the args on a `structured_output` `functionCall` with the
+ * same `__redacted` placeholder used by `ToolCallEvent` telemetry
+ * (`packages/core/src/telemetry/types.ts`).
+ *
+ * The chat-recording JSONL (`<projectDir>/chats/<sessionId>.jsonl`)
+ * persists assistant turns to disk and re-feeds them on
+ * `--continue` / `--resume`. For `--json-schema` runs the tool args
+ * ARE the user's structured payload — already emitted on stdout via
+ * `result` / `structured_result`. Recording them verbatim here would
+ * mean the same payload (and every validation-failure retry along the
+ * way) sits on disk indefinitely, contradicting the privacy contract
+ * documented next to the telemetry redaction. Mirror the placeholder
+ * here so the chat-recording surface matches.
+ *
+ * Non-`structured_output` `functionCall`s pass through untouched.
+ *
+ * Exported for tests; callers should prefer the inline use inside
+ * `recordAssistantTurn` invocation below.
+ */
+export function redactStructuredOutputArgsForRecording(
+  part: Part,
+): { functionCall: NonNullable<Part['functionCall']> } | null {
+  if (!part.functionCall) return null;
+  if (part.functionCall.name !== ToolNames.STRUCTURED_OUTPUT) {
+    return { functionCall: part.functionCall };
+  }
+  return {
+    functionCall: {
+      ...part.functionCall,
+      args: { ...STRUCTURED_OUTPUT_REDACTED_ARGS },
+    },
+  };
+}
 
 function isCompressionFailureStatus(status: CompressionStatus): boolean {
   return (
@@ -346,6 +385,36 @@ export class InvalidStreamError extends Error {
  * @remarks
  * The session maintains all the turns between user and model.
  */
+const SESSION_START_CONTEXT_SENTINEL_START =
+  '<qwen:session-start-context hidden="true">';
+const SESSION_START_CONTEXT_SENTINEL_END = '</qwen:session-start-context>';
+const SESSION_START_CONTEXT_HEADER = 'SessionStart additional context';
+
+function buildSessionStartContextBlock(extraInstruction: string): string {
+  return `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n${extraInstruction}\n${SESSION_START_CONTEXT_SENTINEL_END}`;
+}
+
+function stripTrailingSessionStartContextBlock(
+  systemInstruction: string,
+): string {
+  const startIndex = systemInstruction.lastIndexOf(
+    `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n`,
+  );
+  if (startIndex === -1) {
+    return systemInstruction;
+  }
+
+  const endIndex = systemInstruction.indexOf(
+    `\n${SESSION_START_CONTEXT_SENTINEL_END}`,
+    startIndex,
+  );
+  if (endIndex === -1) {
+    return systemInstruction;
+  }
+
+  return systemInstruction.slice(0, startIndex);
+}
+
 export class GeminiChat {
   // A promise to represent the current state of the message being sent to the
   // model.
@@ -477,6 +546,36 @@ export class GeminiChat {
 
   setSystemInstruction(sysInstr: string) {
     this.generationConfig.systemInstruction = sysInstr;
+  }
+
+  setSessionStartContext(extraInstruction: string) {
+    const trimmed = extraInstruction.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const current = this.generationConfig.systemInstruction;
+    let baseInstruction = '';
+    if (typeof current === 'string') {
+      baseInstruction = stripTrailingSessionStartContextBlock(current);
+    } else if (current) {
+      baseInstruction = getCustomSystemPrompt(current);
+      baseInstruction = stripTrailingSessionStartContextBlock(baseInstruction);
+    }
+    const contextBlock = buildSessionStartContextBlock(trimmed);
+    this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
+  }
+
+  applySessionStartContext(
+    extraInstruction: string,
+    _source: SessionStartSource,
+  ): void {
+    const trimmed = extraInstruction.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    this.setSessionStartContext(trimmed);
   }
 
   /**
@@ -1180,10 +1279,9 @@ export class GeminiChat {
       // Collect token usage for consolidated recording
       if (chunk.usageMetadata) {
         usageMetadata = chunk.usageMetadata;
-        // Use || instead of ?? so that totalTokenCount=0 falls back to promptTokenCount.
-        // Some providers omit total_tokens or return 0 in streaming usage chunks.
+        // Context usage tracks prompt size; output isn't in history yet.
         const lastPromptTokenCount =
-          usageMetadata.totalTokenCount || usageMetadata.promptTokenCount;
+          usageMetadata.promptTokenCount || usageMetadata.totalTokenCount;
         if (lastPromptTokenCount) {
           // Always update the per-chat counter so this chat (including
           // subagents) can make its own compaction decisions.
@@ -1257,8 +1355,13 @@ export class GeminiChat {
           ...(contentText ? [{ text: contentText }] : []),
           ...(hasToolCall
             ? contentParts
-                .filter((part) => part.functionCall)
-                .map((part) => ({ functionCall: part.functionCall }))
+                .map(redactStructuredOutputArgsForRecording)
+                .filter(
+                  (
+                    p,
+                  ): p is { functionCall: NonNullable<Part['functionCall']> } =>
+                    p !== null,
+                )
             : []),
         ],
         tokens: usageMetadata,

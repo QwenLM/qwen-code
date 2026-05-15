@@ -42,7 +42,6 @@ import {
   ShellExecutionService,
   Storage,
   SessionEndReason,
-  SessionStartSource,
   generatePromptSuggestion,
   logPromptSuggestion,
   PromptSuggestionEvent,
@@ -55,11 +54,13 @@ import {
   IDLE_SPECULATION,
   ApprovalMode,
   ConditionalRulesRegistry,
-  type PermissionMode,
+  MCPDiscoveryState,
   ToolConfirmationOutcome,
   type WaitingToolCall,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -68,7 +69,30 @@ import {
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
+import {
+  profileCheckpoint,
+  finalizeStartupProfile,
+} from '../utils/startupProfiler.js';
+import { appEvents } from '../utils/events.js';
 import process from 'node:process';
+
+/**
+ * Window in which mcp-client-update events are coalesced before the cli calls
+ * `setTools()`. Matches Claude Code's `MCP_BATCH_FLUSH_MS` (16 ≈ one 60Hz
+ * frame). Smaller windows would refresh the model tool list more often
+ * without user benefit; larger windows would let multiple servers settle
+ * before the model sees them. 16ms is the sweet spot validated by Claude's
+ * production deployment (see design.md § 8.3 + § 3.2 Round 2).
+ */
+const MCP_BATCH_FLUSH_MS = 16;
+
+/**
+ * Maximum time we keep the startup profile open waiting for MCP discovery to
+ * settle. Slightly longer than the default 30s per-server discovery timeout
+ * so a server that times out can still log its `outcome: failed` event into
+ * the profile. After this cap the profile file is written regardless.
+ */
+const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
@@ -101,7 +125,11 @@ import { computeWindowTitle } from '../utils/windowTitle.js';
 import { clearScreen } from '../utils/stdioHelpers.js';
 import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
-import { useGeminiStream } from './hooks/useGeminiStream.js';
+import {
+  useGeminiStream,
+  type CancelSubmitInfo,
+} from './hooks/useGeminiStream.js';
+import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
@@ -165,6 +193,11 @@ import {
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
 import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
+import {
+  findLastUserItemIndex,
+  isSyntheticHistoryItem,
+  itemsAfterAreOnlySynthetic,
+} from './utils/historyUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -374,7 +407,6 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
-  const previousTerminalWidthRef = useRef(terminalWidth);
   const { stdin, setRawMode } = useStdin();
   const { stdout } = useStdout();
 
@@ -404,13 +436,51 @@ export const AppContainer = (props: AppContainerProps) => {
   const lastTitleRef = useRef<string | null>(null);
   const staticExtraHeight = 3;
 
+  // Prefetch the lowlight chunk on mount so the dynamic import is already
+  // in flight before the first code block needs colorizing. Without this
+  // kick-off, code blocks committed to ink's append-only <Static> region
+  // before the import resolves stay plain text for the rest of the session
+  // — Static can only be re-rendered via `refreshStatic`, which is not
+  // wired to lowlight load completion. Common reachable paths: short
+  // `--prompt -p` runs that finalize quickly, Ctrl+C-cancelled first turns,
+  // and the first-paint history replay on `--resume`. Firing the load
+  // from mount keeps the startup parse-cost win (V8 still parses off the
+  // critical path) while restoring the "first paint sees a loaded
+  // instance" guarantee. Errors are silently swallowed; CodeColorizer
+  // already falls back to plain text on miss.
+  useEffect(() => {
+    void loadLowlight().catch((err) => {
+      // The loader caches rejection with a cooldown (see
+      // `LOWLIGHT_RETRY_COOLDOWN_MS` / `lowlightLastFailureAt` in
+      // `lowlightLoader.ts`). This useEffect runs once on mount, so this
+      // catch fires at most once per session regardless. Log to the debug
+      // channel so a degraded syntax-highlight state (corrupted install,
+      // missing chunk) leaves a breadcrumb without spamming the user's
+      // TTY — `CodeColorizer` already falls back to plain text.
+      debugLogger.warn(
+        `Failed to load lowlight chunk; code blocks will render as plain text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, []);
+
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
       // Note: the program will not work if this fails so let errors be
       // handled by the global catch.
+      profileCheckpoint('config_initialize_start');
       await config.initialize();
+      profileCheckpoint('config_initialize_end');
       setConfigInitialized(true);
+      profileCheckpoint('input_enabled');
+      // Profile finalize is intentionally NOT here. With PR-A's background
+      // MCP discovery, MCP-related events (`mcp_server_ready:*`,
+      // `mcp_first_tool_registered`, `mcp_all_servers_settled`,
+      // `gemini_tools_updated`) arrive AFTER `input_enabled`. The dedicated
+      // `useEffect` below (gated by `configInitialized`) defers finalize
+      // until MCP discovery settles or the 35s hard cap elapses — that way
+      // the profile captures the full MCP timeline without holding back
+      // the user-facing TTI.
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
@@ -443,32 +513,6 @@ export const AppContainer = (props: AppContainerProps) => {
           setSessionName(title);
         }
       }
-
-      // Fire SessionStart event after config is initialized
-      const sessionStartSource = resumedSessionData
-        ? SessionStartSource.Resume
-        : SessionStartSource.Startup;
-
-      const hookSystem = config.getHookSystem();
-
-      if (hookSystem) {
-        hookSystem
-          .fireSessionStartEvent(
-            sessionStartSource,
-            config.getModel() ?? '',
-            String(config.getApprovalMode()) as PermissionMode,
-          )
-          .then(() => {
-            debugLogger.debug('SessionStart event completed successfully');
-          })
-          .catch((err) => {
-            debugLogger.warn(`SessionStart hook failed: ${err}`);
-          });
-      } else {
-        debugLogger.debug(
-          'SessionStart: HookSystem not available, skipping event',
-        );
-      }
     })();
 
     // Register SessionEnd cleanup for process exit
@@ -489,6 +533,138 @@ export const AppContainer = (props: AppContainerProps) => {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
+
+  /**
+   * PR-A wiring: progressive MCP availability.
+   *
+   * This effect does two coupled things, both gated on `configInitialized`:
+   *
+   * 1. **16ms batch-flush of `setTools()`**: as each MCP server completes
+   *    discover, `McpClientManager` emits `mcp-client-update`. We coalesce
+   *    these into at most one `GeminiClient.setTools()` call per ~16ms
+   *    window. With three MCP servers settling within a few ms of each
+   *    other, the model sees one consolidated tool refresh instead of
+   *    three back-to-back; with a server stream over 1s, the model sees
+   *    each batch with at most one frame of lag (this is the gap the
+   *    baseline measured at 6235 ms in three-mixed-mcp before PR-A).
+   *
+   * 2. **Deferred startup-profile finalize**: in PR-A's default mode
+   *    MCP discovery runs in the background, so MCP-related profiler
+   *    events arrive AFTER `input_enabled`. The profile file is held open
+   *    until either the manager's discovery state reaches `COMPLETED`
+   *    (all servers ready or failed) or `STARTUP_PROFILE_FINALIZE_CAP_MS`
+   *    elapses (so a hung server doesn't keep the profile open forever).
+   *
+   * In legacy blocking mode (`QWEN_CODE_LEGACY_MCP_BLOCKING=1`) MCP
+   * discovery already completed inside `config.initialize()`, so this
+   * effect observes `MCPDiscoveryState.COMPLETED` immediately and finalizes
+   * without waiting.
+   */
+  useEffect(() => {
+    if (!isConfigInitialized) return undefined;
+    const geminiClient = config.getGeminiClient();
+    if (!geminiClient) return undefined;
+
+    const manager = config.getToolRegistry().getMcpClientManager();
+    let flushTimer: NodeJS.Timeout | null = null;
+    let finalized = false;
+
+    const finalizeOnce = () => {
+      if (finalized) return;
+      finalized = true;
+      finalizeStartupProfile(config.getSessionId());
+    };
+
+    // Runs the pending batched setTools() immediately and clears the timer.
+    // Returns a promise that resolves when setTools() finishes so callers
+    // can sequence subsequent work after `gemini_tools_updated` is
+    // recorded into the startup profile.
+    const flushNow = (): Promise<void> => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      // GeminiClient.setTools() has no try/catch around warmAll() /
+      // getFunctionDeclarations() / getChat().setTools(). A silent
+      // discard here would make production tool-registration regressions
+      // invisible, so route the error through debugLogger.
+      return geminiClient.setTools().catch((err) => {
+        debugLogger.error(
+          `setTools() batch-flush failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+    };
+
+    const scheduleFlush = () => {
+      if (flushTimer !== null) return;
+      flushTimer = setTimeout(() => {
+        flushTimer = null;
+        void flushNow();
+      }, MCP_BATCH_FLUSH_MS);
+    };
+
+    // Match the non-interactive entry points (`gemini.tsx`, `session.ts`,
+    // `acpAgent.ts`) which warn to stderr when MCP discovery completes with
+    // failed servers. The interactive path can't use stderr (it would
+    // collide with Ink's rendered output), so we route through
+    // `debugLogger.warn` so it shows up under `QWEN_CODE_DEBUG=1` and in
+    // the debug log file — matching the channel `setTools()` errors above
+    // use. The MCP status footer pill already surfaces failures
+    // continuously in the UI; this log is the actionable-on-debug record
+    // wenshao asked for in round 7.
+    let failureSurfaced = false;
+    const surfaceFailuresOnce = () => {
+      if (failureSurfaced) return;
+      failureSurfaced = true;
+      const failedNames =
+        typeof config.getFailedMcpServerNames === 'function'
+          ? config.getFailedMcpServerNames()
+          : [];
+      if (failedNames.length > 0) {
+        debugLogger.warn(
+          `MCP server(s) failed to start: ${failedNames.join(', ')}. ` +
+            `Continuing with built-in tools and any servers that did connect.`,
+        );
+      }
+    };
+
+    const onMcpUpdate = () => {
+      if (manager.getDiscoveryState() === MCPDiscoveryState.COMPLETED) {
+        // Discovery has settled. Flush the pending setTools() NOW (rather
+        // than waiting for the 16ms batch timer) and only finalize after
+        // it runs — `setTools()` emits the `gemini_tools_updated` event,
+        // and finalizing before it fires would drop that event because
+        // the module-level `finalized` guard suppresses every subsequent
+        // record. That dropped event is what `gemini_tools_lag` is
+        // derived from in the profile summary.
+        surfaceFailuresOnce();
+        void flushNow().finally(finalizeOnce);
+      } else {
+        scheduleFlush();
+      }
+    };
+
+    // Legacy / no-MCP path: discovery already finished synchronously
+    // inside config.initialize(), so finalize immediately and only keep
+    // the flush listener around for late refreshes (e.g. SkillTool's
+    // post-construction refreshSkills triggering setTools).
+    if (manager.getDiscoveryState() === MCPDiscoveryState.COMPLETED) {
+      surfaceFailuresOnce();
+      finalizeOnce();
+    }
+
+    appEvents.on('mcp-client-update', onMcpUpdate);
+    const finalizeCap = setTimeout(
+      finalizeOnce,
+      STARTUP_PROFILE_FINALIZE_CAP_MS,
+    );
+
+    return () => {
+      appEvents.off('mcp-client-update', onMcpUpdate);
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      clearTimeout(finalizeCap);
+    };
+  }, [isConfigInitialized, config]);
 
   // Track idle state via ref so the update handler can defer notifications
   // while the model is streaming, without triggering re-renders.
@@ -572,26 +748,54 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [remountStaticHistory, stdout]);
 
   // Targeted repaint for resize events: move cursor to top-left and erase
-  // downward instead of a full clearTerminal, avoiding the full-screen flash.
+  // downward instead of a full clearTerminal, avoiding the full-screen
+  // flash. Ink's <Static> region is append-only, so when terminal width
+  // changes (tmux split, fullscreen toggle, font size change) we must
+  // explicitly re-emit the static history at the new width — otherwise
+  // header content stays at the old width and visibly tears.
   const repaintStaticViewport = useCallback(() => {
     stdout.write(`${ansiEscapes.cursorTo(0, 0)}${ansiEscapes.eraseDown}`);
     remountStaticHistory();
   }, [remountStaticHistory, stdout]);
 
+  // Track previous terminal width across renders so we only repaint when
+  // the width actually changes. Initialized to the current width to avoid
+  // a spurious repaint on first mount.
+  const previousTerminalWidthRef = useRef(terminalWidth);
+
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
   // clear and remount the static region to redraw the banner at the top.
+  //
+  // Two requirements pull in opposite directions:
+  //   (a) refreshStatic() must NOT be called from inside a setState updater,
+  //       because React.StrictMode double-invokes updaters in dev and we'd
+  //       fire two clearTerminal writes per model swap.
+  //   (b) setHistoryRemountKey (inside refreshStatic) and setCurrentModel
+  //       MUST land in the SAME commit. MainContent's <Static> key is
+  //       `${historyRemountKey}-${currentModel}` and its render-phase
+  //       progressive-replay reset (lastRemountKey !== historyRemountKey)
+  //       only fires when historyRemountKey changes. If currentModel
+  //       changes first in its own render, Static remounts with the OLD
+  //       remount key and the unreset (full-length) replayCount — i.e.
+  //       a full-history Static render that bypasses progressive replay
+  //       (the issue #3899 freeze regression). See PR #4119 review.
+  //
+  // Fix: side-effect lives in the event handler (NOT the updater); a ref
+  // guard de-dupes same-model notifications. React batches the
+  // setHistoryRemountKey (via refreshStatic) and setCurrentModel calls in
+  // this event handler into a single commit, so the render-phase reset
+  // and the Static remount happen together — no full-history flash.
+  const lastNotifiedModelRef = useRef(currentModel);
   useEffect(() => {
     const unsubscribe = config.onModelChange((model) => {
-      setCurrentModel((prev) => {
-        if (prev === model) {
-          return prev;
-        }
-        refreshStatic();
-        return model;
-      });
+      if (lastNotifiedModelRef.current === model) {
+        return;
+      }
+      lastNotifiedModelRef.current = model;
+      refreshStatic();
+      setCurrentModel(model);
     });
-
     return unsubscribe;
   }, [config, refreshStatic]);
 
@@ -712,6 +916,7 @@ export const AppContainer = (props: AppContainerProps) => {
     openDeleteDialog,
     closeDeleteDialog,
     handleDelete,
+    handleDeleteMany,
   } = useDeleteCommand({
     config,
     addItem: historyManager.addItem,
@@ -911,7 +1116,7 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [config, historyManager, settings.merged]);
 
-  const cancelHandlerRef = useRef<() => void>(() => {});
+  const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
 
   const {
@@ -943,11 +1148,12 @@ export const AppContainer = (props: AppContainerProps) => {
     modelSwitchedFromQuotaError,
     setModelSwitchedFromQuotaError,
     refreshStatic,
-    () => cancelHandlerRef.current(),
+    (info) => cancelHandlerRef.current(info),
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
     midTurnDrainRef,
+    logger,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -1014,7 +1220,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     messageQueue,
     addMessage,
-    clearQueue,
     popAllMessages,
     drainQueue,
     popNextSegment,
@@ -1351,31 +1556,182 @@ export const AppContainer = (props: AppContainerProps) => {
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
   useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
 
-  cancelHandlerRef.current = useCallback(() => {
-    const pendingHistoryItems = [
-      ...pendingSlashCommandHistoryItems,
-      ...pendingGeminiHistoryItems,
-    ];
-    if (isToolExecuting(pendingHistoryItems)) {
-      // Tool-cancel: drop both buffer and queue so nothing auto-fires later.
-      buffer.setText('');
-      clearQueue();
-      return;
-    }
+  cancelHandlerRef.current = useCallback(
+    (info?: CancelSubmitInfo) => {
+      // Combine the React-state pending items (slash command, retry countdown,
+      // tool group, etc.) with the synchronous snapshot of the Gemini pending
+      // item from `useGeminiStream`. The snapshot closes the race where a
+      // stream chunk just set `pendingHistoryItem` but the consumer's React
+      // state still reads as empty — without it, auto-restore could wrongly
+      // truncate just-committed meaningful content.
+      const pendingHistoryItems: HistoryItemWithoutId[] = [
+        ...pendingSlashCommandHistoryItems,
+        ...pendingGeminiHistoryItems,
+      ];
+      if (info?.pendingItem) {
+        pendingHistoryItems.push(info.pendingItem);
+      }
+      const draftWasEmpty = buffer.text.length === 0;
 
-    // Restore queued input joined into the buffer for editing.
-    const popped = popAllMessages();
-    if (popped) {
-      const currentText = buffer.text;
-      buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
-    }
-  }, [
-    buffer,
-    popAllMessages,
-    clearQueue,
-    pendingSlashCommandHistoryItems,
-    pendingGeminiHistoryItems,
-  ]);
+      // Always drain the queue back into the buffer (claude-code parity:
+      // popAllEditable preserves queued text on every cancel path, including
+      // tool-execution cancels — never silently drop the user's queued work).
+      const popped = popAllMessages();
+      if (popped) {
+        const currentText = buffer.text;
+        buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
+      }
+
+      // Auto-restore-on-cancel: if the user hit ESC immediately after submit
+      // (nothing meaningful was produced), pull the just-submitted prompt back
+      // into the input box and rewind the transcript so it doesn't show a
+      // stranded "user prompt + Request cancelled." pair. Mirrors claude-code
+      // (REPL.tsx auto-restore branch).
+      //
+      // Guards (all required):
+      //   - Buffer was empty before the queue drain (don't clobber typed-during-
+      //     loading text).
+      //   - Queue was empty (popped === null): if the user queued more input,
+      //     they've moved on — don't undo their previous prompt.
+      //   - No pending stream item carries meaningful content. `tool_group` is
+      //     non-synthetic regardless of status (executing/canceled/done), so
+      //     this also covers the tool-execution cancel case.
+      //   - Items committed AFTER the last user prompt are all synthetic
+      //     (info/error/warning/cancel notice).
+      //
+      // truncateToItem is functional setState — it observes the latest queued
+      // history, including any INFO/pending item just appended by
+      // cancelOngoingRequest, and slices them all off together with the user
+      // item. No flicker because React batches with the same render pass.
+      // Each bail-out below is silent in production; toggle DEBUG=1 to
+      // diagnose "ESC pressed but my prompt didn't return to the input box"
+      // by reading which guard fired.
+      if (!draftWasEmpty) {
+        debugLogger.debug('auto-restore bail: buffer was non-empty');
+        return;
+      }
+      if (popped !== null) {
+        debugLogger.debug(
+          'auto-restore bail: queue had items (drained to buffer)',
+        );
+        return;
+      }
+      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
+        debugLogger.debug(
+          'auto-restore bail: pending stream item has meaningful content',
+        );
+        return;
+      }
+      // Synchronous "did the turn produce any content event" flag from
+      // useGeminiStream. Catches the race where the pre-cancel flush
+      // committed gemini_content via addItem and a later thought event
+      // overwrote pendingHistoryItem with a synthetic value — the
+      // committed text isn't in historyRef.current yet (React hasn't
+      // re-rendered), so the trailing-only-synthetic check below would
+      // otherwise pass and we'd wrongly truncate the committed content.
+      if (info?.turnProducedMeaningfulContent) {
+        debugLogger.debug(
+          'auto-restore bail: turn produced meaningful content during stream/flush',
+        );
+        return;
+      }
+
+      // The cancelled turn must have added a `user` history item itself —
+      // Cron / Notification / slash submit_prompt / Retry paths submit
+      // without pushing a user item, so an older user item that happens
+      // to be followed only by synthetic content must NOT be wrongly
+      // auto-restored on top of those turns.
+      const cancelledTurnUserItem = info?.lastTurnUserItem;
+      if (cancelledTurnUserItem == null) {
+        debugLogger.debug(
+          'auto-restore bail: cancelled turn did not add a user history item',
+        );
+        return;
+      }
+
+      const history = historyRef.current;
+      const lastUserIdx = findLastUserItemIndex(history);
+      if (lastUserIdx === -1) {
+        debugLogger.debug('auto-restore bail: no user item in history');
+        return;
+      }
+      if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) {
+        debugLogger.debug(
+          'auto-restore bail: meaningful content committed after last user item',
+        );
+        return;
+      }
+
+      const lastUserItem = history[lastUserIdx];
+      if (lastUserItem.type !== 'user') {
+        debugLogger.debug(
+          'auto-restore bail: lastUserItem type narrowing failed (unexpected)',
+        );
+        return;
+      }
+      // Identity match: the user item we're rewinding has to be the one
+      // this turn added. Use ID (not just text) so a consecutive-
+      // duplicate user submit — where `addItem` skipped insertion but
+      // still returned a fresh id — doesn't make this guard wrongly
+      // match an older identical-text USER row. Text is checked too as
+      // a cheap sanity belt.
+      if (
+        lastUserItem.id !== cancelledTurnUserItem.id ||
+        lastUserItem.text !== cancelledTurnUserItem.text
+      ) {
+        debugLogger.debug(
+          'auto-restore bail: lastUserItem identity does not match cancelled-turn user item',
+        );
+        return;
+      }
+      debugLogger.debug(
+        'auto-restore: rewinding cancelled turn and restoring prompt',
+      );
+      historyManager.truncateToItem(lastUserItem.id);
+      // Repaint the terminal so the cancelled `> prompt` and trailing
+      // INFO disappear from the static-rendered transcript. Ink's
+      // `<Static>` region is append-only — once a line has been printed,
+      // shrinking the underlying array doesn't unprint it. `refreshStatic`
+      // writes the ANSI clear-terminal escape AND bumps the static
+      // remount key so the next render reprints only the truncated
+      // history. Matches what `/clear` and `handleClearScreen` do for
+      // the same reason. Skipping this leaves the user seeing the
+      // cancelled prompt twice — once in scrollback and once pre-filled
+      // in the input buffer.
+      refreshStatic();
+      buffer.setText(lastUserItem.text);
+      // Third cleanup leg: the in-memory chat history. `GeminiChat`
+      // appends the user content before the stream generator runs, and
+      // the abort path doesn't pop it. Without this strip, the NEXT
+      // request's wire payload would carry the cancelled prompt as an
+      // orphan user turn alongside the new one — model context would
+      // contradict what the UI told the user was rewound. Mirrors the
+      // existing strip in the Retry submit path
+      // (GeminiClient.sendMessageStream).
+      geminiClient?.stripOrphanedUserEntriesFromHistory?.();
+      // Also undo the cross-session ↑-history disk entry written by
+      // useGeminiStream's `logger.logMessage` — otherwise
+      // getPreviousUserMessages would resurrect the cancelled prompt next
+      // session. Fire-and-forget; the UI restore must not block on disk
+      // I/O. Logger.removeLastUserMessage already swallows internal
+      // errors and returns false, but attach a .catch as defence so a
+      // future code path that throws doesn't surface as an
+      // UnhandledPromiseRejection.
+      void logger?.removeLastUserMessage().catch((err: unknown) => {
+        debugLogger.debug('Failed to undo cancelled prompt from log:', err);
+      });
+    },
+    [
+      buffer,
+      popAllMessages,
+      historyManager,
+      logger,
+      geminiClient,
+      refreshStatic,
+      pendingSlashCommandHistoryItems,
+      pendingGeminiHistoryItems,
+    ],
+  );
 
   const handleClearScreen = useCallback(() => {
     historyManager.clearItems();
@@ -1773,6 +2129,11 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [terminalWidth, availableTerminalHeight, activePtyId]);
 
+  // Repaint static header on terminal resize. Without this, tmux pane
+  // resizes and fullscreen toggles leave the static region rendered at the
+  // old width — header content visibly tears until the next refreshStatic
+  // (e.g. /model). Cheap repaint (cursor-to + erase-down) rather than a
+  // full clearTerminal to avoid the full-screen flash.
   useEffect(() => {
     if (previousTerminalWidthRef.current === terminalWidth) {
       return;
@@ -1799,14 +2160,25 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // --- Rewind selector callbacks ---
+  // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
+  // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
   const openRewindSelector = useCallback(() => {
     if (streamingState !== StreamingState.Idle) return;
-    if (config.getIdeMode()) return;
     if (dialogsVisibleRef.current) return;
+    if (config.getIdeMode()) {
+      historyManager.addItem(
+        {
+          type: 'info',
+          text: 'Rewind is disabled in IDE mode.',
+        },
+        Date.now(),
+      );
+      return;
+    }
     const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
     if (!hasUserTurns) return;
     setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager.history]);
+  }, [streamingState, config, historyManager]);
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
@@ -2198,7 +2570,8 @@ export const AppContainer = (props: AppContainerProps) => {
         // Input is empty and idle — double-ESC opens rewind selector
         if (
           streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current
+          !dialogsVisibleRef.current &&
+          !config.getIdeMode()
         ) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
@@ -2279,6 +2652,60 @@ export const AppContainer = (props: AppContainerProps) => {
         if (compactToggleHasVisualEffect(historyRef.current)) {
           refreshStatic();
         }
+      } else if (keyMatchers[Command.PROMOTE_SHELL_TO_BACKGROUND](key)) {
+        // Ctrl+B: promote a running foreground shell command to a
+        // background task (#3831). The child keeps running, the
+        // agent's turn unblocks, and the shell becomes a regular
+        // BackgroundShellEntry visible in `/tasks` + the dialog and
+        // stoppable via `task_stop`.
+        //
+        // Read from the ref (NOT the destructured `pendingToolCalls`)
+        // so we don't have to put `pendingToolCalls` in the deps
+        // array — that would re-bind the keypress handler on every
+        // tool-call status update, which is noisy.
+        //
+        // No-op when no foreground shell is currently executing OR
+        // the executing tool call is non-shell (no
+        // `promoteAbortController` projected). Falling through in
+        // the no-op case is intentional: while the agent is idle the
+        // input layer's own Ctrl+B handler (cursor-left in the
+        // prompt) should still fire as before.
+        //
+        // Broadcast caveat: `KeypressContext.broadcast()` has no
+        // consumed-flag mechanism today, so even after we `return`
+        // here the same Ctrl+B keypress is also dispatched to other
+        // useKeypress consumers (text buffer cursor-left,
+        // DebugProfiler, etc.). Visible side effect during a
+        // successful promote: the input cursor will move one
+        // character left if the prompt has focus. Cosmetic; tracked
+        // for a follow-up that introduces a `consumed` return value
+        // on KeypressHandler so global handlers can swallow keys.
+        const executingShell = pendingToolCallsRef.current.find(
+          (tc) =>
+            tc.status === 'executing' &&
+            // Defense-in-depth: also gate on the tool name. Today only
+            // the shell tool's invocation wires `promoteAbortController`,
+            // but a future copy-paste / type-confusion that adds the
+            // property to a non-shell tool would otherwise let Ctrl+B
+            // mistakenly fire `abort({kind:'background'})` on a tool
+            // whose service has no promote-handoff handler.
+            tc.request.name === ToolNames.SHELL &&
+            tc.promoteAbortController !== undefined,
+        ) as TrackedExecutingToolCall | undefined;
+        if (executingShell?.promoteAbortController) {
+          debugLogger.debug(
+            `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
+          );
+          executingShell.promoteAbortController.abort({
+            kind: 'background',
+          });
+          return;
+        }
+        debugLogger.debug(
+          `Ctrl+B promote: no executing shell tool call; falling through ` +
+            `(streamingState=${streamingState}, ` +
+            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+        );
       }
     },
     [
@@ -2695,6 +3122,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      handleDeleteMany,
       // Help dialog
       openHelpDialog,
       closeHelpDialog,
@@ -2766,6 +3194,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openDeleteDialog,
       closeDeleteDialog,
       handleDelete,
+      handleDeleteMany,
       // Help dialog
       openHelpDialog,
       closeHelpDialog,

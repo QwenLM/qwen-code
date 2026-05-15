@@ -1170,13 +1170,32 @@ describe('DataProcessor', () => {
     ];
 
     it('should return partial qualitative data when some LLM calls fail', async () => {
+      // Schema validation rejects partial objects, so build a fully-populated
+      // response — only the explicitly-rejected calls should land as undefined.
       let callIndex = 0;
       mockGenerateJson.mockImplementation(() => {
         callIndex++;
         if (callIndex % 2 === 0) {
           return Promise.reject(new Error('LLM timeout'));
         }
-        return Promise.resolve({ intro: 'test', areas: [], opportunities: [] });
+        return Promise.resolve({
+          intro: 'test',
+          impressive_workflows: [],
+          areas: [],
+          opportunities: [],
+          friction_points: [],
+          memorable_moments: [],
+          improvements: [],
+          interaction_style: {
+            archetype: 'collaborative',
+            description: 'test',
+            traits: [],
+          },
+          at_a_glance: {
+            top_strengths: [],
+            common_pitfalls: [],
+          },
+        });
       });
 
       const result = await (

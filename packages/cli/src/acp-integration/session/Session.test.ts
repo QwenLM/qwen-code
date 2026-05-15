@@ -479,6 +479,49 @@ describe('Session', () => {
       });
     });
 
+    it('forwards command descriptions from getAvailableCommands()', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'review',
+          description: '审查代码变更',
+          kind: CommandKind.SKILL,
+          source: 'skill-dir-command',
+          sourceLabel: '用户',
+          sourceDetail: 'user',
+          supportedModes: ['acp'],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.any(AbortSignal),
+        'acp',
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'review',
+              description: '审查代码变更',
+              input: { hint: '' },
+              _meta: {
+                argumentHint: undefined,
+                source: 'skill-dir-command',
+                sourceLabel: '用户',
+                supportedModes: ['acp'],
+                subcommands: [],
+                modelInvocable: false,
+              },
+            },
+          ],
+        },
+      });
+    });
+
     it('sets input for built-in commands with subCommands', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
