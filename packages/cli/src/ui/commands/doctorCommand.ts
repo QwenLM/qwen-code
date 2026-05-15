@@ -11,6 +11,7 @@ import { runDoctorChecks } from '../../utils/doctorChecks.js';
 import {
   formatMemoryDiagnostics,
   getMemoryDiagnostics,
+  writeMemoryHeapSnapshot,
 } from '../../utils/memoryDiagnostics.js';
 import { t } from '../../i18n/index.js';
 
@@ -35,7 +36,10 @@ export const doctorCommand: SlashCommand = {
   action: async (context, args) => {
     const executionMode = context.executionMode ?? 'interactive';
     const abortSignal = context.abortSignal;
-    const subCommand = args?.trim().toLowerCase() ?? '';
+    const subCommandArgs =
+      args?.trim().toLowerCase().split(/\s+/).filter(Boolean) ?? [];
+    const subCommand = subCommandArgs[0] ?? '';
+    const shouldWriteHeapSnapshot = subCommandArgs.includes('--snapshot');
 
     if (subCommand === MEMORY_SUBCOMMAND) {
       if (abortSignal?.aborted) {
@@ -48,7 +52,16 @@ export const doctorCommand: SlashCommand = {
         return;
       }
 
-      const report = formatMemoryDiagnostics(diagnostics);
+      let report = formatMemoryDiagnostics(diagnostics);
+
+      if (abortSignal?.aborted) {
+        return;
+      }
+
+      if (shouldWriteHeapSnapshot) {
+        const heapSnapshotPath = writeMemoryHeapSnapshot();
+        report = `${report}\n\nHeap snapshot written: ${heapSnapshotPath}`;
+      }
 
       if (abortSignal?.aborted) {
         return;

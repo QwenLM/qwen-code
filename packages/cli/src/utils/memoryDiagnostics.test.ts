@@ -4,10 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import { describe, expect, it, vi } from 'vitest';
 import {
   formatMemoryDiagnostics,
   getMemoryDiagnostics,
+  writeMemoryHeapSnapshot,
 } from './memoryDiagnostics.js';
 
 describe('memoryDiagnostics', () => {
@@ -154,6 +158,22 @@ describe('memoryDiagnostics', () => {
     expect(report).toContain('Non-heap memory is high');
     expect(report).toContain(
       'large tool results, buffers, or native allocations',
+    );
+  });
+
+  it('writes heap snapshots to a diagnostics directory with stable filenames', () => {
+    const outputDir = path.join(os.tmpdir(), 'qwen-memory-diagnostics-test');
+    const writtenPath = writeMemoryHeapSnapshot({
+      outputDir,
+      now: new Date('2026-05-15T12:00:00.000Z'),
+      writeSnapshot: (filePath) => filePath,
+    });
+
+    expect(writtenPath).toBe(
+      path.join(
+        outputDir,
+        `qwen-code-heap-${process.pid}-2026-05-15T12-00-00-000Z.heapsnapshot`,
+      ),
     );
   });
 });

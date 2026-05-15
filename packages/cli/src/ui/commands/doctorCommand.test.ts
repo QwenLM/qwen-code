@@ -61,6 +61,9 @@ describe('doctorCommand', () => {
     vi.mocked(memoryDiagnosticsModule.formatMemoryDiagnostics).mockReturnValue(
       'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3',
     );
+    vi.mocked(memoryDiagnosticsModule.writeMemoryHeapSnapshot).mockReturnValue(
+      '/tmp/qwen-code-heap.heapsnapshot',
+    );
   }
 
   beforeEach(() => {
@@ -184,6 +187,29 @@ describe('doctorCommand', () => {
       content: 'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3',
     });
     expect(doctorChecksModule.runDoctorChecks).not.toHaveBeenCalled();
+  });
+
+  it('should capture a heap snapshot when requested', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await doctorCommand.action!(
+      mockContext,
+      'memory --snapshot',
+    );
+
+    expect(memoryDiagnosticsModule.writeMemoryHeapSnapshot).toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nHeap snapshot written: /tmp/qwen-code-heap.heapsnapshot',
+    });
   });
 
   it('should stop memory diagnostics when aborted before collection', async () => {

@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as v8 from 'node:v8';
 
 export interface MemoryDiagnostics {
@@ -88,6 +91,34 @@ export function getMemoryDiagnostics(): MemoryDiagnostics {
     activeHandles: countProcessInternals('_getActiveHandles'),
     activeRequests: countProcessInternals('_getActiveRequests'),
   };
+}
+
+export interface WriteMemoryHeapSnapshotOptions {
+  outputDir?: string;
+  now?: Date;
+  writeSnapshot?: (filePath: string) => string;
+}
+
+function defaultHeapSnapshotDir(): string {
+  return path.join(os.homedir(), '.qwen', 'memory-snapshots');
+}
+
+function formatSnapshotTimestamp(now: Date): string {
+  return now.toISOString().replace(/[:.]/g, '-');
+}
+
+export function writeMemoryHeapSnapshot({
+  outputDir = defaultHeapSnapshotDir(),
+  now = new Date(),
+  writeSnapshot = v8.writeHeapSnapshot,
+}: WriteMemoryHeapSnapshotOptions = {}): string {
+  fs.mkdirSync(outputDir, { recursive: true });
+  const filePath = path.join(
+    outputDir,
+    `qwen-code-heap-${process.pid}-${formatSnapshotTimestamp(now)}.heapsnapshot`,
+  );
+
+  return writeSnapshot(filePath);
 }
 
 function formatBytes(value: unknown): string {
