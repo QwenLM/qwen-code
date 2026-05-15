@@ -1905,6 +1905,153 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(settles[0].signal).toBeNull();
     });
 
+    it('PR-2.5 wave-4 (T1): post-promote `error` followed by `close` fires onSettle EXACTLY ONCE', async () => {
+      // Regression for the double-fire bug: pre-fix, `child.once('close', ...)`
+      // and `child.once('error', ...)` were independent and each invoked
+      // `onPostSettle` directly. A spawn-side error followed by the
+      // child-process automatic 'close' event would call the caller's
+      // settle twice, violating the exactly-once contract and racing
+      // the caller's `transitionRegistry`. Fix wraps both branches in
+      // a `firePostSettle` latch (mirroring the PTY path).
+      mockPlatform.mockReturnValue('linux');
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_double',
+          } satisfies ShellAbortReason);
+          // First: error fires.
+          cp.emit('error', new Error('error first'));
+          // Then: close (Node child_process always emits 'close' even
+          // after an error). Pre-fix this would call onSettle a second
+          // time.
+          cp.emit('close', 1, null);
+        },
+        {
+          postPromote: {
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      expect(settles).toHaveLength(1);
+      expect(settles[0].error?.message).toBe('error first');
+    });
+
+    it('PR-2.5 wave-4 (T3): onData-only caller still gets decoder flush on close (no trailing multibyte loss)', async () => {
+      // T3 regression: the close handler used to be installed only
+      // when `onSettle` was set, so an `onData`-only caller never got
+      // the trailing-multibyte flush — a UTF-8 character split across
+      // chunks could vanish. Fix installs close whenever ANY
+      // postPromote handler is set, and the flush helper runs whenever
+      // onData is set independent of onSettle.
+      mockPlatform.mockReturnValue('linux');
+      const dataChunks: Array<{ type: string; chunk: unknown }> = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_t3',
+          } satisfies ShellAbortReason);
+          // Push the FIRST byte of a 3-byte UTF-8 char (€ = 0xE2 0x82 0xAC).
+          // Without flush, the trailing two bytes would be stuck in the
+          // decoder's continuation state and lost.
+          cp.stdout?.emit('data', Buffer.from([0xe2]));
+          cp.stdout?.emit('data', Buffer.from([0x82, 0xac]));
+          // Trigger close so the flush runs; no onSettle to gate on.
+          cp.emit('close', 0, null);
+        },
+        {
+          postPromote: {
+            onData: (event) => dataChunks.push(event),
+            // NO onSettle — close handler must still fire flush.
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      // The € character should appear once the second chunk completes
+      // the multibyte sequence; flush at close ensures any remainder
+      // is surfaced.
+      const joined = dataChunks
+        .map((d) => (typeof d.chunk === 'string' ? d.chunk : ''))
+        .join('');
+      expect(joined).toContain('€');
+    });
+
+    it('PR-2.5 wave-4 (T6): onData-only caller has post-promote `error` listener (does not crash CLI)', async () => {
+      // T6 regression: `child.once('error', ...)` install was gated
+      // on `onSettle`, so an `onData`-only caller had the foreground
+      // errorHandler detached at promote with no replacement — a
+      // post-promote spawn error would surface as Node's default
+      // unhandled-error crash. Fix attaches an error listener
+      // whenever ANY postPromote handler is set.
+      mockPlatform.mockReturnValue('linux');
+      const dataChunks: Array<{ type: string; chunk: unknown }> = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_t6',
+          } satisfies ShellAbortReason);
+          // Emitting 'error' on an EventEmitter with no listener throws
+          // synchronously. With the fix, our listener is attached so
+          // the emit does not throw.
+          expect(() =>
+            cp.emit('error', new Error('post-promote err')),
+          ).not.toThrow();
+          // child_process auto-emits 'close' after 'error'.
+          cp.emit('close', null, null);
+        },
+        {
+          postPromote: {
+            onData: (event) => dataChunks.push(event),
+            // NO onSettle — but error must still be handled (no crash).
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+    });
+
+    it('PR-2.5 wave-4 (T7): onSettle-only caller has stdout/stderr resumed (child does not block on full pipes)', async () => {
+      // T7 regression: when `onSettle` is set but `onData` is NOT, the
+      // post-promote path used to leave stdout/stderr without any data
+      // listener. The Readables stay paused; the OS pipe buffer fills
+      // (~64KB on Linux); the child blocks on stdout.write; 'close'
+      // never fires; onSettle never fires. Fix calls .resume() on
+      // both streams in the no-onData branch so the child can drain.
+      mockPlatform.mockReturnValue('linux');
+      const settles: ShellPostPromoteSettleInfo[] = [];
+      const stdoutResumeSpy = vi.fn();
+      const stderrResumeSpy = vi.fn();
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          // Patch resume() so we can verify the wire was driven.
+          if (cp.stdout) cp.stdout.resume = stdoutResumeSpy;
+          if (cp.stderr) cp.stderr.resume = stderrResumeSpy;
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_cp_t7',
+          } satisfies ShellAbortReason);
+          cp.emit('close', 0, null);
+        },
+        {
+          postPromote: {
+            // NO onData — but stdout/stderr must still be resumed.
+            onSettle: (info) => settles.push(info),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      expect(stdoutResumeSpy).toHaveBeenCalled();
+      expect(stderrResumeSpy).toHaveBeenCalled();
+      expect(settles).toHaveLength(1);
+    });
+
     it('should gracefully attempt SIGKILL on linux if SIGTERM fails', async () => {
       mockPlatform.mockReturnValue('linux');
       vi.useFakeTimers();

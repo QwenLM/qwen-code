@@ -775,6 +775,21 @@ export class ShellExecutionService {
           // settle the registry entry on natural child exit. When
           // postPromote is undefined we fall back to the PR-2 detach-
           // everything contract: no listeners re-attach.
+          // PR-2.5 wave-4 (gpt-5.5 T5): preserve the detected encoding
+          // from the foreground decoders so a non-UTF-8 child (e.g.
+          // GBK on a Chinese Windows shell) doesn't snapshot correctly
+          // and then mojibake the post-promote tail. The foreground
+          // `stdoutDecoder` / `stderrDecoder` are initialized in
+          // `handleOutput` from `getCachedEncodingForBuffer(data)` on
+          // the first chunk; if they're still null at promote time
+          // (no bytes yet), fall back to `'utf-8'`. Capture the
+          // detected encoding rather than the decoder instance — the
+          // foreground decoder has already seen pre-promote bytes
+          // (its multibyte state machine is at an arbitrary midpoint)
+          // and may have accumulated continuation-byte state that the
+          // post-promote stream shouldn't inherit; new instances with
+          // the same `encoding` start fresh.
+          const detectedEncoding = stdoutDecoder?.encoding ?? 'utf-8';
           // SEPARATE decoders for stdout and stderr. A single shared
           // decoder corrupts interleaved multibyte UTF-8 (the streaming
           // state machine assumes one byte source); independent
@@ -782,48 +797,145 @@ export class ShellExecutionService {
           // Both decoders are flushed (with `stream: false`) once the
           // child has fully closed so any trailing multibyte bytes
           // surface instead of being silently dropped.
-          const stdoutDecoder = postPromote?.onData
-            ? new TextDecoder('utf-8', { fatal: false })
+          //
+          // PR-2.5 wave-4 (gpt-5.5 T3): allocate decoders whenever
+          // `onData` is set (not gated on close-handler installation),
+          // because the close handler now ALWAYS installs when any
+          // postPromote handler is present (T6 + T7) and needs to
+          // flush these decoders if onData is set, regardless of
+          // whether onSettle is set.
+          const safeDecoder = (encoding: string): TextDecoder => {
+            try {
+              return new TextDecoder(encoding, { fatal: false });
+            } catch {
+              // Defensive: if the detected encoding string is somehow
+              // not supported by Node's ICU (extremely rare on modern
+              // Node), fall back to utf-8 rather than throwing inside
+              // the promote handoff path.
+              return new TextDecoder('utf-8', { fatal: false });
+            }
+          };
+          const postPromoteStdoutDecoder = postPromote?.onData
+            ? safeDecoder(detectedEncoding)
             : null;
-          const stderrDecoder = postPromote?.onData
-            ? new TextDecoder('utf-8', { fatal: false })
+          const postPromoteStderrDecoder = postPromote?.onData
+            ? safeDecoder(detectedEncoding)
             : null;
           if (postPromote?.onData) {
             const onPostData = postPromote.onData;
-            const safeData = (decoder: TextDecoder) => (chunk: Buffer) => {
-              try {
-                onPostData({
-                  type: 'data',
-                  chunk: decoder.decode(chunk, { stream: true }),
-                });
-              } catch (cbErr) {
-                debugLogger.warn(
-                  `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
-                );
-              }
-            };
+            const safeData =
+              (decoder: TextDecoder) => (chunk: Buffer) => {
+                try {
+                  onPostData({
+                    type: 'data',
+                    chunk: decoder.decode(chunk, { stream: true }),
+                  });
+                } catch (cbErr) {
+                  debugLogger.warn(
+                    `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                  );
+                }
+              };
             try {
-              if (stdoutDecoder)
-                child.stdout?.on('data', safeData(stdoutDecoder));
-              if (stderrDecoder)
-                child.stderr?.on('data', safeData(stderrDecoder));
+              if (postPromoteStdoutDecoder)
+                child.stdout?.on('data', safeData(postPromoteStdoutDecoder));
+              if (postPromoteStderrDecoder)
+                child.stderr?.on('data', safeData(postPromoteStderrDecoder));
             } catch (e) {
               debugLogger.warn(
                 `re-attaching post-promote data listeners threw: ${e instanceof Error ? e.message : String(e)}`,
               );
             }
+          } else if (postPromote) {
+            // PR-2.5 wave-4 (gpt-5.5 T7): caller asked for `onSettle`
+            // (or any other future postPromote handler) without
+            // `onData`. The foreground stdout/stderr listeners were
+            // detached above; without ANY data listener the Readable
+            // streams stay paused, the OS pipe buffer fills (~64KB on
+            // Linux), and `child.stdout.write` in the child blocks —
+            // potentially forever. `'close'` then never fires and
+            // `onSettle` is never called. `.resume()` puts the stream
+            // back in flowing mode (data arrives + is dropped) so the
+            // child can drain its pipes and exit normally.
+            try {
+              child.stdout?.resume();
+              child.stderr?.resume();
+            } catch (e) {
+              debugLogger.warn(
+                `post-promote stdout/stderr resume() threw: ${e instanceof Error ? e.message : String(e)}`,
+              );
+            }
           }
-          if (postPromote?.onSettle) {
-            const onPostSettle = postPromote.onSettle;
-            // Listen on 'close' (all stdio fully drained) NOT 'exit'
-            // (which can fire while stdout/stderr still have buffered
-            // bytes pending). Without this, late chunks emitted between
-            // 'exit' and 'close' land in the caller's onData AFTER
-            // onSettle already closed the output stream and transitioned
-            // the registry — they're dropped silently and `/tasks`
-            // shows a truncated log. The (code, signal) payload on
-            // 'close' is identical to 'exit', so callers see the same
-            // info just with proper ordering guarantees.
+          // PR-2.5 wave-4 (gpt-5.5 T1): single-fire latch shared by
+          // 'close' and 'error' (both branches funnel through here).
+          // Without it the child_process path could fire onSettle
+          // twice — once from `error`, then again from the `close`
+          // that immediately follows — violating the exactly-once
+          // settle contract and racing the caller's `transitionRegistry`.
+          //
+          // PR-2.5 wave-4 (gpt-5.5 T3): the helper also performs the
+          // decoder flush so any caller with `onData` set gets the
+          // trailing multibyte bytes surfaced — independent of
+          // whether `onSettle` is also set.
+          let postPromoteSettleFired = false;
+          const flushPostPromoteDecoders = (): void => {
+            if (!postPromote?.onData) return;
+            try {
+              if (postPromoteStdoutDecoder) {
+                const trailing = postPromoteStdoutDecoder.decode();
+                if (trailing) {
+                  postPromote.onData({
+                    type: 'data',
+                    chunk: trailing,
+                  });
+                }
+              }
+              if (postPromoteStderrDecoder) {
+                const trailing = postPromoteStderrDecoder.decode();
+                if (trailing) {
+                  postPromote.onData({
+                    type: 'data',
+                    chunk: trailing,
+                  });
+                }
+              }
+            } catch (flushErr) {
+              debugLogger.warn(
+                `post-promote decoder flush threw: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
+              );
+            }
+          };
+          const firePostSettle = (info: ShellPostPromoteSettleInfo): void => {
+            if (postPromoteSettleFired) return;
+            postPromoteSettleFired = true;
+            // Flush BEFORE the callback so any trailing multibyte
+            // characters land ahead of the settle's stream-close.
+            flushPostPromoteDecoders();
+            if (!postPromote?.onSettle) return;
+            try {
+              postPromote.onSettle(info);
+            } catch (cbErr) {
+              debugLogger.warn(
+                `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+              );
+            }
+          };
+          // PR-2.5 wave-4 (gpt-5.5 T6 + T7): install 'close' and
+          // 'error' listeners whenever ANY postPromote handler is
+          // present, not just when `onSettle` is set. Two reasons:
+          //
+          //  1. T6: `onData`-only callers still had the foreground
+          //     `errorHandler` detached; without a replacement
+          //     listener a post-promote `'error'` would crash Node
+          //     via the unhandled-error default. Even with no
+          //     onSettle to route into, the listener prevents the
+          //     crash (and triggers decoder flush on close).
+          //
+          //  2. T3 / T7: `onData`-only callers need the close handler
+          //     to flush trailing decoder bytes; an `onSettle`-only
+          //     caller needs `'close'` to fire onSettle — both share
+          //     the same close hook now.
+          if (postPromote) {
             try {
               child.once(
                 'close',
@@ -831,69 +943,28 @@ export class ShellExecutionService {
                   exitCode: number | null,
                   signalCode: NodeJS.Signals | null,
                 ) => {
-                  // Flush the streaming decoders so any trailing
-                  // multibyte continuation bytes surface as their final
-                  // characters (or replacement char if truncated). Done
-                  // BEFORE calling onSettle so the last emit lands
-                  // ahead of the settle's stream-close.
-                  if (postPromote.onData) {
-                    try {
-                      if (stdoutDecoder) {
-                        const trailing = stdoutDecoder.decode();
-                        if (trailing) {
-                          postPromote.onData({
-                            type: 'data',
-                            chunk: trailing,
-                          });
-                        }
-                      }
-                      if (stderrDecoder) {
-                        const trailing = stderrDecoder.decode();
-                        if (trailing) {
-                          postPromote.onData({
-                            type: 'data',
-                            chunk: trailing,
-                          });
-                        }
-                      }
-                    } catch (flushErr) {
-                      debugLogger.warn(
-                        `post-promote decoder flush threw: ${flushErr instanceof Error ? flushErr.message : String(flushErr)}`,
-                      );
-                    }
-                  }
-                  try {
-                    onPostSettle({
-                      exitCode,
-                      signal: signalCode,
-                      endTime: Date.now(),
-                    });
-                  } catch (cbErr) {
-                    debugLogger.warn(
-                      `postPromote.onSettle threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
-                    );
-                  }
-                },
-              );
-              // Plus an 'error' listener: spawn-side errors after the
-              // foreground errorHandler was detached would otherwise
-              // crash Node via the default unhandled 'error' event.
-              // Route them through onSettle with `error` populated so
-              // the caller can transition the registry entry to
-              // `'failed'` instead of leaving it stuck on `'running'`.
-              child.once('error', (err: Error) => {
-                try {
-                  onPostSettle({
-                    exitCode: null,
-                    signal: null,
-                    error: err,
+                  // Listen on 'close' (all stdio fully drained) NOT
+                  // 'exit' (which can fire while stdout/stderr still
+                  // have buffered bytes pending). Without this, late
+                  // chunks emitted between 'exit' and 'close' land in
+                  // the caller's onData AFTER onSettle already closed
+                  // the output stream and transitioned the registry —
+                  // they'd be dropped silently and `/tasks` would
+                  // show a truncated log.
+                  firePostSettle({
+                    exitCode,
+                    signal: signalCode,
                     endTime: Date.now(),
                   });
-                } catch (cbErr) {
-                  debugLogger.warn(
-                    `postPromote.onSettle (error path) threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
-                  );
-                }
+                },
+              );
+              child.once('error', (err: Error) => {
+                firePostSettle({
+                  exitCode: null,
+                  signal: null,
+                  error: err,
+                  endTime: Date.now(),
+                });
               });
             } catch (e) {
               debugLogger.warn(

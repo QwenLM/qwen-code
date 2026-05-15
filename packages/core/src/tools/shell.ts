@@ -1695,12 +1695,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // string. The output file is plain text; live ANSI updates are
         // owned by the foreground stream, which by promote-time has
         // already terminated.
-        const chunk =
+        //
+        // PR-2.5 wave-4 (gpt-5.5 T4): strip ANSI before writing so
+        // the post-promote tail of `bg_xxx.output` matches the format
+        // of the snapshot above (which is rendered terminal text, not
+        // raw escape sequences) AND matches the regular
+        // `executeBackground` path's `outputStream.write(stripAnsi(chunk))`
+        // contract. Without this, an agent reading the file after a
+        // promote would see plain text up to the promote moment, then
+        // raw `\x1b[...m` color codes / cursor moves / clear-screen
+        // sequences for any post-promote output — which is unreadable
+        // and inconsistent.
+        const rawChunk =
           typeof event.chunk === 'string'
             ? event.chunk
             : event.chunk
                 .map((line) => line.map((tok) => tok.text).join(''))
                 .join('\n');
+        const chunk = stripAnsi(rawChunk);
         if (promoteArtifacts.stream) {
           try {
             promoteArtifacts.stream.write(chunk);
@@ -2259,13 +2271,25 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Initial snapshot first, so it always precedes post-promote
       // bytes in the file (write ordering is FIFO on a single stream).
       outputStream.write(result.output);
-      // Drain any bytes the service already forwarded via
-      // `postPromote.onData` before this finalizer caught up.
+      // PR-2.5 wave-4 (gpt-5.5 T2): assign the stream BEFORE draining
+      // the buffer, not after. The drain + assign block is synchronous
+      // today (single-tick JS, so a service-side `onData` callback
+      // cannot fire between drain-end and assign), but the assign-
+      // after-drain order leaves a hazard for any future refactor
+      // that introduces an `await` inside the drain — a chunk arriving
+      // in that window would be pushed into `promoteArtifacts.buffer`
+      // (because `stream` is still null), then later chunks would write
+      // directly to the stream after assign, producing out-of-order
+      // bytes in `bg_xxx.output` until the settle drain caught the
+      // straggler. Assign-first eliminates the hazard entirely:
+      // concurrent `onData` writes go straight through after the
+      // queued snapshot + the queued drained chunks, in the correct
+      // FIFO order on the stream.
+      promoteArtifacts.stream = outputStream;
       while (promoteArtifacts.buffer.length > 0) {
         const chunk = promoteArtifacts.buffer.shift()!;
         outputStream.write(chunk);
       }
-      promoteArtifacts.stream = outputStream;
     } catch (err) {
       debugLogger.warn(
         `promote: failed to open output stream for ${outputPath}: ${getErrorMessage(err)}`,
@@ -2610,9 +2634,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const statusLine = postPromoteSettleObserved
       ? `Status: ${postPromoteFinalStatus ?? 'settled'}. PID: ${result.pid ?? '(unknown)'}.`
       : `Status: running. PID: ${result.pid ?? '(unknown)'}.`;
-    const inspectLine = postPromoteSettleObserved
-      ? `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`
-      : `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
+    const inspectLine = `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
     const stopLine = postPromoteSettleObserved
       ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
       : `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`;

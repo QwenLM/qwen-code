@@ -4574,6 +4574,84 @@ describe('ShellTool', () => {
           1700002222222,
         );
       });
+
+      it('wave-4 (T4): post-promote `onData` chunks have ANSI stripped before write (matches executeBackground file format)', async () => {
+        // Regression for the format-mismatch critique: the regular
+        // `executeBackground` path strips ANSI before writing to the
+        // background output file, but the promoted-foreground onData
+        // path used to write raw chunks. After Ctrl+B, the file would
+        // be plain text up to the snapshot then raw `\x1b[31m` /
+        // cursor-move / clear-screen sequences for the post-promote
+        // tail — unreadable for an agent that just `Read`s the file.
+        // Fix applies stripAnsi() in onData before writing/buffering.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+
+        let capturedPostPromote:
+          | {
+              onData?: (event: { type: string; chunk: unknown }) => void;
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            capturedPostPromote = opts?.postPromote;
+            return {
+              pid: 33333,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'pre-promote snapshot',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 33333,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        await invocation.execute(mockAbortSignal);
+
+        // Drive a post-promote chunk with embedded ANSI escapes —
+        // common shapes: color, cursor move, clear-screen.
+        const ansiChunk =
+          '\x1b[31mFAILED\x1b[0m: 3 tests\n\x1b[2K\x1b[1Aprogress: 50%';
+        capturedPostPromote?.onData?.({ type: 'data', chunk: ansiChunk });
+
+        // The stream should have received the STRIPPED version: the
+        // visible text without escape sequences.
+        const writeCalls = writeStreamMock.write.mock.calls.map(
+          (c: unknown[]) => c[0] as string,
+        );
+        const post = writeCalls.find(
+          (c) => typeof c === 'string' && c.includes('FAILED'),
+        );
+        expect(post).toBeDefined();
+        expect(post).not.toContain('\x1b[');
+        expect(post).toBe('FAILED: 3 tests\nprogress: 50%');
+      });
     });
   });
 
