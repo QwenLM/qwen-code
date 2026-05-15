@@ -2303,20 +2303,9 @@ hello
     });
 
     it('should not block the main request when auto-memory recall is slow', async () => {
-      // Simulate a recall that takes longer than the 2.5s deadline
-      mockMemoryManager.recall.mockReturnValue(
-        new Promise((resolve) =>
-          setTimeout(
-            () =>
-              resolve({
-                prompt: '## Relevant memory\n\nSlow memory result.',
-                selectedDocs: [],
-                strategy: 'model',
-              }),
-            10_000,
-          ),
-        ),
-      );
+      // Recall never settles — settledAt stays null so the UserQuery consume
+      // point skips it and turn.run() is called immediately without memory.
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
@@ -2329,38 +2318,28 @@ hello
       };
       client['chat'] = mockChat as GeminiChat;
 
-      vi.useFakeTimers();
-      try {
-        const streamPromise = (async () => {
-          const stream = client.sendMessageStream(
-            [{ text: 'Quick question' }],
-            new AbortController().signal,
-            'prompt-id-slow-memory',
-          );
-          for await (const _ of stream) {
-            // consume stream
-          }
-        })();
-
-        // Advance past the 2.5s deadline — the main request should proceed
-        await vi.advanceTimersByTimeAsync(3_000);
-        await streamPromise;
-
-        // The main request should have been called without the slow memory
-        expect(mockTurnRunFn).toHaveBeenCalledWith(
-          'test-model',
-          expect.not.arrayContaining([
-            expect.stringContaining('Slow memory result'),
-          ]),
-          expect.any(AbortSignal),
-        );
-      } finally {
-        vi.useRealTimers();
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-slow-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
       }
+
+      // turn.run() must have been called without the slow memory
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Slow memory result'),
+        ]),
+        expect.any(AbortSignal),
+      );
     });
 
-    it('should include auto-memory prompt when recall completes within deadline', async () => {
-      // Simulate a fast recall that completes well within the deadline
+    it('should inject auto-memory at UserQuery consume point when recall already settled', async () => {
+      // mockResolvedValue settles synchronously; by the time the consume-point
+      // check runs (after at least one await), settledAt is set.
       mockMemoryManager.recall.mockResolvedValue({
         prompt: '## Relevant memory\n\nFast memory result.',
         selectedDocs: [],
