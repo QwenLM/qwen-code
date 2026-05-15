@@ -713,15 +713,19 @@ download_file() {
     local destination="$2"
 
     if command_exists curl; then
-        curl -fL --retry 2 --progress-bar "${url}" -o "${destination}"
+        curl -fL --retry 2 --connect-timeout 15 --max-time 300 --progress-bar "${url}" -o "${destination}"
         return $?
     fi
 
     if command_exists wget; then
+        local wget_args=(--tries=3 --timeout=15)
+        if wget --help 2>&1 | grep -q -- '--read-timeout'; then
+            wget_args+=(--read-timeout=300)
+        fi
         if wget --help 2>&1 | grep -q -- '--progress'; then
-            wget --progress=bar:force:noscroll --tries=3 "${url}" -O "${destination}" || return 1
+            wget --progress=bar:force:noscroll "${wget_args[@]}" "${url}" -O "${destination}" || return 1
         else
-            wget --tries=3 "${url}" -O "${destination}" || return 1
+            wget "${wget_args[@]}" "${url}" -O "${destination}" || return 1
         fi
         return $?
     fi
@@ -734,12 +738,16 @@ url_exists() {
     local url="$1"
 
     if command_exists curl; then
-        curl -fsIL --retry 1 "${url}" >/dev/null 2>&1
+        curl -fsIL --retry 1 --connect-timeout 10 --max-time 30 "${url}" >/dev/null 2>&1
         return $?
     fi
 
     if command_exists wget; then
-        wget -q --spider "${url}" >/dev/null 2>&1
+        local wget_args=(--tries=2 --timeout=10)
+        if wget --help 2>&1 | grep -q -- '--read-timeout'; then
+            wget_args+=(--read-timeout=30)
+        fi
+        wget -q --spider "${wget_args[@]}" "${url}" >/dev/null 2>&1
         return $?
     fi
 

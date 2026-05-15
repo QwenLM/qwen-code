@@ -136,11 +136,16 @@ describe('installation scripts', () => {
       'tar -xzf "${archive_path}" -C "${destination}" || return 1',
     );
     expect(script).toContain(
-      'curl -fL --retry 2 --progress-bar "${url}" -o "${destination}"',
+      'curl -fL --retry 2 --connect-timeout 15 --max-time 300 --progress-bar "${url}" -o "${destination}"',
     );
     expect(script).toContain(
-      'wget --progress=bar:force:noscroll --tries=3 "${url}" -O "${destination}"',
+      'wget --progress=bar:force:noscroll "${wget_args[@]}" "${url}" -O "${destination}"',
     );
+    expect(script).toContain('wget_args+=(--read-timeout=300)');
+    expect(script).toContain(
+      'curl -fsIL --retry 1 --connect-timeout 10 --max-time 30 "${url}"',
+    );
+    expect(script).toContain('wget_args+=(--read-timeout=30)');
     expect(script).toContain('echo "Downloading ${archive_name}"');
     expect(script).not.toContain(
       'curl -fsSL --retry 2 "${url}" -o "${destination}"',
@@ -1442,9 +1447,17 @@ describe('standalone release packaging', () => {
     const publishLatestStepIndex = workflow.indexOf(
       "name: 'Publish Aliyun OSS Latest VERSION'",
     );
+    const syncHostedStepIndex = workflow.indexOf(
+      "name: 'Sync Hosted Installation Assets to Aliyun OSS'",
+    );
+    const verifyHostedStepIndex = workflow.indexOf(
+      "name: 'Verify Aliyun OSS Hosted Installation Assets'",
+    );
     expect(syncStepIndex).toBeGreaterThanOrEqual(0);
     expect(verifyStepIndex).toBeGreaterThan(syncStepIndex);
     expect(publishLatestStepIndex).toBeGreaterThan(verifyStepIndex);
+    expect(syncHostedStepIndex).toBeGreaterThan(publishLatestStepIndex);
+    expect(verifyHostedStepIndex).toBeGreaterThan(syncHostedStepIndex);
     expect(workflow.slice(syncStepIndex, verifyStepIndex)).not.toContain(
       'releases/qwen-code/latest/VERSION',
     );
@@ -1452,18 +1465,43 @@ describe('standalone release packaging', () => {
       'releases/qwen-code/latest/VERSION',
     );
     const syncStep = workflow.slice(syncStepIndex, verifyStepIndex);
-    expect(syncStep).toContain('IS_STABLE_RELEASE');
-    expect(syncStep).toContain(
-      'if [[ "${IS_STABLE_RELEASE}" == "true" ]]; then',
+    expect(syncStep).not.toContain('dist/installation/');
+    expect(syncStep).not.toContain('installation/install-qwen-standalone.sh');
+    const syncHostedStep = workflow.slice(
+      syncHostedStepIndex,
+      verifyHostedStepIndex,
     );
-    expect(syncStep).toContain(
-      'Skipping hosted installation asset upload for prerelease',
+    expect(syncHostedStep).toContain(
+      'dist/installation/install-qwen-standalone.sh',
     );
-    expect(workflow).toContain('installation/install-qwen-standalone.sh');
-    expect(workflow).toContain('installation/install-qwen-standalone.bat');
-    expect(workflow).toContain('installation/install-qwen-standalone.ps1');
-    expect(workflow).toContain('installation/uninstall-qwen-standalone.sh');
-    expect(workflow).toContain('installation/uninstall-qwen-standalone.ps1');
+    expect(syncHostedStep).toContain(
+      'dist/installation/install-qwen-standalone.bat',
+    );
+    expect(syncHostedStep).toContain(
+      'dist/installation/install-qwen-standalone.ps1',
+    );
+    expect(syncHostedStep).toContain(
+      'dist/installation/uninstall-qwen-standalone.sh',
+    );
+    expect(syncHostedStep).toContain(
+      'dist/installation/uninstall-qwen-standalone.ps1',
+    );
+    expect(syncHostedStep).toContain(
+      'upload_hosted_installation_assets "installation/${RELEASE_TAG}"',
+    );
+    expect(workflow).not.toContain('"installation/install-qwen-standalone.sh"');
+    expect(workflow).not.toContain(
+      '"installation/install-qwen-standalone.bat"',
+    );
+    expect(workflow).not.toContain(
+      '"installation/install-qwen-standalone.ps1"',
+    );
+    expect(workflow).not.toContain(
+      '"installation/uninstall-qwen-standalone.sh"',
+    );
+    expect(workflow).not.toContain(
+      '"installation/uninstall-qwen-standalone.ps1"',
+    );
     expect(workflow).toContain('--acl public-read');
     expect(workflow).toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
@@ -1475,14 +1513,15 @@ describe('standalone release packaging', () => {
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"',
     );
     const verifyStep = workflow.slice(verifyStepIndex, publishLatestStepIndex);
-    expect(verifyStep).toContain('IS_STABLE_RELEASE');
-    expect(verifyStep).toContain(
-      'if [[ "${IS_STABLE_RELEASE}" == "true" ]]; then',
-    );
-    expect(verifyStep).toContain(
-      'Skipping hosted installation asset verification for prerelease',
-    );
+    expect(verifyStep).not.toContain('hosted_tmp_dir');
+    const verifyHostedStep = workflow.slice(verifyHostedStepIndex);
     expect(workflow).toContain('hosted_tmp_dir="$(mktemp -d)"');
+    expect(verifyHostedStep).toContain(
+      'url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${RELEASE_TAG}/${asset}"',
+    );
+    expect(verifyHostedStep).toContain(
+      'curl -fsSL --connect-timeout 15 --max-time 300 "${url}"',
+    );
     expect(workflow).toContain(
       'cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/SHA256SUMS"',
     );

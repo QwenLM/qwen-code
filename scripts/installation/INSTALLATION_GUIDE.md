@@ -60,6 +60,13 @@ Hosted installer assets are staged separately from GitHub Release archives:
 - `uninstall-qwen-standalone.sh` removes Linux/macOS standalone installs.
 - `uninstall-qwen-standalone.ps1` removes Windows standalone installs.
 
+The global standalone-suffixed OSS entrypoints are maintained under
+`installation/install-qwen-standalone.sh`,
+`installation/install-qwen-standalone.ps1`,
+`installation/install-qwen-standalone.bat`,
+`installation/uninstall-qwen-standalone.sh`, and
+`installation/uninstall-qwen-standalone.ps1`.
+
 Build them with:
 
 ```bash
@@ -69,15 +76,11 @@ npm run package:hosted-installation -- --out-dir dist/installation
 The staged `install-qwen-standalone.sh`, `install-qwen-standalone.ps1`,
 `install-qwen-standalone.bat`, `uninstall-qwen-standalone.sh`, and
 `uninstall-qwen-standalone.ps1` files map to the standalone-suffixed hosted URLs
-shown above. During a non-dry-run release, the publish workflow uploads their
-contents byte-for-byte to
-`installation/install-qwen-standalone.sh`,
-`installation/install-qwen-standalone.ps1`, and
-`installation/install-qwen-standalone.bat`,
-`installation/uninstall-qwen-standalone.sh`, and
-`installation/uninstall-qwen-standalone.ps1`; the staging command also writes
-`SHA256SUMS` for upload verification. The hosted installers intentionally
-default to `latest`; on Aliyun OSS this means reading
+shown above. The staging command also writes `SHA256SUMS` for upload
+verification. During a non-dry-run stable release, the publish workflow uploads
+a byte-for-byte snapshot to `installation/vX.Y.Z/` for audit and rollback
+instead of overwriting the global `installation/` entrypoint objects. The hosted
+installers intentionally default to `latest`; on Aliyun OSS this means reading
 `releases/qwen-code/latest/VERSION` first, then downloading the matching
 versioned release directory. Use `--version` or `QWEN_INSTALL_VERSION` to pin a
 standalone release directly.
