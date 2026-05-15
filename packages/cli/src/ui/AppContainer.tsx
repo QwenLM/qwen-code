@@ -155,6 +155,7 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import { useWorktreeSession } from './hooks/useWorktreeSession.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -429,6 +430,24 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
+  const worktreeSession = useWorktreeSession(config);
+  // showWorktreeExitDialog setter is wired in Task 8 (WorktreeExitDialog).
+  // For now, keep the value `false` so Footer / DialogManager type-check.
+  const showWorktreeExitDialog = false;
+  const activeWorktree = useMemo(
+    () =>
+      worktreeSession
+        ? {
+            slug: worktreeSession.slug,
+            branch: worktreeSession.worktreeBranch,
+            path: worktreeSession.worktreePath,
+            originalCwd: worktreeSession.originalCwd,
+            originalBranch: worktreeSession.originalBranch,
+            originalHeadCommit: worktreeSession.originalHeadCommit,
+          }
+        : null,
+    [worktreeSession],
+  );
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const originalTitleRef = useRef(
@@ -2868,6 +2887,8 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       nightly,
       branchName,
+      activeWorktree,
+      showWorktreeExitDialog,
       sessionStats,
       terminalWidth,
       terminalHeight,
@@ -2985,6 +3006,8 @@ export const AppContainer = (props: AppContainerProps) => {
       cancelBtw,
       nightly,
       branchName,
+      activeWorktree,
+      showWorktreeExitDialog,
       sessionStats,
       terminalWidth,
       terminalHeight,

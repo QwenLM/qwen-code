@@ -141,6 +141,7 @@ export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
+export * from './services/worktreeSessionService.js';
 export {
   stripTerminalControlSequences,
   TERMINAL_OSC_REGEX,
