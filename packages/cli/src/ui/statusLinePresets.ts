@@ -61,6 +61,18 @@ export interface StatusLinePresetData {
   streamingState: StreamingState;
 }
 
+export function aggregateModelTokens(metrics: {
+  models: Record<string, { tokens: { prompt: number; candidates: number } }>;
+}): { totalInputTokens: number; totalOutputTokens: number } {
+  let totalInputTokens = 0;
+  let totalOutputTokens = 0;
+  for (const modelMetrics of Object.values(metrics.models)) {
+    totalInputTokens += modelMetrics.tokens.prompt;
+    totalOutputTokens += modelMetrics.tokens.candidates;
+  }
+  return { totalInputTokens, totalOutputTokens };
+}
+
 export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
   {
     id: 'model-with-reasoning',
@@ -202,7 +214,7 @@ function formatPercent(value: number): string {
   return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded}%`;
 }
 
-function formatTokenCount(value: number): string {
+export function formatTokenCount(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return '0';
   }
@@ -215,7 +227,7 @@ function formatTokenCount(value: number): string {
   return String(Math.round(value));
 }
 
-function getRunStateLabel(state: StreamingState): string {
+export function getRunStateLabel(state: StreamingState): string {
   switch (state) {
     case StreamingState.Idle:
       return 'Ready';
@@ -228,7 +240,7 @@ function getRunStateLabel(state: StreamingState): string {
   }
 }
 
-function inferPullRequestNumber(
+export function inferPullRequestNumber(
   branch: string | undefined,
 ): string | undefined {
   if (!branch) {
@@ -305,6 +317,8 @@ export function buildStatusLinePresetParts(
       case 'model-with-reasoning':
       case 'model':
         parts.push(data.modelDisplayName);
+        seen.add('model');
+        seen.add('model-with-reasoning');
         break;
       case 'context-remaining':
         if (data.contextWindowSize > 0) {
@@ -370,8 +384,8 @@ export function buildStatusLinePresetParts(
         }
         break;
       default: {
-        const exhaustive: never = item;
-        return exhaustive;
+        item satisfies never;
+        break;
       }
     }
   }

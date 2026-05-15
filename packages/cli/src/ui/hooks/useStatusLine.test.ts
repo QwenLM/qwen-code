@@ -9,6 +9,12 @@ import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
 
+const debugLogMock = vi.hoisted(() => ({
+  log: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+}));
+
 // --- Mock child_process (auto-mock, then override exec in beforeEach) ---
 vi.mock('child_process');
 
@@ -66,10 +72,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...original,
-    createDebugLogger: () => ({
-      log: vi.fn(),
-      error: vi.fn(),
-    }),
+    createDebugLogger: () => debugLogMock,
   };
 });
 
@@ -188,6 +191,18 @@ describe('useStatusLine', () => {
   });
 
   describe('preset status line', () => {
+    it('returns the preset theme color preference', () => {
+      setStatusLineConfig({
+        type: 'preset',
+        useThemeColors: true,
+        items: ['model'],
+      });
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.useThemeColors).toBe(true);
+      expect(result.current.lines).toEqual(['test-model']);
+    });
+
     it('looks up the current branch pull request number with gh', async () => {
       mockUIState.branchName = 'dragon/feat-reproduce-skill';
       setStatusLineConfig({
@@ -254,6 +269,64 @@ describe('useStatusLine', () => {
       });
 
       expect(result.current.lines).toEqual(['test-model | #4118']);
+    });
+
+    it('uses command settings when a stale preset override no longer matches the settings type', () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo from-settings',
+      });
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model'],
+      };
+
+      renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+      expect(lastExecCommand).toBe('echo from-settings');
+    });
+
+    it('ignores a stale preset override when settings no longer have status line config', () => {
+      setStatusLineConfig(undefined);
+      mockUIState.statusLineConfigOverride = {
+        type: 'preset',
+        items: ['model'],
+      };
+
+      const { result } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([]);
+      expect(child_process.exec).not.toHaveBeenCalled();
+    });
+
+    it('logs and retries pull request lookup failures after state changes', async () => {
+      mockUIState.branchName = 'dragon/feat-reproduce-skill';
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['pull-request-number'],
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+
+      expect(child_process.exec).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        execCallback(new Error('gh not authenticated'), '', '');
+      });
+
+      expect(debugLogMock.warn).toHaveBeenCalledWith(
+        'statusline: gh pr view failed:',
+        'gh not authenticated',
+      );
+
+      mockUIState.sessionStats.lastPromptTokenCount = 101;
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      expect(lastExecCommand).toBe('gh pr view --json number --jq .number');
     });
   });
 

@@ -13,6 +13,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
 import {
+  aggregateModelTokens,
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
   normalizeStatusLinePresetConfig,
@@ -172,16 +173,23 @@ export function useStatusLine(): {
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
 
+  const settingsStatusLineConfig = getStatusLineConfig(settings);
+  const statusLineConfigOverride = uiState.statusLineConfigOverride;
   const statusLineConfig =
-    uiState.statusLineConfigOverride ?? getStatusLineConfig(settings);
+    statusLineConfigOverride &&
+    settingsStatusLineConfig &&
+    statusLineConfigOverride.type === settingsStatusLineConfig.type
+      ? statusLineConfigOverride
+      : settingsStatusLineConfig;
   const statusLineCommand =
     statusLineConfig?.type === 'command' ? statusLineConfig.command : undefined;
   const statusLinePreset =
     statusLineConfig?.type === 'preset' ? statusLineConfig : undefined;
   const statusLineSettingsVersion = uiState.statusLineSettingsVersion ?? 0;
-  const statusLinePresetKey = statusLinePreset
-    ? `${statusLinePreset.useThemeColors ? 'color' : 'plain'}:${statusLinePreset.items.join(',')}:${statusLineSettingsVersion}`
-    : undefined;
+  const hasStatusLinePreset = statusLinePreset !== undefined;
+  const statusLinePresetUseThemeColors =
+    statusLinePreset?.useThemeColors ?? false;
+  const statusLinePresetItemsKey = statusLinePreset?.items.join('\0') ?? '';
   const refreshInterval =
     statusLineConfig?.type === 'command'
       ? statusLineConfig.refreshInterval
@@ -291,7 +299,6 @@ export function useStatusLine(): {
 
       pullRequestLookupChildRef.current?.kill();
       pullRequestLookupChildRef.current = undefined;
-      pullRequestLookupKeyRef.current = lookupKey;
       updatePullRequestNumber(undefined);
 
       const generation = ++pullRequestLookupGenerationRef.current;
@@ -308,21 +315,24 @@ export function useStatusLine(): {
               return;
             }
             pullRequestLookupChildRef.current = undefined;
-            updatePullRequestNumber(
-              error ? undefined : parsePullRequestNumber(stdout),
-            );
+            if (error) {
+              debugLog.warn('statusline: gh pr view failed:', error.message);
+              pullRequestLookupKeyRef.current = undefined;
+              updatePullRequestNumber(undefined);
+              return;
+            }
+            updatePullRequestNumber(parsePullRequestNumber(stdout));
           },
         );
       } catch (err) {
-        debugLog.error(
-          'statusline pull request lookup error:',
-          (err as Error).message,
-        );
+        debugLog.warn('statusline: gh pr view failed:', (err as Error).message);
+        pullRequestLookupKeyRef.current = undefined;
         updatePullRequestNumber(undefined);
         return;
       }
 
       pullRequestLookupChildRef.current = child;
+      pullRequestLookupKeyRef.current = lookupKey;
     },
     [clearPullRequestLookup, updatePullRequestNumber],
   );
@@ -343,12 +353,7 @@ export function useStatusLine(): {
       const currentDir = cfg.getTargetDir();
       ensurePullRequestNumber(preset, currentDir, ui.branchName);
 
-      let totalInputTokens = 0;
-      let totalOutputTokens = 0;
-      for (const mm of Object.values(m.models)) {
-        totalInputTokens += mm.tokens.prompt;
-        totalOutputTokens += mm.tokens.candidates;
-      }
+      const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
 
       const contextWindowSize =
         cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
@@ -399,12 +404,7 @@ export function useStatusLine(): {
           )
         : 0;
 
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-    for (const mm of Object.values(m.models)) {
-      totalInputTokens += mm.tokens.prompt;
-      totalOutputTokens += mm.tokens.candidates;
-    }
+    const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(m);
 
     const input: StatusLineCommandInput = {
       session_id: stats.sessionId,
@@ -512,7 +512,7 @@ export function useStatusLine(): {
 
   // Trigger update when meaningful state changes
   useEffect(() => {
-    if (!statusLineCommand && !statusLinePresetKey) {
+    if (!statusLineCommand && !hasStatusLinePreset) {
       // Command removed — kill any in-flight process and discard callbacks.
       activeChildRef.current?.kill();
       activeChildRef.current = undefined;
@@ -553,7 +553,10 @@ export function useStatusLine(): {
     }
   }, [
     statusLineCommand,
-    statusLinePresetKey,
+    hasStatusLinePreset,
+    statusLinePresetUseThemeColors,
+    statusLinePresetItemsKey,
+    statusLineSettingsVersion,
     lastPromptTokenCount,
     currentModel,
     effectiveVim,
@@ -570,7 +573,7 @@ export function useStatusLine(): {
   // Skip the first run — the mount effect below already handles it.
   useEffect(() => {
     if (!hasMountedRef.current) return;
-    if (statusLineCommand || statusLinePresetKey) {
+    if (statusLineCommand || hasStatusLinePreset) {
       // Clear any pending debounce so we don't get a redundant second run.
       if (debounceTimerRef.current !== undefined) {
         clearTimeout(debounceTimerRef.current);
@@ -580,13 +583,26 @@ export function useStatusLine(): {
     }
     // Cleanup when command is removed is handled by the state-change effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statusLineCommand, statusLinePresetKey]);
+  }, [
+    statusLineCommand,
+    hasStatusLinePreset,
+    statusLinePresetUseThemeColors,
+    statusLinePresetItemsKey,
+    statusLineSettingsVersion,
+  ]);
 
   // Re-render preset output once the async GitHub PR lookup returns.
   useEffect(() => {
-    if (!hasMountedRef.current || !statusLinePresetKey) return;
+    if (!hasMountedRef.current || !hasStatusLinePreset) return;
     scheduleUpdate();
-  }, [pullRequestNumber, statusLinePresetKey, scheduleUpdate]);
+  }, [
+    pullRequestNumber,
+    hasStatusLinePreset,
+    statusLinePresetUseThemeColors,
+    statusLinePresetItemsKey,
+    statusLineSettingsVersion,
+    scheduleUpdate,
+  ]);
 
   // Periodic refresh — re-run the command every `refreshInterval` seconds.
   // The tick yields if a previous exec is still running: unlike state-change

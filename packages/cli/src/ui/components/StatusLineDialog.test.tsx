@@ -136,4 +136,78 @@ describe('StatusLineDialog', () => {
     expect(onSaved).toHaveBeenCalledWith(settings.merged.ui?.statusLine);
     expect(onClose).toHaveBeenCalled();
   });
+
+  it('saves back to workspace settings when workspace config is effective', async () => {
+    const settings = createSettings();
+    settings.workspace.settings.ui = {
+      statusLine: {
+        type: 'preset',
+        useThemeColors: false,
+        items: ['model'],
+      },
+    };
+    settings.workspace.originalSettings.ui = settings.workspace.settings.ui;
+    settings.recomputeMerged();
+    const addItem = vi.fn();
+    const { stdin } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={settings}
+          config={config}
+          uiState={uiState}
+          addItem={addItem}
+          onClose={vi.fn()}
+          availableTerminalHeight={18}
+        />
+      </KeypressProvider>,
+    );
+
+    act(() => {
+      stdin.write('\r');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(settings.forScope(SettingScope.User).settings.ui).toBeUndefined();
+    expect(settings.forScope(SettingScope.Workspace).settings.ui).toEqual({
+      statusLine: {
+        type: 'preset',
+        useThemeColors: false,
+        items: ['model'],
+      },
+    });
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text: 'Status line preset saved to workspace settings.',
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('does not append navigation keys to the search query', async () => {
+    const settings = createSettings();
+    const { stdin, lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <StatusLineDialog
+          settings={settings}
+          config={config}
+          uiState={uiState}
+          addItem={vi.fn()}
+          onClose={vi.fn()}
+          availableTerminalHeight={18}
+        />
+      </KeypressProvider>,
+    );
+
+    act(() => {
+      stdin.write('m');
+      stdin.write('j');
+      stdin.write('k');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(lastFrame()).toContain('> m');
+    expect(lastFrame()).not.toContain('> mj');
+    expect(lastFrame()).not.toContain('> mk');
+  });
 });

@@ -17,6 +17,7 @@ import { MessageType } from '../types.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import { MultiSelect, type MultiSelectItem } from './shared/MultiSelect.js';
 import {
+  aggregateModelTokens,
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
@@ -57,15 +58,32 @@ function buildInitialSelectedKeys(settings: LoadedSettings): string[] {
 function buildConfigFromKeys(keys: readonly string[]): StatusLinePresetConfig {
   const selected = new Set(keys);
   const validItemIds = new Set(STATUS_LINE_PRESET_ITEMS.map((item) => item.id));
-  const items = keys.filter((key): key is StatusLinePresetItemId =>
-    validItemIds.has(key as StatusLinePresetItemId),
-  );
+  const items = [
+    ...new Set(
+      keys.filter((key): key is StatusLinePresetItemId =>
+        validItemIds.has(key as StatusLinePresetItemId),
+      ),
+    ),
+  ];
 
   return {
     type: 'preset',
     useThemeColors: selected.has(THEME_COLORS_KEY),
     items,
   };
+}
+
+function getEffectiveStatusLineScope(settings: LoadedSettings): SettingScope {
+  if (settings.forScope(SettingScope.System).settings.ui?.statusLine) {
+    return SettingScope.System;
+  }
+  if (
+    settings.isTrusted &&
+    settings.forScope(SettingScope.Workspace).settings.ui?.statusLine
+  ) {
+    return SettingScope.Workspace;
+  }
+  return SettingScope.User;
 }
 
 function getOptionSearchText(
@@ -83,12 +101,7 @@ function getOptionSearchText(
 function getPreviewData(config: Config, uiState: UIState) {
   const stats = uiState.sessionStats;
   const metrics = stats.metrics;
-  let totalInputTokens = 0;
-  let totalOutputTokens = 0;
-  for (const modelMetrics of Object.values(metrics.models)) {
-    totalInputTokens += modelMetrics.tokens.prompt;
-    totalOutputTokens += modelMetrics.tokens.candidates;
-  }
+  const { totalInputTokens, totalOutputTokens } = aggregateModelTokens(metrics);
 
   return buildStatusLinePresetData({
     sessionId: stats.sessionId,
@@ -158,18 +171,23 @@ export function StatusLineDialog({
     () => buildConfigFromKeys(selectedKeys),
     [selectedKeys],
   );
-  const previewLines = buildStatusLinePresetLines(
-    presetConfig,
-    getPreviewData(config, uiState),
+  const previewData = useMemo(
+    () => getPreviewData(config, uiState),
+    [config, uiState],
+  );
+  const previewLines = useMemo(
+    () => buildStatusLinePresetLines(presetConfig, previewData),
+    [presetConfig, previewData],
   );
 
   const handleConfirm = useCallback(() => {
-    settings.setValue(SettingScope.User, 'ui.statusLine', presetConfig);
+    const effectiveScope = getEffectiveStatusLineScope(settings);
+    settings.setValue(effectiveScope, 'ui.statusLine', presetConfig);
     onSaved?.(presetConfig);
     addItem(
       {
         type: MessageType.INFO,
-        text: 'Status line preset saved to user settings.',
+        text: `Status line preset saved to ${effectiveScope.toLowerCase()} settings.`,
       },
       Date.now(),
     );
@@ -189,6 +207,16 @@ export function StatusLineDialog({
 
       if (key.name === 'backspace' || key.name === 'delete') {
         setQuery((current) => current.slice(0, -1));
+        return;
+      }
+
+      if (
+        key.name === 'j' ||
+        key.name === 'k' ||
+        key.name === 'up' ||
+        key.name === 'down' ||
+        key.name === 'return'
+      ) {
         return;
       }
 
