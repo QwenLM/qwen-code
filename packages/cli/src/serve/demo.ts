@@ -220,6 +220,27 @@ export function getDemoHtml(_port: number): string {
     return d.innerHTML;
   }
 
+  // --- 401 token hint ---
+  let tokenHintTimer = null;
+  function highlightTokenInput(msg) {
+    tokenInput.style.borderColor = 'var(--warn)';
+    tokenInput.focus();
+    // Show hint text below the input
+    let hint = document.getElementById('tokenHint');
+    if (!hint) {
+      hint = document.createElement('div');
+      hint.id = 'tokenHint';
+      hint.style.cssText = 'font-size:11px;color:var(--warn);margin-top:-4px;margin-bottom:4px;';
+      tokenInput.parentNode.insertBefore(hint, tokenInput.nextSibling);
+    }
+    hint.textContent = msg;
+    if (tokenHintTimer) clearTimeout(tokenHintTimer);
+    tokenHintTimer = setTimeout(() => {
+      tokenInput.style.borderColor = '';
+      hint.textContent = '';
+    }, 6000);
+  }
+
   // --- API helpers ---
   function authHeaders() {
     const token = tokenInput.value.trim();
@@ -240,6 +261,9 @@ export function getDemoHtml(_port: number): string {
       try { data = JSON.parse(text); } catch { data = text; }
       if (!res.ok) {
         logError(res.status, JSON.stringify(data));
+        if (res.status === 401) {
+          highlightTokenInput('API returned 401 — enter your bearer token below');
+        }
         return { ok: false, status: res.status, data };
       }
       logResponse(res.status, JSON.stringify(data));
@@ -306,6 +330,9 @@ export function getDemoHtml(_port: number): string {
         const res = await fetch(url, { signal: abort.signal, headers: hdrs });
         if (!res.ok) {
           logEvent('SSE-ERR', 'HTTP ' + res.status);
+          if (res.status === 401) {
+            highlightTokenInput('SSE returned 401 — enter your bearer token and recreate the session');
+          }
           return;
         }
         const reader = res.body.getReader();
