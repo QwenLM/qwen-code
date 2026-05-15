@@ -25,6 +25,78 @@ export interface DaemonCapabilities {
    */
   features: string[];
   modelServices: string[];
+  /**
+   * Absolute canonical workspace path this daemon is bound to
+   * (per #3803 §02: 1 daemon = 1 workspace). Clients use this to
+   * (a) detect mismatch before posting `/session` (vs. waiting for
+   * a 400 `workspace_mismatch` response), and (b) omit `cwd` on
+   * `POST /session` — the route falls back to this path when the
+   * body has no `cwd` field. Multi-workspace deployments expose
+   * multiple daemons on different ports, each advertising its own
+   * `workspaceCwd`.
+   *
+   * Optional at the type level because the field is an additive
+   * extension to v=1 envelopes (added by #3803 §02). Daemons
+   * predating §02 still announce `v: 1` but omit this field; the
+   * protocol's "bump v only on incompatible frame changes" stance
+   * (see `qwen-serve-protocol.md`) makes additive optionality the
+   * correct shape. All post-§02 daemons populate it.
+   *
+   * **SDK consumers**: if you need the value as a non-undefined
+   * `string` (e.g. to call `.startsWith()` or pass into a function
+   * typed `string`), use the `requireWorkspaceCwd` helper from this
+   * module — it throws `DaemonCapabilityMissingError` with an
+   * actionable "this daemon predates §02" message instead of
+   * letting the call site hit a cryptic
+   * "Cannot read properties of undefined".
+   */
+  workspaceCwd?: string;
+}
+
+/**
+ * Thrown by `requireWorkspaceCwd` (and any future
+ * `requireCapability` helpers) when the daemon's
+ * `/capabilities` envelope is missing a field the caller needs.
+ * Carries the field name so handlers can branch on it.
+ */
+export class DaemonCapabilityMissingError extends Error {
+  readonly capability: string;
+  constructor(capability: string, hint: string) {
+    super(
+      `DaemonCapabilities.${capability} is missing — ${hint}. The daemon ` +
+        `you are connected to likely predates the feature that added ` +
+        `this field; upgrade the daemon or fall back to a different ` +
+        `code path that doesn't require it.`,
+    );
+    this.name = 'DaemonCapabilityMissingError';
+    this.capability = capability;
+  }
+}
+
+/**
+ * Assert that `caps.workspaceCwd` is populated (i.e. the daemon was
+ * built post-§02) and return it as a non-undefined `string`. Throws
+ * `DaemonCapabilityMissingError` otherwise so the call site gets an
+ * actionable error rather than a downstream
+ * `Cannot read properties of undefined`.
+ *
+ * Use this when you need the value as a guaranteed `string` —
+ * e.g. to render in UI, log, compare with `.startsWith()`, or pass
+ * into a function typed `string`. If your code is fine with the
+ * value being absent (e.g. you fall back to `POST /session` without
+ * `workspaceCwd` and let the daemon choose), just read
+ * `caps.workspaceCwd` directly.
+ */
+export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
+  if (typeof caps.workspaceCwd !== 'string' || caps.workspaceCwd.length === 0) {
+    throw new DaemonCapabilityMissingError(
+      'workspaceCwd',
+      caps.workspaceCwd === ''
+        ? 'daemon returned an empty workspaceCwd (post-§02 daemon with a bug)'
+        : 'daemon predates #3803 §02 (1 daemon = 1 workspace); upgrade it',
+    );
+  }
+  return caps.workspaceCwd;
 }
 
 /** Returned from `POST /session`. */

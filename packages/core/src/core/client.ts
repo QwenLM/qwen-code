@@ -99,12 +99,12 @@ import {
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
 import { partToString } from '../utils/partUtils.js';
-import { createHookOutput } from '../hooks/types.js';
+import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import type { StopHookOutput } from '../hooks/types.js';
+import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
@@ -194,6 +194,7 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 export class GeminiClient {
   private chat?: GeminiChat;
+  private initializedSessionId: string | undefined;
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -204,6 +205,8 @@ export class GeminiClient {
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private pendingRecallAbortController: AbortController | undefined;
+  private lastSessionStartContext: string | undefined;
+  private lastSessionStartSource: SessionStartSource | undefined;
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -224,8 +227,13 @@ export class GeminiClient {
     this.loopDetector = new LoopDetectionService(config);
   }
 
-  async initialize() {
-    this.lastPromptId = this.config.getSessionId();
+  async initialize(sessionStartSource?: SessionStartSource) {
+    const sessionId = this.config.getSessionId();
+    this.lastPromptId = sessionId;
+
+    if (this.isInitialized() && this.initializedSessionId === sessionId) {
+      return;
+    }
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -236,7 +244,10 @@ export class GeminiClient {
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
-      await this.startChat(resumedHistory);
+      await this.startChat(
+        resumedHistory,
+        sessionStartSource ?? SessionStartSource.Resume,
+      );
       this.getChat().setLastPromptTokenCount(
         uiTelemetryService.getLastPromptTokenCount(),
       );
@@ -244,8 +255,14 @@ export class GeminiClient {
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
-      await this.startChat();
+      if (sessionStartSource !== undefined) {
+        await this.startChat(undefined, sessionStartSource);
+      } else {
+        await this.startChat();
+      }
     }
+
+    this.initializedSessionId = sessionId;
   }
 
   /**
@@ -385,6 +402,7 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastApiCompletionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
@@ -406,7 +424,8 @@ export class GeminiClient {
     // compression should keep previously-revealed tools so the model can
     // continue using them without re-running ToolSearch.
     this.config.getToolRegistry().clearRevealedDeferredTools();
-    await this.startChat();
+    await this.startChat(undefined, SessionStartSource.Clear);
+    this.initializedSessionId = this.config.getSessionId();
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -473,9 +492,60 @@ export class GeminiClient {
     this.chat.setSystemInstruction(
       this.getMainSessionSystemInstruction(deferredTools),
     );
+    if (this.lastSessionStartContext && this.lastSessionStartSource) {
+      this.chat.applySessionStartContext(
+        this.lastSessionStartContext,
+        this.lastSessionStartSource,
+      );
+    }
   }
 
-  async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
+  private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
+    switch (approvalMode) {
+      case ApprovalMode.DEFAULT:
+        return PermissionMode.Default;
+      case ApprovalMode.PLAN:
+        return PermissionMode.Plan;
+      case ApprovalMode.AUTO_EDIT:
+        return PermissionMode.AutoEdit;
+      case ApprovalMode.YOLO:
+        return PermissionMode.Yolo;
+      default:
+        return PermissionMode.Default;
+    }
+  }
+
+  private async fireSessionStartHook(
+    source: SessionStartSource,
+  ): Promise<string | undefined> {
+    const hookSystem = this.config.getHookSystem();
+    if (
+      this.config.getDisableAllHooks() ||
+      !hookSystem ||
+      !this.config.hasHooksForEvent('SessionStart')
+    ) {
+      return undefined;
+    }
+
+    try {
+      const output = await hookSystem.fireSessionStartEvent(
+        source,
+        this.config.getModel() ?? '',
+        this.toPermissionMode(this.config.getApprovalMode()),
+      );
+      return output?.getAdditionalContext()?.trim() || undefined;
+    } catch (err) {
+      this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      return undefined;
+    }
+  }
+
+  async startChat(
+    extraHistory?: Content[],
+    sessionStartSource = extraHistory
+      ? SessionStartSource.Resume
+      : SessionStartSource.Startup,
+  ): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
@@ -550,6 +620,20 @@ export class GeminiClient {
         this.config.getChatRecordingService(),
         uiTelemetryService,
       );
+
+      const sessionStartAdditionalContext =
+        await this.fireSessionStartHook(sessionStartSource);
+      this.lastSessionStartContext = sessionStartAdditionalContext;
+      this.lastSessionStartSource = sessionStartAdditionalContext
+        ? sessionStartSource
+        : undefined;
+
+      if (sessionStartAdditionalContext) {
+        this.chat.applySessionStartContext(
+          sessionStartAdditionalContext,
+          sessionStartSource,
+        );
+      }
 
       await this.setTools();
 
@@ -1314,6 +1398,23 @@ export class GeminiClient {
         // the previous merged IDE context.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
+          void this.fireSessionStartHook(SessionStartSource.Compact)
+            .then((compactAdditionalContext) => {
+              if (!compactAdditionalContext || !this.chat) {
+                return;
+              }
+              this.lastSessionStartContext = compactAdditionalContext;
+              this.lastSessionStartSource = SessionStartSource.Compact;
+              this.chat.applySessionStartContext(
+                compactAdditionalContext,
+                SessionStartSource.Compact,
+              );
+            })
+            .catch((error) => {
+              this.config
+                .getDebugLogger()
+                .warn(`SessionStart hook failed: ${error}`);
+            });
         }
 
         yield event;
@@ -1645,6 +1746,8 @@ export class GeminiClient {
     force: boolean = false,
     signal?: AbortSignal,
   ): Promise<ChatCompressionInfo> {
+    const previousSessionStartContext = this.lastSessionStartContext;
+    const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
       this.config.getModel(),
@@ -1653,7 +1756,19 @@ export class GeminiClient {
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const compressedHistory = this.getChat().getHistory();
-      await this.startChat(compressedHistory);
+      await this.startChat(compressedHistory, SessionStartSource.Compact);
+      if (
+        !this.lastSessionStartContext &&
+        previousSessionStartContext &&
+        previousSessionStartSource
+      ) {
+        this.lastSessionStartContext = previousSessionStartContext;
+        this.lastSessionStartSource = previousSessionStartSource;
+        this.getChat().applySessionStartContext(
+          previousSessionStartContext,
+          previousSessionStartSource,
+        );
+      }
       // startChat() creates a new GeminiChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still
       // resolve to the file_unchanged placeholder. Clear so post-compaction

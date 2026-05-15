@@ -30,6 +30,7 @@ interface ServeArgs {
   token?: string;
   'max-sessions': number;
   'max-connections': number;
+  workspace?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -66,6 +67,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
       })
+      .option('workspace', {
+        type: 'string',
+        description:
+          'Absolute workspace path this daemon binds to. ' +
+          'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
+          'Defaults to process.cwd() when omitted. ' +
+          'For multi-workspace deployments, run one `qwen serve` per workspace ' +
+          'on separate ports (or behind an external orchestrator).',
+      })
       .option('max-connections', {
         type: 'number',
         default: 256,
@@ -78,10 +88,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'Stage 1 mode: one `qwen --acp` child per workspace behind the HTTP routes, ' +
-          "with multiple sessions multiplexed onto each child via the agent's native " +
-          '`newSession()`. Stage 2 native in-process mode is not yet implemented; ' +
-          'this flag will become opt-in then.',
+          'Stage 1 mode: one `qwen --acp` child per daemon (the daemon binds to ' +
+          'one workspace at boot, multiplexing N sessions onto that child via ' +
+          "the agent's native `newSession()`). Stage 2 native in-process mode " +
+          'is not yet implemented; this flag will become opt-in then.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -112,6 +122,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
         maxConnections: argv['max-connections'],
+        workspace: argv.workspace,
       });
     } catch (err) {
       writeStderrLine(

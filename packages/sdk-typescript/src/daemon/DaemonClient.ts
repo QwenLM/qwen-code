@@ -88,7 +88,16 @@ export class DaemonHttpError extends Error {
 }
 
 export interface CreateSessionRequest {
-  workspaceCwd: string;
+  /**
+   * Workspace path the daemon must be bound to (per #3803 §02). When
+   * omitted, the SDK sends no `cwd` field and the daemon route falls
+   * back to its boot-time `boundWorkspace`. Pass `caps.workspaceCwd`
+   * to be explicit, or omit it for the daemon-knows-best path. A
+   * non-empty `workspaceCwd` that doesn't canonicalize to the
+   * daemon's bound path yields a `400 workspace_mismatch`
+   * `DaemonHttpError`.
+   */
+  workspaceCwd?: string;
   modelServiceId?: string;
 }
 
@@ -250,6 +259,18 @@ export class DaemonClient {
   async createOrAttachSession(
     req: CreateSessionRequest,
   ): Promise<DaemonSession> {
+    // Per #3803 §02: omitting `cwd` lets the daemon fall back to its
+    // bound workspace. JSON.stringify strips `undefined` values, so
+    // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
+    // server then takes the documented fallback path.
+    //
+    // Send EVERY defined `workspaceCwd` value through as-is, including
+    // the empty string. A truthy guard would silently swallow
+    // `workspaceCwd: ""` (a likely client-side bug) and let the server
+    // fall back instead of returning a clear 400 for the malformed
+    // input. The SDK should be a transparent layer here: passing the
+    // caller's value verbatim lets the server's validation surface
+    // bugs that would otherwise hide as "wrong workspace bound".
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session`,
       {

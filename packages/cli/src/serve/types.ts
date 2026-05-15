@@ -7,14 +7,15 @@
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): one `qwen --acp` child PER WORKSPACE, with
- *   multiple sessions multiplexed onto that child via the agent's native
- *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`).
- *   Sessions on the same workspace share the child's process / OAuth /
- *   file-cache / hierarchy-memory parse. The daemon pipes ACP NDJSON over
- *   HTTP/SSE. Same-session multi-client requests serialize through the
- *   bridge's per-session FIFO; cross-session requests on the same channel
- *   can run concurrently (the ACP layer demultiplexes by sessionId).
+ * `http-bridge` (Stage 1): per #3803 §02, one `qwen --acp` child per
+ *   daemon (the daemon binds to ONE workspace at boot). Multiple
+ *   sessions multiplex onto that child via the agent's native
+ *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
+ *   sharing the child's process / OAuth / file-cache / hierarchy-memory
+ *   parse. The daemon pipes ACP NDJSON over HTTP/SSE. Same-session
+ *   multi-client requests serialize through the bridge's per-session
+ *   FIFO; cross-session requests on the same channel can run
+ *   concurrently (the ACP layer demultiplexes by sessionId).
  * `native` (Stage 2+): in-process multi-session, AsyncLocalStorage; not yet
  *   implemented.
  */
@@ -56,6 +57,26 @@ export interface ServeOptions {
    * (default cap 64) plus short-lived REST calls.
    */
   maxConnections?: number;
+  /**
+   * Absolute workspace path this daemon binds to. Per #3803 §02 the
+   * daemon is **1 daemon = 1 workspace × N sessions**: one bound
+   * workspace at boot, sessions multiplexed on the single
+   * `qwen --acp` child via `connection.newSession()`.
+   *
+   * `POST /session` calls whose `cwd` doesn't canonicalize to this
+   * path are rejected with `400 workspace_mismatch`. Clients may
+   * also omit `cwd` — the route falls back to this bound path.
+   *
+   * Multi-workspace deployments use **multiple daemon processes**
+   * (one per workspace, each on its own port), supervised by
+   * systemd / docker-compose / k8s / `qwen-coordinator` reference
+   * orchestrator. There is no intra-daemon multi-workspace mode
+   * (the previous Stage 1 `byWorkspaceChannel` routing layer was
+   * removed in the §02 design revision).
+   *
+   * Defaults to `process.cwd()` when omitted.
+   */
+  workspace?: string;
 }
 
 /**
@@ -77,6 +98,23 @@ export interface CapabilitiesEnvelope {
    * this field being non-empty.
    */
   modelServices: string[];
+  /**
+   * Absolute workspace path this daemon is bound to (per #3803 §02:
+   * `1 daemon = 1 workspace`). Clients use this to:
+   *   - Detect mismatch before posting `/session` (vs. waiting for
+   *     400 workspace_mismatch from the bridge).
+   *   - Omit `cwd` on `POST /session` — the route falls back to this
+   *     path when the body has no `cwd` field.
+   *
+   * Optional at the type level (matches the SDK's `DaemonCapabilities`
+   * type) because the field is an additive extension of the v=1
+   * envelope introduced by #3803 §02. Daemons predating §02 still
+   * announce `v: 1` and omit this field; the protocol's "bump v only
+   * on incompatible frame changes" stance (see `qwen-serve-protocol.md`
+   * "Additive to v=1" note) makes additive optionality the correct
+   * shape. The post-§02 server code here always populates it.
+   */
+  workspaceCwd?: string;
 }
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;
