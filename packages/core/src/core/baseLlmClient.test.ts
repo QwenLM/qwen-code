@@ -476,7 +476,7 @@ describe('BaseLlmClient', () => {
       embedContent: vi.fn(),
     } as unknown as Mocked<ContentGenerator>;
 
-    const getResolvedModel = vi.fn();
+    const getResolvedModelAcrossAuthTypes = vi.fn();
     let crossProviderConfig: Mocked<Config>;
 
     beforeEach(() => {
@@ -486,7 +486,7 @@ describe('BaseLlmClient', () => {
       fastGenerateContent.mockReset();
       mockCreateContentGenerator.mockReset();
       mockBuildAgentContentGeneratorConfig.mockReset();
-      getResolvedModel.mockReset();
+      getResolvedModelAcrossAuthTypes.mockReset();
 
       mockCreateContentGenerator.mockResolvedValue(fastContentGenerator);
       mockBuildAgentContentGeneratorConfig.mockReturnValue({
@@ -503,7 +503,9 @@ describe('BaseLlmClient', () => {
         getModel: vi.fn().mockReturnValue('main-model'),
         getFastModel: vi.fn().mockReturnValue(undefined),
         getFastModelForSideQuery: vi.fn().mockReturnValue(undefined),
-        getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
+        getModelsConfig: vi
+          .fn()
+          .mockReturnValue({ getResolvedModelAcrossAuthTypes }),
       } as unknown as Mocked<Config>;
     });
 
@@ -514,23 +516,24 @@ describe('BaseLlmClient', () => {
 
       expect(resolved.contentGenerator).toBe(mockContentGenerator);
       expect(resolved.retryAuthType).toBe(AuthType.QWEN_OAUTH);
-      expect(getResolvedModel).not.toHaveBeenCalled();
+      expect(getResolvedModelAcrossAuthTypes).not.toHaveBeenCalled();
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
     it('builds a per-model generator when model differs and is registered under another authType', async () => {
       // Main authType is QWEN_OAUTH; fast model only resolves under USE_ANTHROPIC.
-      getResolvedModel.mockImplementation((authType: string, model: string) => {
-        if (authType === AuthType.QWEN_OAUTH) return undefined;
-        if (authType === AuthType.USE_ANTHROPIC && model === fastModel) {
-          return {
-            authType: AuthType.USE_ANTHROPIC,
-            envKey: 'ANTHROPIC_API_KEY',
-            baseUrl: 'https://api.anthropic.com',
-          };
-        }
-        return undefined;
-      });
+      getResolvedModelAcrossAuthTypes.mockImplementation(
+        (model: string, _preferredAuthType?: string) => {
+          if (model === fastModel) {
+            return {
+              authType: AuthType.USE_ANTHROPIC,
+              envKey: 'ANTHROPIC_API_KEY',
+              baseUrl: 'https://api.anthropic.com',
+            };
+          }
+          return undefined;
+        },
+      );
 
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
 
@@ -550,7 +553,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('caches the per-model generator across resolveForModel calls', async () => {
-      getResolvedModel.mockReturnValue({
+      getResolvedModelAcrossAuthTypes.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,
         envKey: 'ANTHROPIC_API_KEY',
       });
@@ -564,7 +567,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('clearPerModelGeneratorCache forces a rebuild on the next call', async () => {
-      getResolvedModel.mockReturnValue({
+      getResolvedModelAcrossAuthTypes.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,
         envKey: 'ANTHROPIC_API_KEY',
       });
@@ -578,7 +581,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('falls back to the main generator when the target model is not in the registry', async () => {
-      getResolvedModel.mockReturnValue(undefined);
+      getResolvedModelAcrossAuthTypes.mockReturnValue(undefined);
 
       const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
       const resolved = await c.resolveForModel('unknown-model');
@@ -590,7 +593,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('falls back to the main generator when createContentGenerator throws', async () => {
-      getResolvedModel.mockReturnValue({
+      getResolvedModelAcrossAuthTypes.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,
         envKey: 'ANTHROPIC_API_KEY',
       });
@@ -608,7 +611,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('generateJson routes through the per-model generator and forwards retry authType', async () => {
-      getResolvedModel.mockReturnValue({
+      getResolvedModelAcrossAuthTypes.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,
         envKey: 'ANTHROPIC_API_KEY',
       });
@@ -638,16 +641,21 @@ describe('BaseLlmClient', () => {
     });
 
     it('generateJson accepts authType-qualified selectors and sends the bare model id', async () => {
-      getResolvedModel.mockImplementation((authType: string, model: string) => {
-        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
-          return {
-            id: 'shared-model',
-            authType: AuthType.USE_OPENAI,
-            envKey: 'OPENAI_API_KEY',
-          };
-        }
-        return undefined;
-      });
+      getResolvedModelAcrossAuthTypes.mockImplementation(
+        (model: string, preferredAuthType?: string) => {
+          if (
+            preferredAuthType === AuthType.USE_OPENAI &&
+            model === 'shared-model'
+          ) {
+            return {
+              id: 'shared-model',
+              authType: AuthType.USE_OPENAI,
+              envKey: 'OPENAI_API_KEY',
+            };
+          }
+          return undefined;
+        },
+      );
       fastGenerateContent.mockResolvedValue(
         createMockResponseWithFunctionCall({ ok: true }),
       );
@@ -665,9 +673,9 @@ describe('BaseLlmClient', () => {
         promptId: 'test',
       });
 
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
+      expect(getResolvedModelAcrossAuthTypes).toHaveBeenCalledWith(
         'shared-model',
+        AuthType.USE_OPENAI,
       );
       expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
         crossProviderConfig,
@@ -684,16 +692,21 @@ describe('BaseLlmClient', () => {
       crossProviderConfig.getFastModelForSideQuery.mockReturnValue(
         'openai:shared-model',
       );
-      getResolvedModel.mockImplementation((authType: string, model: string) => {
-        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
-          return {
-            id: 'shared-model',
-            authType: AuthType.USE_OPENAI,
-            envKey: 'OPENAI_API_KEY',
-          };
-        }
-        return undefined;
-      });
+      getResolvedModelAcrossAuthTypes.mockImplementation(
+        (model: string, preferredAuthType?: string) => {
+          if (
+            preferredAuthType === AuthType.USE_OPENAI &&
+            model === 'shared-model'
+          ) {
+            return {
+              id: 'shared-model',
+              authType: AuthType.USE_OPENAI,
+              envKey: 'OPENAI_API_KEY',
+            };
+          }
+          return undefined;
+        },
+      );
       fastGenerateContent.mockResolvedValue(
         createMockResponseWithFunctionCall({ ok: true }),
       );
@@ -711,9 +724,9 @@ describe('BaseLlmClient', () => {
         promptId: 'test',
       });
 
-      expect(getResolvedModel).toHaveBeenCalledWith(
-        AuthType.USE_OPENAI,
+      expect(getResolvedModelAcrossAuthTypes).toHaveBeenCalledWith(
         'shared-model',
+        AuthType.USE_OPENAI,
       );
       expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
         crossProviderConfig,
@@ -727,7 +740,7 @@ describe('BaseLlmClient', () => {
     });
 
     it('generateText routes through the per-model generator and forwards retry authType', async () => {
-      getResolvedModel.mockReturnValue({
+      getResolvedModelAcrossAuthTypes.mockReturnValue({
         authType: AuthType.USE_ANTHROPIC,
         envKey: 'ANTHROPIC_API_KEY',
       });

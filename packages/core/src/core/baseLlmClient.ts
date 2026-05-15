@@ -410,45 +410,18 @@ export class BaseLlmClient {
     this.perModelGeneratorCache.clear();
   }
 
-  /**
-   * Resolve a model across all authTypes. Handles the case where the target
-   * model is registered under a different authType than the main model
-   * (e.g. main=QWEN_OAUTH, fast=USE_ANTHROPIC).
-   */
   private resolveModelAcrossAuthTypes(
     model: string,
     selector: ResolvedModelId | undefined,
   ): ResolvedModelConfig | undefined {
     const modelsConfig = this.config.getModelsConfig?.();
-    if (!modelsConfig) return undefined;
-    if (!selector) return undefined;
-    const modelId = selector.modelId;
-
-    if (selector.authType) {
-      return modelsConfig.getResolvedModel(selector.authType, modelId);
-    }
-
-    const allAuthTypes: AuthType[] = [
-      AuthType.QWEN_OAUTH,
-      AuthType.USE_OPENAI,
-      AuthType.USE_VERTEX_AI,
-      AuthType.USE_ANTHROPIC,
-      AuthType.USE_GEMINI,
-    ];
+    if (!modelsConfig || !selector) return undefined;
 
     const mainAuthType = this.config.getContentGeneratorConfig()?.authType;
-    if (mainAuthType) {
-      const resolved = modelsConfig.getResolvedModel(mainAuthType, modelId);
-      if (resolved) return resolved;
-    }
-
-    for (const authType of allAuthTypes) {
-      if (authType === mainAuthType) continue;
-      const resolved = modelsConfig.getResolvedModel(authType, modelId);
-      if (resolved) return resolved;
-    }
-
-    return undefined;
+    return modelsConfig.getResolvedModelAcrossAuthTypes(
+      selector.modelId,
+      selector.authType ?? mainAuthType,
+    );
   }
 
   private async createContentGeneratorForModel(

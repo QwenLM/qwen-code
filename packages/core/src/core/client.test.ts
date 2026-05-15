@@ -351,6 +351,12 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    // Restore buildAgentContentGeneratorConfig mock implementation after reset.
+    const { buildAgentContentGeneratorConfig: originalBuildAgentConfig } =
+      await vi.importActual('../models/content-generator-config.js');
+    vi.mocked(buildAgentContentGeneratorConfig).mockImplementation(
+      originalBuildAgentConfig,
+    );
     clientSpanCalls.length = 0;
     mockWithSpan.mockImplementation(
       async (
@@ -3782,12 +3788,10 @@ Other open files:
         capabilities: {},
       };
 
-      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
       const getResolvedModelAcrossAuthTypes = vi
         .fn()
         .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel,
         getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
@@ -3840,12 +3844,11 @@ Other open files:
         capabilities: {},
       };
 
-      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      const getResolvedModelAcrossAuthTypes = vi
+        .fn()
+        .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel,
-        getResolvedModelAcrossAuthTypes: vi
-          .fn()
-          .mockReturnValue(mockResolvedModel),
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       // Override createContentGenerator to return our test double (success path)
@@ -3885,10 +3888,11 @@ Other open files:
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
 
-      const getResolvedModel = vi.fn();
+      const getResolvedModelAcrossAuthTypes = vi
+        .fn()
+        .mockReturnValue(undefined);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel,
-        getResolvedModelAcrossAuthTypes: vi.fn().mockReturnValue(undefined),
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       await client.generateContent(
@@ -3898,8 +3902,8 @@ Other open files:
         'test-model', // same as getModel() return value
       );
 
-      // getResolvedModel should NOT be called when model matches main
-      expect(getResolvedModel).not.toHaveBeenCalled();
+      // getResolvedModelAcrossAuthTypes should NOT be called when model matches main
+      expect(getResolvedModelAcrossAuthTypes).not.toHaveBeenCalled();
 
       // The main content generator should be used directly
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
@@ -3965,12 +3969,11 @@ Other open files:
         capabilities: {},
       };
 
-      const getResolvedModel = vi.fn().mockReturnValue(mockResolvedModel);
+      const getResolvedModelAcrossAuthTypes = vi
+        .fn()
+        .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel,
-        getResolvedModelAcrossAuthTypes: vi
-          .fn()
-          .mockReturnValue(mockResolvedModel),
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       // Main config uses a different authType
@@ -4012,8 +4015,11 @@ Other open files:
         capabilities: {},
       };
 
+      const getResolvedModelAcrossAuthTypes = vi
+        .fn()
+        .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
@@ -4051,18 +4057,12 @@ Other open files:
         envKey: undefined,
       };
 
-      // resolveModelAcrossAuthTypes calls getResolvedModel multiple times:
-      // 1. main authType (QWEN_OAUTH) → undefined (miss)
-      // 2. secondary authType (USE_OPENAI) → mockResolvedModel (hit)
-      // 3. buildAgentContentGeneratorConfig calls getResolvedModel again
-      //    with the resolved authType → mockResolvedModel (hit)
-      const getResolvedModel = vi
+      const getResolvedModelAcrossAuthTypes = vi
         .fn()
-        .mockReturnValueOnce(undefined)
         .mockReturnValue(mockResolvedModel);
 
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel,
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       // Main config uses QWEN_OAUTH — fast model registered under USE_OPENAI
@@ -4083,17 +4083,10 @@ Other open files:
         'fast-model',
       );
 
-      // First call uses main authType (QWEN_OAUTH) — misses
-      expect(getResolvedModel).toHaveBeenNthCalledWith(
-        1,
+      // Verify that getResolvedModelAcrossAuthTypes was called
+      expect(getResolvedModelAcrossAuthTypes).toHaveBeenCalledWith(
+        'fast-model',
         AuthType.QWEN_OAUTH,
-        'fast-model',
-      );
-      // Second call falls through to secondary authType — hits
-      expect(getResolvedModel).toHaveBeenNthCalledWith(
-        2,
-        AuthType.USE_OPENAI,
-        'fast-model',
       );
       // Generator was created using the resolved model's config
       expect(createContentGenerator).toHaveBeenCalled();
@@ -4111,8 +4104,11 @@ Other open files:
         capabilities: {},
       };
 
+      const getResolvedModelAcrossAuthTypes = vi
+        .fn()
+        .mockReturnValue(mockResolvedModel);
       vi.mocked(mockConfig.getModelsConfig).mockReturnValue({
-        getResolvedModel: vi.fn().mockReturnValue(mockResolvedModel),
+        getResolvedModelAcrossAuthTypes,
       } as unknown as ModelsConfig);
 
       vi.mocked(createContentGenerator).mockResolvedValue(mockContentGenerator);
