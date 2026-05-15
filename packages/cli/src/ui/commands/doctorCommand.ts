@@ -9,7 +9,9 @@ import { CommandKind } from './types.js';
 import type { HistoryItemDoctor } from '../types.js';
 import { runDoctorChecks } from '../../utils/doctorChecks.js';
 import {
+  collectMemoryPressureSamples,
   formatMemoryDiagnostics,
+  formatMemoryPressureSamples,
   getMemoryDiagnostics,
   writeMemoryHeapSnapshot,
 } from '../../utils/memoryDiagnostics.js';
@@ -25,8 +27,13 @@ export const doctorCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  argumentHint: '[memory]',
-  examples: ['/doctor', '/doctor memory'],
+  argumentHint: '[memory] [--sample] [--snapshot]',
+  examples: [
+    '/doctor',
+    '/doctor memory',
+    '/doctor memory --sample',
+    '/doctor memory --snapshot',
+  ],
   completion: async (_context, partialArg) => {
     const trimmed = partialArg.trimStart();
     return DOCTOR_SUBCOMMANDS.filter((candidate) =>
@@ -40,6 +47,7 @@ export const doctorCommand: SlashCommand = {
       args?.trim().toLowerCase().split(/\s+/).filter(Boolean) ?? [];
     const subCommand = subCommandArgs[0] ?? '';
     const shouldWriteHeapSnapshot = subCommandArgs.includes('--snapshot');
+    const shouldSampleMemory = subCommandArgs.includes('--sample');
 
     if (subCommand === MEMORY_SUBCOMMAND) {
       if (abortSignal?.aborted) {
@@ -56,6 +64,19 @@ export const doctorCommand: SlashCommand = {
 
       if (abortSignal?.aborted) {
         return;
+      }
+
+      if (shouldSampleMemory) {
+        const samples = await collectMemoryPressureSamples({
+          sampleCount: 3,
+          intervalMs: 1000,
+        });
+
+        if (abortSignal?.aborted) {
+          return;
+        }
+
+        report = `${report}\n\n${formatMemoryPressureSamples(samples)}`;
       }
 
       if (shouldWriteHeapSnapshot) {

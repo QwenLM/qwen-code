@@ -99,6 +99,24 @@ export interface WriteMemoryHeapSnapshotOptions {
   writeSnapshot?: (filePath: string) => string;
 }
 
+export interface MemoryPressureSample {
+  index: number;
+  timestamp: string;
+  rss: number;
+  heapTotal: number;
+  heapUsed: number;
+  external: number;
+  arrayBuffers: number;
+}
+
+export interface CollectMemoryPressureSamplesOptions {
+  sampleCount?: number;
+  intervalMs?: number;
+  now?: () => Date;
+  memoryUsage?: () => NodeJS.MemoryUsage;
+  wait?: (ms: number) => Promise<void>;
+}
+
 function defaultHeapSnapshotDir(): string {
   return path.join(os.homedir(), '.qwen', 'memory-snapshots');
 }
@@ -119,6 +137,48 @@ export function writeMemoryHeapSnapshot({
   );
 
   return writeSnapshot(filePath);
+}
+
+function defaultWait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeSampleCount(sampleCount: number): number {
+  if (!Number.isFinite(sampleCount)) {
+    return 3;
+  }
+
+  return Math.max(1, Math.floor(sampleCount));
+}
+
+export async function collectMemoryPressureSamples({
+  sampleCount = 3,
+  intervalMs = 1000,
+  now = () => new Date(),
+  memoryUsage = process.memoryUsage,
+  wait = defaultWait,
+}: CollectMemoryPressureSamplesOptions = {}): Promise<MemoryPressureSample[]> {
+  const count = normalizeSampleCount(sampleCount);
+  const samples: MemoryPressureSample[] = [];
+
+  for (let index = 1; index <= count; index++) {
+    const memory = memoryUsage();
+    samples.push({
+      index,
+      timestamp: now().toISOString(),
+      rss: memory.rss,
+      heapTotal: memory.heapTotal,
+      heapUsed: memory.heapUsed,
+      external: memory.external,
+      arrayBuffers: memory.arrayBuffers,
+    });
+
+    if (index < count) {
+      await wait(intervalMs);
+    }
+  }
+
+  return samples;
 }
 
 function formatBytes(value: unknown): string {
@@ -223,6 +283,32 @@ function buildMemoryInsights(diagnostics: MemoryDiagnostics): MemoryInsights {
     signals,
     recommendations,
   };
+}
+
+export function formatMemoryPressureSamples(
+  samples: MemoryPressureSample[],
+): string {
+  const first = samples[0];
+  const last = samples.at(-1);
+  const rssDelta = first && last ? last.rss - first.rss : undefined;
+  const heapUsedDelta =
+    first && last ? last.heapUsed - first.heapUsed : undefined;
+  const sampleLines = samples.map(
+    (sample) =>
+      `  #${sample.index} ${sample.timestamp}: RSS ${formatBytes(
+        sample.rss,
+      )}, heap used ${formatBytes(sample.heapUsed)}, external ${formatBytes(
+        sample.external,
+      )}, array buffers ${formatBytes(sample.arrayBuffers)}`,
+  );
+
+  return [
+    'Memory pressure samples',
+    `  Sample count: ${samples.length}`,
+    `  RSS delta: ${formatBytes(rssDelta)}`,
+    `  Heap used delta: ${formatBytes(heapUsedDelta)}`,
+    ...sampleLines,
+  ].join('\n');
 }
 
 export function formatMemoryDiagnostics(

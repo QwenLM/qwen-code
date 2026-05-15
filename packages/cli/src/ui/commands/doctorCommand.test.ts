@@ -64,6 +64,22 @@ describe('doctorCommand', () => {
     vi.mocked(memoryDiagnosticsModule.writeMemoryHeapSnapshot).mockReturnValue(
       '/tmp/qwen-code-heap.heapsnapshot',
     );
+    vi.mocked(
+      memoryDiagnosticsModule.collectMemoryPressureSamples,
+    ).mockResolvedValue([
+      {
+        index: 1,
+        timestamp: '2026-05-15T12:00:00.000Z',
+        rss: 100,
+        heapTotal: 80,
+        heapUsed: 40,
+        external: 5,
+        arrayBuffers: 2,
+      },
+    ]);
+    vi.mocked(
+      memoryDiagnosticsModule.formatMemoryPressureSamples,
+    ).mockReturnValue('Memory pressure samples\nSample count: 1');
   }
 
   beforeEach(() => {
@@ -210,6 +226,72 @@ describe('doctorCommand', () => {
       content:
         'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nHeap snapshot written: /tmp/qwen-code-heap.heapsnapshot',
     });
+  });
+
+  it('should capture a short memory pressure sample when requested', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await doctorCommand.action!(mockContext, 'memory --sample');
+
+    expect(
+      memoryDiagnosticsModule.collectMemoryPressureSamples,
+    ).toHaveBeenCalledWith({ sampleCount: 3, intervalMs: 1000 });
+    expect(
+      memoryDiagnosticsModule.formatMemoryPressureSamples,
+    ).toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nMemory pressure samples\nSample count: 1',
+    });
+  });
+
+  it('should stop memory diagnostics when aborted after sampling', async () => {
+    const abortController = new AbortController();
+    vi.mocked(
+      memoryDiagnosticsModule.collectMemoryPressureSamples,
+    ).mockImplementation(async () => {
+      abortController.abort();
+      return [
+        {
+          index: 1,
+          timestamp: '2026-05-15T12:00:00.000Z',
+          rss: 100,
+          heapTotal: 80,
+          heapUsed: 40,
+          external: 5,
+          arrayBuffers: 2,
+        },
+      ];
+    });
+
+    mockContext = createMockCommandContext({
+      executionMode: 'interactive',
+      abortSignal: abortController.signal,
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await doctorCommand.action!(mockContext, 'memory --sample');
+
+    expect(result).toBeUndefined();
+    expect(
+      memoryDiagnosticsModule.collectMemoryPressureSamples,
+    ).toHaveBeenCalled();
+    expect(
+      memoryDiagnosticsModule.formatMemoryPressureSamples,
+    ).not.toHaveBeenCalled();
+    expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+    expect(doctorChecksModule.runDoctorChecks).not.toHaveBeenCalled();
   });
 
   it('should stop memory diagnostics when aborted before collection', async () => {

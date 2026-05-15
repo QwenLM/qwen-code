@@ -9,7 +9,9 @@ import * as path from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 import {
+  collectMemoryPressureSamples,
   formatMemoryDiagnostics,
+  formatMemoryPressureSamples,
   getMemoryDiagnostics,
   writeMemoryHeapSnapshot,
 } from './memoryDiagnostics.js';
@@ -175,5 +177,76 @@ describe('memoryDiagnostics', () => {
         `qwen-code-heap-${process.pid}-2026-05-15T12-00-00-000Z.heapsnapshot`,
       ),
     );
+  });
+
+  it('collects repeated memory pressure samples with waits between samples', async () => {
+    const waits: number[] = [];
+    const memoryUsages = [
+      {
+        rss: 100 * 1024 * 1024,
+        heapTotal: 80 * 1024 * 1024,
+        heapUsed: 40 * 1024 * 1024,
+        external: 5 * 1024 * 1024,
+        arrayBuffers: 2 * 1024 * 1024,
+      },
+      {
+        rss: 130 * 1024 * 1024,
+        heapTotal: 90 * 1024 * 1024,
+        heapUsed: 60 * 1024 * 1024,
+        external: 6 * 1024 * 1024,
+        arrayBuffers: 3 * 1024 * 1024,
+      },
+      {
+        rss: 150 * 1024 * 1024,
+        heapTotal: 100 * 1024 * 1024,
+        heapUsed: 70 * 1024 * 1024,
+        external: 7 * 1024 * 1024,
+        arrayBuffers: 4 * 1024 * 1024,
+      },
+    ];
+
+    const samples = await collectMemoryPressureSamples({
+      sampleCount: 3,
+      intervalMs: 25,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+      memoryUsage: () => memoryUsages.shift()!,
+      wait: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    expect(samples).toHaveLength(3);
+    expect(waits).toEqual([25, 25]);
+    expect(samples[0]).toMatchObject({ index: 1, rss: 100 * 1024 * 1024 });
+    expect(samples[2]).toMatchObject({ index: 3, heapUsed: 70 * 1024 * 1024 });
+  });
+
+  it('formats memory pressure sample deltas', () => {
+    const report = formatMemoryPressureSamples([
+      {
+        index: 1,
+        timestamp: '2026-05-15T12:00:00.000Z',
+        rss: 100 * 1024 * 1024,
+        heapTotal: 80 * 1024 * 1024,
+        heapUsed: 40 * 1024 * 1024,
+        external: 5 * 1024 * 1024,
+        arrayBuffers: 2 * 1024 * 1024,
+      },
+      {
+        index: 2,
+        timestamp: '2026-05-15T12:00:01.000Z',
+        rss: 130 * 1024 * 1024,
+        heapTotal: 90 * 1024 * 1024,
+        heapUsed: 60 * 1024 * 1024,
+        external: 6 * 1024 * 1024,
+        arrayBuffers: 3 * 1024 * 1024,
+      },
+    ]);
+
+    expect(report).toContain('Memory pressure samples');
+    expect(report).toContain('Sample count: 2');
+    expect(report).toContain('RSS delta: 30.0 MiB');
+    expect(report).toContain('Heap used delta: 20.0 MiB');
+    expect(report).toContain('#2 2026-05-15T12:00:01.000Z');
   });
 });
