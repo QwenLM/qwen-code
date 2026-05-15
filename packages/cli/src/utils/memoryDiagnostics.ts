@@ -107,10 +107,98 @@ function formatActiveCount(value: {
   return value.unavailable ? 'unavailable' : String(value.count);
 }
 
+function asFiniteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? value
+    : undefined;
+}
+
+function formatPercent(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) {
+    return 'unavailable';
+  }
+
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+type MemoryInsightStatus = 'ok' | 'warn';
+
+interface MemoryInsights {
+  status: MemoryInsightStatus;
+  heapPressure?: number;
+  rssHeapGapBytes?: number;
+  signals: string[];
+  recommendations: string[];
+}
+
+function buildMemoryInsights(diagnostics: MemoryDiagnostics): MemoryInsights {
+  const heapStatistics = diagnostics.v8.heapStatistics ?? {};
+  const heapSizeLimit = asFiniteNumber(heapStatistics['heap_size_limit']);
+  const heapPressure =
+    heapSizeLimit !== undefined && heapSizeLimit > 0
+      ? diagnostics.memory.heapUsed / heapSizeLimit
+      : undefined;
+  const rssHeapGapBytes = Math.max(
+    0,
+    diagnostics.memory.rss - diagnostics.memory.heapTotal,
+  );
+  const externalAndBuffers =
+    diagnostics.memory.external + diagnostics.memory.arrayBuffers;
+  const nonHeapGapIsHigh =
+    rssHeapGapBytes >= 256 * 1024 * 1024 &&
+    diagnostics.memory.rss >= diagnostics.memory.heapTotal * 2;
+  const externalMemoryIsHigh =
+    externalAndBuffers >= 256 * 1024 * 1024 &&
+    externalAndBuffers >= diagnostics.memory.rss * 0.3;
+  const heapIsHigh = heapPressure !== undefined && heapPressure >= 0.85;
+
+  const signals: string[] = [];
+  const recommendations: string[] = [];
+
+  if (heapIsHigh) {
+    signals.push(
+      'V8 heap usage is high; the process is close to its configured heap limit.',
+    );
+    recommendations.push(
+      'If the CLI is sluggish or near OOM, restart Qwen Code to recover memory, then capture a heap snapshot before the next restart to identify retained objects.',
+    );
+  }
+
+  if (nonHeapGapIsHigh || externalMemoryIsHigh) {
+    signals.push(
+      'Non-heap memory is high; investigate large tool results, buffers, or native allocations.',
+    );
+    recommendations.push(
+      'Compare RSS against heap usage over time; if RSS grows while heap stays flat, inspect external buffers, tool-result payloads, and native dependencies before increasing the V8 heap limit.',
+    );
+  }
+
+  if (
+    diagnostics.activeHandles.count >= 1000 &&
+    !diagnostics.activeHandles.unavailable
+  ) {
+    signals.push(
+      'Active handle count is high; long-lived timers, sockets, or file watchers may be accumulating.',
+    );
+    recommendations.push(
+      'Check recently enabled MCP servers, watchers, or streaming sessions for resources that are not being closed.',
+    );
+  }
+
+  return {
+    status: signals.length > 0 ? 'warn' : 'ok',
+    heapPressure,
+    rssHeapGapBytes,
+    signals,
+    recommendations,
+  };
+}
+
 export function formatMemoryDiagnostics(
   diagnostics: MemoryDiagnostics,
 ): string {
   const heapStatistics = diagnostics.v8.heapStatistics ?? {};
+  const insights = buildMemoryInsights(diagnostics);
   const heapSpaceLines = diagnostics.v8.heapSpaces.map((space) => {
     const name = String(space['space_name'] ?? 'unknown_space');
     return `  - ${name}: ${formatBytes(space['space_used_size'])} / ${formatBytes(
@@ -149,5 +237,22 @@ export function formatMemoryDiagnostics(
     'Runtime internals',
     `  Active handles: ${formatActiveCount(diagnostics.activeHandles)}`,
     `  Active requests: ${formatActiveCount(diagnostics.activeRequests)}`,
+    '',
+    'Assessment',
+    `  Status: ${insights.status}`,
+    `  Heap pressure: ${formatPercent(insights.heapPressure)}`,
+    `  RSS / heap-total gap: ${formatBytes(insights.rssHeapGapBytes)}`,
+    '  Signals:',
+    ...(insights.signals.length > 0
+      ? insights.signals.map((signal) => `  - ${signal}`)
+      : ['  - No immediate memory pressure signals detected.']),
+    '  Recommendations:',
+    ...(insights.recommendations.length > 0
+      ? insights.recommendations.map(
+          (recommendation) => `  - ${recommendation}`,
+        )
+      : [
+          '  - Re-run /doctor memory when memory grows, before restarting, to compare snapshots.',
+        ]),
   ].join('\n');
 }

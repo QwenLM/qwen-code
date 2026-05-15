@@ -78,8 +78,82 @@ describe('memoryDiagnostics', () => {
       expect(report).toContain('old_space: 20.0 MiB / 30.0 MiB');
       expect(report).toContain('Active handles: 3');
       expect(report).toContain('Active requests: 1');
+      expect(report).toContain('Assessment');
+      expect(report).toContain('Status: ok');
+      expect(report).toContain('Heap pressure: 1.0%');
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('surfaces high heap pressure with actionable recommendations', () => {
+    const report = formatMemoryDiagnostics({
+      generatedAt: '2026-05-15T12:00:00.000Z',
+      process: {
+        pid: 123,
+        nodeVersion: 'v22.0.0',
+        platform: 'linux',
+        arch: 'x64',
+        uptimeSeconds: 120,
+      },
+      memory: {
+        rss: 3900 * 1024 * 1024,
+        heapTotal: 3600 * 1024 * 1024,
+        heapUsed: 3500 * 1024 * 1024,
+        external: 20 * 1024 * 1024,
+        arrayBuffers: 10 * 1024 * 1024,
+      },
+      v8: {
+        heapStatistics: {
+          heap_size_limit: 4096 * 1024 * 1024,
+          total_available_size: 200 * 1024 * 1024,
+        },
+        heapSpaces: [],
+      },
+      activeHandles: { count: 3, unavailable: false },
+      activeRequests: { count: 1, unavailable: false },
+    });
+
+    expect(report).toContain('Status: warn');
+    expect(report).toContain('Heap pressure: 85.4%');
+    expect(report).toContain('V8 heap usage is high');
+    expect(report).toContain('restart Qwen Code to recover memory');
+    expect(report).toContain('capture a heap snapshot');
+  });
+
+  it('surfaces large non-heap memory gaps separately from V8 heap pressure', () => {
+    const report = formatMemoryDiagnostics({
+      generatedAt: '2026-05-15T12:00:00.000Z',
+      process: {
+        pid: 123,
+        nodeVersion: 'v22.0.0',
+        platform: 'linux',
+        arch: 'x64',
+        uptimeSeconds: 120,
+      },
+      memory: {
+        rss: 1800 * 1024 * 1024,
+        heapTotal: 500 * 1024 * 1024,
+        heapUsed: 300 * 1024 * 1024,
+        external: 900 * 1024 * 1024,
+        arrayBuffers: 300 * 1024 * 1024,
+      },
+      v8: {
+        heapStatistics: {
+          heap_size_limit: 4096 * 1024 * 1024,
+          total_available_size: 3000 * 1024 * 1024,
+        },
+        heapSpaces: [],
+      },
+      activeHandles: { count: 3, unavailable: false },
+      activeRequests: { count: 1, unavailable: false },
+    });
+
+    expect(report).toContain('Status: warn');
+    expect(report).toContain('RSS / heap-total gap: 1300.0 MiB');
+    expect(report).toContain('Non-heap memory is high');
+    expect(report).toContain(
+      'large tool results, buffers, or native allocations',
+    );
   });
 });
