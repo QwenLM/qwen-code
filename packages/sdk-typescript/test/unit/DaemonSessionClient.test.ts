@@ -34,6 +34,7 @@ interface CapturedRequest {
   method: string;
   headers: Record<string, string>;
   body: string | null;
+  signal?: AbortSignal | null;
 }
 
 function recordingFetch(
@@ -55,7 +56,13 @@ function recordingFetch(
         h.forEach((v, k) => (headers[k.toLowerCase()] = v));
       }
       const body = typeof init?.body === 'string' ? init.body : null;
-      const captured: CapturedRequest = { url, method, headers, body };
+      const captured: CapturedRequest = {
+        url,
+        method,
+        headers,
+        body,
+        signal: init?.signal,
+      };
       calls.push(captured);
       return reply(captured);
     },
@@ -115,8 +122,12 @@ describe('DaemonSessionClient', () => {
       },
     });
 
+    const controller = new AbortController();
     await expect(
-      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+      session.prompt(
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        controller.signal,
+      ),
     ).resolves.toEqual({ stopReason: 'end_turn' });
     await expect(session.setModel('qwen3-coder')).resolves.toEqual({
       modelId: 'qwen3-coder',
@@ -134,6 +145,7 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
     ]);
+    expect(calls[0]?.signal).toBe(controller.signal);
   });
 
   it('tracks Last-Event-ID across event subscriptions', async () => {
@@ -161,9 +173,19 @@ describe('DaemonSessionClient', () => {
       },
     });
 
-    const events = [];
-    for await (const event of session.events()) events.push(event);
-    expect(events.map((event) => event.id)).toEqual([4, 5]);
+    const stream = session.events();
+    const first = await stream.next();
+    expect(first.value?.id).toBe(4);
+    expect(session.lastEventId).toBeUndefined();
+
+    const second = await stream.next();
+    expect(second.value?.id).toBe(5);
+    expect(session.lastEventId).toBe(4);
+
+    await expect(stream.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
     expect(session.lastEventId).toBe(5);
 
     for await (const _event of session.events()) {
@@ -172,6 +194,59 @@ describe('DaemonSessionClient', () => {
 
     expect(calls[0]?.headers['last-event-id']).toBeUndefined();
     expect(calls[1]?.headers['last-event-id']).toBe('5');
+  });
+
+  it('does not overwrite replay state for events without SSE ids', async () => {
+    const { fetch } = recordingFetch(() =>
+      sseResponse(
+        'id: 4\nevent: session_update\ndata: {"id":4,"v":1,"type":"session_update","data":"a"}\n\n' +
+          'event: session_update\ndata: {"v":1,"type":"session_update","data":"synthetic"}\n\n',
+      ),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(session.lastEventId).toBe(4);
+  });
+
+  it('rejects concurrent subscriptions on one session client', async () => {
+    const { fetch } = recordingFetch(() =>
+      sseResponse(
+        'id: 4\nevent: session_update\ndata: {"id":4,"v":1,"type":"session_update","data":"a"}\n\n',
+      ),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    const first = session.events();
+    await expect(first.next()).resolves.toMatchObject({
+      done: false,
+      value: { id: 4 },
+    });
+
+    const second = session.events();
+    await expect(second.next()).rejects.toThrow(
+      'Another event subscription is already active',
+    );
+    await first.return(undefined);
   });
 
   it('allows callers to seed, override, and disable replay state', async () => {
@@ -200,5 +275,35 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['last-event-id']).toBe('7');
     expect(calls[1]?.headers['last-event-id']).toBe('11');
     expect(calls[2]?.headers['last-event-id']).toBeUndefined();
+  });
+
+  it('propagates prompt and subscription errors', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return jsonResponse(500, { error: 'boom' });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return jsonResponse(500, { error: 'stream failed' });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    await expect(
+      session.prompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).rejects.toThrow('POST /session/:id/prompt: boom');
+
+    const events = session.events();
+    await expect(events.next()).rejects.toThrow(
+      'GET /session/:id/events: stream failed',
+    );
   });
 });

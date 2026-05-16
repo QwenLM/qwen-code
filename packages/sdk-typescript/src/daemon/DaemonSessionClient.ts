@@ -4,8 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  DaemonClient} from './DaemonClient.js';
+import type { DaemonClient } from './DaemonClient.js';
 import {
   type CreateSessionRequest,
   type PromptRequest,
@@ -52,6 +51,7 @@ export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
   private lastSeenEventId: number | undefined;
+  private subscriptionActive = false;
 
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
@@ -59,6 +59,9 @@ export class DaemonSessionClient {
     this.lastSeenEventId = opts.lastEventId;
   }
 
+  /**
+   * Creates a new daemon session or attaches to an existing matching session.
+   */
   static async createOrAttach(
     client: DaemonClient,
     req: CreateSessionRequest = {},
@@ -118,16 +121,30 @@ export class DaemonSessionClient {
   async *subscribeEvents(
     opts: DaemonSessionSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
-    const { resume = true, ...subscribeOpts } = opts;
-    const lastEventId =
-      subscribeOpts.lastEventId ?? (resume ? this.lastSeenEventId : undefined);
+    if (this.subscriptionActive) {
+      throw new Error(
+        'Another event subscription is already active on this session. ' +
+          'Reuse the existing AsyncGenerator or create a separate DaemonSessionClient.',
+      );
+    }
 
-    for await (const event of this.client.subscribeEvents(this.sessionId, {
-      ...subscribeOpts,
-      lastEventId,
-    })) {
-      if (event.id !== undefined) this.lastSeenEventId = event.id;
-      yield event;
+    this.subscriptionActive = true;
+    try {
+      const { resume = true, ...subscribeOpts } = opts;
+      const lastEventId =
+        subscribeOpts.lastEventId ??
+        (resume ? this.lastSeenEventId : undefined);
+
+      for await (const event of this.client.subscribeEvents(this.sessionId, {
+        ...subscribeOpts,
+        lastEventId,
+      })) {
+        yield event;
+        // Terminal/synthetic frames may not carry an SSE id.
+        if (event.id !== undefined) this.lastSeenEventId = event.id;
+      }
+    } finally {
+      this.subscriptionActive = false;
     }
   }
 }
