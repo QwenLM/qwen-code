@@ -677,7 +677,7 @@ interface ToolBatch {
  */
 function isConcurrencySafe(call: ScheduledToolCall): boolean {
   // Agent tools spawn independent sub-agents with no shared state.
-  if (call.request.name === ToolNames.AGENT) return true;
+  if (canonicalToolName(call.request.name) === ToolNames.AGENT) return true;
   // Shell commands: check if the command is read-only (e.g., git log, cat).
   // Uses the synchronous regex+shell-quote checker (not the async AST-based
   // one) because partitioning runs synchronously. The sync checker covers
@@ -1137,12 +1137,14 @@ export class CoreToolScheduler {
 
       const newToolCalls: ToolCall[] = [];
       for (const reqInfo of requestsToProcess) {
+        const canonicalName = canonicalToolName(reqInfo.name);
+
         // Check if the tool is excluded due to permissions/environment restrictions
         // This check should happen before registry lookup to provide a clear permission error
         const pm = this.config.getPermissionManager?.();
-        if (pm && !(await pm.isToolEnabled(reqInfo.name))) {
+        if (pm && !(await pm.isToolEnabled(canonicalName))) {
           const matchingRule = pm.findMatchingDenyRule({
-            toolName: reqInfo.name,
+            toolName: canonicalName,
           });
           const ruleInfo = matchingRule
             ? ` Matching deny rule: "${matchingRule}".`
@@ -1165,7 +1167,7 @@ export class CoreToolScheduler {
         if (!pm) {
           const excludeTools = this.config.getPermissionsDeny?.() ?? undefined;
           if (excludeTools && excludeTools.length > 0) {
-            const normalizedToolName = reqInfo.name.toLowerCase().trim();
+            const normalizedToolName = canonicalName.toLowerCase().trim();
             const excludedMatch = excludeTools.find(
               (excludedTool) =>
                 excludedTool.toLowerCase().trim() === normalizedToolName,
@@ -1187,7 +1189,7 @@ export class CoreToolScheduler {
           }
         }
 
-        const toolInstance = await this.toolRegistry.ensureTool(reqInfo.name);
+        const toolInstance = await this.toolRegistry.ensureTool(canonicalName);
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
           const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
@@ -1286,6 +1288,7 @@ export class CoreToolScheduler {
         }
 
         const { request: reqInfo, invocation } = toolCall;
+        const canonicalName = canonicalToolName(reqInfo.name);
 
         try {
           if (signal.aborted) {
@@ -1306,7 +1309,7 @@ export class CoreToolScheduler {
           const flowResult = await evaluatePermissionFlow(
             this.config,
             invocation,
-            reqInfo.name,
+            canonicalName,
             toolParams,
           );
           const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
@@ -1315,7 +1318,7 @@ export class CoreToolScheduler {
           // ---- L5: Final decision based on permission + ApprovalMode ----
           const approvalMode = this.config.getApprovalMode();
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
-          const isExitPlanModeTool = reqInfo.name === 'exit_plan_mode';
+          const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
 
           if (finalPermission === 'allow') {
             // Auto-approve: tool is inherently safe (read-only) or PM allows
@@ -1346,10 +1349,12 @@ export class CoreToolScheduler {
           // ask_user_question always needs confirmation so the user can answer;
           // it must bypass both YOLO auto-approve and plan-mode blocking.
           const isAskUserQuestionTool =
-            reqInfo.name === ToolNames.ASK_USER_QUESTION;
+            canonicalName === ToolNames.ASK_USER_QUESTION;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-          if (!needsConfirmation(finalPermission, approvalMode, reqInfo.name)) {
+          if (
+            !needsConfirmation(finalPermission, approvalMode, canonicalName)
+          ) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
@@ -1428,7 +1433,7 @@ export class CoreToolScheduler {
               const permissionMode = String(this.config.getApprovalMode());
               const hookResult = await firePermissionRequestHook(
                 messageBus,
-                reqInfo.name,
+                canonicalName,
                 (reqInfo.args as Record<string, unknown>) || {},
                 permissionMode,
               );
@@ -1884,6 +1889,7 @@ export class CoreToolScheduler {
     span: Span,
   ): Promise<void> {
     const { callId, name: toolName } = scheduledCall.request;
+    const canonicalName = canonicalToolName(toolName);
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
@@ -1908,7 +1914,7 @@ export class CoreToolScheduler {
       const permissionMode = this.config.getApprovalMode();
       const preHookResult = await firePreToolUseHook(
         messageBus,
-        toolName,
+        canonicalName,
         toolInput,
         toolUseId,
         permissionMode,
@@ -2015,7 +2021,7 @@ export class CoreToolScheduler {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             'User cancelled tool execution.',
             true,
@@ -2053,7 +2059,7 @@ export class CoreToolScheduler {
           const permissionMode = this.config.getApprovalMode();
           const postHookResult = await firePostToolUseHook(
             messageBus,
-            toolName,
+            canonicalName,
             toolInput,
             toolResponse,
             toolUseId,
@@ -2200,7 +2206,7 @@ export class CoreToolScheduler {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             toolResult.error.message,
             false,
@@ -2248,7 +2254,7 @@ export class CoreToolScheduler {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             'User cancelled tool execution.',
             true,
@@ -2277,7 +2283,7 @@ export class CoreToolScheduler {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
-            toolName,
+            canonicalName,
             toolInput,
             errorMessage,
             false,
