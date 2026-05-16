@@ -36,7 +36,7 @@ import type {
   ShellOutputEvent,
 } from '../services/shellExecutionService.js';
 import { ShellExecutionService } from '../services/shellExecutionService.js';
-import type { BackgroundShellEntry } from '../services/backgroundShellRegistry.js';
+import type { ShellTaskRegistration } from '../services/backgroundShellRegistry.js';
 import stripAnsi from 'strip-ansi';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
@@ -2196,7 +2196,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     entryAc.signal.addEventListener('abort', () => void cancelChild(), {
       once: true,
     });
-    const entry: BackgroundShellEntry = {
+    const entry: ShellTaskRegistration = {
       shellId,
       // Use `commandToExecute` (post-co-author transform) so the registry
       // shows what actually ran. `this.params.command` is the pre-transform
@@ -2355,7 +2355,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     });
 
     const startTime = Date.now();
-    const entry: BackgroundShellEntry = {
+    const registration: ShellTaskRegistration = {
       shellId,
       command: processedCommand,
       cwd,
@@ -2392,9 +2392,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
       { streamStdout: true },
     );
 
-    if (pid !== undefined) entry.pid = pid;
+    if (pid !== undefined) registration.pid = pid;
     const registry = this.config.getBackgroundShellRegistry();
-    registry.register(entry);
+    // Symmetric with the promote path above: `register` is internally
+    // safe today (Map.set + emit), but a throwing subscriber would
+    // propagate here and leave the already-spawned child + open output
+    // stream unreachable by `/tasks` / `task_stop`. Best-effort abort
+    // the child, tear down the stream, and re-throw so the launch fails
+    // visibly instead of leaking.
+    try {
+      registry.register(registration);
+    } catch (e) {
+      debugLogger.warn(
+        `background shell ${shellId} register threw (pid=${pid}) — aborting orphan child: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      try {
+        entryAc.abort();
+      } catch {
+        /* swallow — we're already in an error path */
+      }
+      try {
+        outputStream.destroy();
+      } catch {
+        /* swallow — we're already in an error path */
+      }
+      throw e;
+    }
 
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.

@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { TextInput } from '../shared/TextInput.js';
 import { t } from '../../../i18n/index.js';
 
@@ -150,13 +151,20 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   // Handle navigation and selection
   useKeypress(
     (key) => {
-      // When custom input is focused, still allow up/down navigation and escape
+      // When the custom-input TextInput is focused, we must NOT match bare
+      // letter keys (k/j) for option navigation — those characters are being
+      // typed into the input. Only honor unambiguous shortcuts: arrow keys
+      // and the readline-style Ctrl+P/Ctrl+N. TextInput itself doesn't bind
+      // those, so there's no double-fire.
       if (isCustomInputSelected) {
-        if (key.name === 'up') {
+        const isOptionUp = key.name === 'up' || (key.ctrl && key.name === 'p');
+        const isOptionDown =
+          key.name === 'down' || (key.ctrl && key.name === 'n');
+        if (isOptionUp) {
           setSelectedIndex(Math.max(0, selectedIndex - 1));
           return;
         }
-        if (key.name === 'down') {
+        if (isOptionDown) {
           setSelectedIndex(Math.min(totalOptions - 1, selectedIndex + 1));
           return;
         }
@@ -185,12 +193,12 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
         return;
       }
 
-      // Option navigation (up/down arrows)
-      if (key.name === 'up') {
+      // Option navigation (up/down arrows and Ctrl+P/N)
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex(Math.max(0, selectedIndex - 1));
         return;
       }
-      if (key.name === 'down') {
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex(Math.min(totalOptions - 1, selectedIndex + 1));
         return;
       }

@@ -74,6 +74,15 @@ describe('keyMatchers', () => {
       key.ctrl && key.name === 'f',
     [Command.EXPAND_SUGGESTION]: (key: Key) => key.name === 'right',
     [Command.COLLAPSE_SUGGESTION]: (key: Key) => key.name === 'left',
+    // Selection list navigation: up/k (ctrl=false)/Ctrl+P move up; down/j (ctrl=false)/Ctrl+N move down
+    [Command.SELECTION_UP]: (key: Key) =>
+      key.name === 'up' ||
+      (key.name === 'k' && !key.ctrl) ||
+      (key.ctrl && key.name === 'p'),
+    [Command.SELECTION_DOWN]: (key: Key) =>
+      key.name === 'down' ||
+      (key.name === 'j' && !key.ctrl) ||
+      (key.ctrl && key.name === 'n'),
   };
 
   // Test data for each command with positive and negative test cases
@@ -271,6 +280,38 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_COMPACT_MODE,
       positive: [createKey('o', { ctrl: true })],
       negative: [createKey('o'), createKey('p', { ctrl: true })],
+    },
+
+    // Selection list navigation
+    {
+      command: Command.SELECTION_UP,
+      positive: [
+        createKey('up'),
+        createKey('k'),
+        createKey('p', { ctrl: true }),
+      ],
+      negative: [
+        createKey('p'),
+        createKey('n', { ctrl: true }),
+        createKey('u'),
+        // ctrl: false on k — Ctrl+K must NOT match (would conflict with KILL_LINE_RIGHT)
+        createKey('k', { ctrl: true }),
+      ],
+    },
+    {
+      command: Command.SELECTION_DOWN,
+      positive: [
+        createKey('down'),
+        createKey('j'),
+        createKey('n', { ctrl: true }),
+      ],
+      negative: [
+        createKey('n'),
+        createKey('p', { ctrl: true }),
+        createKey('d'),
+        // ctrl: false on j — Ctrl+J must NOT match (preserves Ctrl+J = newline in some terminals)
+        createKey('j', { ctrl: true }),
+      ],
     },
 
     // Shell commands

@@ -9,13 +9,9 @@ import type {
   ToolConfirmationPayload,
   ToolExecuteConfirmationDetails,
   ToolResult,
-
-  ToolConfirmationOutcome} from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind
+  ToolConfirmationOutcome,
 } from './tools.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';

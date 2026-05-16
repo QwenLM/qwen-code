@@ -27,11 +27,12 @@
 
 import { useState, useEffect } from 'react';
 import {
-  type BackgroundTaskEntry,
-  type BackgroundShellEntry,
+  type AgentTask,
   type Config,
   type MemoryTaskRecord,
-  type MonitorEntry,
+  type MonitorTask,
+  type ShellTask,
+  type TaskState,
 } from '@qwen-code/qwen-code-core';
 
 // Cap on retained terminal dream entries surfaced via the dialog.
@@ -42,10 +43,11 @@ import {
 // dialog right after two dreams completed).
 const MAX_RETAINED_TERMINAL_DREAMS = 3;
 
-export type AgentDialogEntry = BackgroundTaskEntry & {
-  kind: 'agent';
-  resumeBlockedReason?: string;
-};
+/**
+ * @deprecated Use {@link AgentTask} from `@qwen-code/qwen-code-core`
+ * directly. Kept as a one-release alias while UI consumers migrate.
+ */
+export type AgentDialogEntry = AgentTask;
 
 /**
  * Dream-task adapter. MemoryManager owns its own task records
@@ -93,12 +95,13 @@ export type DreamDialogEntry = {
  * Discriminated by `kind`; per-kind fields are inlined verbatim so
  * renderer code can stay mechanical (`entry.kind === 'agent'` /
  * `'shell'` / `'monitor'` / `'dream'` guard, then access fields directly).
+ *
+ * The `agent`/`shell`/`monitor` arms are the core `TaskState` union
+ * member — `kind` lives on the core entry, so the merge step here no
+ * longer tags it. `dream` remains adapted from `MemoryManager` and is
+ * unioned in here while the dream task placement is decided in PR 2.
  */
-export type DialogEntry =
-  | AgentDialogEntry
-  | (BackgroundShellEntry & { kind: 'shell' })
-  | (MonitorEntry & { kind: 'monitor' })
-  | DreamDialogEntry;
+export type DialogEntry = TaskState | DreamDialogEntry;
 
 export interface UseBackgroundTaskViewResult {
   entries: readonly DialogEntry[];
@@ -155,15 +158,9 @@ export function useBackgroundTaskView(
     // race window where the listener's gate sig and the entries it
     // builds would otherwise come from two separate snapshots.
     const refresh = (dreamSnapshot?: readonly MemoryTaskRecord[]) => {
-      const agentEntries: DialogEntry[] = agentRegistry
-        .getAll()
-        .map((e) => ({ ...e, kind: 'agent' as const }));
-      const shellEntries: DialogEntry[] = shellRegistry
-        .getAll()
-        .map((e) => ({ ...e, kind: 'shell' as const }));
-      const monitorEntries: DialogEntry[] = monitorRegistry
-        .getAll()
-        .map((e) => ({ ...e, kind: 'monitor' as const }));
+      const agentEntries: AgentTask[] = [...agentRegistry.getAll()];
+      const shellEntries: ShellTask[] = [...shellRegistry.getAll()];
+      const monitorEntries: MonitorTask[] = [...monitorRegistry.getAll()];
       // Dream entries: only surface tasks that actually fired.
       // `pending` is a sub-second transition state and `skipped`
       // records arise from the rare race where the schedule-time

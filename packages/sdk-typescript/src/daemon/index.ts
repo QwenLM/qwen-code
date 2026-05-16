@@ -18,6 +18,7 @@ export type {
   DaemonCapabilities,
   DaemonEvent,
   DaemonMode,
+  DaemonProtocolVersions,
   DaemonSession,
   DaemonSessionSummary,
   PermissionOutcome,

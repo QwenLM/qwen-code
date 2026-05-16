@@ -98,6 +98,10 @@ describe('DaemonClient', () => {
     it('GETs /capabilities and returns the v1 envelope', async () => {
       const envelope = {
         v: 1 as const,
+        protocolVersions: {
+          current: 'v1',
+          supported: ['v1'],
+        },
         mode: 'http-bridge' as const,
         features: ['health', 'capabilities'],
         modelServices: [],
@@ -110,6 +114,19 @@ describe('DaemonClient', () => {
       // #3803 §02: clients use `workspaceCwd` to pre-flight check +
       // omit `cwd` from `POST /session` (route falls back).
       expect(caps.workspaceCwd).toBe('/work/bound');
+    });
+
+    it('accepts old v1 envelopes without protocolVersions', async () => {
+      const envelope: DaemonCapabilities = {
+        v: 1,
+        mode: 'http-bridge',
+        features: ['health', 'capabilities'],
+        modelServices: [],
+        workspaceCwd: '/work/bound',
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.capabilities()).resolves.toEqual(envelope);
     });
   });
 
@@ -207,6 +224,50 @@ describe('DaemonClient', () => {
         cwd: '/work/a',
         modelServiceId: 'qwen-prod',
       });
+    });
+
+    it('forwards sessionScope when supplied (#4175 PR 5)', async () => {
+      // Per-request scope override: clients pre-flight
+      // `caps.features.session_scope_override` and pass `'single'` /
+      // `'thread'` here when they want to override the daemon-wide
+      // default. Symmetric SDK shape with `modelServiceId`.
+      for (const sessionScope of ['single', 'thread'] as const) {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, {
+            sessionId: 's-1',
+            workspaceCwd: '/work/a',
+            attached: false,
+          }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.createOrAttachSession({
+          workspaceCwd: '/work/a',
+          sessionScope,
+        });
+        expect(JSON.parse(calls[0]!.body!)).toEqual({
+          cwd: '/work/a',
+          sessionScope,
+        });
+      }
+    });
+
+    it('omits sessionScope from the body when the field is absent', async () => {
+      // Backward-compat: a caller that doesn't set the field must not
+      // surface a `sessionScope` key on the wire — old daemons reading
+      // an unknown body key is fine, but the omitted-key shape is what
+      // we tested before #4175 PR 5 and what every existing caller
+      // observes.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.createOrAttachSession({ workspaceCwd: '/work/a' });
+      const body = JSON.parse(calls[0]!.body!) as Record<string, unknown>;
+      expect(body).not.toHaveProperty('sessionScope');
     });
 
     it('throws on 400', async () => {

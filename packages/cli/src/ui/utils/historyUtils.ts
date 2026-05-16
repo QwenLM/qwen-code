@@ -83,6 +83,7 @@ export function isSyntheticHistoryItem(
     case 'diff_stats':
     case 'arena_agent_complete':
     case 'arena_session_complete':
+    case 'goal_status':
       return false;
 
     default: {

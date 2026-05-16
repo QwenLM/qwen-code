@@ -431,6 +431,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     }
 
     try {
+      await this.config.getFileHistoryService().trackEdit(file_path);
+    } catch {
+      // File history is best-effort; never block core tool operations.
+    }
+
+    try {
       await this.config.getFileSystemService().writeTextFile({
         path: file_path,
         content,

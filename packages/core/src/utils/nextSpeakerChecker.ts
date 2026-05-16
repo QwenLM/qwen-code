@@ -60,22 +60,18 @@ export async function checkNextSpeaker(
     return null;
   }
 
-  const comprehensiveHistory = chat.getHistory();
-  // If comprehensiveHistory is empty, there is no last message to check.
-  // This case should ideally be caught by the curatedHistory.length check earlier,
-  // but as a safeguard:
-  if (comprehensiveHistory.length === 0) {
+  // Read the last raw history entry by design: functionResponse turns can be
+  // stripped from curated history, but they are decisive for next-speaker flow.
+  const lastComprehensiveMessage = chat.getLastHistoryEntry();
+  // Raw history can still be empty even if the curated-history guard above is
+  // the normal empty-chat path, so keep this defensive check local.
+  if (!lastComprehensiveMessage) {
     return null;
   }
-  const lastComprehensiveMessage =
-    comprehensiveHistory[comprehensiveHistory.length - 1];
 
   // If the last message is a user message containing only function_responses,
   // then the model should speak next.
-  if (
-    lastComprehensiveMessage &&
-    isFunctionResponse(lastComprehensiveMessage)
-  ) {
+  if (isFunctionResponse(lastComprehensiveMessage)) {
     return {
       reasoning:
         'The last message was a function response, so the model should speak next.',
@@ -84,7 +80,6 @@ export async function checkNextSpeaker(
   }
 
   if (
-    lastComprehensiveMessage &&
     lastComprehensiveMessage.role === 'model' &&
     lastComprehensiveMessage.parts &&
     lastComprehensiveMessage.parts.length === 0

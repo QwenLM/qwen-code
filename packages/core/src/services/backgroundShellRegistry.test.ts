@@ -7,12 +7,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   BackgroundShellRegistry,
-  type BackgroundShellEntry,
+  type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 
 function makeEntry(
-  overrides: Partial<BackgroundShellEntry> = {},
-): BackgroundShellEntry {
+  overrides: Partial<ShellTaskRegistration> = {},
+): ShellTaskRegistration {
   return {
     shellId: 's1',
     command: 'sleep 60',

@@ -12,13 +12,13 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
-import { SpanStatusCode } from '@opentelemetry/api';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import { getActiveGoal } from '../goals/activeGoalStore.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -105,12 +105,6 @@ import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
-import {
-  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
-  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-  safeSetStatus,
-  withSpan,
-} from '../telemetry/tracer.js';
 
 const MAX_TURNS = 100;
 
@@ -312,6 +306,10 @@ export class GeminiClient {
 
   getHistory(curated: boolean = false): Content[] {
     return this.getChat().getHistory(curated);
+  }
+
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    return this.getChat().getHistoryTail(count, curated);
   }
 
   /**
@@ -1224,6 +1222,14 @@ export class GeminiClient {
 
         this.sessionTurnCount++;
 
+        if (messageType === SendMessageType.UserQuery) {
+          try {
+            await this.config.getFileHistoryService().makeSnapshot(prompt_id);
+          } catch (e) {
+            debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+          }
+        }
+
         if (
           this.config.getMaxSessionTurns() > 0 &&
           this.sessionTurnCount > this.config.getMaxSessionTurns()
@@ -1554,22 +1560,27 @@ export class GeminiClient {
             continueReason,
           ];
 
-          // Emit StopHookLoop event for iterations after the first one.
-          // The first iteration (currentIterationCount === 1) is the initial request,
-          // so there's no prior stop hook execution to report. We only emit this event
-          // when stop hooks have been executed multiple times (loop detected).
-          if (currentIterationCount > 1) {
-            yield {
-              type: GeminiEventType.StopHookLoop,
-              value: {
-                iterationCount: currentIterationCount,
-                reasons: currentReasons,
-                stopHookCount: response.stopHookCount ?? 1,
-              },
-            };
-          }
+          // Emit StopHookLoop on EVERY blocking Stop hook execution, including
+          // the first. `currentIterationCount === 1` means a Stop hook just
+          // fired once and produced a blocking decision — the user benefits
+          // from seeing that immediately (e.g. `/goal` rendering "Goal check:
+          // not yet met" on the very first not-met turn, or a configured Stop
+          // hook surfacing its blocking reason before the agent attempts a
+          // retry). The previous `>1` guard hid the first reason until the
+          // hook fired twice, which made /goal's first iteration invisible
+          // and delayed visibility for regular hooks that only fire once.
+          yield {
+            type: GeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: currentIterationCount,
+              reasons: currentReasons,
+              stopHookCount: response.stopHookCount ?? 1,
+            },
+          };
 
           const continueRequest = [{ text: continueReason }];
+          const activeGoal = getActiveGoal(this.config.getSessionId());
+          const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
           const hookTurn = yield* this.sendMessageStream(
             continueRequest,
             signal,
@@ -1582,7 +1593,7 @@ export class GeminiClient {
                 reasons: currentReasons,
               },
             },
-            boundedTurns - 1,
+            hookTurnBudget,
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
@@ -1684,91 +1695,73 @@ export class GeminiClient {
     const promptId =
       promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
-    return withSpan(
-      'client.generateContent',
-      { model, prompt_id: promptId },
-      async (span) => {
-        let currentAttemptModel: string = model;
+    let currentAttemptModel: string = model;
 
-        try {
-          const userMemory = this.config.getUserMemory();
-          const finalSystemInstruction = generationConfig.systemInstruction
-            ? getCustomSystemPrompt(
-                generationConfig.systemInstruction,
-                userMemory,
-              )
-            : this.getMainSessionSystemInstruction();
+    try {
+      const userMemory = this.config.getUserMemory();
+      const finalSystemInstruction = generationConfig.systemInstruction
+        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+        : this.getMainSessionSystemInstruction();
 
-          const requestConfig: GenerateContentConfig = {
-            abortSignal,
-            ...generationConfig,
-            systemInstruction: finalSystemInstruction,
-          };
+      const requestConfig: GenerateContentConfig = {
+        abortSignal,
+        ...generationConfig,
+        systemInstruction: finalSystemInstruction,
+      };
 
-          // When the requested model differs from the main model (e.g. fast model
-          // side queries for session recap / title / summary), resolve the target
-          // model's own ContentGeneratorConfig so that per-model settings like
-          // extra_body, samplingParams, and reasoning are not inherited from the
-          // main model's config. The retry authType is resolved alongside so that
-          // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
-          // the target model's provider.
-          const {
-            contentGenerator,
-            retryAuthType,
+      // When the requested model differs from the main model (e.g. fast model
+      // side queries for session recap / title / summary), resolve the target
+      // model's own ContentGeneratorConfig so that per-model settings like
+      // extra_body, samplingParams, and reasoning are not inherited from the
+      // main model's config. The retry authType is resolved alongside so that
+      // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
+      // the target model's provider.
+      const {
+        contentGenerator,
+        retryAuthType,
+        model: requestModel,
+      } = await this.config.getBaseLlmClient().resolveForModel(model);
+
+      const apiCall = () => {
+        currentAttemptModel = requestModel;
+
+        return contentGenerator.generateContent(
+          {
             model: requestModel,
-          } = await this.config.getBaseLlmClient().resolveForModel(model);
-
-          const apiCall = () => {
-            currentAttemptModel = requestModel;
-
-            return contentGenerator.generateContent(
-              {
-                model: requestModel,
-                config: requestConfig,
-                contents,
-              },
-              promptId,
-            );
-          };
-          const result = await retryWithBackoff(apiCall, {
-            authType: retryAuthType,
-            persistentMode: isUnattendedMode(),
-            signal: abortSignal,
-            heartbeatFn: (info) => {
-              process.stderr.write(
-                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
-              );
-            },
-          });
-          return result;
-        } catch (error: unknown) {
-          if (abortSignal.aborted) {
-            safeSetStatus(span, {
-              code: SpanStatusCode.ERROR,
-              message: API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
-            });
-            throw error;
-          }
-
-          safeSetStatus(span, {
-            code: SpanStatusCode.ERROR,
-            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-          });
-          await reportError(
-            error,
-            `Error generating content via API with model ${currentAttemptModel}.`,
-            {
-              requestContents: contents,
-              requestConfig: generationConfig,
-            },
-            'generateContent-api',
+            config: requestConfig,
+            contents,
+          },
+          promptId,
+        );
+      };
+      const result = await retryWithBackoff(apiCall, {
+        authType: retryAuthType,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
+        heartbeatFn: (info) => {
+          process.stderr.write(
+            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
           );
-          throw new Error(
-            `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
-          );
-        }
-      },
-    );
+        },
+      });
+      return result;
+    } catch (error: unknown) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+      await reportError(
+        error,
+        `Error generating content via API with model ${currentAttemptModel}.`,
+        {
+          requestContents: contents,
+          requestConfig: generationConfig,
+        },
+        'generateContent-api',
+      );
+      throw new Error(
+        `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
+      );
+    }
   }
 
   /**

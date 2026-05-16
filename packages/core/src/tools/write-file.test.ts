@@ -40,6 +40,7 @@ let mockGeminiClientInstance: Mocked<GeminiClient>;
 // Mock Config
 const fsService = new StandardFileSystemService();
 const fileReadCache = new FileReadCache();
+const mockFileHistoryService = { trackEdit: vi.fn() };
 const mockConfigInternal = {
   getTargetDir: () => rootDir,
   getProjectRoot: () => rootDir,
@@ -72,6 +73,7 @@ const mockConfigInternal = {
   getDefaultFileEncoding: () => 'utf-8',
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
+  getFileHistoryService: () => mockFileHistoryService,
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -351,6 +353,7 @@ describe('WriteFileTool', () => {
       expect(result.llmContent).toMatch(
         /Successfully created and wrote to new file/,
       );
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       expect(fs.existsSync(filePath)).toBe(true);
       const { content: writtenContent } = await fsService.readTextFile({
         path: filePath,
@@ -363,6 +366,41 @@ describe('WriteFileTool', () => {
       expect(display.fileDiff).toMatch(
         proposedContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
+    });
+
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the write_file tool.
+    it('completes the write even when trackEdit throws', async () => {
+      const filePath = path.join(rootDir, 'write_when_trackedit_fails.txt');
+      const proposedContent = 'Content that survives trackEdit failure.';
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params = { file_path: filePath, content: proposedContent };
+      const invocation = tool.build(params);
+
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+
+      const result = await invocation.execute(abortSignal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(result.llmContent).toMatch(
+        /Successfully created and wrote to new file/,
+      );
+      expect(fs.existsSync(filePath)).toBe(true);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
+      expect(writtenContent).toBe(proposedContent);
     });
 
     it('should overwrite an existing file and return diff', async () => {
