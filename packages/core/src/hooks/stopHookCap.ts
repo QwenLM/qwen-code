@@ -30,6 +30,9 @@ export function formatStopHookBlockingCapWarning(
   hookLabel: 'Stop' | 'SubagentStop',
   cap: number,
 ): string {
+  // Only Stop and SubagentStop hooks can request continuation after the
+  // model or subagent would otherwise finish, so keep user-facing labels
+  // explicit instead of accepting arbitrary hook names.
   const hookName = hookLabel === 'Stop' ? 'Stop hook' : 'SubagentStop hook';
   return `${hookName} blocked continuation ${cap} consecutive times; overriding and ending the turn.`;
 }

@@ -163,6 +163,7 @@ describe('Session', () => {
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
     } as unknown as Config;
 

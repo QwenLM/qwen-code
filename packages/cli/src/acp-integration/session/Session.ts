@@ -763,12 +763,6 @@ export class Session implements SessionContext {
         stopHookIterationCount++;
         stopHookReasons = [...stopHookReasons, continueReason];
 
-        await this.messageEmitter.emitStopHookLoop(
-          stopHookIterationCount,
-          stopHookReasons,
-          response.stopHookCount ?? 1,
-        );
-
         if (stopHookIterationCount >= stopHookBlockingCap) {
           const warning = formatStopHookBlockingCapWarning(
             'Stop',
@@ -782,6 +776,14 @@ export class Session implements SessionContext {
           await this.messageEmitter.emitAgentMessage(warning);
           debugLogger.warn(warning);
           return { stopReason: 'end_turn' };
+        }
+
+        if (stopHookIterationCount > 1) {
+          await this.messageEmitter.emitStopHookLoop(
+            stopHookIterationCount,
+            stopHookReasons,
+            response.stopHookCount ?? 1,
+          );
         }
 
         // Continue the conversation with the hook's reason

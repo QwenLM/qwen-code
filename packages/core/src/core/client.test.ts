@@ -4377,14 +4377,11 @@ Other open files:
         );
 
         expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
-        expect(events).toContainEqual({
-          type: GeminiEventType.StopHookLoop,
-          value: {
-            iterationCount: 1,
-            reasons: ['Keep working'],
-            stopHookCount: 1,
-          },
-        });
+        expect(events).not.toContainEqual(
+          expect.objectContaining({
+            type: GeminiEventType.StopHookLoop,
+          }),
+        );
         expect(events).toContainEqual({
           type: GeminiEventType.HookSystemMessage,
           value:

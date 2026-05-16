@@ -23,9 +23,14 @@ describe('stop hook blocking cap', () => {
       DEFAULT_STOP_HOOK_BLOCK_CAP,
     );
     expect(normalizeStopHookBlockingCap(0)).toBe(DEFAULT_STOP_HOOK_BLOCK_CAP);
+    expect(normalizeStopHookBlockingCap(-1)).toBe(DEFAULT_STOP_HOOK_BLOCK_CAP);
     expect(normalizeStopHookBlockingCap(Number.NaN)).toBe(
       DEFAULT_STOP_HOOK_BLOCK_CAP,
     );
+  });
+
+  it('normalizes finite fractional values down to whole iterations', () => {
+    expect(normalizeStopHookBlockingCap(3.7)).toBe(3);
   });
 
   it('prefers the environment override over config', () => {

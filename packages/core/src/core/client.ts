@@ -1561,24 +1561,6 @@ export class GeminiClient {
             continueReason,
           ];
 
-          // Emit StopHookLoop on EVERY blocking Stop hook execution, including
-          // the first. `currentIterationCount === 1` means a Stop hook just
-          // fired once and produced a blocking decision — the user benefits
-          // from seeing that immediately (e.g. `/goal` rendering "Goal check:
-          // not yet met" on the very first not-met turn, or a configured Stop
-          // hook surfacing its blocking reason before the agent attempts a
-          // retry). The previous `>1` guard hid the first reason until the
-          // hook fired twice, which made /goal's first iteration invisible
-          // and delayed visibility for regular hooks that only fire once.
-          yield {
-            type: GeminiEventType.StopHookLoop,
-            value: {
-              iterationCount: currentIterationCount,
-              reasons: currentReasons,
-              stopHookCount: response.stopHookCount ?? 1,
-            },
-          };
-
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
           if (currentIterationCount >= stopHookBlockingCap) {
             const warning = formatStopHookBlockingCapWarning(
@@ -1598,6 +1580,15 @@ export class GeminiClient {
             if (isTopLevelInteraction) endInteractionSpan('ok');
             return turn;
           }
+
+          yield {
+            type: GeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: currentIterationCount,
+              reasons: currentReasons,
+              stopHookCount: response.stopHookCount ?? 1,
+            },
+          };
 
           const continueRequest = [{ text: continueReason }];
           const activeGoal = getActiveGoal(this.config.getSessionId());

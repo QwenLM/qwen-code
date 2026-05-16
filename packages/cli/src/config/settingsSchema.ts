@@ -1959,6 +1959,8 @@ const SETTINGS_SCHEMA = {
     default: DEFAULT_STOP_HOOK_BLOCK_CAP,
     description:
       'Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.',
+    // This is an advanced safety valve for runaway hook loops, not a common
+    // interactive preference.
     showInDialog: false,
   },
 
