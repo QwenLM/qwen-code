@@ -195,6 +195,16 @@ async function exportSessionAction(
 
     const { conversation } = sessionData;
 
+    // Collect and normalize export data (SSOT)
+    const exportData = await collectSessionData(conversation, config);
+    const normalizedData = normalizeSessionData(
+      exportData,
+      conversation.messages,
+      config,
+    );
+
+    const content = exportFormat.format(normalizedData);
+
     if (target.shouldCreateOutputDir) {
       try {
         await fs.mkdir(target.outputDir, { recursive: true, mode: 0o700 });
@@ -208,16 +218,6 @@ async function exportSessionAction(
         };
       }
     }
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
-
-    const content = exportFormat.format(normalizedData);
 
     try {
       const writeValidationError = await validateExportTargetWithinCwd(target);
@@ -245,7 +245,9 @@ async function exportSessionAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: `Failed to export session: ${
+        error instanceof Error ? error.message : String(error)
+      } (${exportFormat.displayName})`,
     };
   }
 }

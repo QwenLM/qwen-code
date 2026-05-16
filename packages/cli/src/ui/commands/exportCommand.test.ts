@@ -335,7 +335,8 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: EIO: failed to read session',
+        content:
+          'Failed to export session: EIO: failed to read session (markdown)',
       });
       expect(collectSessionData).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
@@ -355,7 +356,8 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: Failed to collect session data',
+        content:
+          'Failed to export session: Failed to collect session data (markdown)',
       });
       expect(toMarkdown).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
@@ -680,13 +682,14 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: EACCES: permission denied',
+        content:
+          'Failed to export session: EACCES: permission denied (markdown)',
       });
       expect(fs.mkdir).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
-    it('should stop before formatting when custom directory creation fails', async () => {
+    it('should report custom directory creation failures with path context', async () => {
       const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
       if (!mdCommand?.action) {
         throw new Error('md command not found');
@@ -703,8 +706,8 @@ describe('exportCommand', () => {
         content:
           'Failed to create export directory "/test/dir/logs": EACCES: permission denied, mkdir',
       });
-      expect(collectSessionData).not.toHaveBeenCalled();
-      expect(toMarkdown).not.toHaveBeenCalled();
+      expect(collectSessionData).toHaveBeenCalled();
+      expect(toMarkdown).toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });
