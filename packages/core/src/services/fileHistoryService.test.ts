@@ -158,6 +158,18 @@ describe('FileHistoryService', () => {
       expect(p2Backup).toBeDefined();
       expect(p2Backup.failed).toBeFalsy();
       expect(p2Backup.backupFileName).not.toBeNull();
+
+      // Verify the on-disk backup at the new name actually contains the
+      // current file content. Catches a regression where the heal path
+      // accidentally reuses `previous.backupFileName` (pointing at the
+      // older `p1-content`) instead of writing a fresh backup.
+      const backupPath = join(
+        storageDir,
+        'file-history',
+        'test-session',
+        p2Backup.backupFileName!,
+      );
+      expect(await readFile(backupPath, 'utf-8')).toBe('p2-content');
     });
   });
 

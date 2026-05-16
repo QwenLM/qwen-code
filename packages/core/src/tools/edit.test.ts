@@ -545,25 +545,33 @@ describe('EditTool', () => {
     // Without this ordering the multi-hundred-ms `trackEdit` sat
     // between checkPriorRead and writeTextFile, widening the
     // already-acknowledged stat-then-write race window from microseconds
-    // to seconds. Test verifies trackEdit was invoked BEFORE the
-    // pre-write `cache.check(...)` call.
+    // to seconds.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk (bumps mtime) before returning. The mutation has to be
+    // detected by the pre-write `checkPriorRead`. That only happens if
+    // `trackEdit` runs BEFORE the pre-write check — the broken
+    // ordering would run the pre-write check first (passing on the
+    // pre-mutation stats), then trackEdit (which mutates), then write
+    // (which clobbers the external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
     it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
       const initialContent = 'This is some old text.';
       fs.writeFileSync(filePath, initialContent, 'utf8');
       seedPriorRead(filePath);
 
-      const callOrder: string[] = [];
       mockFileHistoryService.trackEdit.mockImplementation(async () => {
-        callOrder.push('trackEdit');
+        // Simulate an external write that lands while trackEdit is
+        // copying the file to the backup directory. Bumping mtime by
+        // 5 s makes the change reliably "newer" under the cache's
+        // ~1 s comparison granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
       });
-      // Pass-through spy: records each call but defers to the real impl.
-      const originalCheck = fileReadCache.check.bind(fileReadCache);
-      const cacheCheckSpy = vi
-        .spyOn(fileReadCache, 'check')
-        .mockImplementation((stats) => {
-          callOrder.push('cache.check');
-          return originalCheck(stats);
-        });
 
       const params: EditToolParams = {
         file_path: filePath,
@@ -571,21 +579,17 @@ describe('EditTool', () => {
         new_string: 'new',
       };
 
-      try {
-        await tool.build(params).execute(new AbortController().signal);
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
 
-        // trackEdit must have run, and must have run BEFORE the pre-write
-        // cache.check (the last cache.check call covers the pre-write
-        // freshness guard — earlier ones come from calculateEdit's
-        // pre-read and post-read phases).
-        const trackEditIdx = callOrder.indexOf('trackEdit');
-        const lastCheckIdx = callOrder.lastIndexOf('cache.check');
-        expect(trackEditIdx).toBeGreaterThanOrEqual(0);
-        expect(lastCheckIdx).toBeGreaterThanOrEqual(0);
-        expect(trackEditIdx).toBeLessThan(lastCheckIdx);
-      } finally {
-        cacheCheckSpy.mockRestore();
-      }
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
     });
 
     // The Edit tool feeds the commit-attribution singleton on success so

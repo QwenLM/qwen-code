@@ -413,8 +413,20 @@ describe('WriteFileTool', () => {
     //
     // Without this ordering the multi-hundred-ms `trackEdit` sat
     // between checkPriorRead and writeTextFile, widening the
-    // already-acknowledged stat-then-write race window. Test verifies
-    // trackEdit was invoked BEFORE the pre-write `cache.check(...)`.
+    // already-acknowledged stat-then-write race window.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk before returning. That mutation must be detected by the
+    // pre-write `checkPriorRead`. That only happens if `trackEdit`
+    // runs BEFORE the pre-write check — the broken ordering would run
+    // the pre-write check first (passing on pre-mutation stats), then
+    // trackEdit (which mutates), then write (which clobbers the
+    // external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
     it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
       const filePath = path.join(rootDir, 'toctou_ordering.txt');
       const initialContent = 'pre-existing content';
@@ -425,42 +437,36 @@ describe('WriteFileTool', () => {
         cacheable: true,
       });
 
-      const callOrder: string[] = [];
       mockFileHistoryService.trackEdit.mockImplementation(async () => {
-        callOrder.push('trackEdit');
+        // Simulate an external write that lands while trackEdit is
+        // copying the file. Bumping mtime by 5 s makes the change
+        // reliably "newer" under the cache's ~1 s comparison
+        // granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
       });
-      // Pass-through spy: records each call but defers to the real impl.
-      const originalCheck = fileReadCache.check.bind(fileReadCache);
-      const cacheCheckSpy = vi
-        .spyOn(fileReadCache, 'check')
-        .mockImplementation((stats) => {
-          callOrder.push('cache.check');
-          return originalCheck(stats);
-        });
 
       const params = { file_path: filePath, content: 'new content' };
       const invocation = tool.build(params);
 
-      try {
-        const confirmDetails =
-          await invocation.getConfirmationDetails(abortSignal);
-        if (
-          typeof confirmDetails === 'object' &&
-          'onConfirm' in confirmDetails &&
-          confirmDetails.onConfirm
-        ) {
-          await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-        }
-        await invocation.execute(abortSignal);
-
-        const trackEditIdx = callOrder.indexOf('trackEdit');
-        const lastCheckIdx = callOrder.lastIndexOf('cache.check');
-        expect(trackEditIdx).toBeGreaterThanOrEqual(0);
-        expect(lastCheckIdx).toBeGreaterThanOrEqual(0);
-        expect(trackEditIdx).toBeLessThan(lastCheckIdx);
-      } finally {
-        cacheCheckSpy.mockRestore();
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
+      if (
+        typeof confirmDetails === 'object' &&
+        'onConfirm' in confirmDetails &&
+        confirmDetails.onConfirm
+      ) {
+        await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
       }
+      const result = await invocation.execute(abortSignal);
+
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
     });
 
     it('should overwrite an existing file and return diff', async () => {
