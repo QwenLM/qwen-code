@@ -20,13 +20,7 @@ import {
   type FinishReason,
 } from '@google/genai';
 import type OpenAI from 'openai';
-import {
-  SpanStatusCode,
-  context,
-  trace,
-  type Context,
-  type Span,
-} from '@opentelemetry/api';
+import { context, trace, type Context, type Span } from '@opentelemetry/api';
 import {
   ApiRequestEvent,
   ApiResponseEvent,
@@ -56,10 +50,12 @@ import {
   getErrorType,
 } from '../../utils/errors.js';
 import {
+  startLLMRequestSpan,
+  endLLMRequestSpan,
+} from '../../telemetry/index.js';
+import {
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-  safeSetStatus,
-  startSpanWithContext,
-  withSpan,
 } from '../../telemetry/tracer.js';
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
@@ -210,88 +206,109 @@ export class LoggingContentGenerator implements ContentGenerator {
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    return withSpan(
-      'api.generateContent',
-      { model: req.model, prompt_id: userPromptId },
-      async (span) => {
-        const startTime = Date.now();
-        const isInternal = isInternalPromptId(userPromptId);
-        const session = this.startCaptureSession();
-        try {
-          if (!isInternal) {
-            this.logApiRequest(
-              this.toContents(req.contents),
-              req.model,
-              userPromptId,
-            );
-          }
-          const response = await session.wrap(() =>
-            this.wrapped.generateContent(req, userPromptId),
-          );
-          const durationMs = Date.now() - startTime;
-          const responseText = isInternal
-            ? undefined
-            : this.extractResponseText(response);
-          this.safelyLogApiResponse(
-            response.responseId ?? '',
-            durationMs,
-            response.modelVersion || req.model,
-            userPromptId,
-            response.usageMetadata,
-            responseText,
-          );
-          try {
-            await this.safelyLogOpenAIInteraction(
-              await session.resolve(req),
-              response,
-              undefined,
-              userPromptId,
-            );
-          } catch (loggingError) {
-            debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
-          }
-          return response;
-        } catch (error) {
-          const durationMs = Date.now() - startTime;
-          this.safelyLogApiError(
-            '',
-            durationMs,
-            error,
+    const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    try {
+      llmSpan.setAttribute('llm_request.stream', false);
+    } catch {
+      /* best-effort */
+    }
+    // Capture span context so the API call and logging activate it via
+    // context.with(). Without this, nested OTel spans (HTTP instrumentation,
+    // log-bridge spans) parent to session root instead of llm_request.
+    const spanContext = trace.setSpan(context.active(), llmSpan);
+
+    const startTime = Date.now();
+    const isInternal = isInternalPromptId(userPromptId);
+    const session = this.startCaptureSession();
+    try {
+      const response = await context.with(spanContext, async () => {
+        if (!isInternal) {
+          this.logApiRequest(
+            this.toContents(req.contents),
             req.model,
             userPromptId,
           );
-          try {
-            await this.safelyLogOpenAIInteraction(
-              await session.resolve(req),
-              undefined,
-              error,
-              userPromptId,
-            );
-          } catch (loggingError) {
-            debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
-          }
-          safeSetStatus(span, {
-            code: SpanStatusCode.ERROR,
-            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-          });
-          throw error;
         }
-      },
-    );
+        const result = await session.wrap(() =>
+          this.wrapped.generateContent(req, userPromptId),
+        );
+        const durationMs = Date.now() - startTime;
+        const responseText = isInternal
+          ? undefined
+          : this.extractResponseText(result);
+        this.safelyLogApiResponse(
+          result.responseId ?? '',
+          durationMs,
+          result.modelVersion || req.model,
+          userPromptId,
+          result.usageMetadata,
+          responseText,
+        );
+        try {
+          await this.safelyLogOpenAIInteraction(
+            await session.resolve(req),
+            result,
+            undefined,
+            userPromptId,
+          );
+        } catch (loggingError) {
+          debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+        }
+        return result;
+      });
+      endLLMRequestSpan(llmSpan, {
+        success: true,
+        inputTokens: response.usageMetadata?.promptTokenCount,
+        outputTokens: response.usageMetadata?.candidatesTokenCount,
+        durationMs: Date.now() - startTime,
+      });
+      return response;
+    } catch (error) {
+      const durationMs = Date.now() - startTime;
+      // End the span BEFORE the (potentially-throwing) logging block, so a
+      // logging-side rejection cannot prevent span finalization. Mirrors the
+      // streaming path order. Use abort-specific status message when the
+      // caller's abortSignal fired, so trace backends can distinguish user
+      // cancellations from real upstream failures.
+      const aborted = req.config?.abortSignal?.aborted ?? false;
+      endLLMRequestSpan(llmSpan, {
+        success: false,
+        durationMs,
+        error: aborted
+          ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+          : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+      });
+      await context.with(spanContext, async () => {
+        this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
+        try {
+          await this.safelyLogOpenAIInteraction(
+            await session.resolve(req),
+            undefined,
+            error,
+            userPromptId,
+          );
+        } catch (loggingError) {
+          debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
+        }
+      });
+      throw error;
+    }
   }
 
   async generateContentStream(
     req: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const { span, runInContext } = startSpanWithContext(
-      'api.generateContentStream',
-      { model: req.model, prompt_id: userPromptId },
-    );
+    const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    try {
+      llmSpan.setAttribute('llm_request.stream', true);
+    } catch {
+      /* best-effort */
+    }
 
     // Capture the span context so the stream wrapper can activate it
     // during iteration — not just during generator creation.
-    const spanContext = trace.setSpan(context.active(), span);
+    const spanContext = trace.setSpan(context.active(), llmSpan);
 
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
@@ -299,7 +316,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
-      stream = await runInContext(async () => {
+      stream = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
             this.toContents(req.contents),
@@ -312,19 +329,18 @@ export class LoggingContentGenerator implements ContentGenerator {
         );
       });
     } catch (error) {
-      safeSetStatus(span, {
-        code: SpanStatusCode.ERROR,
-        message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-      });
       const durationMs = Date.now() - startTime;
-      runInContext(() =>
+      context.with(spanContext, () =>
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
       );
-      try {
-        span.end();
-      } catch {
-        // OTel errors must not mask the original API error
-      }
+      const aborted = req.config?.abortSignal?.aborted ?? false;
+      endLLMRequestSpan(llmSpan, {
+        success: false,
+        durationMs,
+        error: aborted
+          ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+          : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+      });
       try {
         await this.safelyLogOpenAIInteraction(
           await session.resolve(req),
@@ -347,15 +363,16 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
     }
 
-    return runInContext(() =>
+    return context.with(spanContext, () =>
       this.loggingStreamWrapper(
         stream,
         startTime,
         userPromptId,
         req.model,
         resolvedRequest,
-        span,
+        llmSpan,
         spanContext,
+        req.config?.abortSignal,
       ),
     );
   }
@@ -390,6 +407,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
     span?: Span,
     spanContext?: Context,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // Skip collecting full responses for internal prompts to avoid memory
@@ -402,8 +420,12 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstResponseId = '';
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
-    let terminalStatusAttempted = false;
-    let spanEnded = false;
+    let errorOccurred = false;
+    // Tracks whether the idle timeout fired and ended the span. If so,
+    // a resumed-after-timeout consumer must not call endLLMRequestSpan
+    // again (the helper would no-op, but more importantly we skip the
+    // redundant work and avoid resetting the timer further).
+    let spanEndedByTimeout = false;
 
     // Helper to run code within the span context during iteration.
     // This ensures debug log lines emitted during stream processing
@@ -419,20 +441,20 @@ export class LoggingContentGenerator implements ContentGenerator {
     let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
     const resetSpanTimeout = span
       ? () => {
-          if (spanEnded) return;
+          if (spanEndedByTimeout) return;
           if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
           spanEndTimeout = setTimeout(() => {
             try {
-              safeSetStatus(span, {
-                code: SpanStatusCode.ERROR,
-                message: 'Stream span timed out (idle)',
-              });
-              spanEnded = true;
               span.setAttribute('stream.timed_out', true);
-              span.end();
             } catch {
               // OTel errors must not interrupt the consumer.
             }
+            endLLMRequestSpan(span, {
+              success: false,
+              durationMs: Date.now() - startTime,
+              error: 'Stream span timed out (idle)',
+            });
+            spanEndedByTimeout = true;
           }, STREAM_IDLE_TIMEOUT_MS);
           spanEndTimeout.unref();
         }
@@ -485,11 +507,8 @@ export class LoggingContentGenerator implements ContentGenerator {
           userPromptId,
         ),
       );
-      terminalStatusAttempted = true;
-      if (span) {
-        safeSetStatus(span, { code: SpanStatusCode.OK });
-      }
     } catch (error) {
+      errorOccurred = true;
       const durationMs = Date.now() - startTime;
       runInSpan(() =>
         this.safelyLogApiError(
@@ -508,29 +527,28 @@ export class LoggingContentGenerator implements ContentGenerator {
           userPromptId,
         ),
       );
-      terminalStatusAttempted = true;
-      if (span) {
-        safeSetStatus(span, {
-          code: SpanStatusCode.ERROR,
-          message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-        });
-      }
       throw error;
     } finally {
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
       }
-      if (!spanEnded) {
-        if (!terminalStatusAttempted) {
-          if (span) {
-            safeSetStatus(span, { code: SpanStatusCode.OK });
-          }
-        }
-        try {
-          span?.end();
-        } catch {
-          // OTel errors must not mask the original API error
-        }
+      // If the idle timeout already ended the span, skip the redundant
+      // endLLMRequestSpan call. The helper itself would no-op due to its
+      // own ended guard, but we want to avoid pretending the final token
+      // counts were recorded — they weren't, the span is the timeout one.
+      if (span && !spanEndedByTimeout) {
+        const aborted = abortSignal?.aborted ?? false;
+        endLLMRequestSpan(span, {
+          success: !errorOccurred,
+          inputTokens: lastUsageMetadata?.promptTokenCount,
+          outputTokens: lastUsageMetadata?.candidatesTokenCount,
+          durationMs: Date.now() - startTime,
+          error: errorOccurred
+            ? aborted
+              ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+              : API_CALL_FAILED_SPAN_STATUS_MESSAGE
+            : undefined,
+        });
       }
     }
   }
