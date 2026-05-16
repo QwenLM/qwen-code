@@ -26,6 +26,25 @@ function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function formatHeapSnapshotErrorMessage(error: unknown): string {
+  const message = formatErrorMessage(error);
+  return message.startsWith('Heap snapshot')
+    ? message
+    : `Heap snapshot failed: ${message}`;
+}
+
+function hasHighHeapPressure(
+  diagnostics: ReturnType<typeof getMemoryDiagnostics>,
+): boolean {
+  const heapSizeLimit = diagnostics.v8.heapStatistics?.['heap_size_limit'];
+  return (
+    typeof heapSizeLimit === 'number' &&
+    Number.isFinite(heapSizeLimit) &&
+    heapSizeLimit > 0 &&
+    diagnostics.memory.heapUsed / heapSizeLimit >= 0.85
+  );
+}
+
 export const doctorCommand: SlashCommand = {
   name: 'doctor',
   get description() {
@@ -87,23 +106,40 @@ export const doctorCommand: SlashCommand = {
       }
 
       if (shouldWriteHeapSnapshot) {
+        if (abortSignal?.aborted) {
+          return;
+        }
+
+        if (executionMode === 'interactive') {
+          context.ui.setPendingItem({
+            type: 'info',
+            text: t('Writing heap snapshot, this may take a moment...'),
+          });
+        }
+
         try {
+          if (hasHighHeapPressure(diagnostics)) {
+            throw new Error(
+              'Heap snapshot skipped: V8 heap pressure is already high, and writing a synchronous heap snapshot could make the process unresponsive or trigger OOM. Restart Qwen Code first if it is unstable, or retry before memory pressure reaches the warning threshold.',
+            );
+          }
+
           const heapSnapshotPath = writeMemoryHeapSnapshot();
           report = `${report}\n\nHeap snapshot written: ${heapSnapshotPath}\n${HEAP_SNAPSHOT_SENSITIVE_DATA_WARNING}`;
         } catch (error) {
           messageType = 'error';
-          report = `${report}\n\nHeap snapshot failed: ${formatErrorMessage(error)}`;
+          report = `${report}\n\n${formatHeapSnapshotErrorMessage(error)}`;
         }
       }
 
-      if (abortSignal?.aborted) {
+      if (abortSignal?.aborted && !report.includes('Heap snapshot written:')) {
         return;
       }
 
       if (executionMode === 'interactive') {
         context.ui.addItem(
           {
-            type: 'info',
+            type: messageType === 'error' ? 'error' : 'info',
             text: report,
           },
           Date.now(),

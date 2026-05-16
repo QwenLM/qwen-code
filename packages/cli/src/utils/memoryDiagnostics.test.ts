@@ -6,6 +6,7 @@
 
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -168,7 +169,10 @@ describe('memoryDiagnostics', () => {
     const writtenPath = writeMemoryHeapSnapshot({
       outputDir,
       now: new Date('2026-05-15T12:00:00.000Z'),
-      writeSnapshot: (filePath) => filePath,
+      writeSnapshot: (filePath) => {
+        fs.writeFileSync(filePath, 'snapshot');
+        return filePath;
+      },
     });
 
     expect(writtenPath).toBe(
@@ -176,6 +180,126 @@ describe('memoryDiagnostics', () => {
         outputDir,
         `qwen-code-heap-${process.pid}-2026-05-15T12-00-00-000Z.heapsnapshot`,
       ),
+    );
+  });
+
+  it('refuses heap snapshots when estimated heap dump would leave little free disk', () => {
+    const outputDir = path.join(
+      os.tmpdir(),
+      `qwen-memory-diagnostics-disk-${process.pid}`,
+    );
+    fs.rmSync(outputDir, { recursive: true, force: true });
+
+    try {
+      expect(() =>
+        writeMemoryHeapSnapshot({
+          outputDir,
+          writeSnapshot: (filePath) => {
+            fs.writeFileSync(filePath, 'snapshot');
+            return filePath;
+          },
+          estimateSnapshotBytes: () => 900,
+          getAvailableBytes: () => 1000,
+          minFreeBytesAfterSnapshot: 200,
+        }),
+      ).toThrow('Insufficient free disk space');
+      expect(fs.readdirSync(outputDir)).toHaveLength(0);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps only the newest heap snapshots after writing', () => {
+    const outputDir = path.join(
+      os.tmpdir(),
+      `qwen-memory-diagnostics-cleanup-${process.pid}`,
+    );
+    fs.rmSync(outputDir, { recursive: true, force: true });
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    const oldSnapshot = path.join(
+      outputDir,
+      `qwen-code-heap-${process.pid}-2026-05-15T11-00-00-000Z.heapsnapshot`,
+    );
+    const newerSnapshot = path.join(
+      outputDir,
+      `qwen-code-heap-${process.pid}-2026-05-15T11-30-00-000Z.heapsnapshot`,
+    );
+    fs.writeFileSync(oldSnapshot, 'old');
+    fs.writeFileSync(newerSnapshot, 'newer');
+
+    const writtenPath = writeMemoryHeapSnapshot({
+      outputDir,
+      now: new Date('2026-05-15T12:00:00.000Z'),
+      maxSnapshots: 2,
+      writeSnapshot: (filePath) => {
+        fs.writeFileSync(filePath, 'snapshot');
+        return filePath;
+      },
+    });
+
+    try {
+      expect(fs.existsSync(oldSnapshot)).toBe(false);
+      expect(fs.existsSync(newerSnapshot)).toBe(true);
+      expect(fs.existsSync(writtenPath)).toBe(true);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates heap snapshot directories and files with private permissions', () => {
+    const outputDir = path.join(
+      os.tmpdir(),
+      `qwen-memory-diagnostics-private-${process.pid}`,
+    );
+    fs.rmSync(outputDir, { recursive: true, force: true });
+
+    const writtenPath = writeMemoryHeapSnapshot({
+      outputDir,
+      now: new Date('2026-05-15T12:00:00.000Z'),
+      writeSnapshot: (filePath) => {
+        fs.writeFileSync(filePath, 'snapshot');
+        return filePath;
+      },
+    });
+
+    try {
+      expect(fs.statSync(outputDir).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(writtenPath).mode & 0o777).toBe(0o600);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('marks V8 diagnostics as warning when heap statistics are unavailable', () => {
+    const report = formatMemoryDiagnostics({
+      generatedAt: '2026-05-15T12:00:00.000Z',
+      process: {
+        pid: 123,
+        nodeVersion: 'v22.0.0',
+        platform: 'linux',
+        arch: 'x64',
+        uptimeSeconds: 120,
+      },
+      memory: {
+        rss: 100 * 1024 * 1024,
+        heapTotal: 80 * 1024 * 1024,
+        heapUsed: 40 * 1024 * 1024,
+        external: 5 * 1024 * 1024,
+        arrayBuffers: 2 * 1024 * 1024,
+      },
+      v8: {
+        unavailable: true,
+        heapSpaces: [],
+      },
+      activeHandles: { count: 3, unavailable: false },
+      activeRequests: { count: 1, unavailable: false },
+    });
+
+    expect(report).toContain('Status: warn');
+    expect(report).toContain('V8 heap statistics are unavailable');
+    expect(report).not.toContain(
+      'No immediate memory pressure signals detected.',
     );
   });
 
@@ -219,6 +343,24 @@ describe('memoryDiagnostics', () => {
     expect(waits).toEqual([25, 25]);
     expect(samples[0]).toMatchObject({ index: 1, rss: 100 * 1024 * 1024 });
     expect(samples[2]).toMatchObject({ index: 3, heapUsed: 70 * 1024 * 1024 });
+  });
+
+  it('formats single memory pressure sample deltas as unavailable', () => {
+    const report = formatMemoryPressureSamples([
+      {
+        index: 1,
+        timestamp: '2026-05-15T12:00:00.000Z',
+        rss: 100 * 1024 * 1024,
+        heapTotal: 80 * 1024 * 1024,
+        heapUsed: 40 * 1024 * 1024,
+        external: 5 * 1024 * 1024,
+        arrayBuffers: 2 * 1024 * 1024,
+      },
+    ]);
+
+    expect(report).toContain('Sample count: 1');
+    expect(report).toContain('RSS delta: unavailable');
+    expect(report).toContain('Heap used delta: unavailable');
   });
 
   it('formats memory pressure sample deltas', () => {

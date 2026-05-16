@@ -47,8 +47,12 @@ function countProcessInternals(
 
   try {
     const entries = (getter as () => unknown[])();
+    if (!Array.isArray(entries)) {
+      return { count: 0, unavailable: true };
+    }
+
     return {
-      count: Array.isArray(entries) ? entries.length : 0,
+      count: entries.length,
       unavailable: false,
     };
   } catch {
@@ -97,6 +101,10 @@ export interface WriteMemoryHeapSnapshotOptions {
   outputDir?: string;
   now?: Date;
   writeSnapshot?: (filePath: string) => string;
+  estimateSnapshotBytes?: () => number;
+  getAvailableBytes?: (dir: string) => number;
+  minFreeBytesAfterSnapshot?: number;
+  maxSnapshots?: number;
 }
 
 export interface MemoryPressureSample {
@@ -125,18 +133,66 @@ function formatSnapshotTimestamp(now: Date): string {
   return now.toISOString().replace(/[:.]/g, '-');
 }
 
+function estimateHeapSnapshotBytes(): number {
+  const heapStats = v8.getHeapStatistics();
+  return Math.max(heapStats.total_heap_size, process.memoryUsage().heapTotal);
+}
+
+function getAvailableBytes(outputDir: string): number {
+  const stats = fs.statfsSync(outputDir);
+  return stats.bavail * stats.bsize;
+}
+
+function cleanupOldHeapSnapshots(
+  outputDir: string,
+  maxSnapshots: number,
+): void {
+  if (maxSnapshots < 1) return;
+
+  const snapshots = fs
+    .readdirSync(outputDir)
+    .filter(
+      (name) =>
+        name.startsWith('qwen-code-heap-') && name.endsWith('.heapsnapshot'),
+    )
+    .map((name) => path.join(outputDir, name))
+    .sort((a, b) => b.localeCompare(a));
+
+  for (const filePath of snapshots.slice(maxSnapshots)) {
+    fs.rmSync(filePath, { force: true });
+  }
+}
+
 export function writeMemoryHeapSnapshot({
   outputDir = defaultHeapSnapshotDir(),
   now = new Date(),
   writeSnapshot = v8.writeHeapSnapshot,
+  estimateSnapshotBytes:
+    estimateSnapshotBytesOption = estimateHeapSnapshotBytes,
+  getAvailableBytes: getAvailableBytesOption = getAvailableBytes,
+  minFreeBytesAfterSnapshot = 512 * 1024 * 1024,
+  maxSnapshots = 5,
 }: WriteMemoryHeapSnapshotOptions = {}): string {
-  fs.mkdirSync(outputDir, { recursive: true });
+  fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+  fs.chmodSync(outputDir, 0o700);
+
+  const estimatedSnapshotBytes = estimateSnapshotBytesOption();
+  const availableBytes = getAvailableBytesOption(outputDir);
+  if (availableBytes - estimatedSnapshotBytes < minFreeBytesAfterSnapshot) {
+    throw new Error(
+      'Insufficient free disk space for heap snapshot; skipping to avoid filling the disk.',
+    );
+  }
+
   const filePath = path.join(
     outputDir,
     `qwen-code-heap-${process.pid}-${formatSnapshotTimestamp(now)}.heapsnapshot`,
   );
 
-  return writeSnapshot(filePath);
+  const writtenPath = writeSnapshot(filePath);
+  fs.chmodSync(writtenPath, 0o600);
+  cleanupOldHeapSnapshots(outputDir, maxSnapshots);
+  return writtenPath;
 }
 
 function defaultWait(ms: number): Promise<void> {
@@ -246,6 +302,15 @@ function buildMemoryInsights(diagnostics: MemoryDiagnostics): MemoryInsights {
   const signals: string[] = [];
   const recommendations: string[] = [];
 
+  if (diagnostics.v8.unavailable) {
+    signals.push(
+      'V8 heap statistics are unavailable; heap pressure assessment may be incomplete.',
+    );
+    recommendations.push(
+      'Re-run /doctor memory after restarting Qwen Code; if V8 diagnostics remain unavailable, include this report when filing an issue.',
+    );
+  }
+
   if (heapIsHigh) {
     signals.push(
       'V8 heap usage is high; the process is close to its configured heap limit.',
@@ -290,9 +355,12 @@ export function formatMemoryPressureSamples(
 ): string {
   const first = samples[0];
   const last = samples.at(-1);
-  const rssDelta = first && last ? last.rss - first.rss : undefined;
+  const rssDelta =
+    first && last && samples.length > 1 ? last.rss - first.rss : undefined;
   const heapUsedDelta =
-    first && last ? last.heapUsed - first.heapUsed : undefined;
+    first && last && samples.length > 1
+      ? last.heapUsed - first.heapUsed
+      : undefined;
   const sampleLines = samples.map(
     (sample) =>
       `  #${sample.index} ${sample.timestamp}: RSS ${formatBytes(
