@@ -432,7 +432,17 @@ export class DaemonTuiAdapter {
       typeof prompt === 'string'
         ? ([{ type: 'text', text: prompt }] as ContentBlock[])
         : prompt;
-    return await this.session.prompt({ prompt: promptBlocks });
+    try {
+      return await this.session.prompt({ prompt: promptBlocks });
+    } catch (error) {
+      this.onUpdate({
+        type: 'disconnected',
+        reason: sanitizeReason(
+          error instanceof Error ? error.message : String(error),
+        ),
+      });
+      throw error;
+    }
   }
 
   async cancel(): Promise<void> {

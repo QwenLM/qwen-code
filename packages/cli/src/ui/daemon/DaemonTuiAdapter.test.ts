@@ -524,4 +524,25 @@ describe('DaemonTuiAdapter', () => {
 
     events.close();
   });
+
+  it('reports prompt failures without fabricating turn completion', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockRejectedValue(new Error('\x1b[31mdaemon down\x1b[0m'));
+    const onUpdate = vi.fn();
+    const adapter = new DaemonTuiAdapter({ session, onUpdate });
+
+    await expect(adapter.sendPrompt('hello daemon')).rejects.toThrow(
+      'daemon down',
+    );
+    expect(onUpdate).toHaveBeenCalledWith({
+      type: 'disconnected',
+      reason: 'daemon down',
+    });
+    expect(onUpdate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'turn_complete' }),
+    );
+
+    events.close();
+  });
 });
