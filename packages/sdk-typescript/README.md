@@ -101,6 +101,56 @@ const query = qwen.query('Your prompt', {
 });
 ```
 
+### Experimental Daemon Session Client
+
+`DaemonSessionClient` is an experimental wrapper for clients that talk to a
+running `qwen serve` daemon over HTTP + SSE. It binds one daemon session so TUI,
+channel, IDE, or web backend adapters do not need to pass `sessionId` into every
+call.
+
+```typescript
+import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
+
+const daemon = new DaemonClient({
+  baseUrl: 'http://127.0.0.1:4170',
+  token: process.env['QWEN_SERVER_TOKEN'],
+});
+
+const caps = await daemon.capabilities();
+const session = await DaemonSessionClient.createOrAttach(daemon, {
+  workspaceCwd: caps.workspaceCwd,
+});
+
+const eventController = new AbortController();
+const eventTask = (async () => {
+  for await (const event of session.events({
+    signal: eventController.signal,
+  })) {
+    console.log(event.type, event.data);
+  }
+})();
+
+const result = await session.prompt({
+  prompt: [{ type: 'text', text: 'Summarize this workspace.' }],
+});
+
+eventController.abort();
+await eventTask;
+console.log(result.stopReason);
+```
+
+`session.events()` tracks the last seen SSE event id and reuses it on the next
+subscription by default. Pass `{ resume: false }` to start a fresh subscription
+without sending `Last-Event-ID`.
+
+When `createOrAttach()` is called with `modelServiceId`, the returned session
+client seeds its first event subscription with `Last-Event-ID: 0`. This replays
+the daemon ring from the oldest available event so adapters can observe
+attach-time `model_switch_failed` or `model_switched` events that are not
+reported on the create/attach HTTP response. Raw `DaemonClient` callers should
+pass `{ lastEventId: 0 }` on their first `subscribeEvents()` call when they use
+`modelServiceId`.
+
 ### Message Types
 
 The SDK provides type guards to identify different message types:

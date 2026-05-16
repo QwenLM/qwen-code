@@ -12,6 +12,11 @@ export {
   type PromptRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
+export {
+  DaemonSessionClient,
+  type DaemonSessionClientOptions,
+  type DaemonSessionSubscribeOptions,
+} from './DaemonSessionClient.js';
 export { parseSseStream, SseFramingError } from './sse.js';
 export { DaemonCapabilityMissingError, requireWorkspaceCwd } from './types.js';
 export type {
