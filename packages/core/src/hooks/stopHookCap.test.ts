@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_STOP_HOOK_BLOCK_CAP,
+  MAX_STOP_HOOK_BLOCK_CAP,
   STOP_HOOK_BLOCK_CAP_ENV,
   formatStopHookBlockingCapWarning,
   normalizeStopHookBlockingCap,
@@ -31,12 +32,23 @@ describe('stop hook blocking cap', () => {
 
   it('normalizes finite fractional values down to whole iterations', () => {
     expect(normalizeStopHookBlockingCap(3.7)).toBe(3);
+    expect(normalizeStopHookBlockingCap(100.9)).toBe(MAX_STOP_HOOK_BLOCK_CAP);
+  });
+
+  it('caps large finite values to avoid unbounded recursive Stop loops', () => {
+    expect(normalizeStopHookBlockingCap(99999)).toBe(MAX_STOP_HOOK_BLOCK_CAP);
   });
 
   it('prefers the environment override over config', () => {
     process.env[STOP_HOOK_BLOCK_CAP_ENV] = '3';
 
     expect(resolveStopHookBlockingCap(12)).toBe(3);
+  });
+
+  it('ignores an empty environment override', () => {
+    process.env[STOP_HOOK_BLOCK_CAP_ENV] = '';
+
+    expect(resolveStopHookBlockingCap(12)).toBe(12);
   });
 
   it('formats warnings for the relevant hook event', () => {

@@ -5,6 +5,7 @@
  */
 
 export const DEFAULT_STOP_HOOK_BLOCK_CAP = 8;
+export const MAX_STOP_HOOK_BLOCK_CAP = 100;
 export const STOP_HOOK_BLOCK_CAP_ENV = 'QWEN_CODE_STOP_HOOK_BLOCK_CAP';
 
 export function normalizeStopHookBlockingCap(value: unknown): number {
@@ -13,12 +14,14 @@ export function normalizeStopHookBlockingCap(value: unknown): number {
   }
 
   const normalized = Math.floor(value);
-  return normalized >= 1 ? normalized : DEFAULT_STOP_HOOK_BLOCK_CAP;
+  return normalized >= 1
+    ? Math.min(normalized, MAX_STOP_HOOK_BLOCK_CAP)
+    : DEFAULT_STOP_HOOK_BLOCK_CAP;
 }
 
 export function resolveStopHookBlockingCap(configValue?: number): number {
   const envValue = process.env[STOP_HOOK_BLOCK_CAP_ENV];
-  if (envValue !== undefined) {
+  if (envValue !== undefined && envValue.trim() !== '') {
     const parsed = Number(envValue);
     return normalizeStopHookBlockingCap(parsed);
   }

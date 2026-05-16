@@ -1006,6 +1006,17 @@ export class BackgroundAgentResumeService {
         }
 
         stopHookActive = true;
+        const currentIterationCount = i + 1;
+        if (currentIterationCount >= maxIterations) {
+          debugLogger.warn(
+            `[BackgroundAgentResume] ${formatStopHookBlockingCapWarning(
+              'SubagentStop',
+              maxIterations,
+            )}`,
+          );
+          return;
+        }
+
         const continueContext = new ContextState();
         continueContext.set(
           'task_prompt',

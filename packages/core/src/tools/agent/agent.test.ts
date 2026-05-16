@@ -1324,7 +1324,7 @@ describe('AgentTool', () => {
       await invocation.execute();
 
       expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
-      expect(mockAgent.execute).toHaveBeenCalledTimes(3);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
     });
 
     it('should allow stop when SubagentStop hook fails', async () => {

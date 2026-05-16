@@ -998,6 +998,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
 
         stopHookActive = true;
+        const currentIterationCount = i + 1;
+        if (currentIterationCount >= maxIterations) {
+          debugLogger.warn(
+            `[Agent] ${formatStopHookBlockingCapWarning(
+              'SubagentStop',
+              maxIterations,
+            )}`,
+          );
+          return;
+        }
+
         const continueContext = new ContextState();
         continueContext.set(
           'task_prompt',
