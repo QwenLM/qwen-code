@@ -157,6 +157,7 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import type { StatusLinePresetConfig } from './statusLinePresets.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -879,6 +880,26 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const [isStatusLineDialogOpen, setStatusLineDialogOpen] = useState(false);
+  const openStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(true),
+    [],
+  );
+  const closeStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(false),
+    [],
+  );
+  const [statusLineSettingsVersion, setStatusLineSettingsVersion] = useState(0);
+  const [statusLineConfigOverride, setStatusLineConfigOverride] = useState<
+    StatusLinePresetConfig | undefined
+  >(undefined);
+  const notifyStatusLineSettingsChanged = useCallback(
+    (newConfig: StatusLinePresetConfig) => {
+      setStatusLineConfigOverride(newConfig);
+      setStatusLineSettingsVersion((version) => version + 1);
+    },
+    [],
+  );
   const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
     useMemoryDialog();
 
@@ -973,6 +994,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openTrustDialog,
@@ -1007,6 +1029,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openArenaDialog,
@@ -2050,6 +2073,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
     isManageModelsDialogOpen ||
@@ -2525,6 +2549,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isStatusLineDialogOpen,
+    closeStatusLineDialog,
     isMemoryDialogOpen,
     closeMemoryDialog,
     activeArenaDialog,
@@ -2957,6 +2983,9 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -3075,6 +3104,9 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -3198,6 +3230,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
@@ -3272,6 +3306,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,

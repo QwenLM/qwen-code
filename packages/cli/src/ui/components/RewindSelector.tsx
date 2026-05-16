@@ -10,6 +10,7 @@ import type { HistoryItem, HistoryItemUser } from '../types.js';
 import { theme } from '../semantic-colors.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { truncateText } from '../utils/sessionPickerUtils.js';
 import { isRealUserTurn } from '../utils/historyMapping.js';
 import { t } from '../../i18n/index.js';
@@ -265,12 +266,12 @@ export function RewindSelector({
         return;
       }
 
-      if (name === 'up' || name === 'k') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex((prev) => Math.max(0, prev - 1));
         return;
       }
 
-      if (name === 'down' || name === 'j') {
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex((prev) => Math.min(userTurns.length - 1, prev + 1));
         return;
       }
