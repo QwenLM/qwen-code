@@ -1591,6 +1591,10 @@ export async function loadCliConfig(
       }
     }
   } else if (argv.sandboxSessionId) {
+    if (!process.env['SANDBOX']) {
+      writeStderrLine('--sandbox-session-id is for internal sandbox use only.');
+      process.exit(1);
+    }
     sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption

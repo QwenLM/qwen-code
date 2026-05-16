@@ -992,12 +992,33 @@ describe('loadCliConfig', () => {
 
   it('should use internal sandbox session ID without treating it as a new session', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    vi.stubEnv('SANDBOX', 'sandbox-exec');
     process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
     const argv = await parseArguments();
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv);
 
     expect(config.getSessionId()).toBe(sessionId);
+    expect(mockSessionServiceInstance.sessionExists).not.toHaveBeenCalled();
+  });
+
+  it('should reject direct use of the internal sandbox session ID flag', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '--sandbox-session-id is for internal sandbox use only.',
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
     expect(mockSessionServiceInstance.sessionExists).not.toHaveBeenCalled();
   });
 
