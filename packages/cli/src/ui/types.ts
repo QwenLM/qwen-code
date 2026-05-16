@@ -510,7 +510,7 @@ export type HistoryItemGoalStatus = HistoryItemBase & {
   type: 'goal_status';
   kind: GoalStatusKind;
   condition: string;
-  /** Set when kind === 'achieved'. */
+  /** Set for progress and terminal goal states. */
   iterations?: number;
   durationMs?: number;
   lastReason?: string;

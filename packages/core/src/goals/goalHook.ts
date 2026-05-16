@@ -33,17 +33,7 @@ const debugLogger = createDebugLogger('GOAL_HOOK');
  */
 export const MAX_GOAL_ITERATIONS = 50;
 
-/**
- * Default budget (seconds) for a single goal-judge LLM call. Mirrors Claude
- * Code 2.1.140's prompt-hook default of 30s (see `cRK` in the binary, which
- * reads `H.timeout ? H.timeout * 1000 : 30000`).
- *
- * Why this matters in qwen-code specifically: the `FunctionHookRunner` default
- * is 5s, and a real-world session log showed the judge call against a 5K-token
- * context taking ~9.9s — well past 5s but comfortably under 30s. Without
- * passing this through, the hook is killed mid-flight, no `continue:false` is
- * emitted, and the `/goal` loop silently dies after the second turn.
- */
+/** Default budget (seconds) for a single goal-judge LLM call. */
 export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;

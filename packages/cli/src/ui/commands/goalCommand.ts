@@ -111,10 +111,9 @@ export const goalCommand: SlashCommand = {
         );
       }
       // No active goal — surface a summary of the most recent terminal goal
-      // for this session, matching Claude Code's behavior of rendering the
-      // "Goal achieved" card on empty /goal after completion. Only achieved /
-      // aborted entries flow through `getLastGoalTerminal`; user-initiated
-      // `/goal clear` does not populate it.
+      // for this session. Only achieved / aborted entries flow through
+      // `getLastGoalTerminal`; user-initiated `/goal clear` does not
+      // populate it.
       const last = getLastGoalTerminal(sessionId);
       if (last) {
         return infoMessage(formatTerminalSummary(last));
@@ -126,14 +125,10 @@ export const goalCommand: SlashCommand = {
 
     // ── Branch 2: clear keyword ──────────────────────────────────────────
     //
-    // Strict alignment with Claude Code 2.1.140 `woH`: when an active goal
-    // exists, drop the Stop hook + emit a `cleared` history sentinel; when
-    // no active goal exists, this is a no-op that just returns "No goal
-    // set". Claude does NOT wipe the cached "Goal achieved" summary on
-    // clear — subsequent empty `/goal` may still surface the most recent
-    // achievement via `findLastTerminalGoal`. That's intentional: the
-    // `cleared` history item is a sentinel `findLastTerminalGoal` skips,
-    // and the previous non-sentinel achievement remains visible.
+    // When an active goal exists, drop the Stop hook and emit a `cleared`
+    // history sentinel. When no active goal exists, this is a no-op that just
+    // returns "No goal set." The cached terminal summary is left intact so a
+    // later empty `/goal` can still show the latest achieved/aborted state.
     if (CLEAR_KEYWORDS.has(q.toLowerCase())) {
       const cleared = unregisterGoalHook(config, sessionId);
       if (!cleared) {

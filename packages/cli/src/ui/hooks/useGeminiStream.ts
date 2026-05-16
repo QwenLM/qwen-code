@@ -1304,12 +1304,9 @@ export const useGeminiStream = (
         setPendingHistoryItem(null);
       }
       // When the active loop is driven by `/goal`, replace the generic
-      // "Ran N stop hooks ⎿ Stop hook error: ..." chip with a goal-aware
-      // `goal_status` `kind:'checking'` item. Claude Code surfaces this
-      // mid-state through a single updating "running" card; qwen-code keeps
-      // a per-iteration history trail (familiar to its other progress
-      // indicators) but drops the `error:` framing — a not-met judge is the
-      // *expected* outcome of every continuation, not a failure.
+      // "Ran N stop hooks" chip with a goal-aware `goal_status`
+      // `kind:'checking'` item. A not-met judge is the expected outcome of a
+      // continuation, not a hook failure.
       const activeGoal = getActiveGoal(config.getSessionId());
       if (activeGoal && activeGoal.condition) {
         addItem(
@@ -1450,8 +1447,7 @@ export const useGeminiStream = (
             case ServerGeminiEventType.ToolCallRequest:
               flushBufferedStreamEvents();
               toolCallRequests.push(event.value);
-              // Count tool call args JSON toward token estimation (matches
-              // Claude Code's input_json_delta handling).
+              // Count tool call args JSON toward token estimation.
               try {
                 const argsJson = JSON.stringify(event.value.args);
                 streamingResponseLengthRef.current += argsJson.length;
@@ -2129,9 +2125,8 @@ export const useGeminiStream = (
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Fire tool-use summary generation in parallel with the next API call.
-      // The fast-model Haiku-equivalent latency (~1s) is hidden behind the
-      // main-model streaming (5-30s). Mirrors Claude Code's query.ts:1411-1482
-      // behavior. Fire-and-forget: failures are silent and never block the turn.
+      // The fast-model latency is hidden behind the main-model streaming.
+      // Fire-and-forget: failures are silent and never block the turn.
       // Subagent exclusion is implicit — useGeminiStream only drives the
       // main session; subagents run through agents/runtime/ with their own loop.
       if (config.getEmitToolUseSummaries()) {
