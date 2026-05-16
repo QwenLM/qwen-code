@@ -1044,11 +1044,6 @@ export class BackgroundAgentResumeService {
       }
     }
 
-    const warning = formatStopHookBlockingCapWarning(
-      'SubagentStop',
-      maxIterations,
-    );
-    debugLogger.warn(`[BackgroundAgentResume] ${warning}`);
-    return warning;
+    return undefined;
   }
 }

@@ -962,9 +962,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
   }
 
-  // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
-  // reason back and re-executes — up to 5 iterations to defend against a
-  // misconfigured hook looping forever.
+  // Runs the SubagentStop hook after execution. On a blocking decision, feeds
+  // the reason back and re-executes until the configured cap prevents a
+  // misconfigured hook from looping forever.
   private async runSubagentStopHookLoop(
     subagent: AgentHeadless,
     opts: {
@@ -1032,12 +1032,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
     }
 
-    const warning = formatStopHookBlockingCapWarning(
-      'SubagentStop',
-      maxIterations,
-    );
-    debugLogger.warn(`[Agent] ${warning}`);
-    return warning;
+    return undefined;
   }
 
   /**

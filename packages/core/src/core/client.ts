@@ -1561,6 +1561,10 @@ export class GeminiClient {
             continueReason,
           ];
 
+          // Emit StopHookLoop starting with the first blocking decision so
+          // /goal and configured Stop hooks both surface their reason before
+          // the follow-up turn is generated. The cap check stays before the
+          // yield because a cap of 1 means no follow-up turn should run.
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
           if (currentIterationCount >= stopHookBlockingCap) {
             const warning = formatStopHookBlockingCapWarning(
