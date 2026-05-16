@@ -152,6 +152,14 @@ export default {
     'Conversation ramenée en arrière. Modifiez votre invite et appuyez sur Entrée pour continuer.',
   'Rewinding does not affect files edited manually or via shell commands.':
     'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Impossible de revenir à un tour qui a été compressé. Essayez un tour plus récent.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'La restauration des fichiers est indisponible pour ce tour (aucune modification capturée, ou ce tour est antérieur à la session actuelle).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} dans {{count}} fichier)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} dans {{count}} fichiers)',
   'Failed to restore {{count}} file(s): {{files}}':
     'Échec de la restauration de {{count}} fichier(s) : {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

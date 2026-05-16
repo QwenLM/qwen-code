@@ -48,7 +48,7 @@ export interface FileHistoryState {
 }
 
 export interface DiffStats {
-  filesChanged?: string[];
+  filesChanged: string[];
   insertions: number;
   deletions: number;
 }

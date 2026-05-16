@@ -152,6 +152,14 @@ export default {
     'Conversa retrocedida. Edita la teva indicació i prem Retorn per continuar.',
   'Rewinding does not affect files edited manually or via shell commands.':
     'El retrocés no afecta els fitxers editats manualment o mitjançant comandes de shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'No es pot retrocedir a un torn que ha estat comprimit. Prova amb un torn més recent.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'La restauració de fitxers no està disponible per a aquest torn (no s’han capturat canvis, o aquest torn és anterior a la sessió actual).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} en {{count}} fitxer)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} en {{count}} fitxers)',
   'Failed to restore {{count}} file(s): {{files}}':
     'Error en restaurar {{count}} fitxer(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

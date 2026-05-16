@@ -131,6 +131,14 @@ export default {
     'Konversation zurückgespult. Bearbeite deinen Prompt und drücke Enter, um fortzufahren.',
   'Rewinding does not affect files edited manually or via shell commands.':
     'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Zu einem komprimierten Turn kann nicht zurückgespult werden. Bitte einen aktuelleren Turn versuchen.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'Datei-Wiederherstellung ist für diesen Turn nicht verfügbar (keine erfassten Dateiänderungen, oder dieser Turn liegt vor der aktuellen Sitzung).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} in {{count}} Datei)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} in {{count}} Dateien)',
   'Failed to restore {{count}} file(s): {{files}}':
     '{{count}} Datei(en) konnten nicht wiederhergestellt werden: {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

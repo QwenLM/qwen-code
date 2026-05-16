@@ -135,6 +135,14 @@ export default {
     '對話已回退。修改提示後按 Enter 繼續。',
   'Rewinding does not affect files edited manually or via shell commands.':
     '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '無法回退到已被壓縮的輪次，請嘗試更近一些的輪次。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    '該輪次無法還原檔案（沒有擷取到檔案變更，或該輪次屬於本次會話之前）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 個檔案)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 個檔案)',
   'Failed to restore {{count}} file(s): {{files}}':
     '恢復 {{count}} 個檔案失敗：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

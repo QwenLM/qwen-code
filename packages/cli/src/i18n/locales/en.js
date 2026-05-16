@@ -152,6 +152,14 @@ export default {
     'Conversation rewound. Edit your prompt and press Enter to continue.',
   'Rewinding does not affect files edited manually or via shell commands.':
     'Rewinding does not affect files edited manually or via shell commands.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} in {{count}} file)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} in {{count}} files)',
   'Failed to restore {{count}} file(s): {{files}}':
     'Failed to restore {{count}} file(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

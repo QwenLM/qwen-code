@@ -112,6 +112,14 @@ export default {
     '会話を巻き戻しました。プロンプトを編集して Enter キーで続行してください。',
   'Rewinding does not affect files edited manually or via shell commands.':
     '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '圧縮されたターンへは巻き戻せません。より最近のターンをお試しください。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'このターンではファイル復元できません（捕捉されたファイル変更がないか、現在のセッションより前のターンです）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}、{{count}} 個のファイル)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}、{{count}} 個のファイル)',
   'Failed to restore {{count}} file(s): {{files}}':
     '{{count}} 個のファイルの復元に失敗しました：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

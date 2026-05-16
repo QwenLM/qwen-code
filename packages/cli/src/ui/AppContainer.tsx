@@ -2216,7 +2216,9 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: 'error',
-                  text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                  text: t(
+                    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                  ),
                 },
                 Date.now(),
               );

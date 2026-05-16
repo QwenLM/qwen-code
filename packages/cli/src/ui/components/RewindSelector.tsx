@@ -102,14 +102,22 @@ interface RestoreOptionItem {
 function getRestoreOptions(
   diffStats: DiffStats | undefined,
 ): RestoreOptionItem[] {
-  const hasChanges =
-    diffStats && diffStats.filesChanged && diffStats.filesChanged.length > 0;
+  const hasChanges = !!diffStats && diffStats.filesChanged.length > 0;
 
   const options: RestoreOptionItem[] = [];
 
   if (hasChanges) {
-    const fileCount = diffStats!.filesChanged!.length;
-    const detail = `(+${diffStats!.insertions} -${diffStats!.deletions} in ${fileCount} file${fileCount !== 1 ? 's' : ''})`;
+    const fileCount = diffStats!.filesChanged.length;
+    const detail = t(
+      fileCount === 1
+        ? '(+{{insertions}} -{{deletions}} in {{count}} file)'
+        : '(+{{insertions}} -{{deletions}} in {{count}} files)',
+      {
+        insertions: String(diffStats!.insertions),
+        deletions: String(diffStats!.deletions),
+        count: String(fileCount),
+      },
+    );
     options.push({
       key: 'both',
       label: t('Restore code and conversation'),
@@ -422,11 +430,26 @@ export function RewindSelector({
                 })}
                 {restoreOptions.some(
                   (o) => o.key === 'code' || o.key === 'both',
-                ) && (
+                ) ? (
                   <Box marginTop={1}>
                     <Text color={theme.text.secondary} dimColor>
                       {t(
                         'Rewinding does not affect files edited manually or via shell commands.',
+                      )}
+                    </Text>
+                  </Box>
+                ) : (
+                  // No file-restore options were offered. Most likely either
+                  // (a) the chosen turn has no captured edits, or (b) the
+                  // turn predates this process / came from a resumed session
+                  // whose snapshots were not rehydrated. Either way the
+                  // "Restore code" path is not actionable for this turn —
+                  // surface that explicitly so the user is not left
+                  // wondering why the option is missing.
+                  <Box marginTop={1}>
+                    <Text color={theme.text.secondary} dimColor>
+                      {t(
+                        'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
                       )}
                     </Text>
                   </Box>

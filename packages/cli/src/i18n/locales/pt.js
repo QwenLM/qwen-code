@@ -146,6 +146,14 @@ export default {
     'Conversa retrocedida. Edite seu prompt e pressione Enter para continuar.',
   'Rewinding does not affect files edited manually or via shell commands.':
     'O retrocesso não afeta arquivos editados manualmente ou por meio de comandos shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Não é possível retroceder para um turno que foi compactado. Tente um turno mais recente.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'A restauração de arquivos não está disponível para este turno (sem alterações capturadas, ou o turno é anterior à sessão atual).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} em {{count}} arquivo)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} em {{count}} arquivos)',
   'Failed to restore {{count}} file(s): {{files}}':
     'Falha ao restaurar {{count}} arquivo(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

@@ -155,6 +155,14 @@ export default {
     'Разговор откатили. Отредактируйте подсказку и нажмите Enter, чтобы продолжить.',
   'Rewinding does not affect files edited manually or via shell commands.':
     'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Не удаётся откатиться к сжатому ходу. Попробуйте более недавний ход.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'Восстановление файлов недоступно для этого хода (нет записанных изменений или ход был до текущей сессии).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} в {{count}} файле)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} в {{count}} файлах)',
   'Failed to restore {{count}} file(s): {{files}}':
     'Не удалось восстановить {{count}} файл(ов): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':
