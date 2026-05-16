@@ -15,9 +15,19 @@
 
 export type DaemonMode = 'http-bridge' | 'native';
 
+export interface DaemonProtocolVersions {
+  current: string;
+  supported: string[];
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
+  /**
+   * Serve protocol versions supported by the daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  protocolVersions?: DaemonProtocolVersions;
   mode: DaemonMode;
   /**
    * Feature tags the client should gate UI off (e.g. `permission_vote`,

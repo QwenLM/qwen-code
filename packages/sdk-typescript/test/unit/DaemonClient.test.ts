@@ -98,6 +98,10 @@ describe('DaemonClient', () => {
     it('GETs /capabilities and returns the v1 envelope', async () => {
       const envelope = {
         v: 1 as const,
+        protocolVersions: {
+          current: 'v1',
+          supported: ['v1'],
+        },
         mode: 'http-bridge' as const,
         features: ['health', 'capabilities'],
         modelServices: [],
@@ -110,6 +114,19 @@ describe('DaemonClient', () => {
       // #3803 §02: clients use `workspaceCwd` to pre-flight check +
       // omit `cwd` from `POST /session` (route falls back).
       expect(caps.workspaceCwd).toBe('/work/bound');
+    });
+
+    it('accepts old v1 envelopes without protocolVersions', async () => {
+      const envelope: DaemonCapabilities = {
+        v: 1,
+        mode: 'http-bridge',
+        features: ['health', 'capabilities'],
+        modelServices: [],
+        workspaceCwd: '/work/bound',
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.capabilities()).resolves.toEqual(envelope);
     });
   });
 

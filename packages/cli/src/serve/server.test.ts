@@ -11,6 +11,12 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createServeApp } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
+import {
+  getServeFeatures,
+  getServeProtocolVersions,
+  SERVE_CAPABILITY_REGISTRY,
+  SERVE_PROTOCOL_VERSION,
+} from './capabilities.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -30,11 +36,7 @@ import {
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
-import {
-  CAPABILITIES_SCHEMA_VERSION,
-  STAGE1_FEATURES,
-  type ServeOptions,
-} from './types.js';
+import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -51,6 +53,17 @@ const baseOpts: ServeOptions = {
 // WS_B).
 const WS_BOUND = path.resolve(path.sep, 'work', 'bound');
 const WS_DIFFERENT = path.resolve(path.sep, 'work', 'different');
+const EXPECTED_STAGE1_FEATURES = [
+  'health',
+  'capabilities',
+  'session_create',
+  'session_list',
+  'session_prompt',
+  'session_cancel',
+  'session_events',
+  'session_set_model',
+  'permission_vote',
+] as const;
 
 interface FakeBridgeOpts {
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
@@ -190,6 +203,25 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
 }
 
 describe('createServeApp', () => {
+  describe('serve capability registry', () => {
+    it('returns a fresh ordered feature list', () => {
+      const features = getServeFeatures();
+      expect(features).toEqual([...EXPECTED_STAGE1_FEATURES]);
+
+      features.pop();
+      expect(getServeFeatures()).toEqual([...EXPECTED_STAGE1_FEATURES]);
+    });
+
+    it('marks every current feature as v1', () => {
+      expect(Object.keys(SERVE_CAPABILITY_REGISTRY)).toEqual([
+        ...EXPECTED_STAGE1_FEATURES,
+      ]);
+      expect(
+        Object.values(SERVE_CAPABILITY_REGISTRY).map(({ since }) => since),
+      ).toEqual(EXPECTED_STAGE1_FEATURES.map(() => SERVE_PROTOCOL_VERSION));
+    });
+  });
+
   describe('GET /health', () => {
     it('returns 200 ok', async () => {
       const app = createServeApp(baseOpts);
@@ -209,8 +241,9 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
+      expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
       expect(res.body.mode).toBe('http-bridge');
-      expect(res.body.features).toEqual([...STAGE1_FEATURES]);
+      expect(res.body.features).toEqual(getServeFeatures());
       expect(res.body.modelServices).toEqual([]);
     });
 
