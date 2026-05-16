@@ -102,10 +102,8 @@ export function notifyGoalTerminal(
   event: GoalTerminalEvent,
 ): void {
   // Stash the last terminal event so an empty `/goal` after the loop ends
-  // can surface a summary of what just happened (matches Claude Code 2.1.140
-  // empty-/goal-after-achievement UX: scans transcript for last met:true
-  // goal_status and renders an achievement card). We keep the cache in core
-  // so the CLI command can read it without having access to UI history.
+  // can surface a summary of what just happened. We keep the cache in core so
+  // the CLI command can read it without having access to UI history.
   recordLastTerminalEvent(sessionId, event);
   const observer = observers.get(sessionId);
   if (!observer) return;
@@ -120,8 +118,7 @@ export function notifyGoalTerminal(
 // ───────────────────────────────────────────────────────────────────────────
 // Last-completed-goal cache
 //
-// Mirrors `yjK` in Claude Code's binary: empty `/goal` after the active goal
-// is gone should show "Goal achieved · X turns · Ys" for the most recent
+// Empty `/goal` after the active goal is gone should show the most recent
 // actually-finished goal. Only `achieved` and `aborted` qualify (those are
 // the `GoalTerminalKind`s); the user-driven `/goal clear` path emits a
 // `cleared` history card directly and never flows through this notifier.

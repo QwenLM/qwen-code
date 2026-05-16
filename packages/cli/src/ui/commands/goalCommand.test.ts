@@ -247,13 +247,10 @@ describe('goalCommand', () => {
     expect(content).toMatch(/Last check: transcript shows completion/);
   });
 
-  it('strict claude alignment: `/goal clear` with no active goal does NOT dismiss the achievement summary', async () => {
-    // Claude Code's `woH` bails (`q.length===0 → return null`) when no active
-    // goal exists — it does NOT write a dismissal sentinel and does NOT wipe
-    // the cache. Subsequent empty `/goal` still surfaces the previous
-    // achievement via `findLastTerminalGoal`. We pin this behavior to prevent
-    // accidental divergence; users who want a true "forget" will need a
-    // separate dedicated keyword (out of scope for this alignment).
+  it('keeps the latest terminal summary when `/goal clear` has no active goal', async () => {
+    // A no-op clear should not write a dismissal sentinel or wipe the cache.
+    // Subsequent empty `/goal` still surfaces the previous achievement
+    // summary.
     const ctx = createMockCommandContext({
       services: { config: makeConfig() as unknown as Config },
     });

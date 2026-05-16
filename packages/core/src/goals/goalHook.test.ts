@@ -19,6 +19,7 @@ import {
   type GoalTerminalEvent,
 } from './activeGoalStore.js';
 import {
+  abortGoalForStopHookCap,
   createGoalStopHookCallback,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_JUDGE_TIMEOUT_MS,
@@ -350,6 +351,62 @@ describe('createGoalStopHookCallback', () => {
     const out = await cb(stopInput(), undefined);
     expect(out).toEqual({ continue: true });
     expect(judgeMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('abortGoalForStopHookCap', () => {
+  beforeEach(() => {
+    __resetActiveGoalStoreForTests();
+  });
+
+  afterEach(() => __resetActiveGoalStoreForTests());
+
+  it('returns false when no active goal exists', () => {
+    const removeFunctionHook = vi.fn();
+    const config = {
+      getHookSystem: () => ({ removeFunctionHook }),
+    } as unknown as Config;
+
+    expect(abortGoalForStopHookCap(config, 'missing-session', 'cap hit')).toBe(
+      false,
+    );
+    expect(removeFunctionHook).not.toHaveBeenCalled();
+  });
+
+  it('clears the active goal and notifies observers when the cap is reached', () => {
+    const removeFunctionHook = vi.fn();
+    const config = {
+      getHookSystem: () => ({ removeFunctionHook }),
+    } as unknown as Config;
+    const events: GoalTerminalEvent[] = [];
+    setActiveGoal('sess-1', {
+      condition: 'finish tests',
+      iterations: 3,
+      setAt: Date.now() - 100,
+      tokensAtStart: 0,
+      lastReason: 'still incomplete',
+      hookId: 'goal-hook-id',
+    });
+    setGoalTerminalObserver('sess-1', (event) => events.push(event));
+
+    expect(
+      abortGoalForStopHookCap(config, 'sess-1', 'Stop hook cap reached'),
+    ).toBe(true);
+
+    expect(getActiveGoal('sess-1')).toBeUndefined();
+    expect(removeFunctionHook).toHaveBeenCalledWith(
+      'sess-1',
+      HookEventName.Stop,
+      'goal-hook-id',
+    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'aborted',
+      condition: 'finish tests',
+      iterations: 3,
+      lastReason: 'still incomplete',
+      systemMessage: 'Stop hook cap reached',
+    });
   });
 });
 

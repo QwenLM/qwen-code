@@ -19,6 +19,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 import { getActiveGoal } from '../goals/activeGoalStore.js';
+import { abortGoalForStopHookCap } from '../goals/goalHook.js';
+import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -1575,15 +1577,30 @@ export class GeminiClient {
             continueReason,
           ];
 
-          // Emit StopHookLoop on EVERY blocking Stop hook execution, including
-          // the first. `currentIterationCount === 1` means a Stop hook just
-          // fired once and produced a blocking decision — the user benefits
-          // from seeing that immediately (e.g. `/goal` rendering "Goal check:
-          // not yet met" on the very first not-met turn, or a configured Stop
-          // hook surfacing its blocking reason before the agent attempts a
-          // retry). The previous `>1` guard hid the first reason until the
-          // hook fired twice, which made /goal's first iteration invisible
-          // and delayed visibility for regular hooks that only fire once.
+          // Emit StopHookLoop starting with the first blocking decision so
+          // /goal and configured Stop hooks both surface their reason before
+          // the follow-up turn is generated. The cap check stays before the
+          // yield because a cap of 1 means no follow-up turn should run.
+          const stopHookBlockingCap = this.config.getStopHookBlockingCap();
+          if (currentIterationCount >= stopHookBlockingCap) {
+            const warning = formatStopHookBlockingCapWarning(
+              'Stop',
+              stopHookBlockingCap,
+            );
+            abortGoalForStopHookCap(
+              this.config,
+              this.config.getSessionId(),
+              warning,
+            );
+            yield {
+              type: GeminiEventType.HookSystemMessage,
+              value: warning,
+            };
+            debugLogger.warn(warning);
+            if (isTopLevelInteraction) endInteractionSpan('ok');
+            return turn;
+          }
+
           yield {
             type: GeminiEventType.StopHookLoop,
             value: {
