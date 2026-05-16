@@ -36,6 +36,15 @@ const EXPORT_DIR_OUT_OF_CWD =
 
 type ExportOutputDirKind = 'default' | 'custom';
 
+type ExportTargetContext = {
+  outputDir: string;
+  resolvedCwd: string;
+};
+
+function formatExportTargetContext(target: ExportTargetContext): string {
+  return `target: "${target.outputDir}", cwd: "${target.resolvedCwd}"`;
+}
+
 function resolveExportTarget(cwd: string, args: string, extension: string) {
   const filename = generateExportFilename(extension);
   const outputDirArg = args.trim();
@@ -77,8 +86,9 @@ async function validateExportTargetWithinCwd(target: {
       return {
         type: 'message',
         messageType: 'error',
-        content:
-          'Export target directory is not accessible (path does not exist).',
+        content: `Export target directory is not accessible (path does not exist; ${formatExportTargetContext(
+          target,
+        )}).`,
       };
     }
     throw error;
@@ -88,7 +98,9 @@ async function validateExportTargetWithinCwd(target: {
     return {
       type: 'message',
       messageType: 'error',
-      content: `${EXPORT_DIR_OUT_OF_CWD} (target path resolves outside cwd via symlink)`,
+      content: `${EXPORT_DIR_OUT_OF_CWD} (target path resolves outside cwd via symlink; ${formatExportTargetContext(
+        target,
+      )})`,
     };
   }
 
@@ -134,7 +146,9 @@ async function validateExistingExportParentWithinCwd(target: {
     return {
       type: 'message',
       messageType: 'error',
-      content: `${EXPORT_DIR_OUT_OF_CWD} (parent path resolves outside cwd via symlink)`,
+      content: `${EXPORT_DIR_OUT_OF_CWD} (parent path resolves outside cwd via symlink; ${formatExportTargetContext(
+        target,
+      )})`,
     };
   }
 
@@ -172,7 +186,9 @@ async function exportSessionAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: `${EXPORT_DIR_OUT_OF_CWD} (target path is outside cwd)`,
+      content: `${EXPORT_DIR_OUT_OF_CWD} (target path is outside cwd; ${formatExportTargetContext(
+        target,
+      )})`,
     };
   }
 

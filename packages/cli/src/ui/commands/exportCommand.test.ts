@@ -399,12 +399,14 @@ describe('exportCommand', () => {
       }
 
       const result = await mdCommand.action(mockContext, '../outside');
+      const outputDir = path.resolve('/test/dir', '../outside');
 
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory. (target path is outside cwd)',
+          `Export directory must be within the project working directory. ` +
+          `(target path is outside cwd; target: "${outputDir}", cwd: "/test/dir")`,
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -418,12 +420,14 @@ describe('exportCommand', () => {
       }
 
       const result = await mdCommand.action(mockContext, '/tmp/exports');
+      const outputDir = path.resolve('/tmp/exports');
 
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory. (target path is outside cwd)',
+          `Export directory must be within the project working directory. ` +
+          `(target path is outside cwd; target: "${outputDir}", cwd: "/test/dir")`,
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -449,7 +453,8 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory. (parent path resolves outside cwd via symlink)',
+          `Export directory must be within the project working directory. ` +
+          `(parent path resolves outside cwd via symlink; target: "${outputDir}", cwd: "/test/dir")`,
       });
       expect(fs.mkdir).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
@@ -482,7 +487,8 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory. (parent path resolves outside cwd via symlink)',
+          `Export directory must be within the project working directory. ` +
+          `(parent path resolves outside cwd via symlink; target: "${missingOutputDir}", cwd: "/test/dir")`,
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -515,7 +521,8 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory. (target path resolves outside cwd via symlink)',
+          `Export directory must be within the project working directory. ` +
+          `(target path resolves outside cwd via symlink; target: "${outputDir}", cwd: "/test/dir")`,
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
         recursive: true,
@@ -553,7 +560,8 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export target directory is not accessible (path does not exist).',
+          `Export target directory is not accessible (path does not exist; ` +
+          `target: "${outputDir}", cwd: "/test/dir").`,
       });
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
