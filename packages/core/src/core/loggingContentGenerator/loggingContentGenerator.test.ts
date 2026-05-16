@@ -106,7 +106,10 @@ vi.mock('../../telemetry/index.js', () => {
   ) {
     const record = {
       name,
-      attributes,
+      attributes: { ...attributes } as Record<
+        string,
+        string | number | boolean
+      >,
       statuses: [] as Array<{ code: number; message?: string }>,
       ended: false,
     };
@@ -119,8 +122,12 @@ vi.mock('../../telemetry/index.js', () => {
         }
         record.statuses.push(status);
       },
-      setAttribute: vi.fn(),
-      setAttributes: vi.fn(),
+      setAttribute(key: string, value: string | number | boolean) {
+        record.attributes[key] = value;
+      },
+      setAttributes(attrs: Record<string, string | number | boolean>) {
+        Object.assign(record.attributes, attrs);
+      },
       end() {
         record.ended = true;
       },
@@ -429,12 +436,67 @@ describe('LoggingContentGenerator', () => {
     await generator.generateContent(request, 'prompt-span');
 
     const spanRecord = getGenerateContentSpanRecord();
-    expect(spanRecord.attributes).toEqual({
+    expect(spanRecord.attributes).toMatchObject({
       model: 'test-model',
       prompt_id: 'prompt-span',
+      'llm_request.stream': false,
     });
     expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('marks non-stream LLM span with llm_request.stream=false', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-stream-attr');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.attributes['llm_request.stream']).toBe(false);
+  });
+
+  it('marks streaming LLM span with llm_request.stream=true', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'ok' }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-attr',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.attributes['llm_request.stream']).toBe(true);
   });
 
   it('preserves non-stream success when response and OpenAI logging fail', async () => {

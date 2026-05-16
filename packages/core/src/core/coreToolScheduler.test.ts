@@ -3379,6 +3379,60 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
   });
+
+  // tool.execution sub-span lifecycle assertions —
+  // ensure the sub-span is started/ended on every meaningful path so that
+  // future regressions (e.g. dropping the sub-span call or mis-marking a
+  // failed result as success) fail loudly.
+
+  function getExecutionSpan(): ToolSpanRecord | undefined {
+    return toolSpanRecords.find((r) => r.name === 'tool.execution');
+  }
+
+  it('execution sub-span: started and ended (success: true) on success', async () => {
+    await runSingleTool();
+    const exec = getExecutionSpan();
+    expect(exec).toBeDefined();
+    expect(exec!.ended).toBe(true);
+  });
+
+  it('execution sub-span: ended (success: false) when ToolResult.error is set', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'tool failed',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+    const exec = getExecutionSpan();
+    expect(exec).toBeDefined();
+    expect(exec!.ended).toBe(true);
+  });
+
+  it('execution sub-span: ended on thrown invocation exception', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+    const exec = getExecutionSpan();
+    expect(exec).toBeDefined();
+    expect(exec!.ended).toBe(true);
+  });
+
+  it('execution sub-span: NOT created when pre-hook denies execution', async () => {
+    const messageBus = {
+      request: vi.fn().mockResolvedValueOnce({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: 'pre-hook',
+        success: true,
+        output: { decision: 'block', reason: 'denied' },
+      }),
+    };
+    await runSingleTool({ messageBus, disableHooks: false });
+    expect(getExecutionSpan()).toBeUndefined();
+  });
 });
 
 // Integration tests for the fire* functions

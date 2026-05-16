@@ -405,6 +405,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let errorOccurred = false;
+    // Tracks whether the idle timeout fired and ended the span. If so,
+    // a resumed-after-timeout consumer must not call endLLMRequestSpan
+    // again (the helper would no-op, but more importantly we skip the
+    // redundant work and avoid resetting the timer further).
+    let spanEndedByTimeout = false;
 
     // Helper to run code within the span context during iteration.
     // This ensures debug log lines emitted during stream processing
@@ -420,6 +425,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     let spanEndTimeout: ReturnType<typeof setTimeout> | undefined;
     const resetSpanTimeout = span
       ? () => {
+          if (spanEndedByTimeout) return;
           if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
           spanEndTimeout = setTimeout(() => {
             try {
@@ -432,6 +438,7 @@ export class LoggingContentGenerator implements ContentGenerator {
               durationMs: Date.now() - startTime,
               error: 'Stream span timed out (idle)',
             });
+            spanEndedByTimeout = true;
           }, STREAM_IDLE_TIMEOUT_MS);
           spanEndTimeout.unref();
         }
@@ -509,7 +516,11 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
       }
-      if (span) {
+      // If the idle timeout already ended the span, skip the redundant
+      // endLLMRequestSpan call. The helper itself would no-op due to its
+      // own ended guard, but we want to avoid pretending the final token
+      // counts were recorded — they weren't, the span is the timeout one.
+      if (span && !spanEndedByTimeout) {
         endLLMRequestSpan(span, {
           success: !errorOccurred,
           inputTokens: lastUsageMetadata?.promptTokenCount,

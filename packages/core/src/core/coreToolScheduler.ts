@@ -1958,43 +1958,47 @@ export class CoreToolScheduler {
     // currently emit nested OTel spans of their own — the span boundary
     // is purely for timing/attribution.
     const execSpan = startToolExecutionSpan();
-    let promise: Promise<ToolResult>;
-    if (invocation instanceof ShellToolInvocation) {
-      const setPidCallback = (pid: number) => {
-        this.toolCalls = this.toolCalls.map((tc) =>
-          tc.request.callId === callId && tc.status === 'executing'
-            ? { ...tc, pid }
-            : tc,
-        );
-        this.notifyToolCallsUpdate();
-      };
-      // Stash the promote AbortController on the executing tool call so
-      // a UI surface (Ctrl+B keybind) can find the foreground shell's
-      // promote trigger by callId.
-      const setPromoteAbortControllerCallback = (ac: AbortController) => {
-        this.toolCalls = this.toolCalls.map((tc) =>
-          tc.request.callId === callId && tc.status === 'executing'
-            ? { ...tc, promoteAbortController: ac }
-            : tc,
-        );
-        this.notifyToolCallsUpdate();
-      };
-      promise = invocation.execute(
-        signal,
-        liveOutputCallback,
-        shellExecutionConfig,
-        setPidCallback,
-        setPromoteAbortControllerCallback,
-      );
-    } else {
-      promise = invocation.execute(
-        signal,
-        liveOutputCallback,
-        shellExecutionConfig,
-      );
-    }
-
+    // try wraps both invocation.execute() and the await so synchronous
+    // throws (e.g. shell setup failure) flow into the same catch as async
+    // rejections — otherwise execSpan leaks unended and failure hooks
+    // are skipped.
     try {
+      let promise: Promise<ToolResult>;
+      if (invocation instanceof ShellToolInvocation) {
+        const setPidCallback = (pid: number) => {
+          this.toolCalls = this.toolCalls.map((tc) =>
+            tc.request.callId === callId && tc.status === 'executing'
+              ? { ...tc, pid }
+              : tc,
+          );
+          this.notifyToolCallsUpdate();
+        };
+        // Stash the promote AbortController on the executing tool call so
+        // a UI surface (Ctrl+B keybind) can find the foreground shell's
+        // promote trigger by callId.
+        const setPromoteAbortControllerCallback = (ac: AbortController) => {
+          this.toolCalls = this.toolCalls.map((tc) =>
+            tc.request.callId === callId && tc.status === 'executing'
+              ? { ...tc, promoteAbortController: ac }
+              : tc,
+          );
+          this.notifyToolCallsUpdate();
+        };
+        promise = invocation.execute(
+          signal,
+          liveOutputCallback,
+          shellExecutionConfig,
+          setPidCallback,
+          setPromoteAbortControllerCallback,
+        );
+      } else {
+        promise = invocation.execute(
+          signal,
+          liveOutputCallback,
+          shellExecutionConfig,
+        );
+      }
+
       const toolResult: ToolResult = await promise;
       endToolExecutionSpan(execSpan, {
         success: toolResult.error === undefined,
