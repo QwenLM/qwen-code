@@ -55,6 +55,14 @@ const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
 const META_FILE_SUFFIX = '.meta.json';
 
+function appendSubagentStopWarning(
+  text: string,
+  warning: string | undefined,
+): string {
+  if (!warning) return text;
+  return text ? `${text}\n\n${warning}` : warning;
+}
+
 export const DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE =
   'Continue working on the current task from the last completed step.';
 
@@ -729,8 +737,9 @@ export class BackgroundAgentResumeService {
         try {
           await subagent.execute(contextState, bgAbortController.signal);
 
+          let stopHookWarning: string | undefined;
           if (hookSystem && !bgAbortController.signal.aborted) {
-            await this.runSubagentStopHookLoop(subagent, {
+            stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
               agentId: meta.agentId,
               agentType: meta.agentType,
               transcriptPath: outputFile,
@@ -740,7 +749,10 @@ export class BackgroundAgentResumeService {
           }
 
           const terminateMode = subagent.getTerminateMode();
-          const finalText = subagent.getFinalText();
+          const finalText = appendSubagentStopWarning(
+            subagent.getFinalText(),
+            stopHookWarning,
+          );
           const stats = getCompletionStats(subagent, liveToolCallCount);
           if (terminateMode === AgentTerminateMode.GOAL) {
             registry.complete(meta.agentId, finalText, stats);
@@ -978,10 +990,10 @@ export class BackgroundAgentResumeService {
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
-    if (!hookSystem) return;
+    if (!hookSystem) return undefined;
     let stopHookActive = false;
     const maxIterations = this.config.getStopHookBlockingCap();
 
@@ -1002,19 +1014,18 @@ export class BackgroundAgentResumeService {
           !typedStopOutput?.isBlockingDecision() &&
           !typedStopOutput?.shouldStopExecution()
         ) {
-          return;
+          return undefined;
         }
 
         stopHookActive = true;
         const currentIterationCount = i + 1;
         if (currentIterationCount >= maxIterations) {
-          debugLogger.warn(
-            `[BackgroundAgentResume] ${formatStopHookBlockingCapWarning(
-              'SubagentStop',
-              maxIterations,
-            )}`,
+          const warning = formatStopHookBlockingCapWarning(
+            'SubagentStop',
+            maxIterations,
           );
-          return;
+          debugLogger.warn(`[BackgroundAgentResume] ${warning}`);
+          return warning;
         }
 
         const continueContext = new ContextState();
@@ -1024,20 +1035,20 @@ export class BackgroundAgentResumeService {
         );
         await subagent.execute(continueContext, signal);
 
-        if (signal?.aborted) return;
+        if (signal?.aborted) return undefined;
       } catch (hookError) {
         debugLogger.warn(
           `[BackgroundAgentResume] SubagentStop hook failed, allowing stop: ${hookError}`,
         );
-        return;
+        return undefined;
       }
     }
 
-    debugLogger.warn(
-      `[BackgroundAgentResume] ${formatStopHookBlockingCapWarning(
-        'SubagentStop',
-        maxIterations,
-      )}`,
+    const warning = formatStopHookBlockingCapWarning(
+      'SubagentStop',
+      maxIterations,
     );
+    debugLogger.warn(`[BackgroundAgentResume] ${warning}`);
+    return warning;
   }
 }

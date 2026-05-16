@@ -1321,10 +1321,13 @@ describe('AgentTool', () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      await invocation.execute();
+      const result = await invocation.execute();
 
       expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
       expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+      expect(partToString(result.llmContent)).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
     });
 
     it('should allow stop when SubagentStop hook fails', async () => {

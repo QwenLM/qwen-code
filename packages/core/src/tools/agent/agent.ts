@@ -167,6 +167,14 @@ export interface AgentParams {
 
 const debugLogger = createDebugLogger('AGENT');
 
+function appendSubagentStopWarning(
+  text: string,
+  warning: string | undefined,
+): string {
+  if (!warning) return text;
+  return text ? `${text}\n\n${warning}` : warning;
+}
+
 /**
  * Maps ApprovalMode to PermissionMode for hook events.
  */
@@ -966,10 +974,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
-    if (!hookSystem) return;
+    if (!hookSystem) return undefined;
 
     const effectiveTranscriptPath =
       transcriptPath ?? this.config.getTranscriptPath();
@@ -994,19 +1002,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           !typedStopOutput?.isBlockingDecision() &&
           !typedStopOutput?.shouldStopExecution()
         ) {
-          return;
+          return undefined;
         }
 
         stopHookActive = true;
         const currentIterationCount = i + 1;
         if (currentIterationCount >= maxIterations) {
-          debugLogger.warn(
-            `[Agent] ${formatStopHookBlockingCapWarning(
-              'SubagentStop',
-              maxIterations,
-            )}`,
+          const warning = formatStopHookBlockingCapWarning(
+            'SubagentStop',
+            maxIterations,
           );
-          return;
+          debugLogger.warn(`[Agent] ${warning}`);
+          return warning;
         }
 
         const continueContext = new ContextState();
@@ -1016,21 +1023,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         await subagent.execute(continueContext, signal);
 
-        if (signal?.aborted) return;
+        if (signal?.aborted) return undefined;
       } catch (hookError) {
         debugLogger.warn(
           `[Agent] SubagentStop hook failed, allowing stop: ${hookError}`,
         );
-        return;
+        return undefined;
       }
     }
 
-    debugLogger.warn(
-      `[Agent] ${formatStopHookBlockingCapWarning(
-        'SubagentStop',
-        maxIterations,
-      )}`,
+    const warning = formatStopHookBlockingCapWarning(
+      'SubagentStop',
+      maxIterations,
     );
+    debugLogger.warn(`[Agent] ${warning}`);
+    return warning;
   }
 
   /**
@@ -1047,7 +1054,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       signal?: AbortSignal;
       updateOutput?: (output: ToolResultDisplay) => void;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
     const hookSystem = this.config.getHookSystem();
 
@@ -1076,8 +1083,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Execute the subagent (blocking)
       await subagent.execute(contextState, signal);
 
+      let stopHookWarning: string | undefined;
       if (hookSystem && !signal?.aborted) {
-        await this.runSubagentStopHookLoop(subagent, {
+        stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
           agentId,
           agentType,
           resolvedMode,
@@ -1086,7 +1094,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // Get the results
-      const finalText = subagent.getFinalText();
+      const finalText = appendSubagentStopWarning(
+        subagent.getFinalText(),
+        stopHookWarning,
+      );
       const terminateMode = subagent.getTerminateMode();
       const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
@@ -1111,6 +1122,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           updateOutput,
         );
       }
+      return stopHookWarning;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -1124,6 +1136,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         },
         updateOutput,
       );
+      return undefined;
     }
   }
 
@@ -1786,8 +1799,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
+            let stopHookWarning: string | undefined;
             if (hookSystem && !bgAbortController.signal.aborted) {
-              await this.runSubagentStopHookLoop(bgSubagent, {
+              stopHookWarning = await this.runSubagentStopHookLoop(bgSubagent, {
                 agentId: hookOpts.agentId,
                 agentType: hookOpts.agentType,
                 transcriptPath: jsonlPath,
@@ -1806,7 +1820,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const wtSuffix = formatWorktreeSuffix(
               await cleanupWorktreeIsolation(),
             );
-            const finalText = bgSubagent.getFinalText() + wtSuffix;
+            const finalText =
+              appendSubagentStopWarning(
+                bgSubagent.getFinalText(),
+                stopHookWarning,
+              ) + wtSuffix;
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
@@ -2061,8 +2079,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
       try {
-        await runFramed();
-        const finalText = subagent.getFinalText();
+        const stopHookWarning = await runFramed();
+        const finalText = appendSubagentStopWarning(
+          subagent.getFinalText(),
+          stopHookWarning,
+        );
         const terminateMode = subagent.getTerminateMode();
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
