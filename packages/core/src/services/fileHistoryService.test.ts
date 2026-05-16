@@ -119,6 +119,58 @@ describe('FileHistoryService', () => {
       await expect(service.trackEdit(file)).resolves.toBeUndefined();
       expect(service.getSnapshots()[0].trackedFileBackups).toEqual({});
     });
+
+    // The sticky-failed guard symmetry test for trackEdit. After
+    // makeSnapshot recorded a `failed: true` marker for a file (e.g.
+    // transient disk full), the next trackEdit invocation — typically
+    // triggered by a tool about to modify the same file — must NOT
+    // skip just because the entry exists. It must attempt a fresh
+    // backup; on success the failed marker is replaced. Without this
+    // the failed flag stays sticky until the file content changes,
+    // permanently poisoning rewind for that file.
+    it('heals a failed entry on the next trackEdit attempt', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'p1-content');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+
+      // Force makeSnapshot's per-file backup to throw. The file content
+      // is unchanged so checkOriginFileChanged short-circuits to "no
+      // change" — but we want the failure path here, so modify the file
+      // first to ensure createBackup is reached.
+      await writeFile(file, 'p2-content');
+      await rm(storageDir, { recursive: true, force: true });
+      await writeFile(storageDir, '');
+      await service.makeSnapshot('p2');
+      expect(
+        service.getSnapshots()[1].trackedFileBackups['a.txt']!.failed,
+      ).toBe(true);
+
+      // Restore the backup target and have a tool about to edit the file
+      // call trackEdit. The guard must let createBackup run again; on
+      // success the failed marker is replaced with a real entry.
+      await rm(storageDir, { recursive: true, force: true });
+      await mkdir(storageDir, { recursive: true });
+      await service.trackEdit(file);
+
+      const p2Backup = service.getSnapshots()[1].trackedFileBackups['a.txt'];
+      expect(p2Backup).toBeDefined();
+      expect(p2Backup.failed).toBeFalsy();
+      expect(p2Backup.backupFileName).not.toBeNull();
+
+      // Verify the on-disk backup at the new name actually contains the
+      // current file content. Catches a regression where the heal path
+      // accidentally reuses `previous.backupFileName` (pointing at the
+      // older `p1-content`) instead of writing a fresh backup.
+      const backupPath = join(
+        storageDir,
+        'file-history',
+        'test-session',
+        p2Backup.backupFileName!,
+      );
+      expect(await readFile(backupPath, 'utf-8')).toBe('p2-content');
+    });
   });
 
   describe('makeSnapshot', () => {

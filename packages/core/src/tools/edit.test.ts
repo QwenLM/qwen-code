@@ -534,6 +534,64 @@ describe('EditTool', () => {
       );
     });
 
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window from microseconds
+    // to seconds.
+    //
+    // Test strategy: install a `trackEdit` mock that mutates the file
+    // on disk (bumps mtime) before returning. The mutation has to be
+    // detected by the pre-write `checkPriorRead`. That only happens if
+    // `trackEdit` runs BEFORE the pre-write check — the broken
+    // ordering would run the pre-write check first (passing on the
+    // pre-mutation stats), then trackEdit (which mutates), then write
+    // (which clobbers the external mutation silently).
+    //
+    // Asserting on `result.error` directly tests the behavioral
+    // invariant rather than the call-ordering proxy, so it survives
+    // future refactors that preserve the invariant even if they shift
+    // the number of `cache.check` calls.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const initialContent = 'This is some old text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        // Simulate an external write that lands while trackEdit is
+        // copying the file to the backup directory. Bumping mtime by
+        // 5 s makes the change reliably "newer" under the cache's
+        // ~1 s comparison granularity on macOS.
+        const newTime = new Date(Date.now() + 5000);
+        fs.utimesSync(filePath, newTime, newTime);
+      });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      // trackEdit must have actually fired.
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      // The pre-write check must have caught the in-trackEdit mutation
+      // and rejected, proving trackEdit ran BEFORE the pre-write check.
+      expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+      // The file on disk is unchanged (rejected, not overwritten).
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
+    });
+
     // The Edit tool feeds the commit-attribution singleton on success so
     // commit notes can later report per-file AI/human ratios. Service-
     // level tests for `recordEdit` already exist; these guard against
