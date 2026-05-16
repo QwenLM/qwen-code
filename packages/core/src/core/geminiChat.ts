@@ -554,6 +554,24 @@ export class GeminiChat {
   private hasFailedCompressionAttempt = false;
 
   /**
+   * Index into `this.history` of the model turn that `processStreamResponse`
+   * persisted on the CURRENT in-flight attempt's mid-stream error. `null` if
+   * no partial has been pushed (the common case).
+   *
+   * The retry loop in `sendMessageStream` reads this on every catch to roll
+   * the partial back BEFORE retrying — without that pop, a retryable
+   * mid-stream error (rate limit, transient stream anomaly) leaves the
+   * failed attempt's `model[functionCall]` in history, and the successful
+   * retry's response lands as a SECOND consecutive model turn (invalid
+   * user/model alternation, plus the failed-attempt tool_use is orphan on
+   * the wire — the very wedge this whole subsystem is meant to escape).
+   *
+   * Reset to `null` on every `sendMessageStream` entry so a marker left
+   * over from a prior unretryable break doesn't bleed into the next send.
+   */
+  private pendingPartialAssistantTurnIndex: number | null = null;
+
+  /**
    * Creates a new GeminiChat instance.
    *
    * @param config - The configuration object.
@@ -730,6 +748,12 @@ export class GeminiChat {
     });
     this.sendPromise = streamDonePromise;
 
+    // Clear any partial-push marker left over from a prior unretryable
+    // break path — the marker is per-send; carrying it across sends
+    // would let the next send's retry catch wrongly pop a now-valid
+    // model entry sitting at the stale index.
+    this.pendingPartialAssistantTurnIndex = null;
+
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
@@ -855,12 +879,35 @@ export class GeminiChat {
           } catch (error) {
             lastError = error;
 
+            // If `processStreamResponse` persisted a partial assistant turn
+            // (mid-stream error after a `functionCall` was already yielded),
+            // every retry-and-continue path below must drop that turn first.
+            // Otherwise a successful retry's response lands AFTER the stale
+            // failed-attempt model turn — two consecutive `model` entries
+            // with an orphan tool_use in the first, re-triggering the
+            // "tool_use_id ... corresponding tool_use" 400 this fix is
+            // supposed to escape. Paths that `break` (unretryable) keep
+            // the partial — the caller will see it as part of the error
+            // surface.
+            const popPartialIfPushed = () => {
+              const idx = self.pendingPartialAssistantTurnIndex;
+              if (idx === null) return;
+              if (
+                self.history.length > idx &&
+                self.history[idx]?.role === 'model'
+              ) {
+                self.history.splice(idx, 1);
+              }
+              self.pendingPartialAssistantTurnIndex = null;
+            };
+
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
             if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
+              popPartialIfPushed();
               rateLimitRetryCount++;
               const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                 ...RATE_LIMIT_RETRY_OPTIONS,
@@ -935,6 +982,7 @@ export class GeminiChat {
                     reactiveInfo.compressionStatus ===
                     CompressionStatus.COMPRESSED
                   ) {
+                    popPartialIfPushed();
                     requestContents = self.getHistory(true);
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
@@ -991,6 +1039,7 @@ export class GeminiChat {
               isTransientStreamError &&
               invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
             ) {
+              popPartialIfPushed();
               invalidStreamRetryCount++;
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -1024,6 +1073,7 @@ export class GeminiChat {
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
+                popPartialIfPushed();
                 logContentRetry(
                   self.config,
                   new ContentRetryEvent(
@@ -1586,6 +1636,12 @@ export class GeminiChat {
             ...consolidatedHistoryParts,
           ],
         });
+        // Track the pushed turn so the outer sendMessageStream retry loop
+        // can roll it back if it decides to retry the same send. Without
+        // this, a successful retry would leave the failed attempt's
+        // partial `model[functionCall]` as a stale leading model turn in
+        // front of the retry's real response.
+        this.pendingPartialAssistantTurnIndex = this.history.length - 1;
       }
       throw streamError;
     }

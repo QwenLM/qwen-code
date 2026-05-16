@@ -2382,6 +2382,87 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('rolls back the partial assistant turn when a retryable error fires after a tool_use chunk', async () => {
+      // Regression for the case @yiliang114 reproduced on #4176: stream
+      // attempt 1 yields a `functionCall` (which triggers the partial-
+      // history push in `processStreamResponse`), then the SAME stream
+      // throws a retryable error (e.g. a TPM 429 `StreamContentError`).
+      // The outer retry loop must drop the partial before issuing the
+      // retry — otherwise the retry's response lands as a SECOND
+      // consecutive `model` entry and the failed-attempt `tool_use`
+      // becomes orphan on the wire (invalid alternation +
+      // tool_use_id-with-no-matching-tool_use 400).
+      vi.useFakeTimers();
+      try {
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        const failingStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_failed_retry_attempt',
+                        name: 'read_file',
+                        args: { path: '/tmp/a.txt' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw tpmError;
+        })();
+        const successStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Success after retry' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failingStream)
+          .mockResolvedValueOnce(successStream);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-rollback-on-retry',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+        // Advance through the rate-limit RETRY + delay, drain all events.
+        for (;;) {
+          const next = iterator.next();
+          await vi.advanceTimersByTimeAsync(60_000);
+          const r = await next;
+          if (r.done) break;
+        }
+
+        const history = chat.getHistory();
+        // History must NOT contain the failed attempt's partial
+        // model[functionCall]. Expected shape: [user, model(success
+        // text)] — exactly two entries, alternation intact.
+        expect(history.length).toBe(2);
+        expect(history[0]!.role).toBe('user');
+        expect(history[1]!.role).toBe('model');
+        const successText = history[1]!.parts!.find((p) => p.text)?.text;
+        expect(successText).toBe('Success after retry');
+        // Defensively: NO functionCall anywhere in history.
+        expect(history.some((h) => h.parts?.some((p) => p.functionCall))).toBe(
+          false,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should retry on TPM throttling StreamContentError with initial delay', async () => {
       vi.useFakeTimers();
 
