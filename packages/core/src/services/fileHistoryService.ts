@@ -392,6 +392,7 @@ export class FileHistoryService {
 
             if (
               latestBackup &&
+              !latestBackup.failed &&
               latestBackup.backupFileName !== null &&
               !(await checkOriginFileChanged(
                 filePath,
@@ -400,6 +401,14 @@ export class FileHistoryService {
                 fileStats,
               ))
             ) {
+              // The previous snapshot has a confirmed (non-failed) backup of
+              // an unchanged file — reuse it. We must NOT reach this branch
+              // when `latestBackup.failed` is set: copying that entry forward
+              // would carry the `failed` flag into every subsequent snapshot
+              // for as long as the file stays unchanged, permanently
+              // poisoning rewind for that file. Instead we fall through and
+              // retry `createBackup`, which either heals (transient I/O
+              // recovered) or honestly records another failed entry.
               trackedFileBackups[trackingPath] = latestBackup;
               return;
             }

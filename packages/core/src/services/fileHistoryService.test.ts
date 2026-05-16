@@ -5,7 +5,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, stat, writeFile, readFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  rm,
+  stat,
+  writeFile,
+  readFile,
+} from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -191,6 +198,45 @@ describe('FileHistoryService', () => {
       const result = await service.rewind('p2');
       expect(result.filesChanged).toEqual([]);
       expect(result.filesFailed).toContain(file);
+    });
+
+    // After a transient backup failure, the no-change optimization must NOT
+    // copy the failed entry forward into the next snapshot. If we did, the
+    // failed flag would stay sticky for as long as the file is unchanged,
+    // permanently poisoning rewind for that file even after the backup
+    // target recovers.
+    it('does not carry a failed marker forward when the file is unchanged', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'stable-content');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+
+      // Break the backup target so p2's per-file backup throws; do NOT
+      // change the file content.
+      await rm(storageDir, { recursive: true, force: true });
+      await writeFile(storageDir, '');
+      await service.makeSnapshot('p2');
+      expect(
+        service.getSnapshots()[1].trackedFileBackups['a.txt']!.failed,
+      ).toBe(true);
+
+      // Restore the backup target. The file is still unchanged. p3 must
+      // retry the backup (instead of copying p2's failed entry forward) and
+      // record a fresh non-failed entry.
+      await rm(storageDir, { recursive: true, force: true });
+      await mkdir(storageDir, { recursive: true });
+
+      await service.makeSnapshot('p3');
+
+      const p3Backup = service.getSnapshots()[2].trackedFileBackups['a.txt'];
+      expect(p3Backup).toBeDefined();
+      expect(p3Backup.failed).toBeFalsy();
+      expect(p3Backup.backupFileName).not.toBeNull();
+
+      // Rewind to p3 succeeds (file is unchanged but the backup is now real).
+      const result = await service.rewind('p3');
+      expect(result.filesFailed).toEqual([]);
     });
   });
 
