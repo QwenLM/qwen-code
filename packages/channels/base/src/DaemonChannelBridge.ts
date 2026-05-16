@@ -17,9 +17,12 @@ export interface DaemonChannelSessionClient {
   readonly sessionId: string;
   readonly workspaceCwd: string;
   readonly lastEventId?: number;
-  prompt(req: {
-    prompt: Array<Record<string, unknown>>;
-  }): Promise<{ stopReason?: string; [key: string]: unknown }>;
+  prompt(
+    req: {
+      prompt: Array<Record<string, unknown>>;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ stopReason?: string; [key: string]: unknown }>;
   events(opts?: {
     signal?: AbortSignal;
     lastEventId?: number;
@@ -87,16 +90,26 @@ export class DaemonChannelBridge extends EventEmitter {
   private readonly sessions = new Map<string, DaemonChannelSessionClient>();
   private readonly eventControllers = new Map<string, AbortController>();
   private readonly requestToSession = new Map<string, string>();
+  private readonly activePrompts = new Set<string>();
+  private readonly availableCommandsBySession = new Map<
+    string,
+    AvailableCommand[]
+  >();
   private connected = false;
   private _availableCommands: AvailableCommand[] = [];
 
   constructor(options: DaemonChannelBridgeOptions) {
     super();
     this.options = options;
+    this.on('error', () => {});
   }
 
   get availableCommands(): AvailableCommand[] {
     return this._availableCommands;
+  }
+
+  getAvailableCommands(sessionId: string): AvailableCommand[] {
+    return this.availableCommandsBySession.get(sessionId) ?? [];
   }
 
   async start(): Promise<void> {
@@ -128,13 +141,27 @@ export class DaemonChannelBridge extends EventEmitter {
     options?: { imageBase64?: string; imageMimeType?: string },
   ): Promise<string> {
     const session = this.ensureSession(sessionId);
+    if (this.activePrompts.has(sessionId)) {
+      throw new Error(
+        `Prompt already in flight for daemon session ${sessionId}`,
+      );
+    }
+    this.activePrompts.add(sessionId);
+
+    const controller = new AbortController();
     const chunks: string[] = [];
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) {
         chunks.push(chunk);
       }
     };
+    const onSessionDied = (info: { sessionId: string }) => {
+      if (info.sessionId === sessionId) {
+        controller.abort();
+      }
+    };
     this.on('textChunk', onChunk);
+    this.on('sessionDied', onSessionDied);
 
     const prompt: Array<Record<string, unknown>> = [];
     if (options?.imageBase64 && options.imageMimeType) {
@@ -147,9 +174,11 @@ export class DaemonChannelBridge extends EventEmitter {
     prompt.push({ type: 'text', text });
 
     try {
-      await session.prompt({ prompt });
+      await session.prompt({ prompt }, controller.signal);
     } finally {
       this.off('textChunk', onChunk);
+      this.off('sessionDied', onSessionDied);
+      this.activePrompts.delete(sessionId);
     }
 
     return chunks.join('');
@@ -174,10 +203,12 @@ export class DaemonChannelBridge extends EventEmitter {
     if (!sessionId) {
       return false;
     }
-    return await this.ensureSession(sessionId).respondToPermission(
-      requestId,
-      response,
-    );
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      this.requestToSession.delete(requestId);
+      return false;
+    }
+    return await session.respondToPermission(requestId, response);
   }
 
   stop(): void {
@@ -187,6 +218,9 @@ export class DaemonChannelBridge extends EventEmitter {
     this.eventControllers.clear();
     this.sessions.clear();
     this.requestToSession.clear();
+    this.activePrompts.clear();
+    this.availableCommandsBySession.clear();
+    this._availableCommands = [];
     this.connected = false;
   }
 
@@ -217,12 +251,23 @@ export class DaemonChannelBridge extends EventEmitter {
     signal: AbortSignal,
   ): Promise<void> {
     try {
-      for await (const event of session.events({ signal })) {
+      for await (const event of session.events({
+        signal,
+        lastEventId: session.lastEventId,
+        resume: true,
+      })) {
         this.handleEvent(session, event);
+      }
+      if (!signal.aborted) {
+        this.dropSession(session.sessionId, 'stream_ended');
       }
     } catch (error) {
       if (!signal.aborted) {
         this.emit('error', error);
+        this.dropSession(
+          session.sessionId,
+          error instanceof Error ? error.message : String(error),
+        );
       }
     }
   }
@@ -291,9 +336,9 @@ export class DaemonChannelBridge extends EventEmitter {
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          this._availableCommands = update[
-            'availableCommands'
-          ] as AvailableCommand[];
+          const commands = update['availableCommands'] as AvailableCommand[];
+          this.availableCommandsBySession.set(sessionId, commands);
+          this._availableCommands = commands;
         }
         break;
       }
@@ -305,7 +350,12 @@ export class DaemonChannelBridge extends EventEmitter {
   }
 
   private handlePermissionRequest(sessionId: string, data: unknown): void {
-    if (!isRecord(data) || typeof data['requestId'] !== 'string') {
+    if (
+      !isRecord(data) ||
+      typeof data['requestId'] !== 'string' ||
+      !isRecord(data['toolCall']) ||
+      !Array.isArray(data['options'])
+    ) {
       return;
     }
     const requestId = data['requestId'];
@@ -344,9 +394,25 @@ export class DaemonChannelBridge extends EventEmitter {
       isRecord(data) && typeof data['reason'] === 'string'
         ? data['reason']
         : 'session_died';
+    this.dropSession(sessionId, reason);
+  }
+
+  private dropSession(sessionId: string, reason: string): void {
+    if (!this.sessions.has(sessionId)) {
+      return;
+    }
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
+    this.activePrompts.delete(sessionId);
+    this.availableCommandsBySession.delete(sessionId);
+    this._availableCommands =
+      Array.from(this.availableCommandsBySession.values()).at(-1) ?? [];
+    for (const [requestId, mappedSessionId] of this.requestToSession) {
+      if (mappedSessionId === sessionId) {
+        this.requestToSession.delete(requestId);
+      }
+    }
     this.emit('sessionDied', { sessionId, reason });
   }
 }

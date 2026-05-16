@@ -14,8 +14,12 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   private waiters: Array<(value: IteratorResult<DaemonChannelEvent>) => void> =
     [];
   private closed = false;
+  private failure: unknown;
 
   async next(): Promise<IteratorResult<DaemonChannelEvent>> {
+    if (this.failure) {
+      throw this.failure;
+    }
     const event = this.events.shift();
     if (event) {
       return { done: false, value: event };
@@ -57,6 +61,10 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
       waiter({ done: true, value: undefined });
     }
   }
+
+  fail(error: unknown): void {
+    this.failure = error;
+  }
 }
 
 interface FakeSession extends DaemonChannelSessionClient {
@@ -76,7 +84,12 @@ function createFakeSession(
     workspaceCwd: '/repo',
     lastEventId: undefined,
     prompt: vi.fn().mockImplementation(async () => undefined),
-    events: vi.fn(() => events),
+    events: vi.fn((opts?: { signal?: AbortSignal }) => {
+      opts?.signal?.addEventListener('abort', () => events.close(), {
+        once: true,
+      });
+      return events;
+    }),
     cancel: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue({}),
     respondToPermission: vi.fn().mockResolvedValue(true),
@@ -137,15 +150,18 @@ describe('DaemonChannelBridge', () => {
       workspaceCwd: '/repo',
       modelServiceId: undefined,
     });
-    expect(session.prompt).toHaveBeenCalledWith({
-      prompt: [{ type: 'text', text: 'summarize' }],
-    });
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'summarize' }],
+      },
+      expect.any(AbortSignal),
+    );
 
     events.close();
     bridge.stop();
   });
 
-  it('emits tool, thought, model, and session lifecycle events', async () => {
+  it('emits tool, thought, model, commands, and session lifecycle events', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
     const bridge = new DaemonChannelBridge({
@@ -196,11 +212,34 @@ describe('DaemonChannelBridge', () => {
     events.push({
       id: 4,
       v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: '/help', description: 'Show help', input: null },
+          ],
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(bridge.getAvailableCommands('session-1')).toEqual([
+        { name: '/help', description: 'Show help', input: null },
+      ]),
+    );
+    expect(bridge.availableCommands).toEqual([
+      { name: '/help', description: 'Show help', input: null },
+    ]);
+
+    events.push({
+      id: 5,
+      v: 1,
       type: 'model_switched',
       data: { sessionId: 'session-1', modelId: 'qwen3-coder-plus' },
     });
     events.push({
-      id: 5,
+      id: 6,
       v: 1,
       type: 'session_died',
       data: { sessionId: 'session-1', reason: 'agent exited' },
@@ -217,14 +256,19 @@ describe('DaemonChannelBridge', () => {
       status: 'completed',
       rawInput: { path: 'README.md' },
     });
-    expect(modelSwitched).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      modelId: 'qwen3-coder-plus',
-    });
-    expect(sessionDied).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      reason: 'agent exited',
-    });
+    await waitFor(() =>
+      expect(modelSwitched).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        modelId: 'qwen3-coder-plus',
+      }),
+    );
+    await waitFor(() =>
+      expect(sessionDied).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        reason: 'agent exited',
+      }),
+    );
+    expect(bridge.getAvailableCommands('session-1')).toEqual([]);
 
     events.close();
   });
@@ -296,8 +340,159 @@ describe('DaemonChannelBridge', () => {
       false,
     );
 
+    events.push({
+      id: 8,
+      v: 1,
+      type: 'permission_request',
+      data: request,
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledTimes(2));
+    let staleResponse: Promise<boolean> | undefined;
+    bridge.once('sessionDied', () => {
+      staleResponse = bridge.respondToPermission('req-1', response);
+    });
+    events.push({
+      id: 9,
+      v: 1,
+      type: 'session_died',
+      data: { reason: 'gone' },
+    });
+    await waitFor(() => expect(staleResponse).toBeDefined());
+    await expect(staleResponse).resolves.toBe(false);
+
     events.close();
     bridge.stop();
+  });
+
+  it('rejects unknown sessions and concurrent prompts for one session', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let resolvePrompt: () => void = () => {};
+    session.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = () => resolve({ stopReason: 'end_turn' });
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.cancelSession('missing')).rejects.toThrow(
+      'No daemon session bound for missing',
+    );
+    await expect(bridge.prompt('missing', 'hello')).rejects.toThrow(
+      'No daemon session bound for missing',
+    );
+    await expect(
+      bridge.setSessionModel('missing', 'qwen3-coder-plus'),
+    ).rejects.toThrow('No daemon session bound for missing');
+
+    const firstPrompt = bridge.prompt('session-1', 'first');
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    await expect(bridge.prompt('session-1', 'second')).rejects.toThrow(
+      'Prompt already in flight for daemon session session-1',
+    );
+    resolvePrompt();
+    await expect(firstPrompt).resolves.toBe('');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('passes image prompt blocks and aborts prompts when a session dies', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(
+      (_req: unknown, signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt('session-1', 'describe', {
+      imageBase64: 'base64-image',
+      imageMimeType: 'image/png',
+    });
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [
+          { type: 'image', data: 'base64-image', mimeType: 'image/png' },
+          { type: 'text', text: 'describe' },
+        ],
+      },
+      expect.any(AbortSignal),
+    );
+
+    events.push({
+      id: 10,
+      v: 1,
+      type: 'session_died',
+      data: { reason: 'agent exited' },
+    });
+    await expect(promptPromise).rejects.toThrow('aborted');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('treats stream errors and normal stream completion as session death', async () => {
+    const failedEvents = new EventQueue();
+    failedEvents.fail(new Error('network down'));
+    const failedSession = createFakeSession(failedEvents);
+    const failedBridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(failedSession),
+    });
+    const failedDied = vi.fn();
+    failedBridge.on('sessionDied', failedDied);
+
+    await failedBridge.start();
+    await failedBridge.newSession('/repo');
+    await waitFor(() =>
+      expect(failedDied).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        reason: 'network down',
+      }),
+    );
+    await expect(failedBridge.prompt('session-1', 'hello')).rejects.toThrow(
+      'No daemon session bound for session-1',
+    );
+
+    const endedEvents = new EventQueue();
+    const endedSession = createFakeSession(endedEvents);
+    const endedBridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(endedSession),
+    });
+    const endedDied = vi.fn();
+    endedBridge.on('sessionDied', endedDied);
+
+    await endedBridge.start();
+    await endedBridge.newSession('/repo');
+    endedEvents.close();
+    await waitFor(() =>
+      expect(endedDied).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        reason: 'stream_ended',
+      }),
+    );
   });
 
   it('loads an existing daemon session and forwards cancel/model changes', async () => {
