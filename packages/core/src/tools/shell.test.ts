@@ -4186,6 +4186,76 @@ describe('ShellTool', () => {
         expect(result.llmContent).not.toContain('task_stop({');
       });
 
+      it('queued-settle race with non-zero exit code: llmContent reflects failed status', async () => {
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        let capturedPostPromote:
+          | {
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            capturedPostPromote?.onSettle?.({
+              exitCode: 1,
+              signal: null,
+              endTime: 1700000000456,
+            });
+            return {
+              pid: 88888,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'error output',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 88888,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'exit 1',
+          is_background: false,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Exited with code 1',
+          1700000000456,
+        );
+        expect(result.llmContent).toContain('Status: failed.');
+        expect(result.llmContent).not.toContain('Status: running.');
+        expect(result.llmContent).toContain('already exited');
+        expect(result.llmContent).not.toContain('task_stop({');
+      });
+
       it("wave-2 (C3): llmContent reflects 'completed' even when stream.once('finish') fires asynchronously after the queued-settle drain", async () => {
         // Regression for the C3 race: previously the model-facing
         // status flag was only flipped INSIDE `transitionRegistry`,
@@ -4288,7 +4358,7 @@ describe('ShellTool', () => {
         );
       });
 
-      it("wave-2 (C1): stream open async error transitions registry — does not hang waiting on `finish`", async () => {
+      it('wave-2 (C1): stream open async error transitions registry — does not hang waiting on `finish`', async () => {
         // Regression for C1: `fs.createWriteStream` reports common
         // open failures (ENOENT / EACCES / ENOSPC) via an async
         // 'error' event, NOT by throwing. Before the fix, the
@@ -4409,7 +4479,9 @@ describe('ShellTool', () => {
           | undefined;
         mockShellExecutionService.mockImplementationOnce(
           (...args: unknown[]) => {
-            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
             capturedPostPromote = opts?.postPromote;
             return {
               pid: 55555,
@@ -4497,7 +4569,9 @@ describe('ShellTool', () => {
         // does not crash, (c) a post-buffer-drain settle still
         // transitions the registry.
         vi.mocked(fs.createWriteStream).mockImplementationOnce(() => {
-          throw Object.assign(new Error('ENOENT no tmpdir'), { code: 'ENOENT' });
+          throw Object.assign(new Error('ENOENT no tmpdir'), {
+            code: 'ENOENT',
+          });
         });
         // Spy on writeFileSync (the snapshot fallback) — passthrough
         // implementation since the default mock would be no-op.
@@ -4519,7 +4593,9 @@ describe('ShellTool', () => {
           | undefined;
         mockShellExecutionService.mockImplementationOnce(
           (...args: unknown[]) => {
-            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
             capturedPostPromote = opts?.postPromote;
             // Fire 3 pre-finalizer chunks → all queue in buffer.
             capturedPostPromote?.onData?.({ type: 'data', chunk: 'a' });
@@ -4609,7 +4685,9 @@ describe('ShellTool', () => {
           | undefined;
         mockShellExecutionService.mockImplementationOnce(
           (...args: unknown[]) => {
-            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
             capturedPostPromote = opts?.postPromote;
             return {
               pid: 33333,

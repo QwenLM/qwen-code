@@ -823,19 +823,18 @@ export class ShellExecutionService {
             : null;
           if (postPromote?.onData) {
             const onPostData = postPromote.onData;
-            const safeData =
-              (decoder: TextDecoder) => (chunk: Buffer) => {
-                try {
-                  onPostData({
-                    type: 'data',
-                    chunk: decoder.decode(chunk, { stream: true }),
-                  });
-                } catch (cbErr) {
-                  debugLogger.warn(
-                    `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
-                  );
-                }
-              };
+            const safeData = (decoder: TextDecoder) => (chunk: Buffer) => {
+              try {
+                onPostData({
+                  type: 'data',
+                  chunk: decoder.decode(chunk, { stream: true }),
+                });
+              } catch (cbErr) {
+                debugLogger.warn(
+                  `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                );
+              }
+            };
             try {
               if (postPromoteStdoutDecoder)
                 child.stdout?.on('data', safeData(postPromoteStdoutDecoder));
@@ -1630,22 +1629,11 @@ export class ShellExecutionService {
                 `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
               );
             }
-            // PR-2.5 wave-2 (gpt-5.5 C2): the foreground `ptyErrorHandler`
-            // was removed above as part of the handoff. Without a
-            // replacement, a post-promote PTY error event has NO listener
-            // — Node treats an unhandled `error` from an EventEmitter
-            // as a fatal exception that takes the whole CLI down. The
-            // foreground handler `throw`s on unexpected errors (and
-            // ignores expected PTY-read-exit codes); for the post-promote
-            // path we want unexpected errors to FAIL the background task
-            // via `onSettle`, not crash the CLI.
+          }
+          if (postPromote) {
             try {
               postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
                 if (isExpectedPtyReadExitError(err)) {
-                  // EIO / EAGAIN during the PTY read-exit race — same
-                  // as the foreground handler's filter. The onExit
-                  // listener above will fire shortly with the real
-                  // status; let it carry the settle.
                   return;
                 }
                 firePostSettle({

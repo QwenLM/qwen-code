@@ -2265,8 +2265,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
         debugLogger.warn(
           `promote: output write stream error for ${outputPath}: ${getErrorMessage(err)}`,
         );
+        const droppedChunks = promoteArtifacts.buffer.length;
         promoteArtifacts.stream = null;
         promoteArtifacts.streamFailed = true;
+        try {
+          fs.appendFileSync(
+            outputPath,
+            `\n[WARNING: post-promote output lost — stream error (${getErrorMessage(err)}). ${droppedChunks} buffered chunks dropped.]\n`,
+          );
+        } catch {
+          // Best-effort diagnostic — if the append itself fails
+          // (e.g. disk full), the debugLogger.warn above is the
+          // only trace left.
+        }
       });
       // Initial snapshot first, so it always precedes post-promote
       // bytes in the file (write ordering is FIFO on a single stream).
@@ -2506,7 +2517,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (info.error) return { status: 'failed', failMsg: info.error.message };
       if (info.exitCode === 0) return { status: 'completed', failMsg: null };
       if (info.exitCode !== null)
-        return { status: 'failed', failMsg: `Exited with code ${info.exitCode}` };
+        return {
+          status: 'failed',
+          failMsg: `Exited with code ${info.exitCode}`,
+        };
       if (info.signal !== null)
         return {
           status: 'failed',
@@ -2600,10 +2614,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
           transitioned = true;
           transitionRegistry(info);
         };
-        stream.once('finish', finalize);
+        const FLUSH_TIMEOUT_MS = 10_000;
+        const flushTimer = setTimeout(() => {
+          debugLogger.warn(
+            `promote: output stream flush timed out for ${shellId} after ${FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
+          );
+          finalize();
+        }, FLUSH_TIMEOUT_MS);
+        flushTimer.unref();
+        stream.once('finish', () => {
+          clearTimeout(flushTimer);
+          finalize();
+        });
         stream.once('error', () => {
-          // Stream already logged via its general 'error' listener at
-          // open time; just make sure we still transition the entry.
+          clearTimeout(flushTimer);
           finalize();
         });
         stream.end();
