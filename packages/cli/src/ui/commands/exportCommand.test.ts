@@ -34,6 +34,12 @@ vi.mock('@qwen-code/qwen-code-core', () => {
   }
 
   return {
+    createDebugLogger: () => ({
+      debug: () => {},
+      error: () => {},
+      info: () => {},
+      warn: () => {},
+    }),
     isSubpath: (parentPath: string, childPath: string) => {
       const relativePath = path.relative(parentPath, childPath);
       return (

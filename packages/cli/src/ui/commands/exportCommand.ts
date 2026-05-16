@@ -12,7 +12,11 @@ import {
   type MessageActionReturn,
   CommandKind,
 } from './types.js';
-import { isSubpath, SessionService } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  isSubpath,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import {
   collectSessionData,
   normalizeSessionData,
@@ -33,6 +37,8 @@ type ExportFormat = {
 
 const EXPORT_DIR_OUT_OF_CWD =
   'Export directory must be within the project working directory.';
+
+const debugLogger = createDebugLogger('EXPORT_COMMAND');
 
 type ExportOutputDirKind = 'default' | 'custom';
 
@@ -74,6 +80,11 @@ async function validateExportTargetWithinCwd(target: {
   outputDir: string;
   resolvedCwd: string;
 }): Promise<MessageActionReturn | undefined> {
+  debugLogger.debug(
+    'Validating export target realpath:',
+    formatExportTargetContext(target),
+  );
+
   let realCwd: string;
   let realOutputDir: string;
   try {
@@ -83,6 +94,10 @@ async function validateExportTargetWithinCwd(target: {
     ]);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      debugLogger.debug(
+        'Export target realpath validation failed: missing path',
+        formatExportTargetContext(target),
+      );
       return {
         type: 'message',
         messageType: 'error',
@@ -95,6 +110,11 @@ async function validateExportTargetWithinCwd(target: {
   }
 
   if (!isSubpath(realCwd, realOutputDir)) {
+    debugLogger.debug('Export target realpath escaped cwd:', {
+      realCwd,
+      realOutputDir,
+      target,
+    });
     return {
       type: 'message',
       messageType: 'error',
@@ -113,11 +133,22 @@ async function realpathNearestExisting(
 ): Promise<string> {
   let currentPath = outputDir;
 
+  debugLogger.debug('Resolving nearest existing export parent:', {
+    outputDir,
+    resolvedCwd,
+  });
+
   while (isSubpath(resolvedCwd, currentPath)) {
     try {
-      return await fs.realpath(currentPath);
+      const realCurrentPath = await fs.realpath(currentPath);
+      debugLogger.debug('Resolved nearest existing export parent:', {
+        currentPath,
+        realCurrentPath,
+      });
+      return realCurrentPath;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        debugLogger.debug('Failed to resolve existing export parent:', error);
         throw error;
       }
       const parentPath = path.dirname(currentPath);
@@ -137,12 +168,22 @@ async function validateExistingExportParentWithinCwd(target: {
   outputDir: string;
   resolvedCwd: string;
 }): Promise<MessageActionReturn | undefined> {
+  debugLogger.debug(
+    'Validating existing export parent realpath:',
+    formatExportTargetContext(target),
+  );
+
   const [realCwd, realExistingParent] = await Promise.all([
     fs.realpath(target.resolvedCwd),
     realpathNearestExisting(target.outputDir, target.resolvedCwd),
   ]);
 
   if (!isSubpath(realCwd, realExistingParent)) {
+    debugLogger.debug('Existing export parent escaped cwd:', {
+      realCwd,
+      realExistingParent,
+      target,
+    });
     return {
       type: 'message',
       messageType: 'error',
@@ -182,7 +223,20 @@ async function exportSessionAction(
 
   const target = resolveExportTarget(cwd, args, exportFormat.extension);
   const targetFilepath = target.filepath;
+  debugLogger.debug('Resolved export target:', {
+    format: exportFormat.displayName,
+    cwd,
+    outputDirArg: args.trim(),
+    outputDir: target.outputDir,
+    outputDirKind: target.outputDirKind,
+    filepath: target.filepath,
+  });
+
   if (!target.isInsideCwd) {
+    debugLogger.debug(
+      'Export target rejected before realpath validation:',
+      formatExportTargetContext(target),
+    );
     return {
       type: 'message',
       messageType: 'error',
@@ -200,13 +254,23 @@ async function exportSessionAction(
     if (initialValidationError) {
       return initialValidationError;
     }
+    debugLogger.debug('Export target validation passed:', {
+      format: exportFormat.displayName,
+      outputDir: target.outputDir,
+      outputDirKind: target.outputDirKind,
+    });
 
     // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
     const sessionId = config.getSessionId();
+    debugLogger.debug('Loading session for export:', { sessionId, cwd });
     const sessionData = await sessionService.loadSession(sessionId);
 
     if (!sessionData) {
+      debugLogger.debug('No active session found for export:', {
+        sessionId,
+        cwd,
+      });
       return {
         type: 'message',
         messageType: 'error',
@@ -228,8 +292,12 @@ async function exportSessionAction(
 
     if (target.outputDirKind === 'custom') {
       try {
+        debugLogger.debug('Creating export directory:', {
+          outputDir: target.outputDir,
+        });
         await fs.mkdir(target.outputDir, { recursive: true, mode: 0o700 });
       } catch (error) {
+        debugLogger.debug('Failed to create export directory:', error);
         return {
           type: 'message',
           messageType: 'error',
@@ -245,11 +313,16 @@ async function exportSessionAction(
       if (writeValidationError) {
         return writeValidationError;
       }
+      debugLogger.debug('Writing export file:', {
+        format: exportFormat.displayName,
+        filepath: target.filepath,
+      });
       await fs.writeFile(target.filepath, content, {
         encoding: 'utf-8',
         mode: 0o600,
       });
     } catch (error) {
+      debugLogger.debug('Failed to write export file:', error);
       return {
         type: 'message',
         messageType: 'error',
@@ -257,12 +330,21 @@ async function exportSessionAction(
       };
     }
 
+    debugLogger.debug('Session export completed:', {
+      format: exportFormat.displayName,
+      filepath: target.filepath,
+    });
     return {
       type: 'message',
       messageType: 'info',
       content: `Session exported to ${exportFormat.displayName}: ${target.displayPath}`,
     };
   } catch (error) {
+    debugLogger.debug('Session export failed:', {
+      format: exportFormat.displayName,
+      target,
+      error,
+    });
     return {
       type: 'message',
       messageType: 'error',
