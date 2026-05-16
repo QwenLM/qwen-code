@@ -386,6 +386,39 @@ describe('exportCommand', () => {
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
+    it('should revalidate the output directory before writing', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const outputDir = path.resolve('/test/dir', './logs');
+      let contentFormatted = false;
+      vi.mocked(toMarkdown).mockImplementation(() => {
+        contentFormatted = true;
+        return '# Test Markdown';
+      });
+      vi.mocked(fs.realpath).mockImplementation(async (p) => {
+        const pathStr = p.toString();
+        if (pathStr === outputDir && contentFormatted) {
+          return path.resolve('/outside/logs');
+        }
+        return pathStr;
+      });
+
+      const result = await mdCommand.action(mockContext, './logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Export directory must be within the project working directory. (path resolves outside cwd via symlink)',
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(toMarkdown).toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should allow output directories with names beginning with two dots', async () => {
       const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
       if (!mdCommand?.action) {
@@ -439,6 +472,40 @@ describe('exportCommand', () => {
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
       expect(fs.writeFile).toHaveBeenCalled();
+    });
+
+    it('should not ignore non-missing realpath errors while checking parents', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const missingOutputDir = path.resolve('/test/dir', './blocked/logs');
+      const blockedParent = path.resolve('/test/dir', './blocked');
+      vi.mocked(fs.realpath).mockImplementation(async (p) => {
+        const pathStr = p.toString();
+        if (pathStr === missingOutputDir) {
+          const err = new Error('ENOENT: no such file or directory');
+          (err as NodeJS.ErrnoException).code = 'ENOENT';
+          throw err;
+        }
+        if (pathStr === blockedParent) {
+          const err = new Error('EACCES: permission denied');
+          (err as NodeJS.ErrnoException).code = 'EACCES';
+          throw err;
+        }
+        return pathStr;
+      });
+
+      const result = await mdCommand.action(mockContext, './blocked/logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Failed to export session: EACCES: permission denied',
+      });
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });
 

@@ -86,7 +86,10 @@ async function realpathNearestExisting(
   while (isSubpath(resolvedCwd, currentPath)) {
     try {
       return await fs.realpath(currentPath);
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw error;
+      }
       const parentPath = path.dirname(currentPath);
       if (parentPath === currentPath) {
         break;
@@ -198,6 +201,11 @@ async function exportSessionAction(
     );
 
     const content = exportFormat.format(normalizedData);
+
+    const writeValidationError = await validateExportTargetWithinCwd(target);
+    if (writeValidationError) {
+      return writeValidationError;
+    }
 
     try {
       await fs.writeFile(target.filepath, content, 'utf-8');
