@@ -52,6 +52,9 @@ import {
 import {
   startLLMRequestSpan,
   endLLMRequestSpan,
+  addSystemPromptAttributes,
+  addToolSchemaAttributes,
+  addModelOutputAttributes,
 } from '../../telemetry/index.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
@@ -221,6 +224,18 @@ export class LoggingContentGenerator implements ContentGenerator {
     const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
     try {
+      if (!isInternal) {
+        addSystemPromptAttributes(
+          this.config,
+          llmSpan,
+          req.config?.systemInstruction,
+        );
+        addToolSchemaAttributes(
+          this.config,
+          llmSpan,
+          req.config?.tools as unknown[] | undefined,
+        );
+      }
       const response = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
@@ -236,6 +251,9 @@ export class LoggingContentGenerator implements ContentGenerator {
         const responseText = isInternal
           ? undefined
           : this.extractResponseText(result);
+        if (!isInternal) {
+          addModelOutputAttributes(this.config, llmSpan, responseText);
+        }
         this.safelyLogApiResponse(
           result.responseId ?? '',
           durationMs,
@@ -316,6 +334,18 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
+      if (!isInternal) {
+        addSystemPromptAttributes(
+          this.config,
+          llmSpan,
+          req.config?.systemInstruction,
+        );
+        addToolSchemaAttributes(
+          this.config,
+          llmSpan,
+          req.config?.tools as unknown[] | undefined,
+        );
+      }
       stream = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
@@ -487,6 +517,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       const consolidatedResponse = shouldCollectResponses
         ? this.consolidateGeminiResponsesForLogging(responses)
         : undefined;
+      const streamResponseText = isInternal
+        ? undefined
+        : this.extractResponseText(consolidatedResponse);
       runInSpan(() =>
         this.safelyLogApiResponse(
           firstResponseId,
@@ -494,11 +527,12 @@ export class LoggingContentGenerator implements ContentGenerator {
           firstModelVersion || model,
           userPromptId,
           lastUsageMetadata,
-          isInternal
-            ? undefined
-            : this.extractResponseText(consolidatedResponse),
+          streamResponseText,
         ),
       );
+      if (!isInternal && span) {
+        addModelOutputAttributes(this.config, span, streamResponseText);
+      }
       await runInSpan(() =>
         this.safelyLogOpenAIInteraction(
           openaiRequest,

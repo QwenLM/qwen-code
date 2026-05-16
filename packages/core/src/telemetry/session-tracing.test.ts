@@ -121,6 +121,7 @@ import {
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  getActiveInteractionSpan,
   clearSessionTracingForTesting,
 } from './session-tracing.js';
 
@@ -488,6 +489,54 @@ describe('session-tracing', () => {
       const toolRecord = mockSpans.find((s) => s.name === 'qwen-code.tool');
       expect(toolRecord!.statuses).toHaveLength(1);
       expect(toolRecord!.statuses[0]!.code).toBe(SpanStatusCode.ERROR);
+    });
+  });
+
+  describe('getActiveInteractionSpan', () => {
+    it('returns the span when an interaction is active', () => {
+      const config = createMockConfig();
+      startInteractionSpan(config, {
+        promptId: 'p-active',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+
+      const span = getActiveInteractionSpan();
+      expect(span).toBeDefined();
+      expect(span).toBe(mockSpans[0]);
+    });
+
+    it('returns undefined after endInteractionSpan', () => {
+      const config = createMockConfig();
+      startInteractionSpan(config, {
+        promptId: 'p-end',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      endInteractionSpan('ok');
+
+      expect(getActiveInteractionSpan()).toBeUndefined();
+    });
+
+    it('falls back to lastInteractionCtx outside the AsyncLocalStorage context', async () => {
+      const config = createMockConfig();
+      startInteractionSpan(config, {
+        promptId: 'p-fallback',
+        model: 'm',
+        messageType: 'userQuery',
+      });
+      // Yield via setImmediate to schedule the continuation on a separate
+      // async resource — best-effort attempt to leave the ALS scope so
+      // getActiveInteractionSpan must rely on lastInteractionCtx.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const span = getActiveInteractionSpan();
+      expect(span).toBeDefined();
+      expect(span).toBe(mockSpans[0]);
+    });
+
+    it('returns undefined when no interaction has ever started', () => {
+      expect(getActiveInteractionSpan()).toBeUndefined();
     });
   });
 

@@ -194,6 +194,9 @@ vi.mock('../../telemetry/index.js', () => {
         }
       },
     ),
+    addSystemPromptAttributes: vi.fn(),
+    addToolSchemaAttributes: vi.fn(),
+    addModelOutputAttributes: vi.fn(),
   };
 });
 
