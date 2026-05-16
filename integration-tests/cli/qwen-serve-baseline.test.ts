@@ -66,7 +66,8 @@ const RSS_SAMPLE_INTERVAL_MS = Number(
   process.env['QWEN_BASELINE_RSS_SAMPLE_INTERVAL_MS'] ?? 100,
 );
 const RSS_SAMPLE_DURATION_MS = Number(
-  process.env['QWEN_BASELINE_RSS_SAMPLE_DURATION_MS'] ?? (HEAVY ? 15_000 : 5_000),
+  process.env['QWEN_BASELINE_RSS_SAMPLE_DURATION_MS'] ??
+    (HEAVY ? 15_000 : 5_000),
 );
 const SKIP_PROMPT_LATENCY =
   process.env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1' ||
@@ -74,10 +75,7 @@ const SKIP_PROMPT_LATENCY =
 
 const FIXTURES_DIR = path.resolve(__dirname, '../fixtures');
 const IDLE_MCP_PATH = path.join(FIXTURES_DIR, 'idle-mcp/server.mjs');
-const RUN_TS = new Date()
-  .toISOString()
-  .replace(/[:.]/g, '')
-  .replace(/Z$/, '');
+const RUN_TS = new Date().toISOString().replace(/[:.]/g, '').replace(/Z$/, '');
 const OUTPUT_DIR =
   process.env['INTEGRATION_TEST_FILE_DIR'] ??
   path.join(process.cwd(), '.integration-tests', `baseline-${RUN_TS}`);
@@ -228,41 +226,41 @@ async function measureRssAtSessionCount(
   }
 }
 
-(SKIP ? describe.skip : describe)('daemon baseline harness (POSIX-only)', () => {
-  describe('RSS scaling', () => {
-    it(
-      'captures peak RSS at 1 / 5 / 10 sessions',
-      async () => {
-        const r1 = await measureRssAtSessionCount(1);
-        const r5 = await measureRssAtSessionCount(5);
-        const r10 = await measureRssAtSessionCount(10);
+(SKIP ? describe.skip : describe)(
+  'daemon baseline harness (POSIX-only)',
+  () => {
+    describe('RSS scaling', () => {
+      it(
+        'captures peak RSS at 1 / 5 / 10 sessions',
+        async () => {
+          const r1 = await measureRssAtSessionCount(1);
+          const r5 = await measureRssAtSessionCount(5);
+          const r10 = await measureRssAtSessionCount(10);
 
-        snapshot.rssScaling = {
-          session1MB: r1.peakRssMB,
-          session5MB: r5.peakRssMB,
-          session10MB: r10.peakRssMB,
-          sampleCount: r1.sampleCount + r5.sampleCount + r10.sampleCount,
-          growthPerSessionMB:
-            Math.round(((r10.peakRssMB - r1.peakRssMB) / 9) * 10) / 10,
-        };
+          snapshot.rssScaling = {
+            session1MB: r1.peakRssMB,
+            session5MB: r5.peakRssMB,
+            session10MB: r10.peakRssMB,
+            sampleCount: r1.sampleCount + r5.sampleCount + r10.sampleCount,
+            growthPerSessionMB:
+              Math.round(((r10.peakRssMB - r1.peakRssMB) / 9) * 10) / 10,
+          };
 
-        // Catastrophic upper bounds only.
-        expect(r1.peakRssMB).toBeLessThan(THRESH.rss1SessionMaxMB);
-        expect(r10.peakRssMB).toBeLessThan(THRESH.rss10SessionsMaxMB);
-        // Sanity: growth should be non-negative (more sessions ≥ more memory).
-        expect(r10.peakRssMB).toBeGreaterThanOrEqual(r1.peakRssMB);
-      },
-      // Each session-count needs daemon spawn + N session creates +
-      // RSS_SAMPLE_DURATION_MS sampling + dispose. ~3 × 15s budget per
-      // count in heavy mode → 90s base; pad for slow CI.
-      HEAVY ? 600_000 : 180_000,
-    );
-  });
+          // Catastrophic upper bounds only.
+          expect(r1.peakRssMB).toBeLessThan(THRESH.rss1SessionMaxMB);
+          expect(r10.peakRssMB).toBeLessThan(THRESH.rss10SessionsMaxMB);
+          // Sanity: growth should be non-negative (more sessions ≥ more memory).
+          expect(r10.peakRssMB).toBeGreaterThanOrEqual(r1.peakRssMB);
+        },
+        // Each session-count needs daemon spawn + N session creates +
+        // RSS_SAMPLE_DURATION_MS sampling + dispose. ~3 × 15s budget per
+        // count in heavy mode → 90s base; pad for slow CI.
+        HEAVY ? 600_000 : 180_000,
+      );
+    });
 
-  describe('attach latency', () => {
-    it(
-      'measures Nth same-workspace session attach time',
-      async () => {
+    describe('attach latency', () => {
+      it('measures Nth same-workspace session attach time', async () => {
         const ws = makeTempWorkspace('attach');
         const daemon = await spawnDaemon({ workspaceCwd: ws });
         try {
@@ -292,15 +290,11 @@ async function measureRssAtSessionCount(
           await daemon.dispose();
           fs.rmSync(ws, { recursive: true, force: true });
         }
-      },
-      60_000,
-    );
-  });
+      }, 60_000);
+    });
 
-  describe('MCP child amplification (P1 baseline)', () => {
-    it(
-      'counts MCP grandchildren as session count grows',
-      async () => {
+    describe('MCP child amplification (P1 baseline)', () => {
+      it('counts MCP grandchildren as session count grows', async () => {
         const ws = makeTempWorkspace('mcp');
         writeWorkspaceSettings(ws, {
           mcpServers: {
@@ -333,8 +327,7 @@ async function measureRssAtSessionCount(
           const expectedMaxAt5 =
             mcpServersConfigured * 5 * THRESH.mcpAmplificationFactor;
           const linear =
-            at5.mcpGrandchildren.length >=
-            mcpServersConfigured * 5 * 0.5; // ≥50% of linear → confirmed amplification
+            at5.mcpGrandchildren.length >= mcpServersConfigured * 5 * 0.5; // ≥50% of linear → confirmed amplification
 
           snapshot.mcpAmplification = {
             mcpServersConfigured,
@@ -354,155 +347,155 @@ async function measureRssAtSessionCount(
           await daemon.dispose();
           fs.rmSync(ws, { recursive: true, force: true });
         }
-      },
-      120_000,
-    );
-  });
-
-  describe('SSE backpressure (unit)', () => {
-    // Note: EventBus is the daemon's per-session fan-out primitive. It
-    // doesn't take a sessionId in publish/subscribe — the bus instance
-    // itself is per-session, owned upstream. We use it directly here for
-    // deterministic backpressure invariants without needing a live HTTP
-    // round-trip; pattern matches `packages/cli/src/serve/eventBus.test.ts`.
-    it('overflow at maxQueued boundary fires client_evicted', async () => {
-      const bus = new EventBus();
-      const ac = new AbortController();
-      // Per-subscriber queue cap is set on subscribe(), not on bus
-      // construction (matches the existing eventBus.test.ts:103 pattern).
-      const iter = bus.subscribe({ maxQueued: 2, signal: ac.signal });
-
-      // Publish 3 events into a 2-deep queue. The 3rd trips eviction →
-      // a synthetic client_evicted terminal frame is appended.
-      bus.publish({ type: 'tick', data: { i: 1 } });
-      bus.publish({ type: 'tick', data: { i: 2 } });
-      bus.publish({ type: 'tick', data: { i: 3 } });
-
-      const collected: BridgeEventLike[] = [];
-      for await (const ev of iter) {
-        collected.push({ type: ev.type });
-      }
-      ac.abort();
-
-      expect(collected).toHaveLength(3);
-      expect(collected[2]!.type).toBe('client_evicted');
-      snapshot.sseBackpressure = {
-        ringSize: 4_000,
-        maxQueuedDefault: 256,
-        evictionAtOverflow: true,
-        replayUpToRing: true,
-        heartbeatIntervalMs: 15_000,
-      };
+      }, 120_000);
     });
 
-    it('replay across reconnect honors lastEventId up to ring size', async () => {
-      const bus = new EventBus();
-      // Publish 5 events.
-      for (let i = 1; i <= 5; i++) {
-        bus.publish({ type: 'tick', data: { i } });
-      }
-      // Subscribe with lastEventId=2 → should replay events 3..5.
-      const ac = new AbortController();
-      const iter = bus.subscribe({ lastEventId: 2, signal: ac.signal });
-      const replayed: number[] = [];
-      for await (const ev of iter) {
-        const data = ev.data as { i: number };
-        replayed.push(data.i);
-        if (replayed.length >= 3) break;
-      }
-      ac.abort();
-      expect(replayed).toEqual([3, 4, 5]);
-    });
-  });
+    describe('SSE backpressure (unit)', () => {
+      // Note: EventBus is the daemon's per-session fan-out primitive. It
+      // doesn't take a sessionId in publish/subscribe — the bus instance
+      // itself is per-session, owned upstream. We use it directly here for
+      // deterministic backpressure invariants without needing a live HTTP
+      // round-trip; pattern matches `packages/cli/src/serve/eventBus.test.ts`.
+      it('overflow at maxQueued boundary fires client_evicted', async () => {
+        const bus = new EventBus();
+        const ac = new AbortController();
+        // Per-subscriber queue cap is set on subscribe(), not on bus
+        // construction (matches the existing eventBus.test.ts:103 pattern).
+        const iter = bus.subscribe({ maxQueued: 2, signal: ac.signal });
 
-  describe('prompt latency', () => {
-    it.skipIf(SKIP_PROMPT_LATENCY)(
-      `p50 / p99 over ${PROMPT_ITERATIONS} prompts`,
-      async () => {
-        const ws = makeTempWorkspace('prompt');
-        const daemon = await spawnDaemon({ workspaceCwd: ws });
-        try {
-          const sess = await daemon.client.createOrAttachSession({
-            workspaceCwd: ws,
-          });
-          const firstByteMs: number[] = [];
-          const totalMs: number[] = [];
+        // Publish 3 events into a 2-deep queue. The 3rd trips eviction →
+        // a synthetic client_evicted terminal frame is appended.
+        bus.publish({ type: 'tick', data: { i: 1 } });
+        bus.publish({ type: 'tick', data: { i: 2 } });
+        bus.publish({ type: 'tick', data: { i: 3 } });
 
-          for (let i = 0; i < PROMPT_ITERATIONS; i++) {
-            const t0 = Date.now();
-            // Subscribe to events for first-byte timing; promptly cancel
-            // when we see the first session_update.
-            const ac = new AbortController();
-            const iter = daemon.client.subscribeEvents(sess.sessionId, {
-              signal: ac.signal,
-            });
-            const firstByteP = (async () => {
-              for await (const _ of iter) {
-                ac.abort();
-                return Date.now();
-              }
-              return Date.now();
-            })();
-
-            await daemon.client.prompt(sess.sessionId, {
-              prompt: [{ type: 'text', text: 'reply with the single word ok' }],
-            });
-            const tEnd = Date.now();
-            const tFirstByte = await firstByteP;
-
-            firstByteMs.push(tFirstByte - t0);
-            totalMs.push(tEnd - t0);
-          }
-
-          snapshot.promptLatency = {
-            iterations: PROMPT_ITERATIONS,
-            firstByteMs: percentiles(firstByteMs),
-            totalMs: percentiles(totalMs),
-            skipped: false,
-          };
-
-          expect(snapshot.promptLatency.totalMs!.p99).toBeLessThan(
-            THRESH.promptP99MaxMs,
-          );
-        } finally {
-          await daemon.dispose();
-          fs.rmSync(ws, { recursive: true, force: true });
+        const collected: BridgeEventLike[] = [];
+        for await (const ev of iter) {
+          collected.push({ type: ev.type });
         }
-      },
-      HEAVY ? 30 * 60_000 : 10 * 60_000,
-    );
+        ac.abort();
 
-    if (SKIP_PROMPT_LATENCY) {
-      it('prompt latency skipped (no QWEN_TEST_MODEL_KEY)', () => {
-        snapshot.promptLatency = {
-          iterations: 0,
-          firstByteMs: null,
-          totalMs: null,
-          skipped: true,
-          skipReason:
-            'QWEN_TEST_MODEL_KEY not set; prompt latency requires a real model credential.',
+        expect(collected).toHaveLength(3);
+        expect(collected[2]!.type).toBe('client_evicted');
+        snapshot.sseBackpressure = {
+          ringSize: 4_000,
+          maxQueuedDefault: 256,
+          evictionAtOverflow: true,
+          replayUpToRing: true,
+          heartbeatIntervalMs: 15_000,
         };
-        // Mark via a no-op assertion so the suite still appears in output.
-        expect(true).toBe(true);
       });
-    }
-  });
 
-  afterAll(() => {
-    if (SKIP) return;
-    fs.mkdirSync(OUTPUT_DIR, { recursive: true });
-    const jsonPath = path.join(OUTPUT_DIR, 'perf-baseline.json');
-    fs.writeFileSync(jsonPath, JSON.stringify(snapshot, null, 2));
-    fs.writeFileSync(
-      path.join(OUTPUT_DIR, 'perf-baseline.md'),
-      renderMarkdown(snapshot),
-    );
-    // Echo the path so a reviewer / CI logs surface where the artifact
-    // landed.
-    // eslint-disable-next-line no-console
-    console.log(`[baseline] perf-baseline.json written to ${jsonPath}`);
-  });
-});
+      it('replay across reconnect honors lastEventId up to ring size', async () => {
+        const bus = new EventBus();
+        // Publish 5 events.
+        for (let i = 1; i <= 5; i++) {
+          bus.publish({ type: 'tick', data: { i } });
+        }
+        // Subscribe with lastEventId=2 → should replay events 3..5.
+        const ac = new AbortController();
+        const iter = bus.subscribe({ lastEventId: 2, signal: ac.signal });
+        const replayed: number[] = [];
+        for await (const ev of iter) {
+          const data = ev.data as { i: number };
+          replayed.push(data.i);
+          if (replayed.length >= 3) break;
+        }
+        ac.abort();
+        expect(replayed).toEqual([3, 4, 5]);
+      });
+    });
+
+    describe('prompt latency', () => {
+      it.skipIf(SKIP_PROMPT_LATENCY)(
+        `p50 / p99 over ${PROMPT_ITERATIONS} prompts`,
+        async () => {
+          const ws = makeTempWorkspace('prompt');
+          const daemon = await spawnDaemon({ workspaceCwd: ws });
+          try {
+            const sess = await daemon.client.createOrAttachSession({
+              workspaceCwd: ws,
+            });
+            const firstByteMs: number[] = [];
+            const totalMs: number[] = [];
+
+            for (let i = 0; i < PROMPT_ITERATIONS; i++) {
+              const t0 = Date.now();
+              // Subscribe to events for first-byte timing; promptly cancel
+              // when we see the first session_update.
+              const ac = new AbortController();
+              const iter = daemon.client.subscribeEvents(sess.sessionId, {
+                signal: ac.signal,
+              });
+              const firstByteP = (async () => {
+                for await (const _ of iter) {
+                  ac.abort();
+                  return Date.now();
+                }
+                return Date.now();
+              })();
+
+              await daemon.client.prompt(sess.sessionId, {
+                prompt: [
+                  { type: 'text', text: 'reply with the single word ok' },
+                ],
+              });
+              const tEnd = Date.now();
+              const tFirstByte = await firstByteP;
+
+              firstByteMs.push(tFirstByte - t0);
+              totalMs.push(tEnd - t0);
+            }
+
+            snapshot.promptLatency = {
+              iterations: PROMPT_ITERATIONS,
+              firstByteMs: percentiles(firstByteMs),
+              totalMs: percentiles(totalMs),
+              skipped: false,
+            };
+
+            expect(snapshot.promptLatency.totalMs!.p99).toBeLessThan(
+              THRESH.promptP99MaxMs,
+            );
+          } finally {
+            await daemon.dispose();
+            fs.rmSync(ws, { recursive: true, force: true });
+          }
+        },
+        HEAVY ? 30 * 60_000 : 10 * 60_000,
+      );
+
+      if (SKIP_PROMPT_LATENCY) {
+        it('prompt latency skipped (no QWEN_TEST_MODEL_KEY)', () => {
+          snapshot.promptLatency = {
+            iterations: 0,
+            firstByteMs: null,
+            totalMs: null,
+            skipped: true,
+            skipReason:
+              'QWEN_TEST_MODEL_KEY not set; prompt latency requires a real model credential.',
+          };
+          // Mark via a no-op assertion so the suite still appears in output.
+          expect(true).toBe(true);
+        });
+      }
+    });
+
+    afterAll(() => {
+      if (SKIP) return;
+      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+      const jsonPath = path.join(OUTPUT_DIR, 'perf-baseline.json');
+      fs.writeFileSync(jsonPath, JSON.stringify(snapshot, null, 2));
+      fs.writeFileSync(
+        path.join(OUTPUT_DIR, 'perf-baseline.md'),
+        renderMarkdown(snapshot),
+      );
+      // Echo the path so a reviewer / CI logs surface where the artifact
+      // landed.
+      console.log(`[baseline] perf-baseline.json written to ${jsonPath}`);
+    });
+  },
+);
 
 function renderMarkdown(s: SnapshotShape): string {
   const fmt = (p: Percentiles | null | undefined): string =>
