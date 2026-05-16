@@ -21,8 +21,12 @@ class EventQueue implements AsyncGenerator<DaemonIdeEvent> {
   private events: DaemonIdeEvent[] = [];
   private waiters: Array<(value: IteratorResult<DaemonIdeEvent>) => void> = [];
   private closed = false;
+  private failure: unknown;
 
   async next(): Promise<IteratorResult<DaemonIdeEvent>> {
+    if (this.failure) {
+      throw this.failure;
+    }
     const event = this.events.shift();
     if (event) {
       return { done: false, value: event };
@@ -64,6 +68,10 @@ class EventQueue implements AsyncGenerator<DaemonIdeEvent> {
       waiter({ done: true, value: undefined });
     }
   }
+
+  fail(error: unknown): void {
+    this.failure = error;
+  }
 }
 
 interface FakeSession extends DaemonIdeSessionClient {
@@ -79,7 +87,12 @@ function createFakeSession(events: EventQueue): FakeSession {
     workspaceCwd: '/tmp/workspace',
     lastEventId: undefined,
     prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
-    events: vi.fn(() => events),
+    events: vi.fn((opts?: { signal?: AbortSignal }) => {
+      opts?.signal?.addEventListener('abort', () => events.close(), {
+        once: true,
+      });
+      return events;
+    }),
     cancel: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue({}),
     respondToPermission: vi.fn().mockResolvedValue(true),
@@ -136,8 +149,14 @@ describe('DaemonIdeConnection', () => {
     expect(connection.currentSessionId).toBe('session-1');
     expect(connection.lastEventId).toBe(11);
 
+    expect(session.events).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
+      lastEventId: 10,
+      resume: true,
+    });
+
     events.close();
-    connection.disconnect();
+    await connection.disconnect();
   });
 
   it('sends prompts through the bound daemon session', async () => {
@@ -171,14 +190,16 @@ describe('DaemonIdeConnection', () => {
     expect(session.prompt).toHaveBeenLastCalledWith({ prompt: blocks });
 
     events.close();
-    connection.disconnect();
+    await connection.disconnect();
   });
 
   it('responds to daemon permission requests with the selected option id', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
     const connection = new DaemonIdeConnection();
-    const onPermissionRequest = vi.fn().mockResolvedValue('proceed_once');
+    const onPermissionRequest = vi
+      .fn()
+      .mockResolvedValue({ optionId: 'proceed_once' });
     connection.onPermissionRequest = onPermissionRequest;
 
     await connection.connect({
@@ -199,7 +220,7 @@ describe('DaemonIdeConnection', () => {
         { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
         { optionId: 'reject_once', kind: 'reject_once', name: 'Reject' },
       ],
-    } as RequestPermissionRequest & { requestId: string };
+    } as unknown as RequestPermissionRequest & { requestId: string };
 
     events.push({
       id: 12,
@@ -216,7 +237,145 @@ describe('DaemonIdeConnection', () => {
     expect(onPermissionRequest).toHaveBeenCalledWith(request);
 
     events.close();
-    connection.disconnect();
+    await connection.disconnect();
+  });
+
+  it('cancels permission requests by default and for reject options', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const connection = new DaemonIdeConnection();
+
+    await connection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    const request: RequestPermissionRequest & { requestId: string } = {
+      requestId: 'request-1',
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        title: 'Edit file',
+        kind: 'edit',
+        rawInput: {},
+      },
+      options: [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'reject_once', kind: 'reject_once', name: 'Reject' },
+      ],
+    } as unknown as RequestPermissionRequest & { requestId: string };
+
+    events.push({ id: 1, v: 1, type: 'permission_request', data: request });
+    await waitFor(() =>
+      expect(session.respondToPermission).toHaveBeenCalledWith('request-1', {
+        outcome: { outcome: 'cancelled' },
+      } satisfies RequestPermissionResponse),
+    );
+
+    connection.onPermissionRequest = vi
+      .fn()
+      .mockResolvedValue({ optionId: 'reject_once' });
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'permission_request',
+      data: { ...request, requestId: 'request-2' },
+    });
+    await waitFor(() =>
+      expect(session.respondToPermission).toHaveBeenCalledWith('request-2', {
+        outcome: { outcome: 'cancelled' },
+      } satisfies RequestPermissionResponse),
+    );
+
+    events.close();
+    await connection.disconnect();
+  });
+
+  it('forwards ask-user-question answers and cancels empty selections', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const connection = new DaemonIdeConnection();
+    connection.onAskUserQuestion = vi.fn().mockResolvedValue({
+      optionId: 'proceed_once',
+      answers: { q1: 'A' },
+    });
+
+    await connection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    const request: RequestPermissionRequest & { requestId: string } = {
+      requestId: 'ask-1',
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-ask',
+        title: 'Ask',
+        kind: 'ask_user_question',
+        rawInput: {
+          questions: [
+            {
+              question: 'Pick one',
+              header: 'Choice',
+              options: [{ label: 'A', description: 'A' }],
+              multiSelect: false,
+            },
+          ],
+          metadata: { source: 'test' },
+        },
+      },
+      options: [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Submit' },
+        { optionId: 'cancel', kind: 'reject_once', name: 'Cancel' },
+      ],
+    } as unknown as RequestPermissionRequest & { requestId: string };
+
+    events.push({ id: 3, v: 1, type: 'permission_request', data: request });
+    await waitFor(() =>
+      expect(session.respondToPermission).toHaveBeenCalledWith('ask-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        answers: { q1: 'A' },
+      } as RequestPermissionResponse),
+    );
+
+    connection.onAskUserQuestion = vi.fn().mockResolvedValue({ optionId: '' });
+    events.push({
+      id: 4,
+      v: 1,
+      type: 'permission_request',
+      data: { ...request, requestId: 'ask-2' },
+    });
+    await waitFor(() =>
+      expect(session.respondToPermission).toHaveBeenCalledWith('ask-2', {
+        outcome: { outcome: 'cancelled' },
+      } satisfies RequestPermissionResponse),
+    );
+
+    events.close();
+    await connection.disconnect();
+  });
+
+  it('ignores malformed permission events', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const connection = new DaemonIdeConnection();
+
+    await connection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    events.push({
+      id: 5,
+      v: 1,
+      type: 'permission_request',
+      data: { requestId: 'bad' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.respondToPermission).not.toHaveBeenCalled();
+
+    events.close();
+    await connection.disconnect();
   });
 
   it('forwards cancel and model changes to the daemon session', async () => {
@@ -236,7 +395,7 @@ describe('DaemonIdeConnection', () => {
     expect(session.setModel).toHaveBeenCalledWith('qwen3-coder-plus');
 
     events.close();
-    connection.disconnect();
+    await connection.disconnect();
   });
 
   it('surfaces session_died as a disconnect', async () => {
@@ -264,5 +423,62 @@ describe('DaemonIdeConnection', () => {
     expect(connection.isConnected).toBe(false);
 
     events.close();
+  });
+
+  it('surfaces event stream failures and normal stream completion', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failedEvents = new EventQueue();
+    failedEvents.fail(new Error('network down'));
+    const failedSession = createFakeSession(failedEvents);
+    const failedConnection = new DaemonIdeConnection();
+    const failedDisconnected = vi.fn();
+    failedConnection.onDisconnected = failedDisconnected;
+
+    await failedConnection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(failedSession),
+    });
+    await waitFor(() =>
+      expect(failedDisconnected).toHaveBeenCalledWith(null, 'daemon_error'),
+    );
+    expect(failedConnection.isConnected).toBe(false);
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonIdeConnection] Event stream failed:',
+      'network down',
+    );
+
+    const endedEvents = new EventQueue();
+    const endedSession = createFakeSession(endedEvents);
+    const endedConnection = new DaemonIdeConnection();
+    const endedDisconnected = vi.fn();
+    endedConnection.onDisconnected = endedDisconnected;
+
+    await endedConnection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(endedSession),
+    });
+    endedEvents.close();
+    await waitFor(() =>
+      expect(endedDisconnected).toHaveBeenCalledWith(null, 'stream_ended'),
+    );
+    expect(endedConnection.isConnected).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('validates daemon base URLs before connecting', async () => {
+    const connection = new DaemonIdeConnection();
+    await expect(
+      connection.connect({
+        baseUrl: 'file:///tmp/daemon.sock',
+        sessionFactory: vi.fn(),
+      }),
+    ).rejects.toThrow('Daemon baseUrl must use http or https scheme');
+
+    await expect(
+      connection.connect({
+        baseUrl: 'http://user:pass@127.0.0.1:4170',
+        sessionFactory: vi.fn(),
+      }),
+    ).rejects.toThrow('Daemon baseUrl must not contain credentials');
   });
 });

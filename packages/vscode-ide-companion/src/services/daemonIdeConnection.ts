@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * Daemon-backed IDE connection spike. It mirrors the ACP process connection
+ * shape while replacing the local child process with a qwen serve session.
+ */
+
 import type {
   ContentBlock,
   RequestPermissionRequest,
@@ -81,6 +86,8 @@ type SdkModule = {
   };
 };
 
+// Uses new Function to bypass esbuild static analysis so @qwen-code/sdk is
+// loaded dynamically at runtime rather than bundled into the extension.
 const dynamicImport = new Function('specifier', 'return import(specifier)') as (
   specifier: string,
 ) => Promise<unknown>;
@@ -102,6 +109,38 @@ function isSdkModule(value: unknown): value is SdkModule {
   );
 }
 
+function validateDaemonBaseUrl(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error('Daemon baseUrl must use http or https scheme');
+  }
+  if (url.username || url.password) {
+    throw new Error('Daemon baseUrl must not contain credentials');
+  }
+  return baseUrl;
+}
+
+function normalizePrompt(prompt: string | ContentBlock[]): ContentBlock[] {
+  return typeof prompt === 'string'
+    ? ([{ type: 'text', text: prompt }] as ContentBlock[])
+    : prompt;
+}
+
+function toSafeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isPermissionRequestData(
+  value: unknown,
+): value is RequestPermissionRequest & { requestId: string } {
+  return (
+    isRecord(value) &&
+    typeof value['requestId'] === 'string' &&
+    isRecord(value['toolCall']) &&
+    Array.isArray(value['options'])
+  );
+}
+
 export function createSdkDaemonSessionFactory(): DaemonIdeSessionFactory {
   return async (opts: DaemonIdeSessionFactoryOptions) => {
     const sdk = await dynamicImport('@qwen-code/sdk');
@@ -110,7 +149,7 @@ export function createSdkDaemonSessionFactory(): DaemonIdeSessionFactory {
     }
 
     const daemon = new sdk.DaemonClient({
-      baseUrl: opts.baseUrl,
+      baseUrl: validateDaemonBaseUrl(opts.baseUrl),
       token: opts.token,
     });
     const session = await sdk.DaemonSessionClient.createOrAttach(daemon, {
@@ -131,10 +170,7 @@ export class DaemonIdeConnection {
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
     optionId: string;
-  }> = (data) =>
-    Promise.resolve({
-      optionId: this.resolvePermissionOptionId(data) || '',
-    });
+  }> = () => Promise.resolve({ optionId: 'cancel' });
   onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
     optionId: string;
     answers?: Record<string, string>;
@@ -145,18 +181,18 @@ export class DaemonIdeConnection {
 
   async connect(options: DaemonIdeConnectionOptions): Promise<void> {
     if (this.session) {
-      this.disconnect();
+      await this.disconnect();
     }
 
     const factory = options.sessionFactory ?? createSdkDaemonSessionFactory();
     this.session = await factory({
-      baseUrl: options.baseUrl,
+      baseUrl: validateDaemonBaseUrl(options.baseUrl),
       token: options.token,
       workspaceCwd: options.workspaceCwd,
       modelServiceId: options.modelServiceId,
       lastEventId: options.lastEventId,
     });
-    this.lastSeenEventId = this.session.lastEventId ?? options.lastEventId;
+    this.lastSeenEventId = options.lastEventId ?? this.session.lastEventId;
 
     this.eventController = new AbortController();
     this.eventPump = this.pumpEvents(this.session, this.eventController.signal);
@@ -166,10 +202,7 @@ export class DaemonIdeConnection {
     prompt: string | ContentBlock[],
   ): Promise<DaemonIdePromptResult> {
     const session = this.ensureSession();
-    const promptBlocks =
-      typeof prompt === 'string'
-        ? ([{ type: 'text', text: prompt }] as ContentBlock[])
-        : prompt;
+    const promptBlocks = normalizePrompt(prompt);
     const response = await session.prompt({ prompt: promptBlocks });
     this.onEndTurn(response.stopReason);
     return response;
@@ -187,8 +220,15 @@ export class DaemonIdeConnection {
     return await this.ensureSession().setModel(modelId);
   }
 
-  disconnect(): void {
+  async disconnect(): Promise<void> {
     this.eventController?.abort();
+    if (this.eventPump) {
+      try {
+        await this.eventPump;
+      } catch {
+        /* pump errors are converted into callbacks */
+      }
+    }
     this.eventController = null;
     this.eventPump = null;
     this.session = null;
@@ -207,7 +247,7 @@ export class DaemonIdeConnection {
   }
 
   get lastEventId(): number | undefined {
-    return this.session?.lastEventId ?? this.lastSeenEventId;
+    return this.lastSeenEventId ?? this.session?.lastEventId;
   }
 
   private ensureSession(): DaemonIdeSessionClient {
@@ -222,17 +262,41 @@ export class DaemonIdeConnection {
     signal: AbortSignal,
   ): Promise<void> {
     try {
-      for await (const event of session.events({ signal })) {
+      const resumeId = this.lastSeenEventId ?? session.lastEventId;
+      for await (const event of session.events({
+        signal,
+        lastEventId: resumeId,
+        resume: true,
+      })) {
+        try {
+          await this.handleEvent(event);
+        } catch (error) {
+          console.warn('[DaemonIdeConnection] Event handler failed:', {
+            eventType: event.type,
+            eventId: event.id,
+            error: toSafeErrorMessage(error),
+          });
+          continue;
+        }
         if (event.id !== undefined) {
           this.lastSeenEventId = event.id;
         }
-        await this.handleEvent(event);
+      }
+      if (!signal.aborted) {
+        this.clearCurrentSession(session, 'stream_ended');
       }
     } catch (error) {
       if (!signal.aborted) {
-        console.warn('[DaemonIdeConnection] Event stream failed:', error);
-        this.session = null;
-        this.onDisconnected(null, 'daemon_error');
+        console.warn(
+          '[DaemonIdeConnection] Event stream failed:',
+          toSafeErrorMessage(error),
+        );
+        this.eventController?.abort();
+        this.clearCurrentSession(session, 'daemon_error');
+      }
+    } finally {
+      if (this.session === session) {
+        this.eventPump = null;
       }
     }
   }
@@ -254,14 +318,23 @@ export class DaemonIdeConnection {
   }
 
   private async handlePermissionRequest(data: unknown): Promise<void> {
-    if (!isRecord(data) || typeof data['requestId'] !== 'string') {
+    if (!isPermissionRequestData(data)) {
       return;
     }
 
     const requestId = data['requestId'];
-    const request = data as unknown as RequestPermissionRequest;
+    const request = data;
     const response = await this.resolvePermissionResponse(request);
-    await this.ensureSession().respondToPermission(requestId, response);
+    const accepted = await this.ensureSession().respondToPermission(
+      requestId,
+      response,
+    );
+    if (!accepted) {
+      console.warn(
+        '[DaemonIdeConnection] Permission response rejected by daemon for request:',
+        requestId,
+      );
+    }
   }
 
   private async resolvePermissionResponse(
@@ -277,14 +350,22 @@ export class DaemonIdeConnection {
         questions: rawInput['questions'] as AskUserQuestionRequest['questions'],
         metadata: rawInput['metadata'] as AskUserQuestionRequest['metadata'],
       });
-      if (this.isCancelledOption(askResponse.optionId)) {
+      if (
+        !askResponse.optionId ||
+        this.isCancelledOption(askResponse.optionId)
+      ) {
         return { outcome: { outcome: 'cancelled' } };
       }
+      const optionId =
+        this.resolvePermissionOptionId(request, askResponse.optionId) ??
+        askResponse.optionId;
       return {
         outcome: {
           outcome: 'selected',
-          optionId: askResponse.optionId || 'proceed_once',
+          optionId,
         },
+        // Daemon's HTTP permission route preserves top-level passthrough
+        // fields and the ACP session consumes `answers` from this position.
         answers: askResponse.answers,
       } as RequestPermissionResponse;
     }
@@ -313,15 +394,19 @@ export class DaemonIdeConnection {
         ? data['reason']
         : 'session_died';
     this.eventController?.abort();
-    this.eventController = null;
-    this.eventPump = null;
-    this.session = null;
-    this.onDisconnected(null, reason);
+    if (this.session) {
+      this.clearCurrentSession(this.session, reason);
+    } else {
+      this.onDisconnected(null, reason);
+    }
   }
 
   private isCancelledOption(optionId?: string): boolean {
-    return Boolean(
-      optionId && (optionId.includes('reject') || optionId === 'cancel'),
+    return (
+      !optionId ||
+      optionId === 'cancel' ||
+      optionId === 'reject' ||
+      optionId.startsWith('reject_')
     );
   }
 
@@ -344,9 +429,24 @@ export class DaemonIdeConnection {
     return (
       options.find((option) => option.kind === 'allow_once')?.optionId ||
       options.find((option) => option.optionId === 'proceed_once')?.optionId ||
+      // Some ACP producers namespace standard option ids. Prefer an
+      // explicit allow_once kind first, then tolerate namespaced proceed_once.
       options.find((option) => option.optionId.includes('proceed_once'))
         ?.optionId ||
       options[0]?.optionId
     );
+  }
+
+  private clearCurrentSession(
+    session: DaemonIdeSessionClient,
+    reason: string,
+  ): void {
+    if (this.session !== session) {
+      return;
+    }
+    this.eventController = null;
+    this.eventPump = null;
+    this.session = null;
+    this.onDisconnected(null, reason);
   }
 }
