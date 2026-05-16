@@ -2042,7 +2042,9 @@ describe('Session', () => {
           };
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
           mockChat.getHistory = vi
             .fn()
             .mockReturnValue([
@@ -2075,6 +2077,54 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
+        });
+
+        it('ends Stop hook continuation when the blocking cap is reached', async () => {
+          const messageBus = {
+            request: vi.fn().mockImplementation(async (request) => ({
+              success: true,
+              output:
+                request.eventName === 'Stop'
+                  ? {
+                      decision: 'block',
+                      reason: 'Continue after Stop hook',
+                    }
+                  : {},
+            })),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(2);
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(result).toEqual({ stopReason: 'end_turn' });
+          expect(messageBus.request).toHaveBeenCalledTimes(2);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+              },
+            },
+          });
         });
       });
 
