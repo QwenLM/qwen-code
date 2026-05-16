@@ -179,9 +179,7 @@ function cleanupOldHeapSnapshots(
     )
     .map((name) => path.join(outputDir, name))
     .sort((a, b) => {
-      const aStat = fs.statSync(a);
-      const bStat = fs.statSync(b);
-      const mtimeDelta = bStat.mtimeMs - aStat.mtimeMs;
+      const mtimeDelta = getSnapshotMtimeMs(b) - getSnapshotMtimeMs(a);
       if (mtimeDelta !== 0) return mtimeDelta;
 
       return (
@@ -192,7 +190,19 @@ function cleanupOldHeapSnapshots(
     });
 
   for (const filePath of snapshots.slice(maxSnapshots)) {
-    fs.rmSync(filePath, { force: true });
+    try {
+      fs.rmSync(filePath, { force: true });
+    } catch {
+      // Cleanup is best effort; one stuck file should not block the rest.
+    }
+  }
+}
+
+function getSnapshotMtimeMs(filePath: string): number {
+  try {
+    return fs.lstatSync(filePath).mtimeMs;
+  } catch {
+    return 0;
   }
 }
 

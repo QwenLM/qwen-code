@@ -333,6 +333,47 @@ describe('memoryDiagnostics', () => {
     }
   });
 
+  it('uses filename timestamps to break equal-mtime cleanup ties', () => {
+    const outputDir = path.join(
+      os.tmpdir(),
+      `qwen-memory-diagnostics-equal-mtime-cleanup-${process.pid}`,
+    );
+    fs.rmSync(outputDir, { recursive: true, force: true });
+    fs.mkdirSync(outputDir, { recursive: true });
+
+    const olderSnapshot = path.join(
+      outputDir,
+      'qwen-code-heap-1-2026-05-15T11-00-00-000Z.heapsnapshot',
+    );
+    const newerSnapshot = path.join(
+      outputDir,
+      'qwen-code-heap-1-2026-05-15T12-00-00-000Z.heapsnapshot',
+    );
+    fs.writeFileSync(olderSnapshot, 'older');
+    fs.writeFileSync(newerSnapshot, 'newer');
+    const sameMtime = new Date('2026-05-15T12:00:00.000Z');
+    fs.utimesSync(olderSnapshot, sameMtime, sameMtime);
+    fs.utimesSync(newerSnapshot, sameMtime, sameMtime);
+
+    const writtenPath = writeMemoryHeapSnapshot({
+      outputDir,
+      now: new Date('2026-05-15T13:00:00.000Z'),
+      maxSnapshots: 2,
+      writeSnapshot: (filePath) => {
+        fs.writeFileSync(filePath, 'snapshot');
+        return filePath;
+      },
+    });
+
+    try {
+      expect(fs.existsSync(olderSnapshot)).toBe(false);
+      expect(fs.existsSync(newerSnapshot)).toBe(true);
+      expect(fs.existsSync(writtenPath)).toBe(true);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps successful heap snapshot writes when cleanup fails', () => {
     const outputDir = path.join(
       os.tmpdir(),
@@ -340,13 +381,11 @@ describe('memoryDiagnostics', () => {
     );
     fs.rmSync(outputDir, { recursive: true, force: true });
     fs.mkdirSync(outputDir, { recursive: true });
-    fs.symlinkSync(
-      'missing-target.heapsnapshot',
-      path.join(
-        outputDir,
-        'qwen-code-heap-999-2026-05-15T11-00-00-000Z.heapsnapshot',
-      ),
+    const brokenSymlink = path.join(
+      outputDir,
+      'qwen-code-heap-999-2026-05-15T11-00-00-000Z.heapsnapshot',
     );
+    fs.symlinkSync('missing-target.heapsnapshot', brokenSymlink);
 
     try {
       const writtenPath = writeMemoryHeapSnapshot({
@@ -360,6 +399,7 @@ describe('memoryDiagnostics', () => {
       });
 
       expect(fs.existsSync(writtenPath)).toBe(true);
+      expect(() => fs.lstatSync(brokenSymlink)).toThrow();
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
