@@ -173,6 +173,7 @@ export interface OpenDialogActionReturn {
     | 'theme'
     | 'editor'
     | 'settings'
+    | 'statusline'
     | 'memory'
     | 'model'
     | 'fast-model'

@@ -15,6 +15,7 @@ import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
 import type { RestoreOption } from '../components/RewindSelector.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 
 export type HelpTab = 'general' | 'commands' | 'custom-commands';
 
@@ -38,6 +39,8 @@ export interface UIActions {
   ) => void;
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
+  closeStatusLineDialog: () => void;
+  notifyStatusLineSettingsChanged: (config: StatusLinePresetConfig) => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
