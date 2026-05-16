@@ -35,6 +35,7 @@ import type {
 import {
   createHttpAcpBridge,
   InvalidPermissionOptionError,
+  InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -487,18 +488,118 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  it('rejects an invalid per-request sessionScope', async () => {
-    // Defense-in-depth: the route-layer validates strings, but a direct
-    // bridge caller (test, embed, future entry point) could pass a
-    // non-enum value. Throw `TypeError` mirroring the construction-time
-    // validator so the failure shape is consistent.
-    const bridge = makeBridge();
-    await expect(
+  it('symmetric mixed-scope leak: single-first does NOT trap a later thread call into the single slot', async () => {
+    // Mirror of the daemon-default-`'single'` + thread-first leak
+    // regression: under daemon-default-`'thread'` an explicit `'single'`
+    // first call legitimately claims the attach slot, and a SECOND
+    // omitted-scope call (`effectiveScope = 'thread'` under the daemon
+    // default) must then create a fresh session, NOT attach to the
+    // single-scope first session. Confirms `effectiveScope` is what
+    // gates attach-reuse, not just the daemon-wide default.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: factory,
+    });
+
+    const single = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'single',
+    });
+    const omitted = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(single.attached).toBe(false);
+    expect(omitted.attached).toBe(false); // thread under daemon default
+    expect(omitted.sessionId).not.toBe(single.sessionId);
+    expect(bridge.sessionCount).toBe(2);
+
+    // A second explicit `'single'` MUST attach to `single`, proving
+    // the slot stayed correctly populated by the first call.
+    const reattachSingle = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'single',
+    });
+    expect(reattachSingle.sessionId).toBe(single.sessionId);
+    expect(reattachSingle.attached).toBe(true);
+
+    await bridge.shutdown();
+  });
+
+  it("concurrent mixed-scope spawns don't collide on the in-flight tracker (#4175 PR 5)", async () => {
+    // The in-flight coalescing key is `workspaceKey` for `'single'` and
+    // `${workspaceKey}#${randomUUID()}` for `'thread'`. A simultaneous
+    // single+thread pair against the same workspace must not collide:
+    // the `'single'` caller's `inFlightSpawns.get(workspaceKey)` must
+    // not match the `'thread'` caller's tracker, and vice versa.
+    //
+    // Slow `initialize` so both calls reach `inFlightSpawns` before
+    // either's spawn resolves — exercises the actual race window. The
+    // shared workspace channel is created once (Stage 1.5
+    // multi-session); the slow init also serializes the second
+    // `ensureChannel` waiter under the same mutex, but the
+    // `inFlightSpawns` tracker key differs by scope so the two
+    // resolutions stay isolated.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        sessionIdPrefix: `s${handles.length}`,
+        initializeDelayMs: 30,
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({
+      sessionScope: 'single', // production default
+      channelFactory: factory,
+    });
+
+    // Fire both calls before either's spawn has resolved.
+    const [singleSess, threadSess] = await Promise.all([
       bridge.spawnOrAttach({
         workspaceCwd: WS_A,
-        sessionScope: 'bogus' as unknown as 'single',
+        sessionScope: 'single',
       }),
-    ).rejects.toThrow(/Invalid sessionScope/);
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      }),
+    ]);
+
+    // Distinct sessions — the thread caller did NOT attach to the
+    // in-flight single spawn (or vice versa).
+    expect(singleSess.sessionId).not.toBe(threadSess.sessionId);
+    expect(singleSess.attached).toBe(false);
+    expect(threadSess.attached).toBe(false);
+    expect(bridge.sessionCount).toBe(2);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects an invalid per-request sessionScope with InvalidSessionScopeError', async () => {
+    // Defense-in-depth: the route-layer validates strings, but a direct
+    // bridge caller (test, embed, future entry point) could pass a
+    // non-enum value. Throw a typed `InvalidSessionScopeError` so the
+    // route's `sendBridgeError` translator returns the same 400
+    // `code: 'invalid_session_scope'` it would have if the route had
+    // caught the bad value first — keeping both layers in agreement
+    // on the wire shape.
+    const bridge = makeBridge();
+    const err = await bridge
+      .spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'bogus' as unknown as 'single',
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InvalidSessionScopeError);
+    expect((err as InvalidSessionScopeError).sessionScope).toBe('bogus');
+    expect((err as InvalidSessionScopeError).message).toMatch(
+      /Invalid sessionScope/,
+    );
   });
 
   it('rejects relative workspace paths', async () => {
@@ -2718,6 +2819,47 @@ describe('createHttpAcpBridge', () => {
         limit: 2,
       });
       // Cap rejection must NOT register a new session.
+      expect(bridge.sessionCount).toBe(2);
+
+      await bridge.shutdown();
+    });
+
+    it('per-request thread overrides cannot bypass the cap (#4175 PR 5 amplification guard)', async () => {
+      // The cap exists to bound child-process / RSS / MCP amplification
+      // — the new `'thread'` per-request override is exactly the kind of
+      // request a single-scope daemon could be hammered with by a
+      // multi-window client. A future refactor that gated the cap on
+      // `defaultSessionScope` (instead of `effectiveScope`) would
+      // silently let `'thread'` overrides bypass the limit. Pin the
+      // contract here.
+      let n = 0;
+      const factory: ChannelFactory = async () =>
+        makeChannel({ sessionIdPrefix: `s${n++}` }).channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        maxSessions: 2,
+        sessionScope: 'single', // production default
+      });
+
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      expect(bridge.sessionCount).toBe(2);
+
+      await expect(
+        bridge.spawnOrAttach({
+          workspaceCwd: WS_A,
+          sessionScope: 'thread',
+        }),
+      ).rejects.toMatchObject({
+        name: 'SessionLimitExceededError',
+        limit: 2,
+      });
       expect(bridge.sessionCount).toBe(2);
 
       await bridge.shutdown();

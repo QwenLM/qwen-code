@@ -73,10 +73,11 @@ export interface BridgeSpawnRequest {
   modelServiceId?: string;
   /**
    * Per-request override for `sessionScope`. When set, takes precedence
-   * over the daemon-wide default (`BridgeOptions.sessionScope`, set at
-   * boot via `serve --sessionScope`). When omitted, the daemon-wide
-   * default applies — preserving exact pre-#4175-PR-5 behavior for any
-   * caller that doesn't set the field.
+   * over the bridge-wide default (`BridgeOptions.sessionScope`, which
+   * direct embeds may set at construction time; the production daemon
+   * has no CLI flag for it today and currently always uses `'single'`).
+   * When omitted, the bridge-wide default applies — preserving exact
+   * pre-#4175-PR-5 behavior for any caller that doesn't set the field.
    *
    * Resolves the FIXME at `BridgeOptions.sessionScope` (#3803 — VSCode
    * needing per-window isolation against a daemon defaulting to
@@ -242,6 +243,29 @@ export class SessionNotFoundError extends Error {
     super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
+  }
+}
+
+/**
+ * Thrown by `spawnOrAttach` when `req.sessionScope` is set to a value
+ * outside the `'single' | 'thread'` enum. The HTTP route validates the
+ * body field at the boundary first (so HTTP callers get a typed
+ * `400 invalid_session_scope` before ever reaching the bridge); this
+ * class exists for direct callers — tests, embeds, future entry points
+ * — and so the route's catch-block can translate it back to the same
+ * 400 shape rather than the generic 500 every other thrown `Error`
+ * collapses to. Distinct type so routes can branch without
+ * text-matching the message.
+ */
+export class InvalidSessionScopeError extends Error {
+  readonly sessionScope: unknown;
+  constructor(sessionScope: unknown) {
+    super(
+      `Invalid sessionScope: ${JSON.stringify(sessionScope)}. ` +
+        `Expected 'single' or 'thread'.`,
+    );
+    this.name = 'InvalidSessionScopeError';
+    this.sessionScope = sessionScope;
   }
 }
 
@@ -1713,10 +1737,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         req.sessionScope !== 'single' &&
         req.sessionScope !== 'thread'
       ) {
-        throw new TypeError(
-          `Invalid sessionScope: ${JSON.stringify(req.sessionScope)}. ` +
-            `Expected 'single' or 'thread'.`,
-        );
+        throw new InvalidSessionScopeError(req.sessionScope);
       }
       const effectiveScope = req.sessionScope ?? defaultSessionScope;
 

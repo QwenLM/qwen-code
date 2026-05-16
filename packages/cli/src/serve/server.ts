@@ -14,6 +14,7 @@ import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
   InvalidPermissionOptionError,
+  InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -293,7 +294,7 @@ export function createServeApp(
       const session = await bridge.spawnOrAttach({
         workspaceCwd: cwd,
         modelServiceId,
-        ...(sessionScope ? { sessionScope } : {}),
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1002,6 +1003,19 @@ function sendBridgeError(
       code: 'workspace_mismatch',
       boundWorkspace: err.bound,
       requestedWorkspace: err.requested,
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionScopeError) {
+    // Same wire shape as the route-layer 400 (`server.ts` validates
+    // body['sessionScope'] before calling the bridge). A direct embed
+    // / test caller bypassing the route would otherwise see a generic
+    // 500 — the typed translation keeps both layers in agreement so
+    // SDK clients can branch on `code` regardless of which layer
+    // surfaced the rejection.
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_session_scope',
     });
     return;
   }
