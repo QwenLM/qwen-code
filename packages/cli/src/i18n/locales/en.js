@@ -713,6 +713,9 @@ export default {
   'When a session is ending': 'When a session is ending',
   'When a permission dialog is displayed':
     'When a permission dialog is displayed',
+  'When a new todo item is created': 'When a new todo item is created',
+  'When a todo item is marked as completed':
+    'When a todo item is marked as completed',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'Input to command is JSON of tool call arguments.',
@@ -736,6 +739,10 @@ export default {
     'Input to command is JSON with compaction details.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr not shown',
   'show stderr to model and continue conversation':
@@ -761,6 +768,12 @@ export default {
   'show stderr to user only but continue with compaction':
     'show stderr to user only but continue with compaction',
   'use hook decision if provided': 'use hook decision if provided',
+  'allow todo creation': 'allow todo creation',
+  'block todo creation and show reason to model':
+    'block todo creation and show reason to model',
+  'allow todo completion': 'allow todo completion',
+  'block todo completion and show reason to model':
+    'block todo completion and show reason to model',
   // Hooks - Messages
   'Config not loaded.': 'Config not loaded.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -812,25 +825,6 @@ export default {
   'Set LLM output language': 'Set LLM output language',
   'Usage: /language ui [{{options}}]': 'Usage: /language ui [{{options}}]',
   'Usage: /language output <language>': 'Usage: /language output <language>',
-  'Manage dynamic translation cache': 'Manage dynamic translation cache',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    'Re-translate currently loaded dynamic slash descriptions for the current UI language',
-  'Clear cached translations for the current UI language':
-    'Clear cached translations for the current UI language',
-  'Manage AI translation for dynamic slash command descriptions':
-    'Manage AI translation for dynamic slash command descriptions',
-  'Enable AI translation for dynamic slash command descriptions':
-    'Enable AI translation for dynamic slash command descriptions',
-  'Disable AI translation for dynamic slash command descriptions':
-    'Disable AI translation for dynamic slash command descriptions',
-  'Show AI translation status for dynamic slash command descriptions':
-    'Show AI translation status for dynamic slash command descriptions',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    'AI translation for dynamic slash command descriptions is {{status}}.',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    'AI translation for dynamic slash command descriptions is now enabled.',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    'AI translation for dynamic slash command descriptions is now disabled.',
   'Example: /language output 中文': 'Example: /language output 中文',
   'Example: /language output English': 'Example: /language output English',
   'Example: /language output 日本語': 'Example: /language output 日本語',

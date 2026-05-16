@@ -853,6 +853,21 @@ describe('loadCliConfig', () => {
     expect(config.getIncludePartialMessages()).toBe(true);
   });
 
+  it('should use internal sandbox session ID without treating it as a new session', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
+    const sessionExistsSpy = vi.spyOn(
+      ServerConfig.SessionService.prototype,
+      'sessionExists',
+    );
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(sessionExistsSpy).not.toHaveBeenCalled();
+  });
+
   it('should reset context filenames to defaults when context.fileName is not configured', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1309,6 +1324,63 @@ describe('mergeExcludeTools', () => {
       expect.arrayContaining(['tool1', 'tool2']),
     );
     expect(config.getPermissionsDeny()).toHaveLength(2);
+  });
+
+  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: false } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--model',
+      'openrouter/deepseek/deepseek-chat',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should not auto-disable tool_search for non-deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'qwen-max'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+  });
+
+  it('should respect explicit enabled:true override for deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
   });
 });
 
@@ -2891,15 +2963,6 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryOutfile()).toBe('/gemini/env/telemetry.log');
-  });
-
-  it('should prioritize QWEN_TELEMETRY_USE_COLLECTOR over settings', async () => {
-    vi.stubEnv('QWEN_TELEMETRY_USE_COLLECTOR', 'true');
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const settings: Settings = { telemetry: { useCollector: false } };
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getTelemetryUseCollector()).toBe(true);
   });
 
   it('should use settings value when QWEN_TELEMETRY_ENABLED is not set', async () => {

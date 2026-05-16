@@ -368,17 +368,10 @@ export interface SlashCommand {
   whenToUse?: string;
 
   /**
-   * Non-localized description reserved for model-visible metadata.
-   * Dynamic command localization may rewrite `description` for UI display while
-   * keeping this value stable for model invocation hints.
+   * Non-localized description reserved for model-visible metadata. Stays stable
+   * across UI locale changes; `description` is what the UI surface renders.
    */
   modelDescription?: string;
-
-  /**
-   * Marks command descriptions that should be localized at runtime to match the
-   * current UI language.
-   */
-  localizeDescription?: boolean;
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];

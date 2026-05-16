@@ -8,8 +8,8 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { fileURLToPath } from 'url';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
+import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import * as yaml from 'yaml';
 import type {
@@ -86,8 +86,13 @@ export class SkillManager {
   private activationRegistry: SkillActivationRegistry | null = null;
 
   constructor(private readonly config: Config) {
+    // Anchor the bundled skills directory at the on-disk sibling of
+    // `cli.js` (i.e. `dist/bundled/`, populated by `copy_bundle_assets.js`).
+    // See `resolveBundleDir` for the rationale behind stripping a trailing
+    // `chunks/` segment when this module is hoisted into a shared esbuild
+    // chunk.
     this.bundledSkillsDir = path.join(
-      path.dirname(fileURLToPath(import.meta.url)),
+      resolveBundleDir(import.meta.url),
       'bundled',
     );
   }

@@ -29,10 +29,6 @@ export class CommandService {
    */
   private constructor(private readonly commands: readonly SlashCommand[]) {}
 
-  static fromCommands(commands: readonly SlashCommand[]): CommandService {
-    return new CommandService(Object.freeze([...commands]));
-  }
-
   /**
    * Asynchronously creates and initializes a new CommandService instance.
    *

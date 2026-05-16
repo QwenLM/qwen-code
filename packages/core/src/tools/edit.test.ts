@@ -40,6 +40,7 @@ describe('EditTool', () => {
   let geminiClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
+  let fsService: StandardFileSystemService;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -47,6 +48,7 @@ describe('EditTool', () => {
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
     fileReadCache = new FileReadCache();
+    fsService = new StandardFileSystemService();
 
     geminiClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
@@ -63,7 +65,7 @@ describe('EditTool', () => {
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
-      getFileSystemService: () => new StandardFileSystemService(),
+      getFileSystemService: () => fsService,
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
       getModel: () => 'test-model',
@@ -918,24 +920,23 @@ describe('EditTool', () => {
       expect(() => tool.build(params)).toThrow();
     });
 
-    it.skipIf(process.getuid && process.getuid() === 0)(
-      'should return FILE_WRITE_FAILURE on write error',
-      async () => {
-        fs.writeFileSync(filePath, 'content', 'utf8');
-        seedPriorRead(filePath);
-        // Make file readonly to trigger a write error
-        fs.chmodSync(filePath, '444');
+    it('should return FILE_WRITE_FAILURE on write error', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
 
-        const params: EditToolParams = {
-          file_path: filePath,
-          old_string: 'content',
-          new_string: 'new content',
-        };
-        const invocation = tool.build(params);
-        const result = await invocation.execute(new AbortController().signal);
-        expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
-      },
-    );
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
+        new Error('Simulated write error'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+    });
   });
 
   describe('getDescription', () => {

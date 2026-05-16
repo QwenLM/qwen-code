@@ -1440,8 +1440,13 @@ describe('LoggingContentGenerator', () => {
     expect(openaiLoggerInstance.logInteraction).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
-    'skips logApiRequest and OpenAI logging for internal promptId %s (generateContent)',
+  it.each([
+    'prompt_suggestion',
+    'forked_query',
+    'speculation',
+    'side-query:session-title',
+  ])(
+    'skips logApiRequest but writes tagged OpenAI logging for internal promptId %s (generateContent)',
     async (promptId) => {
       const mockResponse = {
         responseId: 'internal-resp',
@@ -1474,17 +1479,36 @@ describe('LoggingContentGenerator', () => {
       expect(logApiResponse).toHaveBeenCalled();
       const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
       expect(responseEvent.response_text).toBeUndefined();
-      // OpenAI logger should be constructed, but no interaction should be logged
+      // OpenAI file logging is explicit diagnostic output, so internal prompts
+      // are written with a tag instead of being dropped.
       expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
         OpenAILogger as unknown as ReturnType<typeof vi.fn>
       ).mock.results[0]?.value;
-      expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
+      expect(loggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+      const [openaiRequest, openaiResponse, openaiError, options] =
+        loggerInstance.logInteraction.mock.calls[0];
+      expect(openaiRequest).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          messages: [{ role: 'user', content: 'converted' }],
+        }),
+      );
+      expect(openaiResponse).toEqual(
+        expect.objectContaining({ id: 'openai-response' }),
+      );
+      expect(openaiError).toBeUndefined();
+      expect(options).toBe(promptId);
     },
   );
 
-  it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
-    'skips logApiRequest and OpenAI logging for internal promptId %s (generateContentStream)',
+  it.each([
+    'prompt_suggestion',
+    'forked_query',
+    'speculation',
+    'side-query:session-title',
+  ])(
+    'skips logApiRequest but writes tagged OpenAI logging for internal promptId %s (generateContentStream)',
     async (promptId) => {
       const mockChunk = {
         responseId: 'stream-resp',
@@ -1527,7 +1551,20 @@ describe('LoggingContentGenerator', () => {
       const loggerInstance = (
         OpenAILogger as unknown as ReturnType<typeof vi.fn>
       ).mock.results[0]?.value;
-      expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
+      expect(loggerInstance.logInteraction).toHaveBeenCalledTimes(1);
+      const [openaiRequest, openaiResponse, openaiError, options] =
+        loggerInstance.logInteraction.mock.calls[0];
+      expect(openaiRequest).toEqual(
+        expect.objectContaining({
+          model: 'test-model',
+          messages: [{ role: 'user', content: 'converted' }],
+        }),
+      );
+      expect(openaiResponse).toEqual(
+        expect.objectContaining({ id: 'openai-response' }),
+      );
+      expect(openaiError).toBeUndefined();
+      expect(options).toBe(promptId);
     },
   );
 });

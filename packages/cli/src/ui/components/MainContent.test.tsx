@@ -456,4 +456,75 @@ describe('<MainContent />', () => {
 
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
   });
+
+  it('does NOT reset progressive replay when only currentModel changes (PR #4119 regression guard)', async () => {
+    // Wenshao's review on PR #4119: if AppContainer splits the model-change
+    // wiring into two separate effects (setCurrentModel first, refreshStatic
+    // -> historyRemountKey bump second), there is a render where currentModel
+    // is new but historyRemountKey is still the old value. <Static>'s key is
+    // `${historyRemountKey}-${currentModel}`, so the key changes (Ink remounts
+    // Static), but the render-phase reset (lastRemountKey !== historyRemountKey)
+    // does NOT fire — so the new <Static> is mounted with the full pre-catch-up
+    // replayCount, and Ink does the synchronous full-history layout the PR is
+    // meant to avoid.
+    //
+    // This test reproduces only the dangerous half of that interleaving:
+    // currentModel flips while historyRemountKey is held constant. Under the
+    // correct (single-batch) AppContainer wiring this combination never
+    // appears in practice, but the test pins the MainContent invariant —
+    // currentModel alone must not trigger progressive-replay reset, which
+    // makes any future "two-effect" regression visible here as a freeze.
+    staticItemsSpy.mockClear();
+    const history = Array.from({ length: 200 }, (_, i) => ({
+      type: 'user' as const,
+      id: i,
+      text: `msg ${i}`,
+    }));
+    const TOTAL = 203;
+
+    const { rerender } = renderMainContent(
+      createUIState({
+        history,
+        historyRemountKey: 1,
+        currentModel: 'model-a',
+      }),
+    );
+
+    // Drive the chunked replay to completion (replayCount === TOTAL).
+    for (let i = 0; i < 50; i++) {
+      const len = staticItemsSpy.mock.calls.at(-1)?.[0].length ?? 0;
+      if (len === TOTAL) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+
+    // Re-render with a NEW currentModel but the SAME historyRemountKey.
+    // <Static>'s key will change (Ink remounts), but replayCount must stay
+    // at TOTAL — i.e. progressive replay must NOT re-trigger. Any future
+    // refactor that re-introduces a one-render gap between setCurrentModel
+    // and the historyRemountKey bump will trip this assertion the moment
+    // someone correctly drives the reset off the model dimension instead.
+    rerender(
+      <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+        <CompactModeProvider value={{ compactMode: false }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                history,
+                historyRemountKey: 1,
+                currentModel: 'model-b',
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </CompactModeProvider>
+      </AppContext.Provider>,
+    );
+
+    // No reset means the LAST staticItemsSpy call still received TOTAL.
+    expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+  });
 });

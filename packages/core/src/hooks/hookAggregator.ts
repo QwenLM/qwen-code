@@ -107,6 +107,8 @@ export class HookAggregator {
       case HookEventName.Stop:
       case HookEventName.UserPromptSubmit:
       case HookEventName.SubagentStop:
+      case HookEventName.TodoCreated:
+      case HookEventName.TodoCompleted:
         merged = this.mergeWithOrLogic(outputs, eventName);
         break;
       case HookEventName.PermissionRequest:
