@@ -403,6 +403,66 @@ describe('WriteFileTool', () => {
       expect(writtenContent).toBe(proposedContent);
     });
 
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window. Test verifies
+    // trackEdit was invoked BEFORE the pre-write `cache.check(...)`.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const filePath = path.join(rootDir, 'toctou_ordering.txt');
+      const initialContent = 'pre-existing content';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: true,
+        cacheable: true,
+      });
+
+      const callOrder: string[] = [];
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        callOrder.push('trackEdit');
+      });
+      // Pass-through spy: records each call but defers to the real impl.
+      const originalCheck = fileReadCache.check.bind(fileReadCache);
+      const cacheCheckSpy = vi
+        .spyOn(fileReadCache, 'check')
+        .mockImplementation((stats) => {
+          callOrder.push('cache.check');
+          return originalCheck(stats);
+        });
+
+      const params = { file_path: filePath, content: 'new content' };
+      const invocation = tool.build(params);
+
+      try {
+        const confirmDetails =
+          await invocation.getConfirmationDetails(abortSignal);
+        if (
+          typeof confirmDetails === 'object' &&
+          'onConfirm' in confirmDetails &&
+          confirmDetails.onConfirm
+        ) {
+          await confirmDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+        }
+        await invocation.execute(abortSignal);
+
+        const trackEditIdx = callOrder.indexOf('trackEdit');
+        const lastCheckIdx = callOrder.lastIndexOf('cache.check');
+        expect(trackEditIdx).toBeGreaterThanOrEqual(0);
+        expect(lastCheckIdx).toBeGreaterThanOrEqual(0);
+        expect(trackEditIdx).toBeLessThan(lastCheckIdx);
+      } finally {
+        cacheCheckSpy.mockRestore();
+      }
+    });
+
     it('should overwrite an existing file and return diff', async () => {
       const filePath = path.join(rootDir, 'execute_existing_file.txt');
       const initialContent = 'Initial content for execute.';

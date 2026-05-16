@@ -336,7 +336,15 @@ export class FileHistoryService {
       return;
     }
 
-    if (mostRecent.trackedFileBackups[trackingPath]) {
+    const existing = mostRecent.trackedFileBackups[trackingPath];
+    // Skip only when we already have a confirmed (non-failed) backup. If
+    // the existing entry is marked `failed` (because makeSnapshot's
+    // per-file backup attempt threw earlier), let trackEdit retry: this
+    // is the next chance to capture the file's pre-edit state under
+    // hopefully-recovered I/O conditions. Without this allowance the
+    // failed marker would stay sticky until the file content changes
+    // again, permanently poisoning rewind for that file.
+    if (existing && !existing.failed) {
       return;
     }
 
@@ -352,7 +360,11 @@ export class FileHistoryService {
 
     // Re-check after async backup — concurrent calls write the same
     // deterministic path, so the second overwrites the first harmlessly.
-    if (!mostRecent.trackedFileBackups[trackingPath]) {
+    // Allow overwriting a `failed` entry so the heal path actually
+    // records the fresh backup (otherwise we'd leave the failed marker
+    // in place even though we successfully captured the file).
+    const current = mostRecent.trackedFileBackups[trackingPath];
+    if (!current || current.failed) {
       mostRecent.trackedFileBackups[trackingPath] = backup;
       this.state.trackedFiles.add(trackingPath);
     }

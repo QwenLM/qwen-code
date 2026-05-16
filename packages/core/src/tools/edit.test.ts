@@ -534,6 +534,60 @@ describe('EditTool', () => {
       );
     });
 
+    // Pin the upstream-aligned ordering: trackEdit MUST run before the
+    // pre-write checkPriorRead. The upstream `claude-code/src/tools/
+    // FileEditTool` comment on the equivalent block says:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // Without this ordering the multi-hundred-ms `trackEdit` sat
+    // between checkPriorRead and writeTextFile, widening the
+    // already-acknowledged stat-then-write race window from microseconds
+    // to seconds. Test verifies trackEdit was invoked BEFORE the
+    // pre-write `cache.check(...)` call.
+    it('backs up before the pre-write freshness check (TOCTOU ordering)', async () => {
+      const initialContent = 'This is some old text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+
+      const callOrder: string[] = [];
+      mockFileHistoryService.trackEdit.mockImplementation(async () => {
+        callOrder.push('trackEdit');
+      });
+      // Pass-through spy: records each call but defers to the real impl.
+      const originalCheck = fileReadCache.check.bind(fileReadCache);
+      const cacheCheckSpy = vi
+        .spyOn(fileReadCache, 'check')
+        .mockImplementation((stats) => {
+          callOrder.push('cache.check');
+          return originalCheck(stats);
+        });
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      try {
+        await tool.build(params).execute(new AbortController().signal);
+
+        // trackEdit must have run, and must have run BEFORE the pre-write
+        // cache.check (the last cache.check call covers the pre-write
+        // freshness guard — earlier ones come from calculateEdit's
+        // pre-read and post-read phases).
+        const trackEditIdx = callOrder.indexOf('trackEdit');
+        const lastCheckIdx = callOrder.lastIndexOf('cache.check');
+        expect(trackEditIdx).toBeGreaterThanOrEqual(0);
+        expect(lastCheckIdx).toBeGreaterThanOrEqual(0);
+        expect(trackEditIdx).toBeLessThan(lastCheckIdx);
+      } finally {
+        cacheCheckSpy.mockRestore();
+      }
+    });
+
     // The Edit tool feeds the commit-attribution singleton on success so
     // commit notes can later report per-file AI/human ratios. Service-
     // level tests for `recordEdit` already exist; these guard against
