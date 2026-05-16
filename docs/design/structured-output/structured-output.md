@@ -79,20 +79,20 @@ needs whole-schema satisfiability analysis to Ajv at runtime.
 
 **Decided at parse time:**
 
-| Pattern | Outcome |
-| --- | --- |
-| `type` present, doesn't include `"object"` | reject |
-| `type: ["object", "null"]` etc. | accept |
-| `const`: non-object value | reject |
-| `enum`: no object members (incl. empty) | reject |
-| `anyOf`/`oneOf`: empty array | reject |
-| `anyOf`/`oneOf`: no branch admits object | reject |
-| `allOf`: any branch is `false` or rejects object | reject |
-| Root `$ref` (with or without sibling `type`) | reject |
-| `not`: bare `{type: "object"}` (no narrowing keywords) | reject |
-| `not`: `{type: "object", required: […], …}` etc. | accept (narrowing keywords leave some objects satisfiable; defer) |
-| `if: true` + `then` rejects object | reject |
-| `if: false` + `else` rejects object | reject |
+| Pattern                                                | Outcome                                                           |
+| ------------------------------------------------------ | ----------------------------------------------------------------- |
+| `type` present, doesn't include `"object"`             | reject                                                            |
+| `type: ["object", "null"]` etc.                        | accept                                                            |
+| `const`: non-object value                              | reject                                                            |
+| `enum`: no object members (incl. empty)                | reject                                                            |
+| `anyOf`/`oneOf`: empty array                           | reject                                                            |
+| `anyOf`/`oneOf`: no branch admits object               | reject                                                            |
+| `allOf`: any branch is `false` or rejects object       | reject                                                            |
+| Root `$ref` (with or without sibling `type`)           | reject                                                            |
+| `not`: bare `{type: "object"}` (no narrowing keywords) | reject                                                            |
+| `not`: `{type: "object", required: […], …}` etc.       | accept (narrowing keywords leave some objects satisfiable; defer) |
+| `if: true` + `then` rejects object                     | reject                                                            |
+| `if: false` + `else` rejects object                    | reject                                                            |
 
 **Deferred to Ajv at runtime:**
 
@@ -127,18 +127,18 @@ pre-scan in `processToolCallBatch` filters `requestsToExecute` to
 
 Example batches (when `--json-schema` is active):
 
-| Model emits | Behavior |
-| --- | --- |
-| `[write_file(…), structured_output(…)]` | `write_file` is skipped. `structured_output` validates, run ends. |
-| `[structured_output(bad-args), structured_output(good)]` | First fails Ajv validation; second succeeds. Run ends with the second call's args. |
-| `[structured_output(bad-args), write_file(…)]` | `structured_output(bad)` fails. `write_file` is also skipped (it was suppressed up front). The model sees both: Ajv's error message for the structured call, and a synthesised `"Skipped: …"` tool_result for the side-effect call. Next turn, the model may re-issue both or correct the structured call alone. |
-| `[other_tool_a, other_tool_b]` (no `structured_output`) | Pre-scan is inert. Both tools run normally; the run does NOT terminate. |
+| Model emits                                              | Behavior                                                                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[write_file(…), structured_output(…)]`                  | `write_file` is skipped. `structured_output` validates, run ends.                                                                                                                                                                                                                                                |
+| `[structured_output(bad-args), structured_output(good)]` | First fails Ajv validation; second succeeds. Run ends with the second call's args.                                                                                                                                                                                                                               |
+| `[structured_output(bad-args), write_file(…)]`           | `structured_output(bad)` fails. `write_file` is also skipped (it was suppressed up front). The model sees both: Ajv's error message for the structured call, and a synthesised `"Skipped: …"` tool_result for the side-effect call. Next turn, the model may re-issue both or correct the structured call alone. |
+| `[other_tool_a, other_tool_b]` (no `structured_output`)  | Pre-scan is inert. Both tools run normally; the run does NOT terminate.                                                                                                                                                                                                                                          |
 
 The synthesised "Skipped:" body has two variants:
 
 - **Success path** (a structured call captured the contract this turn):
   `"Skipped: this turn's structured_output contract took precedence as
-  the terminal output."` — short, because the session terminates
+the terminal output."` — short, because the session terminates
   immediately and no consumer (model or SDK) acts on it.
 - **Retry path** (no structured call captured, the model gets another
   turn): adds `"Re-issue this call in a separate turn if needed."` —
@@ -189,12 +189,12 @@ the shared "we got a valid call, shut down" path:
 
 ### Failure paths
 
-| Cause | Exit code | Surface |
-| --- | --- | --- |
-| Model emits plain text only | 1 | Error with turn count + truncated `Output preview`. |
-| Model never calls `structured_output` for `maxSessionTurns` turns | 53 | `Reached max session turns` + `--json-schema` hint pointing at the three common causes. |
-| Validation fails repeatedly | (eventually 53 via max-turns) | Each failure surfaces to the model on the next turn with the Ajv message. |
-| Abort / SIGINT | 130 | Cancellation path. A structured result is normally not emitted, but `emitStructuredSuccess()`'s holdback loop does not poll the abort signal — a SIGINT that arrives after capture but before/during the stdout emit may still flush the result. Exit code is the reliable signal. |
+| Cause                                                             | Exit code                     | Surface                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Model emits plain text only                                       | 1                             | Error with turn count + truncated `Output preview`.                                                                                                                                                                                                                                |
+| Model never calls `structured_output` for `maxSessionTurns` turns | 53                            | `Reached max session turns` + `--json-schema` hint pointing at the three common causes.                                                                                                                                                                                            |
+| Validation fails repeatedly                                       | (eventually 53 via max-turns) | Each failure surfaces to the model on the next turn with the Ajv message.                                                                                                                                                                                                          |
+| Abort / SIGINT                                                    | 130                           | Cancellation path. A structured result is normally not emitted, but `emitStructuredSuccess()`'s holdback loop does not poll the abort signal — a SIGINT that arrives after capture but before/during the stdout emit may still flush the result. Exit code is the reliable signal. |
 
 ## Output envelope
 
@@ -243,7 +243,8 @@ constant
   QwenLogger, ui-telemetry, and the chat-recording UI event mirror.
 - `redactStructuredOutputArgsForRecording` (used by
   `recordAssistantTurn` in `geminiChat.ts`) — covers the on-disk
-  chat-recording JSONL at `<projectDir>/chats/<sessionId>.jsonl`.
+  chat-recording JSONL at
+  `~/.qwen/projects/<sanitized-cwd>/chats/<sessionId>.jsonl`.
   Validation-failure retries land here too — each retry's args also
   get the same placeholder.
 
@@ -324,17 +325,17 @@ the structured-output contract.
 
 ## Compatibility surface
 
-| Combination | Status | Rationale |
-| --- | --- | --- |
-| `--json-schema` + `-p` (or stdin, or positional) | Supported | Primary headless path. |
-| `--json-schema` + `--output-format text` (default) | Supported | `JSON.stringify(payload)` + newline. |
-| `--json-schema` + `--output-format json` / `stream-json` | Supported | `structured_result` field carries the raw object. |
-| `--json-schema` + `--bare` | Supported | `--bare` restricts the registry to `read_file`, `edit`, `run_shell_command`; the synthetic tool is registered alongside that minimal set. |
-| `--json-schema` + `-i` | Rejected at parse time | TUI has no terminal contract for the synthetic tool. |
-| `--json-schema` + `--input-format stream-json` | Rejected at parse time | Single-shot contract vs. long-lived protocol. |
-| `--json-schema` + `--acp` / `--experimental-acp` | Rejected at parse time | ACP loop is independent. |
-| `--json-schema` + `--prompt-interactive` | Rejected at parse time | Same as `-i`. |
-| `--json-schema` + no prompt + no piped stdin | Rejected at parse time | Headless requires a prompt. |
+| Combination                                              | Status                 | Rationale                                                                                                                                 |
+| -------------------------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `--json-schema` + `-p` (or stdin, or positional)         | Supported              | Primary headless path.                                                                                                                    |
+| `--json-schema` + `--output-format text` (default)       | Supported              | `JSON.stringify(payload)` + newline.                                                                                                      |
+| `--json-schema` + `--output-format json` / `stream-json` | Supported              | `structured_result` field carries the raw object.                                                                                         |
+| `--json-schema` + `--bare`                               | Supported              | `--bare` restricts the registry to `read_file`, `edit`, `run_shell_command`; the synthetic tool is registered alongside that minimal set. |
+| `--json-schema` + `-i`                                   | Rejected at parse time | TUI has no terminal contract for the synthetic tool.                                                                                      |
+| `--json-schema` + `--input-format stream-json`           | Rejected at parse time | Single-shot contract vs. long-lived protocol.                                                                                             |
+| `--json-schema` + `--acp` / `--experimental-acp`         | Rejected at parse time | ACP loop is independent.                                                                                                                  |
+| `--json-schema` + `--prompt-interactive`                 | Rejected at parse time | Same as `-i`.                                                                                                                             |
+| `--json-schema` + no prompt + no piped stdin             | Rejected at parse time | Headless requires a prompt.                                                                                                               |
 
 ## Alternatives considered
 

@@ -27,7 +27,7 @@ qwen --prompt "Summarize the changes in HEAD with risk_level" \
 Output on stdout (default `--output-format text`):
 
 ```json
-{"summary":"…","risk_level":"low"}
+{ "summary": "…", "risk_level": "low" }
 ```
 
 The line is exactly the JSON-stringified payload + newline — no
@@ -44,9 +44,11 @@ mirrored to stderr either — text mode discards it; reach for
 In `--output-format json` and `stream-json`, the failure result
 message is emitted on **stdout** alongside the success path (as the
 final element of the JSON array, or the terminating `result` line on
-the JSONL stream). Wrappers that switch to those modes must
-distinguish success from failure by reading `is_error` on the result
-message rather than by checking whether stdout is empty.
+the JSONL stream). Not all failure modes emit a result to stdout —
+max-session-turns (exit 53) and signal interrupts (exit 130) exit with
+stderr output only. Check the exit code first; `is_error` on the
+result object disambiguates within the subset of failures that do
+produce a result event.
 
 > **Empty schema:** Passing `{}` produces `{}` (an empty JSON object)
 > on stdout. The model calls `structured_output` with no arguments;
@@ -125,11 +127,11 @@ decidable cases). When in doubt it defers to Ajv at runtime.
 
 ## Output shape per format
 
-| `--output-format` | What goes to stdout |
-| --- | --- |
-| `text` (default) | `JSON.stringify(payload) + "\n"` — one line, the validated object. |
-| `json` | A single JSON **array** of message objects (the full event log). The final element is the `type: "result"` message, which carries both `result` (`JSON.stringify(payload)`) and `structured_result` (the raw object). |
-| `stream-json` | Each event on its own line as JSONL. The terminating `result` line carries `result` (stringified) and `structured_result` (raw object). |
+| `--output-format` | What goes to stdout                                                                                                                                                                                                   |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `text` (default)  | `JSON.stringify(payload) + "\n"` — one line, the validated object.                                                                                                                                                    |
+| `json`            | A single JSON **array** of message objects (the full event log). The final element is the `type: "result"` message, which carries both `result` (`JSON.stringify(payload)`) and `structured_result` (the raw object). |
+| `stream-json`     | Each event on its own line as JSONL. The terminating `result` line carries `result` (stringified) and `structured_result` (raw object).                                                                               |
 
 In both JSON formats, prefer reading `structured_result` over `result`
 when you want the object; `result` is the stringified form provided for
@@ -140,14 +142,14 @@ read the final `type: "result"` line on the stream.
 
 ## Restrictions
 
-| Combination | Behavior |
-| --- | --- |
-| `--json-schema` + `-i` / `--prompt-interactive` | Rejected at parse time. The synthetic tool's "session ends now" message has no terminator in the TUI loop. |
-| `--json-schema` + `--input-format stream-json` | Rejected at parse time. The single-shot terminal contract is incompatible with the long-lived stream-json input protocol. |
-| `--json-schema` + `--acp` / `--experimental-acp` | Rejected at parse time. ACP runs its own turn loop that doesn't honor the synthetic-tool terminal contract. |
-| `--json-schema` with no prompt and no piped stdin | Rejected at parse time. Headless mode needs a prompt — pass `-p`, a positional argument, or pipe one in. |
-| `--bare` + `--json-schema` | Supported. The synthetic tool is registered alongside the bare three (`read_file`, `edit`, `run_shell_command`). |
-| `--json-schema` inside a subagent | Tool is NOT registered. Only the main / drain turns of the top-level run honor the terminal contract; a subagent calling the tool would receive "session ends now" and then keep running because its loop has no terminator. |
+| Combination                                       | Behavior                                                                                                                                                                                                                     |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--json-schema` + `-i` / `--prompt-interactive`   | Rejected at parse time. The synthetic tool's "session ends now" message has no terminator in the TUI loop.                                                                                                                   |
+| `--json-schema` + `--input-format stream-json`    | Rejected at parse time. The single-shot terminal contract is incompatible with the long-lived stream-json input protocol.                                                                                                    |
+| `--json-schema` + `--acp` / `--experimental-acp`  | Rejected at parse time. ACP runs its own turn loop that doesn't honor the synthetic-tool terminal contract.                                                                                                                  |
+| `--json-schema` with no prompt and no piped stdin | Rejected at parse time. Headless mode needs a prompt — pass `-p`, a positional argument, or pipe one in.                                                                                                                     |
+| `--bare` + `--json-schema`                        | Supported. The synthetic tool is registered alongside the bare three (`read_file`, `edit`, `run_shell_command`).                                                                                                             |
+| `--json-schema` inside a subagent                 | Tool is NOT registered. Only the main / drain turns of the top-level run honor the terminal contract; a subagent calling the tool would receive "session ends now" and then keep running because its loop has no terminator. |
 
 ## Retry and failure modes
 
@@ -179,8 +181,8 @@ The session ends on the first valid call. Until then:
     discarded.
   - **Validation fails:** the model gets another turn and sees a
     synthesised "Skipped:" `tool_result` for the suppressed call,
-    so it can re-issue that call in a separate turn alongside the
-    retried structured call.
+    so it can re-issue that call in a **separate turn** (one that
+    does not include `structured_output`).
 - **Model emits plain text instead of calling
   `structured_output`.** Exit code `1`. The error message includes
   the turn count and a truncated preview of the model's output so
@@ -208,14 +210,15 @@ the machine, args are redacted with the placeholder
 - The `ToolCallEvent` telemetry path (OTLP exports, QwenLogger,
   ui-telemetry stream, chat-recording UI event mirror).
 - The on-disk chat-recording JSONL at
-  `<projectDir>/chats/<sessionId>.jsonl` (re-fed into model context on
-  `--continue` / `--resume`), including every validation-failure retry.
+  `~/.qwen/projects/<sanitized-cwd>/chats/<sessionId>.jsonl` (re-fed
+  into model context on `--continue` / `--resume`), including every
+  validation-failure retry.
 
 Tool-call metrics (duration, success, decision) and surrounding event
 metadata are preserved.
 
 > **Schema is sent to the model provider.** Redaction covers the
-> *call arguments* on local surfaces only. The schema itself rides
+> _call arguments_ on local surfaces only. The schema itself rides
 > on every model request as the `structured_output` function
 > declaration's `parameters` block — so any literal values you put
 > inside it (`enum`, `const`, `default`, `examples`, `description`,
@@ -261,9 +264,18 @@ the tool only exists when `--json-schema` is set, so excluding it
 would leave the run with no terminal contract.
 
 Explicit `permissions.deny` rules and `--exclude-tools` settings DO
-take effect. If you deny the tool, the model can't call it and the
-run will hit `maxSessionTurns` — at which point the `--json-schema`
-hint in the error message tells you exactly where to look.
+take effect, but they fail differently:
+
+- If `structured_output` is **denied at call time** (settings-level
+  `permissions.deny`), the tool declaration is still visible to the
+  model, so it keeps trying and eventually hits `maxSessionTurns`
+  (exit 53).
+- If the tool declaration is **removed entirely** (`--exclude-tools
+structured_output`), the model doesn't know the tool exists,
+  answers in plain text, and the run exits with code 1.
+
+In both cases the `--json-schema` hint in the error message tells you
+where to look.
 
 > **`--bare` caveat.** Bare mode ignores most settings-derived inputs,
 > including settings-level `permissions.deny` and `tools.exclude`. The
