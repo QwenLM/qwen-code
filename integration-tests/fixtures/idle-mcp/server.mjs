@@ -10,7 +10,7 @@
 // network + version-lock churn into CI; this fixture is deterministic
 // and ~30 lines.
 
-import { stdin, stdout } from 'node:process';
+import { exit, stdin, stdout } from 'node:process';
 
 const PROTOCOL_VERSION = '2024-11-05';
 
@@ -59,4 +59,4 @@ stdin.on('data', (chunk) => {
   }
 });
 
-stdin.on('end', () => process.exit(0));
+stdin.on('end', () => exit(0));
