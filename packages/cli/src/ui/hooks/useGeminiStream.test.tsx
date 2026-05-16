@@ -4500,7 +4500,7 @@ describe('useGeminiStream', () => {
             kind: 'checking',
             condition: 'finish the refactor',
             iterations: 2,
-            lastReason: 'controlled continuation prompt',
+            lastReason: 'not enough evidence yet',
           }),
           expect.any(Number),
         );

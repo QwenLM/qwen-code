@@ -19,6 +19,7 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import { getActiveGoal } from '../goals/activeGoalStore.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -1577,6 +1578,8 @@ export class GeminiClient {
           };
 
           const continueRequest = [{ text: continueReason }];
+          const activeGoal = getActiveGoal(this.config.getSessionId());
+          const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
           const hookTurn = yield* this.sendMessageStream(
             continueRequest,
             signal,
@@ -1589,7 +1592,7 @@ export class GeminiClient {
                 reasons: currentReasons,
               },
             },
-            boundedTurns - 1,
+            hookTurnBudget,
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
