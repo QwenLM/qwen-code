@@ -128,10 +128,9 @@ export async function collectMemoryDiagnostics(
     ]);
   const v8HeapSpaces = mapHeapSpaces(heapSpaceStatistics);
 
-  // process.resourceUsage().maxRSS is in kilobytes on Linux but bytes on
-  // macOS/Windows. Normalise to bytes for a consistent diagnostic unit.
-  const maxRSSBytes =
-    platform === 'linux' ? resourceUsage.maxRSS * 1024 : resourceUsage.maxRSS;
+  // Node.js >=14.10.0 returns maxRSS in bytes on all platforms.
+  // This project requires Node >=22.
+  const maxRSSBytes = resourceUsage.maxRSS;
 
   const diagnostics = {
     timestamp: now().toISOString(),
@@ -251,7 +250,8 @@ function analyzeMemoryDiagnostics(
   const risks: MemoryRisk[] = [];
   const heapRatio =
     diagnostics.v8HeapStats.heapSizeLimit > 0
-      ? diagnostics.memoryUsage.heapUsed / diagnostics.v8HeapStats.heapSizeLimit
+      ? diagnostics.v8HeapStats.usedHeapSize /
+        diagnostics.v8HeapStats.heapSizeLimit
       : 0;
 
   if (heapRatio >= 0.75) {

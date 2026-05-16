@@ -116,7 +116,7 @@ describe('collectMemoryDiagnostics', () => {
         },
       ],
       resourceUsage: {
-        maxRSS: 6 * 1024,
+        maxRSS: 6,
         userCPUTime: 10,
         systemCPUTime: 20,
       },
@@ -221,7 +221,7 @@ describe('collectMemoryDiagnostics', () => {
     );
   });
 
-  it('does not multiply maxRSS by 1024 on non-Linux platforms', async () => {
+  it('treats maxRSS as bytes on all platforms', async () => {
     const diagnostics = await collectMemoryDiagnostics({
       memoryUsage: () => ({
         heapUsed: 100,
@@ -268,7 +268,7 @@ describe('collectMemoryDiagnostics', () => {
       nodeVersion: 'v20.19.0',
     });
 
-    // On macOS, maxRSS is already in bytes — no ×1024 conversion.
+    // Node.js >=14.10.0 returns maxRSS in bytes on all platforms.
     expect(diagnostics.resourceUsage.maxRSS).toBe(4_096);
   });
 
