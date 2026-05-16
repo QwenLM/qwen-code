@@ -34,15 +34,19 @@ type ExportFormat = {
 function resolveExportTarget(cwd: string, args: string, extension: string) {
   const filename = generateExportFilename(extension);
   const outputDirArg = args.trim();
-  const outputDir = outputDirArg ? path.resolve(cwd, outputDirArg) : cwd;
+  const resolvedCwd = path.resolve(cwd);
+  const outputDir = outputDirArg
+    ? path.resolve(resolvedCwd, outputDirArg)
+    : resolvedCwd;
   const filepath = path.join(outputDir, filename);
+  const isDefaultOutputDir = outputDir === resolvedCwd;
 
   return {
     filename,
     filepath,
     outputDir,
-    displayPath: outputDirArg ? filepath : filename,
-    shouldCreateOutputDir: Boolean(outputDirArg),
+    displayPath: isDefaultOutputDir ? filename : filepath,
+    shouldCreateOutputDir: Boolean(outputDirArg && !isDefaultOutputDir),
   };
 }
 
@@ -71,6 +75,8 @@ async function exportSessionAction(
     };
   }
 
+  let targetFilepath: string | undefined;
+
   try {
     // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
@@ -95,8 +101,9 @@ async function exportSessionAction(
       config,
     );
 
-    const content = exportFormat.format(normalizedData);
     const target = resolveExportTarget(cwd, args, exportFormat.extension);
+    targetFilepath = target.filepath;
+    const content = exportFormat.format(normalizedData);
 
     if (target.shouldCreateOutputDir) {
       await fs.mkdir(target.outputDir, { recursive: true });
@@ -109,10 +116,13 @@ async function exportSessionAction(
       content: `Session exported to ${exportFormat.displayName}: ${target.displayPath}`,
     };
   } catch (error) {
+    const destination = targetFilepath
+      ? ` to ${exportFormat.displayName} at "${targetFilepath}"`
+      : '';
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: `Failed to export session${destination}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }
@@ -181,7 +191,7 @@ export const exportCommand: SlashCommand = {
   get description() {
     return t('Export current session message history to a file');
   },
-  argumentHint: 'md|html|json|jsonl [path]',
+  argumentHint: '[md|html|json|jsonl] [path]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: exportHtmlAction,
