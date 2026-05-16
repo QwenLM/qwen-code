@@ -180,14 +180,18 @@ describe('qwen serve — CORS browser-origin denial', () => {
 });
 
 describe('qwen serve — capabilities envelope', () => {
-  it('advertises all 9 Stage 1 features', async () => {
+  it('advertises all 10 Stage 1 features', async () => {
     const caps = await client.capabilities();
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
+    // Order must match `SERVE_CAPABILITY_REGISTRY` in
+    // `packages/cli/src/serve/capabilities.ts` and the unit-level
+    // `EXPECTED_STAGE1_FEATURES` in `packages/cli/src/serve/server.test.ts`.
     expect(caps.features).toEqual([
       'health',
       'capabilities',
       'session_create',
+      'session_scope_override',
       'session_list',
       'session_prompt',
       'session_cancel',
