@@ -10,8 +10,8 @@ const crawlCache = new Map<string, string[]>();
 const cacheTimers = new Map<string, NodeJS.Timeout>();
 
 // Limits to prevent heap exhaustion when many projects are crawled concurrently
-const MAX_CACHE_ENTRIES = 256;      // max distinct project roots cached
-const MAX_TOTAL_PATHS = 50_000;     // max total paths across all entries
+export const MAX_CACHE_ENTRIES = 256; // max distinct project roots cached
+export const MAX_TOTAL_PATHS = 50_000; // max total paths across all entries
 
 /**
  * Generates a unique cache key based on the project directory and the content
@@ -55,7 +55,8 @@ export const write = (key: string, results: string[], ttlMs: number): void => {
     clearTimeout(cacheTimers.get(key)!);
   }
 
-  // Evict oldest entries when cache exceeds entry limit (FIFO / insertion-order)
+  // Evict oldest entries when cache exceeds entry limit (FIFO / insertion-order).
+  // Guard: updating an existing key doesn't increase entry count, so skip eviction.
   while (crawlCache.size >= MAX_CACHE_ENTRIES && !crawlCache.has(key)) {
     const oldestKey = crawlCache.keys().next().value;
     if (oldestKey) {
@@ -67,16 +68,20 @@ export const write = (key: string, results: string[], ttlMs: number): void => {
     }
   }
 
-  // Evict largest entries when total path count exceeds limit
+  // Evict largest entries when total path count exceeds limit.
+  // Calculate totalPaths excluding the key being updated to avoid counting old value.
   let totalPaths = 0;
-  for (const entry of crawlCache.values()) {
-    totalPaths += entry.length;
+  for (const [k, entry] of crawlCache) {
+    if (k !== key) {
+      totalPaths += entry.length;
+    }
   }
-  while (totalPaths + results.length > MAX_TOTAL_PATHS && crawlCache.size > 1 && !crawlCache.has(key)) {
-    // Find and remove the entry with the most paths
+  while (totalPaths + results.length > MAX_TOTAL_PATHS && crawlCache.size > 1) {
+    // Find and remove the entry with the most paths (never evict the current key)
     let largestKey: string | undefined;
     let largestSize = 0;
     for (const [k, v] of crawlCache) {
+      if (k === key) continue;
       if (v.length > largestSize) {
         largestSize = v.length;
         largestKey = k;
@@ -92,6 +97,11 @@ export const write = (key: string, results: string[], ttlMs: number): void => {
     } else {
       break;
     }
+  }
+
+  // Bump existing key to end of FIFO queue (mirror fileReadCache.upsert behavior)
+  if (crawlCache.has(key)) {
+    crawlCache.delete(key);
   }
 
   // Store the new data
