@@ -1557,7 +1557,14 @@ export async function loadCliConfig(
     if (argv.forkSession && sessionId) {
       const sourceSessionId = sessionId;
       const forkedSessionId = randomUUID();
-      await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      try {
+        await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      } catch (err) {
+        writeStderrLine(
+          `Failed to fork session ${sourceSessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        process.exit(1);
+      }
       sessionId = forkedSessionId;
       sessionData = await sessionService.loadSession(forkedSessionId);
       if (!sessionData) {
