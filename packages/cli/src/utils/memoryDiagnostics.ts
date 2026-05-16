@@ -144,6 +144,8 @@ function formatSnapshotTimestamp(now: Date): string {
 }
 
 function estimateHeapSnapshotBytes(): number {
+  // Conservative 3x estimate: V8 heap snapshots include metadata, edges, and
+  // string tables in addition to live heap bytes.
   const overheadFactor = 3;
   try {
     const heapStats = v8.getHeapStatistics();
@@ -160,9 +162,17 @@ function getAvailableBytes(outputDir: string): number {
   try {
     const stats = fs.statfsSync(outputDir);
     return stats.bavail * stats.bsize;
-  } catch {
-    return Number.MAX_SAFE_INTEGER;
+  } catch (error) {
+    throw new Error(
+      `Unable to check available disk space for heap snapshot: ${formatErrorMessage(
+        error,
+      )}`,
+    );
   }
+}
+
+function formatErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function cleanupOldHeapSnapshots(
@@ -307,7 +317,7 @@ function defaultWait(ms: number): Promise<void> {
 }
 
 function normalizeSampleCount(sampleCount: number): number {
-  if (!Number.isFinite(sampleCount)) {
+  if (!Number.isFinite(sampleCount) || sampleCount <= 0) {
     return 3;
   }
 

@@ -462,7 +462,7 @@ describe('memoryDiagnostics', () => {
     }
   });
 
-  it('continues heap snapshot writes when free disk space cannot be read', async () => {
+  it('refuses heap snapshot writes when free disk space cannot be read', async () => {
     const outputDir = path.join(
       os.tmpdir(),
       `qwen-memory-diagnostics-statfs-fallback-${process.pid}`,
@@ -481,17 +481,19 @@ describe('memoryDiagnostics', () => {
     );
 
     try {
-      const writtenPath = writeWithMockedFs({
-        outputDir,
-        now: new Date('2026-05-15T12:00:00.000Z'),
-        writeSnapshot: (filePath) => {
-          fs.writeFileSync(filePath, 'snapshot');
-          return filePath;
-        },
-      });
+      expect(() =>
+        writeWithMockedFs({
+          outputDir,
+          now: new Date('2026-05-15T12:00:00.000Z'),
+          writeSnapshot: (filePath) => {
+            fs.writeFileSync(filePath, 'snapshot');
+            return filePath;
+          },
+        }),
+      ).toThrow('Unable to check available disk space');
 
       expect(statfsSync).toHaveBeenCalledWith(outputDir);
-      expect(fs.existsSync(writtenPath)).toBe(true);
+      expect(fs.readdirSync(outputDir)).toHaveLength(0);
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
@@ -539,6 +541,24 @@ describe('memoryDiagnostics', () => {
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
+  });
+
+  it('uses the default sample count for non-positive sample counts', async () => {
+    const samples = await collectMemoryPressureSamples({
+      sampleCount: 0,
+      intervalMs: 0,
+      now: () => new Date('2026-05-15T12:00:00.000Z'),
+      memoryUsage: () => ({
+        rss: 100,
+        heapTotal: 80,
+        heapUsed: 40,
+        external: 5,
+        arrayBuffers: 2,
+      }),
+      wait: async () => {},
+    });
+
+    expect(samples).toHaveLength(3);
   });
 
   it('marks V8 diagnostics as warning when heap statistics are unavailable', () => {

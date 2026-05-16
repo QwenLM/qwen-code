@@ -91,12 +91,26 @@ export const doctorCommand: SlashCommand = {
           intervalMs: 1000,
           signal: abortSignal,
         });
+        report = `${report}\n\n${formatMemoryPressureSamples(samples)}`;
 
         if (abortSignal?.aborted) {
-          return;
-        }
+          if (executionMode === 'interactive') {
+            context.ui.addItem(
+              {
+                type: 'info',
+                text: report,
+              },
+              Date.now(),
+            );
+            return;
+          }
 
-        report = `${report}\n\n${formatMemoryPressureSamples(samples)}`;
+          return {
+            type: 'message' as const,
+            messageType: 'info' as const,
+            content: report,
+          };
+        }
       }
 
       if (shouldWriteHeapSnapshot) {

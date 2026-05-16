@@ -438,7 +438,7 @@ describe('doctorCommand', () => {
     });
   });
 
-  it('should stop memory diagnostics when aborted after sampling', async () => {
+  it('should render completed sample diagnostics when aborted after sampling', async () => {
     const abortController = new AbortController();
     vi.mocked(
       memoryDiagnosticsModule.collectMemoryPressureSamples,
@@ -474,8 +474,14 @@ describe('doctorCommand', () => {
     ).toHaveBeenCalled();
     expect(
       memoryDiagnosticsModule.formatMemoryPressureSamples,
-    ).not.toHaveBeenCalled();
-    expect(mockContext.ui.addItem).not.toHaveBeenCalled();
+    ).toHaveBeenCalled();
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining('Memory pressure samples'),
+      }),
+      expect.any(Number),
+    );
     expect(doctorChecksModule.runDoctorChecks).not.toHaveBeenCalled();
   });
 
