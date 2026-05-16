@@ -135,16 +135,3 @@ export const STAGE1_FEATURES = SERVE_FEATURES;
 
 /** @deprecated Use ServeFeature from the capability registry. */
 export type Stage1Feature = ServeFeature;
-
-export {
-  getServeFeatures,
-  getServeProtocolVersions,
-  SERVE_CAPABILITY_REGISTRY,
-  SERVE_FEATURES,
-  SERVE_PROTOCOL_VERSION,
-  SUPPORTED_SERVE_PROTOCOL_VERSIONS,
-  type ServeCapabilityDescriptor,
-  type ServeFeature,
-  type ServeProtocolVersion,
-  type ServeProtocolVersions,
-} from './capabilities.js';

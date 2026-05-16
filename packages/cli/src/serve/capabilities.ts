@@ -23,15 +23,15 @@ export interface ServeCapabilityDescriptor {
 }
 
 export const SERVE_CAPABILITY_REGISTRY = {
-  health: { since: SERVE_PROTOCOL_VERSION },
-  capabilities: { since: SERVE_PROTOCOL_VERSION },
-  session_create: { since: SERVE_PROTOCOL_VERSION },
-  session_list: { since: SERVE_PROTOCOL_VERSION },
-  session_prompt: { since: SERVE_PROTOCOL_VERSION },
-  session_cancel: { since: SERVE_PROTOCOL_VERSION },
-  session_events: { since: SERVE_PROTOCOL_VERSION },
-  session_set_model: { since: SERVE_PROTOCOL_VERSION },
-  permission_vote: { since: SERVE_PROTOCOL_VERSION },
+  health: { since: 'v1' },
+  capabilities: { since: 'v1' },
+  session_create: { since: 'v1' },
+  session_list: { since: 'v1' },
+  session_prompt: { since: 'v1' },
+  session_cancel: { since: 'v1' },
+  session_events: { since: 'v1' },
+  session_set_model: { since: 'v1' },
+  permission_vote: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -40,8 +40,34 @@ export const SERVE_FEATURES = Object.freeze(
   Object.keys(SERVE_CAPABILITY_REGISTRY) as ServeFeature[],
 );
 
-export function getServeFeatures(): ServeFeature[] {
+function serveProtocolVersionIndex(version: ServeProtocolVersion): number {
+  return SUPPORTED_SERVE_PROTOCOL_VERSIONS.indexOf(version);
+}
+
+function isFeatureAvailableInProtocol(
+  feature: ServeFeature,
+  protocolVersion: ServeProtocolVersion,
+): boolean {
+  return (
+    serveProtocolVersionIndex(SERVE_CAPABILITY_REGISTRY[feature].since) <=
+    serveProtocolVersionIndex(protocolVersion)
+  );
+}
+
+export function getRegisteredServeFeatures(): ServeFeature[] {
   return [...SERVE_FEATURES];
+}
+
+export function getAdvertisedServeFeatures(
+  protocolVersion: ServeProtocolVersion = SERVE_PROTOCOL_VERSION,
+): ServeFeature[] {
+  return SERVE_FEATURES.filter((feature) =>
+    isFeatureAvailableInProtocol(feature, protocolVersion),
+  );
+}
+
+export function getServeFeatures(): ServeFeature[] {
+  return getAdvertisedServeFeatures();
 }
 
 export function getServeProtocolVersions(): ServeProtocolVersions {

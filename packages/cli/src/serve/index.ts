@@ -12,22 +12,26 @@ export {
 } from './runQwenServe.js';
 export {
   CAPABILITIES_SCHEMA_VERSION,
+  STAGE1_FEATURES,
+  type CapabilitiesEnvelope,
+  type ServeMode,
+  type ServeOptions,
+  type Stage1Feature,
+} from './types.js';
+export {
   SERVE_CAPABILITY_REGISTRY,
   SERVE_FEATURES,
   SERVE_PROTOCOL_VERSION,
-  STAGE1_FEATURES,
   SUPPORTED_SERVE_PROTOCOL_VERSIONS,
+  getAdvertisedServeFeatures,
+  getRegisteredServeFeatures,
   getServeFeatures,
   getServeProtocolVersions,
-  type CapabilitiesEnvelope,
   type ServeCapabilityDescriptor,
   type ServeFeature,
-  type ServeMode,
-  type ServeOptions,
   type ServeProtocolVersion,
   type ServeProtocolVersions,
-  type Stage1Feature,
-} from './types.js';
+} from './capabilities.js';
 export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,

@@ -20,7 +20,10 @@ import {
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
-import { getServeFeatures, getServeProtocolVersions } from './capabilities.js';
+import {
+  getAdvertisedServeFeatures,
+  getServeProtocolVersions,
+} from './capabilities.js';
 import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
@@ -199,7 +202,7 @@ export function createServeApp(
       v: CAPABILITIES_SCHEMA_VERSION,
       protocolVersions: getServeProtocolVersions(),
       mode: opts.mode,
-      features: getServeFeatures(),
+      features: getAdvertisedServeFeatures(),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect
       // mismatch pre-flight and omit `cwd` on `POST /session`.

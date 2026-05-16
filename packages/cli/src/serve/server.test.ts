@@ -12,10 +12,12 @@ import request from 'supertest';
 import { createServeApp } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
 import {
+  getAdvertisedServeFeatures,
+  getRegisteredServeFeatures,
   getServeFeatures,
   getServeProtocolVersions,
   SERVE_CAPABILITY_REGISTRY,
-  SERVE_PROTOCOL_VERSION,
+  type ServeProtocolVersion,
 } from './capabilities.js';
 import type {
   CancelNotification,
@@ -204,21 +206,41 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
 
 describe('createServeApp', () => {
   describe('serve capability registry', () => {
-    it('returns a fresh ordered feature list', () => {
-      const features = getServeFeatures();
+    it('returns a fresh ordered registered feature list', () => {
+      const features = getRegisteredServeFeatures();
       expect(features).toEqual([...EXPECTED_STAGE1_FEATURES]);
 
       features.pop();
-      expect(getServeFeatures()).toEqual([...EXPECTED_STAGE1_FEATURES]);
+      expect(getRegisteredServeFeatures()).toEqual([
+        ...EXPECTED_STAGE1_FEATURES,
+      ]);
     });
 
-    it('marks every current feature as v1', () => {
+    it('advertises current-protocol features separately from the registry', () => {
+      expect(getAdvertisedServeFeatures()).toEqual([
+        ...EXPECTED_STAGE1_FEATURES,
+      ]);
+      expect(getServeFeatures()).toEqual(getAdvertisedServeFeatures());
+    });
+
+    it('marks every current feature with its historical v1 origin', () => {
       expect(Object.keys(SERVE_CAPABILITY_REGISTRY)).toEqual([
         ...EXPECTED_STAGE1_FEATURES,
       ]);
       expect(
         Object.values(SERVE_CAPABILITY_REGISTRY).map(({ since }) => since),
-      ).toEqual(EXPECTED_STAGE1_FEATURES.map(() => SERVE_PROTOCOL_VERSION));
+      ).toEqual(EXPECTED_STAGE1_FEATURES.map(() => 'v1'));
+    });
+
+    it('returns protocol version metadata with a fresh supported array', () => {
+      const versions = getServeProtocolVersions();
+      expect(versions).toEqual({ current: 'v1', supported: ['v1'] });
+
+      versions.supported.push('v99' as ServeProtocolVersion);
+      expect(getServeProtocolVersions()).toEqual({
+        current: 'v1',
+        supported: ['v1'],
+      });
     });
   });
 
@@ -243,7 +265,7 @@ describe('createServeApp', () => {
       expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
       expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
       expect(res.body.mode).toBe('http-bridge');
-      expect(res.body.features).toEqual(getServeFeatures());
+      expect(res.body.features).toEqual(getAdvertisedServeFeatures());
       expect(res.body.modelServices).toEqual([]);
     });
 
