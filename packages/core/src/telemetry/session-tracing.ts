@@ -62,6 +62,9 @@ interface SpanContext {
     | 'llm_request'
     | 'tool'
     | 'tool.execution'
+    // Phase 2 forward-declarations (no start*/end* helpers wired yet —
+    // see docs/design/workflow-tracing-gaps.md). Listed here so Phase 2
+    // can add helpers without touching this type.
     | 'tool.blocked_on_user'
     | 'hook';
 }
@@ -453,13 +456,18 @@ export function endToolExecutionSpan(
 
     spanCtx.span.setAttributes(endAttributes);
 
-    if (metadata?.success !== false) {
-      spanCtx.span.setStatus({ code: SpanStatusCode.OK });
-    } else {
-      spanCtx.span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: metadata?.error ?? 'tool execution error',
-      });
+    // No-metadata-no-status: matches endToolSpan. Callers that pre-set
+    // status (e.g. via setToolSpanCancelled) and then call this without
+    // metadata get their pre-set status preserved.
+    if (metadata) {
+      if (metadata.success !== false) {
+        spanCtx.span.setStatus({ code: SpanStatusCode.OK });
+      } else {
+        spanCtx.span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: metadata.error ?? 'tool execution error',
+        });
+      }
     }
   } catch (error) {
     debugLogger.warn(

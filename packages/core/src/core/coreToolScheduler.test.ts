@@ -3451,6 +3451,23 @@ describe('CoreToolScheduler telemetry spans', () => {
     await runSingleTool({ messageBus, disableHooks: false });
     expect(getExecutionSpan()).toBeUndefined();
   });
+
+  it('execution sub-span: uses cancelled-by-user error when invocation throws after abort', async () => {
+    const abortController = new AbortController();
+    await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        throw new Error('aborted');
+      }),
+    });
+    const exec = getExecutionSpan();
+    expect(exec).toBeDefined();
+    expect(exec!.endMetadata?.success).toBe(false);
+    // Operators filtering exec spans for errors should NOT see cancellation
+    // messages here — only real exception messages.
+    expect(exec!.endMetadata?.error).toBe('Tool execution cancelled by user');
+  });
 });
 
 // Integration tests for the fire* functions

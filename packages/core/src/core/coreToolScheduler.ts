@@ -96,6 +96,7 @@ const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
 const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
 const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
+const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -2217,9 +2218,15 @@ export class CoreToolScheduler {
         executionError instanceof Error
           ? executionError.message
           : String(executionError);
+      // Distinguish user cancellation from real tool exceptions on the
+      // execution sub-span so trace backends filtering for errors do not
+      // see false positives. Both are still success: false; only the
+      // sanitized error message differs.
       endToolExecutionSpan(execSpan, {
         success: false,
-        error: TOOL_SPAN_STATUS_TOOL_EXCEPTION,
+        error: signal.aborted
+          ? TOOL_SPAN_STATUS_TOOL_CANCELLED
+          : TOOL_SPAN_STATUS_TOOL_EXCEPTION,
       });
 
       if (signal.aborted) {

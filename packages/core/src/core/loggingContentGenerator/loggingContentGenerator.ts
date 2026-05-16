@@ -53,7 +53,10 @@ import {
   startLLMRequestSpan,
   endLLMRequestSpan,
 } from '../../telemetry/index.js';
-import { API_CALL_FAILED_SPAN_STATUS_MESSAGE } from '../../telemetry/tracer.js';
+import {
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+} from '../../telemetry/tracer.js';
 
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
@@ -262,6 +265,19 @@ export class LoggingContentGenerator implements ContentGenerator {
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
+      // End the span BEFORE the (potentially-throwing) logging block, so a
+      // logging-side rejection cannot prevent span finalization. Mirrors the
+      // streaming path order. Use abort-specific status message when the
+      // caller's abortSignal fired, so trace backends can distinguish user
+      // cancellations from real upstream failures.
+      const aborted = req.config?.abortSignal?.aborted ?? false;
+      endLLMRequestSpan(llmSpan, {
+        success: false,
+        durationMs,
+        error: aborted
+          ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+          : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+      });
       await context.with(spanContext, async () => {
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId);
         try {
@@ -274,11 +290,6 @@ export class LoggingContentGenerator implements ContentGenerator {
         } catch (loggingError) {
           debugLogger.warn('Failed to log OpenAI interaction:', loggingError);
         }
-      });
-      endLLMRequestSpan(llmSpan, {
-        success: false,
-        durationMs,
-        error: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
       });
       throw error;
     }
@@ -322,10 +333,13 @@ export class LoggingContentGenerator implements ContentGenerator {
       context.with(spanContext, () =>
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
       );
+      const aborted = req.config?.abortSignal?.aborted ?? false;
       endLLMRequestSpan(llmSpan, {
         success: false,
         durationMs,
-        error: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
+        error: aborted
+          ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+          : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
       });
       try {
         await this.safelyLogOpenAIInteraction(
@@ -358,6 +372,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         resolvedRequest,
         llmSpan,
         spanContext,
+        req.config?.abortSignal,
       ),
     );
   }
@@ -392,6 +407,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
     span?: Span,
     spanContext?: Context,
+    abortSignal?: AbortSignal,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // Skip collecting full responses for internal prompts to avoid memory
@@ -521,13 +537,16 @@ export class LoggingContentGenerator implements ContentGenerator {
       // own ended guard, but we want to avoid pretending the final token
       // counts were recorded — they weren't, the span is the timeout one.
       if (span && !spanEndedByTimeout) {
+        const aborted = abortSignal?.aborted ?? false;
         endLLMRequestSpan(span, {
           success: !errorOccurred,
           inputTokens: lastUsageMetadata?.promptTokenCount,
           outputTokens: lastUsageMetadata?.candidatesTokenCount,
           durationMs: Date.now() - startTime,
           error: errorOccurred
-            ? API_CALL_FAILED_SPAN_STATUS_MESSAGE
+            ? aborted
+              ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE
+              : API_CALL_FAILED_SPAN_STATUS_MESSAGE
             : undefined,
         });
       }
