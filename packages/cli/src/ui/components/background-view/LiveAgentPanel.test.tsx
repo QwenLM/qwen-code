@@ -352,7 +352,7 @@ describe('<LiveAgentPanel />', () => {
           agentId: 'fg-1',
           subagentType: 'editor',
           description: 'editor: tighten import order',
-          flavor: 'foreground',
+          isBackgrounded: false,
         }),
       ],
     });

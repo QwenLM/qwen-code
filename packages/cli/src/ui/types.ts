@@ -95,6 +95,7 @@ export interface HistoryItemBase {
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  promptId?: string;
 };
 
 export type HistoryItemGemini = HistoryItemBase & {
@@ -162,6 +163,7 @@ export type HistoryItemAbout = HistoryItemBase & {
     memoryUsage: string;
     baseUrl?: string;
     gitCommit?: string;
+    lspStatus?: string;
   };
 };
 
@@ -499,6 +501,23 @@ export type HistoryItemDoctor = HistoryItemBase & {
   summary: { pass: number; warn: number; fail: number };
 };
 
+export type GoalStatusKind =
+  | 'set'
+  | 'achieved'
+  | 'cleared'
+  | 'aborted'
+  | 'checking';
+
+export type HistoryItemGoalStatus = HistoryItemBase & {
+  type: 'goal_status';
+  kind: GoalStatusKind;
+  condition: string;
+  /** Set when kind === 'achieved'. */
+  iterations?: number;
+  durationMs?: number;
+  lastReason?: string;
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -542,7 +561,8 @@ export type HistoryItemWithoutId =
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage
   | HistoryItemDoctor
-  | HistoryItemDiffStats;
+  | HistoryItemDiffStats
+  | HistoryItemGoalStatus;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
@@ -572,6 +592,7 @@ export enum MessageType {
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
   DIFF_STATS = 'diff_stats',
+  GOAL_STATUS = 'goal_status',
 }
 
 export interface InsightProgressProps {
@@ -607,6 +628,7 @@ export type Message =
         memoryUsage: string;
         baseUrl?: string;
         gitCommit?: string;
+        lspStatus?: string;
       };
       content?: string; // Optional content, not really used for ABOUT
     }

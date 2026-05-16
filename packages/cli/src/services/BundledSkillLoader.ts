@@ -64,7 +64,6 @@ export class BundledSkillLoader implements ICommandLoader {
         name: skill.name,
         description: skill.description,
         modelDescription: skill.description,
-        localizeDescription: true,
         kind: CommandKind.SKILL,
         source: 'bundled-skill' as const,
         sourceLabel: t('Skill'),

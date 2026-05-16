@@ -107,12 +107,18 @@ const agent = (
   startTime: number,
   overrides: StatusOverride = {},
 ) => ({
+  id,
+  kind: 'agent' as const,
   agentId: id,
   description: 'desc',
+  isBackgrounded: true,
   status: overrides.status ?? ('running' as const),
   startTime,
   endTime: overrides.endTime,
   abortController: new AbortController(),
+  outputFile: '/tmp/agent.jsonl',
+  outputOffset: 0,
+  notified: false,
 });
 
 const shell = (
@@ -122,13 +128,19 @@ const shell = (
     status?: 'running' | 'completed' | 'failed' | 'cancelled';
   } = {},
 ) => ({
+  id,
+  kind: 'shell' as const,
   shellId: id,
   command: 'sleep 60',
+  description: 'sleep 60',
   cwd: '/tmp',
   status: overrides.status ?? ('running' as const),
   startTime,
   endTime: overrides.endTime,
   outputPath: '/tmp/x.out',
+  outputFile: '/tmp/x.out',
+  outputOffset: 0,
+  notified: false,
   abortController: new AbortController(),
 });
 
@@ -139,6 +151,8 @@ const monitor = (
     status?: 'running' | 'completed' | 'failed' | 'cancelled';
   } = {},
 ) => ({
+  id,
+  kind: 'monitor' as const,
   monitorId: id,
   command: 'tail -f log',
   description: 'watch logs',
@@ -151,6 +165,9 @@ const monitor = (
   maxEvents: 1000,
   idleTimeoutMs: 300_000,
   droppedLines: 0,
+  outputFile: '/tmp/monitor.log',
+  outputOffset: 0,
+  notified: false,
 });
 
 // Mirror the MemoryTaskRecord shape that MemoryManager.listTasksByType

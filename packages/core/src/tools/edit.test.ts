@@ -40,6 +40,8 @@ describe('EditTool', () => {
   let geminiClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
+  let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
+  let fsService: StandardFileSystemService;
 
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -47,6 +49,8 @@ describe('EditTool', () => {
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
     fileReadCache = new FileReadCache();
+    mockFileHistoryService = { trackEdit: vi.fn() };
+    fsService = new StandardFileSystemService();
 
     geminiClient = {
       generateJson: mockGenerateJson, // mockGenerateJson is already defined and hoisted
@@ -63,7 +67,7 @@ describe('EditTool', () => {
       getApprovalMode: vi.fn(),
       setApprovalMode: vi.fn(),
       getWorkspaceContext: () => createMockWorkspaceContext(rootDir),
-      getFileSystemService: () => new StandardFileSystemService(),
+      getFileSystemService: () => fsService,
       getIdeMode: () => false,
       getApiKey: () => 'test-api-key',
       getModel: () => 'test-model',
@@ -84,6 +88,7 @@ describe('EditTool', () => {
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
+      getFileHistoryService: () => mockFileHistoryService,
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -495,10 +500,38 @@ describe('EditTool', () => {
         /Showing lines \d+-\d+ of \d+ from the edited file:/,
       );
       expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+    });
+
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the edit tool.
+    it('completes the edit even when trackEdit throws', async () => {
+      const initialContent = 'This is some old text.';
+      const newContent = 'This is some new text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      );
     });
 
     // The Edit tool feeds the commit-attribution singleton on success so
@@ -918,24 +951,23 @@ describe('EditTool', () => {
       expect(() => tool.build(params)).toThrow();
     });
 
-    it.skipIf(process.getuid && process.getuid() === 0)(
-      'should return FILE_WRITE_FAILURE on write error',
-      async () => {
-        fs.writeFileSync(filePath, 'content', 'utf8');
-        seedPriorRead(filePath);
-        // Make file readonly to trigger a write error
-        fs.chmodSync(filePath, '444');
+    it('should return FILE_WRITE_FAILURE on write error', async () => {
+      fs.writeFileSync(filePath, 'content', 'utf8');
+      seedPriorRead(filePath);
 
-        const params: EditToolParams = {
-          file_path: filePath,
-          old_string: 'content',
-          new_string: 'new content',
-        };
-        const invocation = tool.build(params);
-        const result = await invocation.execute(new AbortController().signal);
-        expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
-      },
-    );
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
+        new Error('Simulated write error'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'content',
+        new_string: 'new content',
+      };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+    });
   });
 
   describe('getDescription', () => {

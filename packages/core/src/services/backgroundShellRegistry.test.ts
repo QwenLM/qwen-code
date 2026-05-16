@@ -8,12 +8,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   BackgroundShellRegistry,
   MAX_RETAINED_TERMINAL_SHELLS,
-  type BackgroundShellEntry,
+  type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
 
 function makeEntry(
-  overrides: Partial<BackgroundShellEntry> = {},
-): BackgroundShellEntry {
+  overrides: Partial<ShellTaskRegistration> = {},
+): ShellTaskRegistration {
   return {
     shellId: 's1',
     command: 'sleep 60',
