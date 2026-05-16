@@ -258,7 +258,7 @@ export interface LspClient {
   /**
    * Get the status of all configured LSP servers.
    */
-  getServerStatus(): LspServerStatusInfo[];
+  getServerStatus?(): LspServerStatusInfo[];
 
   /**
    * Search for symbols across the workspace.

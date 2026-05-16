@@ -34,6 +34,13 @@ import type {
 
 import type { NativeLspService } from './NativeLspService.js';
 
+function getErrorMessage(error: unknown): string | undefined {
+  if (error === undefined || error === null) {
+    return undefined;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Adapter class that implements LspClient by delegating to NativeLspService.
  *
@@ -57,18 +64,17 @@ export class NativeLspClient implements LspClient {
    * Get the status of all configured LSP servers.
    */
   getServerStatus(): LspServerStatusInfo[] {
-    const statusMap = this.service.getStatus();
     const handles = this.service.getServerHandles();
     const result: LspServerStatusInfo[] = [];
 
-    for (const [name, status] of statusMap) {
-      const handle = handles.get(name);
+    for (const [name, handle] of handles) {
+      const error = getErrorMessage(handle.error);
       result.push({
         name,
-        status,
-        command: handle?.config.command,
-        languages: handle?.config.languages ?? [],
-        error: handle?.error?.message,
+        status: handle.status,
+        command: handle.config.command,
+        languages: handle.config.languages ?? [],
+        ...(error !== undefined ? { error } : {}),
       });
     }
 

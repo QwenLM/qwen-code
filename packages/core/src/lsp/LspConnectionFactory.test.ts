@@ -30,4 +30,26 @@ describe('LspConnectionFactory', () => {
     expect(diagnostics.exitCode).toBe(7);
     expect(diagnostics.exitSignal).toBeNull();
   });
+
+  it('preserves UTF-8 characters split across stderr chunks', async () => {
+    const connection = await LspConnectionFactory.createStdioConnection(
+      process.execPath,
+      [
+        '-e',
+        [
+          'process.stderr.write(Buffer.from([0xe2]));',
+          'setTimeout(() => {',
+          'process.stderr.write(Buffer.from([0x98, 0x83, 0x0a]));',
+          'process.exit(7);',
+          '}, 10);',
+        ].join(''),
+      ],
+    );
+
+    await expect(connection.connection.initialize({})).rejects.toThrow(
+      'LSP connection closed',
+    );
+
+    expect(connection.processDiagnostics?.stderrTail).toContain('☃');
+  });
 });

@@ -6,28 +6,33 @@
 
 import {
   type CommandContext,
+  type MessageActionReturn,
   type SlashCommand,
   CommandKind,
 } from './types.js';
 import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 
-/**
- * Format LSP server status with an icon.
- */
-function statusIcon(status: string): string {
-  switch (status) {
-    case 'READY':
-      return '✅';
-    case 'IN_PROGRESS':
-      return '⏳';
-    case 'FAILED':
-      return '❌';
-    case 'NOT_STARTED':
-      return '⚪';
-    default:
-      return '❓';
+function emitMessage(
+  context: CommandContext,
+  messageType: 'info' | 'error',
+  content: string,
+): MessageActionReturn | void {
+  if (context.executionMode !== 'interactive') {
+    return {
+      type: 'message',
+      messageType,
+      content,
+    };
   }
+
+  context.ui.addItem(
+    {
+      type: messageType === 'error' ? MessageType.ERROR : MessageType.INFO,
+      text: content,
+    },
+    Date.now(),
+  );
 }
 
 export const lspCommand: SlashCommand = {
@@ -37,78 +42,70 @@ export const lspCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive'] as const,
-  action: async (context: CommandContext, _args?: string): Promise<void> => {
+  action: async (
+    context: CommandContext,
+    _args?: string,
+  ): Promise<MessageActionReturn | void> => {
     const config = context.services.config;
 
     if (!config) {
-      context.ui.addItem(
-        { type: MessageType.ERROR, text: t('Config not available.') },
-        Date.now(),
-      );
-      return;
+      return emitMessage(context, 'error', t('Config not available.'));
     }
 
     if (!config.isLspEnabled()) {
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            'LSP is not enabled. Start Qwen Code with `--experimental-lsp` to enable LSP support.',
-          ),
-        },
-        Date.now(),
+      return emitMessage(
+        context,
+        'info',
+        t(
+          'LSP is not enabled. Start Qwen Code with `--experimental-lsp` to enable LSP support.',
+        ),
       );
-      return;
     }
 
     const client = config.getLspClient();
     if (!client) {
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            "LSP is enabled but no client is connected. Check debug logs: `grep '[LSP]' ~/.qwen/debug/latest`",
-          ),
-        },
-        Date.now(),
+      return emitMessage(
+        context,
+        'info',
+        t(
+          'LSP is enabled but no client is connected. Check debug logs under `${QWEN_RUNTIME_DIR:-~/.qwen}/debug/` or see the LSP troubleshooting docs.',
+        ),
       );
-      return;
     }
 
-    // Get server status via the client
+    if (!client.getServerStatus) {
+      return emitMessage(
+        context,
+        'info',
+        t('LSP is enabled, but server status is unavailable.'),
+      );
+    }
+
     const servers = client.getServerStatus();
 
     if (servers.length === 0) {
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            'No LSP servers configured. Add a `.lsp.json` file to your project root. See `/help` for details.',
-          ),
-        },
-        Date.now(),
+      return emitMessage(
+        context,
+        'info',
+        t(
+          'No LSP servers configured. Add a `.lsp.json` file to your project root. See `/help` for details.',
+        ),
       );
-      return;
     }
 
-    // Build status table
     const lines: string[] = ['**LSP Server Status**', ''];
     lines.push('| Server | Command | Languages | Status |');
     lines.push('|--------|---------|-----------|--------|');
 
     for (const server of servers) {
-      const icon = statusIcon(server.status);
       const cmd = server.command ?? '(n/a)';
       const langs = server.languages.join(', ') || '(auto)';
       const statusText = server.error
-        ? `${icon} ${server.status} — ${server.error}`
-        : `${icon} ${server.status}`;
+        ? `${server.status} - ${server.error}`
+        : server.status;
       lines.push(`| ${server.name} | \`${cmd}\` | ${langs} | ${statusText} |`);
     }
 
-    context.ui.addItem(
-      { type: MessageType.INFO, text: lines.join('\n') },
-      Date.now(),
-    );
+    return emitMessage(context, 'info', lines.join('\n'));
   },
 };

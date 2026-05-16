@@ -211,6 +211,22 @@ describe('BuiltinCommandLoader', () => {
     expect(modelCmd?.name).toBe('model');
   });
 
+  it('should include lsp command only when LSP is enabled', async () => {
+    const disabledLoader = new BuiltinCommandLoader(mockConfig);
+    const disabledCommands = await disabledLoader.loadCommands(
+      new AbortController().signal,
+    );
+    expect(disabledCommands.find((c) => c.name === 'lsp')).toBeUndefined();
+
+    (mockConfig.isLspEnabled as Mock).mockReturnValue(true);
+    const enabledLoader = new BuiltinCommandLoader(mockConfig);
+    const enabledCommands = await enabledLoader.loadCommands(
+      new AbortController().signal,
+    );
+
+    expect(enabledCommands.find((c) => c.name === 'lsp')).toBeDefined();
+  });
+
   it('should still load all other commands when ideCommand() throws', async () => {
     // Simulate ideCommand() failure (e.g., platform-specific process detection fails)
     const { ideCommand: ideCommandMock } = await import(

@@ -6,6 +6,7 @@
 
 import * as cp from 'node:child_process';
 import * as net from 'node:net';
+import { StringDecoder } from 'node:string_decoder';
 import { DEFAULT_LSP_REQUEST_TIMEOUT_MS } from './constants.js';
 import type { JsonRpcMessage, LspProcessDiagnostics } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -295,9 +296,16 @@ export class LspConnectionFactory {
           return;
         }
 
+        const stderrDecoder = new StringDecoder('utf8');
         processInstance.stderr?.on('data', (chunk: Buffer) => {
           processDiagnostics.stderrTail = trimTail(
-            processDiagnostics.stderrTail + chunk.toString('utf8'),
+            processDiagnostics.stderrTail + stderrDecoder.write(chunk),
+            MAX_STDERR_TAIL_BYTES,
+          );
+        });
+        processInstance.stderr?.on('end', () => {
+          processDiagnostics.stderrTail = trimTail(
+            processDiagnostics.stderrTail + stderrDecoder.end(),
             MAX_STDERR_TAIL_BYTES,
           );
         });

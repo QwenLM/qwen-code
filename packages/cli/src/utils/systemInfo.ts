@@ -208,16 +208,26 @@ export async function getExtendedSystemInfo(
 }
 
 function getLspStatus(context: CommandContext): string | undefined {
-  const snapshot = context.services.config?.getLspStatusSnapshot?.();
-  if (!snapshot) {
+  try {
+    const snapshot = context.services.config?.getLspStatusSnapshot?.();
+    if (!snapshot) {
+      return undefined;
+    }
+
+    if (context.services.config?.getDebugMode?.()) {
+      debugLogger.debug('LSP status snapshot for /status:', snapshot);
+    }
+
+    return formatLspStatusSnapshot(snapshot);
+  } catch (error) {
+    if (context.services.config?.getDebugMode?.()) {
+      debugLogger.debug(
+        'Unable to read LSP status snapshot for /status:',
+        error,
+      );
+    }
     return undefined;
   }
-
-  if (context.services.config?.getDebugMode?.()) {
-    debugLogger.debug('LSP status snapshot for /status:', snapshot);
-  }
-
-  return formatLspStatusSnapshot(snapshot);
 }
 
 function formatLspStatusSnapshot(snapshot: LspStatusSnapshot): string {

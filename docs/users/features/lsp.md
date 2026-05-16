@@ -396,6 +396,17 @@ LSP: enabled, no servers configured
 LSP: enabled, status unavailable
 ```
 
+For per-server details, run `/lsp`:
+
+```text
+**LSP Server Status**
+
+| Server | Command | Languages | Status |
+|--------|---------|-----------|--------|
+| clangd | `clangd` | c, cpp | READY |
+| pyright | `pyright-langserver` | python | FAILED - startup failed |
+```
+
 Common error messages to look for:
 
 ```text
@@ -456,12 +467,16 @@ Start Qwen Code with LSP and debug mode enabled:
 qwen --experimental-lsp --debug
 ```
 
-Then run `/status` for a short summary, or inspect the debug log:
+Then run `/status` for a short summary, `/lsp` for per-server status, or inspect the debug log:
 
 ```bash
+# Default runtime directory
 rg "LSP|Native LSP|<server-name>" ~/.qwen/debug/latest
 # Or:
 grep -E "LSP|Native LSP|<server-name>" ~/.qwen/debug/latest
+
+# If QWEN_RUNTIME_DIR is configured
+rg "LSP|Native LSP|<server-name>" "$QWEN_RUNTIME_DIR/debug/latest"
 ```
 
 LSP uses Qwen Code's normal `--debug` mode; there is no separate LSP debug flag.

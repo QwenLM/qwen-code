@@ -470,6 +470,50 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  it('should merge initialization errors into the client LSP status snapshot', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        getStatusSnapshot: vi.fn().mockReturnValue({
+          enabled: true,
+          configuredServers: 1,
+          readyServers: 0,
+          failedServers: 1,
+          inProgressServers: 0,
+          notStartedServers: 0,
+          servers: [],
+          initializationError: 'client failed',
+        }),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    config.setLspInitializationError('discovery failed');
+
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      enabled: true,
+      initializationError: 'discovery failed',
+    });
+  });
+
+  it('should report an initialization error when LSP is enabled without a client', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+    });
+
+    expect(config.getLspStatusSnapshot()).toEqual({
+      enabled: true,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      initializationError: 'LSP client is not initialized',
+    });
+  });
+
   describe('initialize', () => {
     it('should throw an error if checkpointing is enabled and GitService fails', async () => {
       const gitError = new Error('Git is not installed');
