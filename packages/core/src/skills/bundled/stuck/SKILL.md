@@ -40,16 +40,20 @@ RUNTIME_DIR="${RUNTIME_DIR:-${QWEN_HOME:-$HOME/.qwen}}"
 
 (If `jq` isn't installed, the settings layer is silently skipped — the env-var / default fallback covers the common case.)
 
-**Fast path for targeted diagnosis** — if a digit-only PID argument was given, skip step 1 enumeration but still match the PID to its sidecar so step 3 has the right session ID for log lookup:
+**Fast path for targeted diagnosis** — if a digit-only PID argument was given, skip step 1 enumeration. First validate that the PID is a live current-user Qwen Code process; if not, refuse and stop. Without this check, a same-user non-Qwen PID (e.g., a `node my-other-app.js --api-key=...`) would have its full command line dumped into the report.
 
 ```
-kill -0 <pid> 2>/dev/null \
-  && ps -p <pid> -o pid=,pcpu=,rss=,etime=,state=,comm=,command= -ww \
-  || echo "PID <pid> is not running"
+kill -0 <pid> 2>/dev/null && ps -p <pid> -o command= -ww 2>/dev/null | grep -qE '(qwen|node.*qwen|bun.*qwen)'
+```
+
+If this pipeline returns non-zero (PID dead, owned by another user, or not a Qwen Code process), stop the diagnostic and tell the user "PID `<pid>` is not a current-user Qwen Code session". Otherwise, gather stats and the sidecar mapping, then jump to step 3:
+
+```
+ps -p <pid> -o pid=,pcpu=,rss=,etime=,state=,comm=,command= -ww
 grep -l '"pid"[[:space:]]*:[[:space:]]*<pid>\b' "$RUNTIME_DIR"/projects/*/chats/*.runtime.json 2>/dev/null
 ```
 
-The `grep -l` returns the sidecar file path (if any); the basename (stripped of `.runtime.json`) is the session ID for step 3's debug log read. Then jump to step 3.
+The `grep -l` returns the sidecar file path (if any); the basename (stripped of `.runtime.json`) is the session ID for step 3's debug log read.
 
 Otherwise (no arg, or symptom-only arg), run the general path below:
 
