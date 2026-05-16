@@ -41,7 +41,7 @@ QWEN_IDE_DAEMON_URL=http://127.0.0.1:4170 code .
 
 ## Relationship To Existing ACP Connection
 
-The first draft should introduce a sibling connection path, not replace
+The first implementation introduces a sibling connection path, not replace
 `AcpConnection`:
 
 ```text
@@ -53,6 +53,10 @@ QwenAgentManager
 Both paths should feed the same higher-level webview callbacks where practical.
 If an event cannot be faithfully mapped yet, the daemon path should surface a
 clear unsupported-state warning rather than silently pretending parity.
+
+This PR adds `DaemonIdeConnection` as the locally verifiable extension-host
+adapter spike. It is not wired into the default `QwenAgentManager` path yet, so
+existing VS Code behavior remains ACP subprocess based.
 
 ## Event Mapping Contract
 
@@ -98,8 +102,10 @@ the daemon.
 
 ## Validation Plan
 
-- Unit-test settings/env resolution.
-- Unit-test daemon event to webview callback mapping.
+- Unit-test daemon session factory connection and SSE event consumption.
+- Unit-test daemon event to existing extension-host callback mapping.
+- Unit-test prompt, cancel, model switch, and permission response forwarding.
+- Unit-test settings/env resolution when the feature flag is wired.
 - Smoke-test local extension host against `qwen serve`:
   - prompt streams into chat
   - cancel works
