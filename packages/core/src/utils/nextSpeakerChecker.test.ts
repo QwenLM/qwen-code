@@ -279,6 +279,42 @@ describe('checkNextSpeaker', () => {
     expect(generateJsonCall[0].promptId).toBe(promptId);
   });
 
+  it('should use raw last history entry to detect function responses', async () => {
+    vi.mocked(chatInstance.getHistory).mockReturnValue([
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'read_file', args: {} } }],
+      },
+    ] as Content[]);
+    vi.mocked(chatInstance.getLastHistoryEntry).mockReturnValue({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'read_file',
+            response: { result: 'file content' },
+          },
+        },
+      ],
+    } as Content);
+
+    const result = await checkNextSpeaker(
+      chatInstance,
+      mockConfig,
+      abortSignal,
+      promptId,
+    );
+
+    expect(result).toEqual({
+      reasoning:
+        'The last message was a function response, so the model should speak next.',
+      next_speaker: 'model',
+    });
+    expect(chatInstance.getHistory).toHaveBeenCalledWith(true);
+    expect(chatInstance.getLastHistoryEntry).toHaveBeenCalledTimes(1);
+    expect(mockBaseLlmClient.generateJson).not.toHaveBeenCalled();
+  });
+
   it('should avoid cloning comprehensive history just to inspect the last message', async () => {
     mockChatHistory([
       { role: 'user', parts: [{ text: 'Hello' }] },
