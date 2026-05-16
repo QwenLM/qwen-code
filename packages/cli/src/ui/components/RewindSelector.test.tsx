@@ -7,6 +7,7 @@
 import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { FileHistoryService } from '@qwen-code/qwen-code-core';
 import type { HistoryItem } from '../types.js';
 import type { KeypressHandler, Key } from '../contexts/KeypressContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -45,8 +46,11 @@ const userTurn = (id: number, text: string): HistoryItem => ({
 });
 
 describe('RewindSelector', () => {
+  let fileHistoryService: FileHistoryService;
+
   beforeEach(() => {
     activeKeypressHandler = null;
+    fileHistoryService = new FileHistoryService('test-session', false, '/tmp');
     vi.mocked(useTerminalSize).mockReturnValue({ columns: 100, rows: 30 });
     vi.mocked(useKeypress).mockImplementation((handler, { isActive }) => {
       if (isActive) {
@@ -61,6 +65,8 @@ describe('RewindSelector', () => {
         history={[userTurn(1, 'first prompt'), userTurn(2, 'second prompt')]}
         onRewind={vi.fn()}
         onCancel={vi.fn()}
+        fileCheckpointingEnabled={false}
+        fileHistoryService={fileHistoryService}
       />,
     );
 
