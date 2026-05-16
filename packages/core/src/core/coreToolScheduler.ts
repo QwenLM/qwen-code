@@ -83,7 +83,10 @@ import {
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
+  addToolInputAttributes,
+  addToolResultAttributes,
 } from '../telemetry/index.js';
+import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 
 const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
 const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
@@ -1895,6 +1898,18 @@ export class CoreToolScheduler {
       }
     }
 
+    // Guard the JSON serialization — addToolInputAttributes early-returns
+    // when sensitive attributes are off, but the argument is computed
+    // before the call.
+    if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
+      addToolInputAttributes(
+        this.config,
+        span,
+        toolName,
+        safeJsonStringify(toolInput) ?? '{}',
+      );
+    }
+
     // Generate unique tool_use_id for hook tracking
     const toolUseId = generateToolUseId();
 
@@ -1922,6 +1937,12 @@ export class CoreToolScheduler {
           scheduledCall.request,
           new Error(blockMessage),
           ToolErrorType.EXECUTION_DENIED,
+        );
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `BLOCKED: ${blockMessage}`,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
@@ -2011,30 +2032,30 @@ export class CoreToolScheduler {
       });
       if (signal.aborted) {
         // PostToolUseFailure Hook
+        let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
             toolName,
             toolInput,
-            'User cancelled tool execution.',
+            cancelMessage,
             true,
             this.config.getApprovalMode(),
           );
 
           // Append additional context from hook if provided
-          let cancelMessage = 'User cancelled tool execution.';
           if (failureHookResult.additionalContext) {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
-          this.setStatusInternal(callId, 'cancelled', cancelMessage);
-        } else {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            'User cancelled tool execution.',
-          );
         }
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `CANCELLED: ${cancelMessage}`,
+        );
+        this.setStatusInternal(callId, 'cancelled', cancelMessage);
         setToolSpanCancelled(span);
         return; // Both code paths should return here
       }
@@ -2076,6 +2097,12 @@ export class CoreToolScheduler {
               scheduledCall.request,
               new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
+            );
+            addToolResultAttributes(
+              this.config,
+              span,
+              toolName,
+              `STOPPED: ${stopMessage}`,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
             setToolSpanFailure(
@@ -2168,6 +2195,20 @@ export class CoreToolScheduler {
           }
         }
 
+        // Guard the JSON serialization for non-string content. Tool
+        // results can contain Part[] with large inlineData/media payloads
+        // that we don't want to serialize when telemetry is off.
+        if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
+          addToolResultAttributes(
+            this.config,
+            span,
+            toolName,
+            typeof content === 'string'
+              ? content
+              : (safeJsonStringify(content) ?? ''),
+          );
+        }
+
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
           callId,
@@ -2213,6 +2254,13 @@ export class CoreToolScheduler {
           }
         }
 
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `ERROR: ${errorMessage}`,
+        );
+
         const error = new Error(errorMessage);
         const errorResponse = createErrorResponse(
           scheduledCall.request,
@@ -2244,30 +2292,30 @@ export class CoreToolScheduler {
 
       if (signal.aborted) {
         // PostToolUseFailure Hook (user interrupt)
+        let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
           const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
             toolName,
             toolInput,
-            'User cancelled tool execution.',
+            cancelMessage,
             true,
             this.config.getApprovalMode(),
           );
 
           // Append additional context from hook if provided
-          let cancelMessage = 'User cancelled tool execution.';
           if (failureHookResult.additionalContext) {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
-          this.setStatusInternal(callId, 'cancelled', cancelMessage);
-        } else {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            'User cancelled tool execution.',
-          );
         }
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `CANCELLED: ${cancelMessage}`,
+        );
+        this.setStatusInternal(callId, 'cancelled', cancelMessage);
         setToolSpanCancelled(span);
         return;
       } else {
@@ -2289,6 +2337,12 @@ export class CoreToolScheduler {
             exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `EXCEPTION: ${exceptionErrorMessage}`,
+        );
         this.setStatusInternal(
           callId,
           'error',

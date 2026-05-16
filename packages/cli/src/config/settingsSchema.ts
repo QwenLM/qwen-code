@@ -185,7 +185,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
-            enum: ['command', 'http', 'prompt'],
+            enum: ['command', 'http'],
             required: true,
           },
           command: {
@@ -197,16 +197,6 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
             type: 'string',
             description:
               'The URL to send the POST request to. Required for "http" type.',
-          },
-          prompt: {
-            type: 'string',
-            description:
-              'The prompt template to send to the LLM. Required for "prompt" type. Use $ARGUMENTS as placeholder for hook input JSON.',
-          },
-          model: {
-            type: 'string',
-            description:
-              'Optional model override for "prompt" type hooks. Defaults to your current model.',
           },
           headers: {
             type: 'object',
@@ -488,6 +478,17 @@ const SETTINGS_SCHEMA = {
         description:
           'The language for LLM output. Use "auto" to detect from system settings, ' +
           'or set a specific language.',
+        showInDialog: true,
+      },
+      dynamicCommandTranslation: {
+        type: 'boolean',
+        label: 'Language: Dynamic Command Translation',
+        category: 'General',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable AI translation for dynamic slash command descriptions. ' +
+          'When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.',
         showInDialog: true,
       },
       terminalBell: {
@@ -968,7 +969,7 @@ const SETTINGS_SCHEMA = {
       properties: {
         includeSensitiveSpanAttributes: {
           description:
-            'Include prompt, function_args, and response_text in spans created by the log-to-span bridge. Only controls bridge spans; OTel logs and other telemetry sinks may still receive response_text.',
+            'When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.',
           type: 'boolean',
           default: false,
         },
