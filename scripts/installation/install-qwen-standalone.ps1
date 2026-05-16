@@ -30,13 +30,13 @@ function Download-File {
     $global:ProgressPreference = 'SilentlyContinue'
     try {
         if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-            curl.exe -sSfLo $OutFile $Url
+            curl.exe --connect-timeout 15 --max-time 300 -sSfLo $OutFile $Url
             if ($LASTEXITCODE -ne 0) {
                 throw "curl.exe download failed (exit code $LASTEXITCODE)"
             }
             return
         }
-        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300
     } finally {
         $global:ProgressPreference = $prevProgressPreference
     }

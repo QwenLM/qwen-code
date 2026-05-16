@@ -184,7 +184,13 @@ describe('installation scripts', () => {
     expect(script).not.toContain('node-v!NODE_VERSION!');
     expect(script).not.toContain('msiexec');
     expect(script).toContain('Invoke-WebRequest');
-    expect(script).toContain('& $curl -#fSLo');
+    expect(script).toContain(
+      '& $curl --connect-timeout 15 --max-time 300 -#fSLo',
+    );
+    expect(script).toContain(
+      '& $curl --connect-timeout 15 --max-time 300 -fsSLo',
+    );
+    expect(script).toContain('-TimeoutSec 300');
     expect(script).not.toContain('PowerShell (Administrator)');
     expect(script).not.toContain('echo INFO: Installation source: %SOURCE%');
     expect(script).not.toMatch(/^\s*call\s+qwen\s*$/m);
@@ -265,6 +271,10 @@ describe('installation scripts', () => {
     expect(script).toContain('$curl = $env:QWEN_INSTALL_CURL_EXE');
     expect(script).toContain('QWEN_INSTALL_CURL_EXE');
     expect(script).toContain('Get-Command curl.exe -CommandType Application');
+    expect(script).toContain('--connect-timeout 15 --max-time 300 -#fSLo');
+    expect(script).toContain('--connect-timeout 15 --max-time 300 -fsSLo');
+    expect(script).toContain('Invoke-WebRequest');
+    expect(script).toContain('-TimeoutSec 300');
     expect(script).toContain(
       '[Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13',
     );
@@ -743,7 +753,10 @@ describe('standalone release packaging', () => {
     expect(installPowerShellSource).toContain('install-qwen-standalone.bat');
     expect(installPowerShellSource).toContain('Invoke-WebRequest');
     expect(installPowerShellSource).toContain('Download-File');
-    expect(installPowerShellSource).toContain('curl.exe -sSfLo');
+    expect(installPowerShellSource).toContain(
+      'curl.exe --connect-timeout 15 --max-time 300 -sSfLo',
+    );
+    expect(installPowerShellSource).toContain('-TimeoutSec 300');
     expect(installPowerShellSource).toContain(
       "$global:ProgressPreference = 'SilentlyContinue'",
     );
