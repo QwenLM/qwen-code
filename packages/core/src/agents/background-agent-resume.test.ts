@@ -400,6 +400,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume with hooks',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -488,6 +489,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume stop hook path',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -574,6 +576,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume after trust revoked',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const createAgentHeadless = vi.fn().mockResolvedValue({
@@ -643,6 +646,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume once',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     let releaseExecute: (() => void) | undefined;
@@ -720,6 +724,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume monitor owner',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -832,6 +837,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume monitor setup failure',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -966,6 +972,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: launchPrompt,
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const execute = vi.fn(async (_context: unknown) => undefined);
@@ -1061,6 +1068,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Legacy fork task',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const createSpy = vi.spyOn(AgentHeadless, 'create');
@@ -1142,6 +1150,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Legacy fork task',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const createSpy = vi.spyOn(AgentHeadless, 'create');
@@ -1183,6 +1192,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Interrupted by shutdown',
       metaPath,
       outputFile: getAgentJsonlPath(tempDir, sessionId, agentId),
+      isBackgrounded: true,
     });
 
     registry.abortAll();
@@ -1230,6 +1240,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume then shutdown',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     let releaseExecute: (() => void) | undefined;
@@ -1304,6 +1315,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume then cancel',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     let releaseExecute: (() => void) | undefined;
@@ -1396,6 +1408,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'original task',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const execute = vi.fn(

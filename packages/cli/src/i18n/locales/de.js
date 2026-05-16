@@ -110,6 +110,46 @@ export default {
     'Die aktuelle Unterhaltung umbenennen. Mit --auto lässt du das schnelle Modell einen Titel wählen.',
   'Rewind conversation to a previous turn':
     'Die Unterhaltung auf einen früheren Gesprächsschritt zurücksetzen',
+  'Rewind Conversation': 'Unterhaltung zurückspulen',
+  'No user turns to rewind to.': 'Keine Benutzerrunden zum Zurückspulen.',
+  'Rewind to: ': 'Zurückspulen zu: ',
+  'Restore code and conversation': 'Code und Unterhaltung wiederherstellen',
+  'Restore conversation only': 'Nur Unterhaltung wiederherstellen',
+  'Restore code only': 'Nur Code wiederherstellen',
+  'Never mind': 'Egal',
+  'Computing file changes...': 'Dateiänderungen werden berechnet...',
+  'Restoring...': 'Wiederherstellung läuft...',
+  'Restored {{count}} file(s).': '{{count}} Datei(en) wiederhergestellt.',
+  'Failed to restore files: {{error}}':
+    'Fehler beim Wiederherstellen der Dateien: {{error}}',
+  'Rewind failed: {{error}}': 'Zurückspulen fehlgeschlagen: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Konversation kann nicht zurückgespult werden: kein aktiver Modell-Client.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code wiederhergestellt, aber Konversation konnte nicht zurückgespult werden (kein aktiver Client).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Konversation zurückgespult. Bearbeite deinen Prompt und drücke Enter, um fortzufahren.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Zu einem komprimierten Turn kann nicht zurückgespult werden. Bitte einen aktuelleren Turn versuchen.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'Datei-Wiederherstellung ist für diesen Turn nicht verfügbar (keine erfassten Dateiänderungen, oder dieser Turn liegt vor der aktuellen Sitzung).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} in {{count}} Datei)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} in {{count}} Dateien)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '{{count}} Datei(en) konnten nicht wiederhergestellt werden: {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Dateien können nicht wiederhergestellt werden: Dieser Turn wurde erstellt, bevor Datei-Checkpointing aktiviert war.',
+  'No files needed to be restored.':
+    'Keine Dateien mussten wiederhergestellt werden.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ navigieren · Enter auswählen · Esc zurück',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ navigieren · Enter auswählen · Esc abbrechen',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y bestätigen · Esc/N zurück',
   'change the theme': 'Design ändern',
   'Select Theme': 'Design auswählen',
   Preview: 'Vorschau',

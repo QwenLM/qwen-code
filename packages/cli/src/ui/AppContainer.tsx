@@ -25,9 +25,11 @@ import {
 import { ConfigContext } from './contexts/ConfigContext.js';
 import {
   type HistoryItem,
+  type HistoryItemUser,
   ToolCallStatus,
   type HistoryItemWithoutId,
 } from './types.js';
+import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
 import {
   type EditorType,
@@ -155,6 +157,7 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import type { StatusLinePresetConfig } from './statusLinePresets.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -877,6 +880,26 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const [isStatusLineDialogOpen, setStatusLineDialogOpen] = useState(false);
+  const openStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(true),
+    [],
+  );
+  const closeStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(false),
+    [],
+  );
+  const [statusLineSettingsVersion, setStatusLineSettingsVersion] = useState(0);
+  const [statusLineConfigOverride, setStatusLineConfigOverride] = useState<
+    StatusLinePresetConfig | undefined
+  >(undefined);
+  const notifyStatusLineSettingsChanged = useCallback(
+    (newConfig: StatusLinePresetConfig) => {
+      setStatusLineConfigOverride(newConfig);
+      setStatusLineSettingsVersion((version) => version + 1);
+    },
+    [],
+  );
   const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
     useMemoryDialog();
 
@@ -971,6 +994,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openTrustDialog,
@@ -1005,6 +1029,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openArenaDialog,
@@ -2048,6 +2073,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
     isManageModelsDialogOpen ||
@@ -2194,75 +2220,189 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const handleRewindConfirm = useCallback(
-    (userItem: HistoryItem) => {
-      const geminiClient = config.getGeminiClient();
-      if (!geminiClient) return;
+    async (userItem: HistoryItem, option: RestoreOption) => {
+      try {
+        // For 'both', validate that conversation can be truncated BEFORE
+        // touching files — otherwise we'd roll back the workspace while
+        // the conversation stays at the newer state.
+        const needsConversation =
+          option === 'conversation' || option === 'both';
+        const geminiClient = needsConversation
+          ? config.getGeminiClient()
+          : null;
+        let apiTruncateIndex = -1;
+        let conversationSkippedNoClient = false;
+        if (needsConversation) {
+          if (!geminiClient) {
+            if (option === 'conversation') {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Cannot rewind conversation: no active model client.',
+                  ),
+                },
+                Date.now(),
+              );
+              return;
+            }
+            // 'both' with no client: skip conversation, still try files,
+            // and surface a warning after the restore output.
+            conversationSkippedNoClient = true;
+          } else {
+            apiTruncateIndex = computeApiTruncationIndex(
+              historyManager.history,
+              userItem.id,
+              geminiClient.getHistory(),
+            );
+            if (apiTruncateIndex < 0) {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                  ),
+                },
+                Date.now(),
+              );
+              if (option === 'both') {
+                // Abort file restore too — don't create inconsistent state
+                return;
+              }
+              return;
+            }
+          }
+        }
 
-      // 1. Compute values from current history BEFORE truncation
-      const originalHistory = historyManager.history;
-      const originalLength = originalHistory.length;
+        // Restore code (files on disk). For 'code'-only, don't truncate
+        // the snapshot timeline — the conversation turns remain visible
+        // and their snapshots must stay available for future rewinds.
+        let fileRestoreMessage: string | undefined;
+        let fileRestoreError: string | undefined;
+        let hasRestoreFailure = false;
+        if (option === 'code' || option === 'both') {
+          const promptId = (userItem as HistoryItemUser).promptId;
+          if (promptId) {
+            try {
+              const truncateHistory =
+                option === 'both' && !!geminiClient && apiTruncateIndex >= 0;
+              const result = await config
+                .getFileHistoryService()
+                .rewind(promptId, truncateHistory);
+              if (result.filesChanged.length > 0) {
+                fileRestoreMessage = t('Restored {{count}} file(s).', {
+                  count: String(result.filesChanged.length),
+                });
+              } else if (result.filesFailed.length === 0) {
+                fileRestoreMessage = t('No files needed to be restored.');
+              }
+              if (result.filesFailed.length > 0) {
+                hasRestoreFailure = true;
+                fileRestoreError = t(
+                  'Failed to restore {{count}} file(s): {{files}}',
+                  {
+                    count: String(result.filesFailed.length),
+                    files: result.filesFailed
+                      .map((f) => f.split('/').pop())
+                      .join(', '),
+                  },
+                );
+              }
+            } catch (error) {
+              hasRestoreFailure = true;
+              fileRestoreError = t('Failed to restore files: {{error}}', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } else {
+            hasRestoreFailure = true;
+            fileRestoreError = t(
+              'Cannot restore files: this turn was created before file checkpointing was enabled.',
+            );
+          }
+        }
 
-      let targetTurnIndex = 0;
-      for (const h of originalHistory) {
-        if (h.id === userItem.id) break;
-        if (isRealUserTurn(h)) targetTurnIndex++;
-      }
+        // Truncate conversation (already validated above).
+        // Skip if file restore had failures in "both" mode to avoid inconsistent state.
+        if (
+          needsConversation &&
+          geminiClient &&
+          apiTruncateIndex >= 0 &&
+          !(option === 'both' && hasRestoreFailure)
+        ) {
+          const originalHistory = historyManager.history;
+          const originalLength = originalHistory.length;
 
-      // 2. Compute API truncation point
-      const apiHistory = geminiClient.getHistory();
-      const apiTruncateIndex = computeApiTruncationIndex(
-        originalHistory,
-        userItem.id,
-        apiHistory,
-      );
+          let targetTurnIndex = 0;
+          for (const h of originalHistory) {
+            if (h.id === userItem.id) break;
+            if (isRealUserTurn(h)) targetTurnIndex++;
+          }
 
-      // Abort if the target turn is unreachable (e.g., absorbed by compression)
-      if (apiTruncateIndex < 0) {
+          geminiClient.truncateHistory(apiTruncateIndex);
+
+          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          historyManager.loadHistory(truncatedUi);
+
+          refreshStatic();
+
+          if (userItem.type === 'user' && userItem.text) {
+            buffer.setText(userItem.text);
+          }
+
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Conversation rewound. Edit your prompt and press Enter to continue.',
+              ),
+            },
+            Date.now(),
+          );
+
+          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+            truncatedCount: originalLength - truncatedUi.length,
+          });
+        }
+
+        // Show file restore result after conversation truncation so the
+        // message isn't immediately removed by loadHistory.
+        if (fileRestoreMessage) {
+          historyManager.addItem(
+            { type: 'info', text: fileRestoreMessage },
+            Date.now(),
+          );
+        }
+        if (fileRestoreError) {
+          historyManager.addItem(
+            { type: 'error', text: fileRestoreError },
+            Date.now(),
+          );
+        }
+        if (conversationSkippedNoClient) {
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Code restored, but conversation could not be rewound (no active client).',
+              ),
+            },
+            Date.now(),
+          );
+        }
+      } catch (error) {
         historyManager.addItem(
           {
             type: 'error',
-            text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+            text: t('Rewind failed: {{error}}', {
+              error: error instanceof Error ? error.message : String(error),
+            }),
           },
           Date.now(),
         );
+      } finally {
         setIsRewindSelectorOpen(false);
-        return;
       }
-
-      // 3. Truncate API history to the target point.
-      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
-      // reasoning_content continuity across all turns in the conversation.
-      geminiClient.truncateHistory(apiTruncateIndex);
-
-      // 4. Truncate UI history (keep everything before the target item)
-      const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
-      historyManager.loadHistory(truncatedUi);
-
-      // 5. Re-render the terminal
-      refreshStatic();
-
-      // 6. Pre-populate input with the original user text
-      if (userItem.type === 'user' && userItem.text) {
-        buffer.setText(userItem.text);
-      }
-
-      // 7. Add info message
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
-        },
-        Date.now(),
-      );
-
-      // 8. Record the rewind event — re-roots the parentUuid chain so
-      //    rewound messages end up on a dead branch during resume.
-      config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-        truncatedCount: originalLength - truncatedUi.length,
-      });
-
-      // 9. Close the selector
-      setIsRewindSelectorOpen(false);
     },
     [config, historyManager, refreshStatic, buffer],
   );
@@ -2409,6 +2549,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isStatusLineDialogOpen,
+    closeStatusLineDialog,
     isMemoryDialogOpen,
     closeMemoryDialog,
     activeArenaDialog,
@@ -2841,6 +2983,9 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -2959,6 +3104,9 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -3082,6 +3230,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
@@ -3156,6 +3306,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,

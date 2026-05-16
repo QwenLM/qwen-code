@@ -614,14 +614,21 @@ const SETTINGS_SCHEMA = {
         category: 'UI',
         requiresRestart: false,
         default: undefined as
-          | {
-              type: 'command';
-              command: string;
-              refreshInterval?: number;
-            }
+          | (
+              | {
+                  type: 'command';
+                  command: string;
+                  refreshInterval?: number;
+                }
+              | {
+                  type: 'preset';
+                  items: string[];
+                  useThemeColors?: boolean;
+                }
+            )
           | undefined,
         description:
-          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
         showInDialog: false,
       },
       customThemes: {

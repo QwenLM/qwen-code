@@ -134,6 +134,7 @@ export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
+export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';

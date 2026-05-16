@@ -80,6 +80,20 @@ import {
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 
+// Memoize git branch per cwd for the agent-launch path. `getGitBranch`
+// shells out to `git rev-parse` synchronously; caching avoids the per-launch
+// execSync on a path that runs every time a subagent (foreground or
+// background) starts. Branches don't change within a process under normal
+// use; the transcript annotation is best-effort audit metadata, so a stale
+// value after a user `git checkout` mid-session is acceptable.
+const gitBranchCache = new Map<string, string | undefined>();
+function getCachedGitBranch(cwd: string): string | undefined {
+  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
+  const branch = getGitBranch(cwd);
+  gitBranchCache.set(cwd, branch);
+  return branch;
+}
+
 function persistBackgroundCancellation(
   metaPath: string,
   persistedStatus: 'running' | 'cancelled',
@@ -1674,7 +1688,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             sessionId,
             cwd: projectRoot,
             version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getGitBranch(projectRoot),
+            gitBranch: getCachedGitBranch(projectRoot),
             // Seed the JSONL with the launching prompt so the transcript is
             // self-describing — readers don't need to consult .meta.json to
             // know what the agent was asked to do.
@@ -1688,6 +1702,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
+        // Register before writing the meta sidecar — see the matching
+        // foreground call below for the full rationale. Keeping the
+        // order symmetric here guards the background path against the
+        // same orphaned-meta hazard if register() ever grows a throw.
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: subagentConfig.name,
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: bgAbortController,
+          toolUseId: this.callId,
+          prompt: this.params.prompt,
+          outputFile: jsonlPath,
+          metaPath,
+        });
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
           agentType: hookOpts.agentType,
@@ -1704,19 +1735,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
-        });
-        registry.register({
-          agentId: hookOpts.agentId,
-          description: this.params.description,
-          subagentType: subagentConfig.name,
-          flavor: 'background',
-          status: 'running',
-          startTime: Date.now(),
-          abortController: bgAbortController,
-          toolUseId: this.callId,
-          prompt: this.params.prompt,
-          outputFile: jsonlPath,
-          metaPath,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -2001,22 +2019,35 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
         );
 
-      // Register in BackgroundTaskRegistry with flavor:'foreground' so the
+      // Register in BackgroundTaskRegistry with isBackgrounded:false so the
       // pill counts the run and the dialog can drill in. Foreground entries
       // skip XML notification and headless-holdback (see the registry for
       // the gating logic).
+      //
+      // Persistence wiring mirrors the background path so foreground
+      // subagents leave the same JSONL transcript + meta sidecar on disk
+      // as their backgrounded counterparts. Without this, post-mortem of a
+      // cancelled / crashed foreground subagent has no on-disk evidence
+      // beyond what made it into the parent's tool result.
       const registry = this.config.getBackgroundTaskRegistry();
-      registry.register({
-        agentId: hookOpts.agentId,
-        description: this.params.description,
-        subagentType: hookOpts.agentType,
-        flavor: 'foreground',
-        status: 'running',
-        startTime: Date.now(),
-        abortController: fgAbortController,
-        prompt: this.params.prompt,
-        toolUseId: this.callId,
-      });
+      const fgProjectDir = this.config.storage.getProjectDir();
+      const fgSessionId = this.config.getSessionId();
+      const fgJsonlPath = getAgentJsonlPath(
+        fgProjectDir,
+        fgSessionId,
+        hookOpts.agentId,
+      );
+      const fgMetaPath = getAgentMetaPath(
+        fgProjectDir,
+        fgSessionId,
+        hookOpts.agentId,
+      );
+      const fgProjectRoot = this.config.getProjectRoot();
+      // Declared `let` so the `finally` block can release the writer's
+      // listeners + fd even if the attach itself throws partway through.
+      // The attach happens inside the `try` below — keeping it outside
+      // would leak listeners on any synchronous setup failure.
+      let cleanupFgJsonl: (() => void) | undefined;
 
       const cleanupOwnedMonitorNotifications =
         this.registerOwnedMonitorNotifications(
@@ -2074,6 +2105,57 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
       try {
+        ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
+          this.eventEmitter,
+          fgJsonlPath,
+          {
+            agentId: hookOpts.agentId,
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            sessionId: fgSessionId,
+            cwd: fgProjectRoot,
+            version: this.config.getCliVersion() || 'unknown',
+            gitBranch: getCachedGitBranch(fgProjectRoot),
+            // Seed the JSONL with the launching prompt so the transcript
+            // is self-describing — readers don't need the meta sidecar to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+          },
+        ));
+        // Register before writing the meta sidecar: if register() throws
+        // (e.g. duplicate agent id), we leave no orphaned 'running' meta
+        // file behind. writeAgentMeta is best-effort and never throws, so
+        // a failure there leaves the registry entry without a sidecar —
+        // a benign degradation (post-mortem readers miss this run) rather
+        // than a stuck meta file the cleanup path can't reach.
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: hookOpts.agentType,
+          isBackgrounded: false,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: fgAbortController,
+          prompt: this.params.prompt,
+          toolUseId: this.callId,
+          outputFile: fgJsonlPath,
+          metaPath: fgMetaPath,
+        });
+        writeAgentMeta(fgMetaPath, {
+          agentId: hookOpts.agentId,
+          agentType: hookOpts.agentType,
+          description: this.params.description,
+          parentSessionId: fgSessionId,
+          parentAgentId: getCurrentAgentId(),
+          createdAt: new Date().toISOString(),
+          status: 'running',
+          lastUpdatedAt: new Date().toISOString(),
+          resolvedApprovalMode,
+          subagentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          resumeCount: 0,
+        });
+
         const stopHookWarning = await runFramed();
         const finalText = appendSubagentStopWarning(
           subagent.getFinalText(),
@@ -2128,6 +2210,32 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
+        // Release the JSONL writer's listeners and close the fd before
+        // patching the meta sidecar — closing first guarantees the
+        // transcript file is flushed and visible to any post-mortem reader
+        // by the time the sidecar reports the terminal status.
+        // The optional chain covers the rare case where the attach itself
+        // threw before assigning `cleanupFgJsonl`; in that case there is
+        // nothing to release and we still want the meta-patch / unregister
+        // tail of the cleanup path to run.
+        cleanupFgJsonl?.();
+        // Patch the sidecar so a post-mortem reader sees the agent's final
+        // state. Foreground subagents settle synchronously through the
+        // tool-result channel rather than emitting a `task-notification`,
+        // so this is the only point where the on-disk meta gets the
+        // terminal status — without it, the sidecar would be frozen at
+        // `running` for every completed foreground run.
+        const fgTerminateMode = subagent.getTerminateMode();
+        const fgTerminalStatus =
+          fgTerminateMode === AgentTerminateMode.GOAL
+            ? 'completed'
+            : fgTerminateMode === AgentTerminateMode.CANCELLED
+              ? 'cancelled'
+              : 'failed';
+        patchAgentMeta(fgMetaPath, {
+          status: fgTerminalStatus,
+          lastUpdatedAt: new Date().toISOString(),
+        });
         // Foreground entries leave the registry as soon as the tool-call
         // returns — the parent's tool-result is the durable record. Doing
         // this in finally guarantees we clean up on success, failure,
