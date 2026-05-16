@@ -105,6 +105,7 @@ export interface WriteMemoryHeapSnapshotOptions {
   getAvailableBytes?: (dir: string) => number;
   minFreeBytesAfterSnapshot?: number;
   maxSnapshots?: number;
+  rateLimitMs?: number;
 }
 
 export interface MemoryPressureSample {
@@ -163,6 +164,30 @@ function cleanupOldHeapSnapshots(
   }
 }
 
+const lastHeapSnapshotWriteByDir = new Map<string, number>();
+
+function enforceHeapSnapshotRateLimit(
+  outputDir: string,
+  now: Date,
+  rateLimitMs: number,
+): void {
+  if (rateLimitMs <= 0) return;
+
+  const key = path.resolve(outputDir);
+  const nowMs = now.getTime();
+  const lastWriteMs = lastHeapSnapshotWriteByDir.get(key);
+  if (lastWriteMs !== undefined && nowMs - lastWriteMs < rateLimitMs) {
+    const waitSeconds = Math.ceil((rateLimitMs - (nowMs - lastWriteMs)) / 1000);
+    throw new Error(
+      `Heap snapshot rate limit: wait ${waitSeconds}s before writing another snapshot in this directory.`,
+    );
+  }
+}
+
+function recordHeapSnapshotWrite(outputDir: string, now: Date): void {
+  lastHeapSnapshotWriteByDir.set(path.resolve(outputDir), now.getTime());
+}
+
 export function writeMemoryHeapSnapshot({
   outputDir = defaultHeapSnapshotDir(),
   now = new Date(),
@@ -172,9 +197,17 @@ export function writeMemoryHeapSnapshot({
   getAvailableBytes: getAvailableBytesOption = getAvailableBytes,
   minFreeBytesAfterSnapshot = 512 * 1024 * 1024,
   maxSnapshots = 5,
+  rateLimitMs = 60_000,
 }: WriteMemoryHeapSnapshotOptions = {}): string {
   fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
-  fs.chmodSync(outputDir, 0o700);
+  try {
+    fs.chmodSync(outputDir, 0o700);
+  } catch {
+    // Best-effort hardening; keep diagnostics usable on filesystems that do
+    // not support POSIX chmod semantics.
+  }
+
+  enforceHeapSnapshotRateLimit(outputDir, now, rateLimitMs);
 
   const estimatedSnapshotBytes = estimateSnapshotBytesOption();
   const availableBytes = getAvailableBytesOption(outputDir);
@@ -190,7 +223,12 @@ export function writeMemoryHeapSnapshot({
   );
 
   const writtenPath = writeSnapshot(filePath);
-  fs.chmodSync(writtenPath, 0o600);
+  try {
+    fs.chmodSync(writtenPath, 0o600);
+  } catch {
+    // Best-effort hardening; the report warns that snapshots are sensitive.
+  }
+  recordHeapSnapshotWrite(outputDir, now);
   cleanupOldHeapSnapshots(outputDir, maxSnapshots);
   return writtenPath;
 }

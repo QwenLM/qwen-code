@@ -296,6 +296,34 @@ describe('doctorCommand', () => {
     await doctorCommand.action!(mockContext, 'memory --snapshot');
 
     expect(memoryDiagnosticsModule.writeMemoryHeapSnapshot).toHaveBeenCalled();
+    expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: 'Writing heap snapshot, this may take a moment...',
+      }),
+    );
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining('Heap snapshot written'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('should render sampled heap snapshot diagnostics in interactive mode', async () => {
+    await doctorCommand.action!(mockContext, 'memory --sample --snapshot');
+
+    expect(
+      memoryDiagnosticsModule.collectMemoryPressureSamples,
+    ).toHaveBeenCalledWith({ sampleCount: 3, intervalMs: 1000 });
+    expect(memoryDiagnosticsModule.writeMemoryHeapSnapshot).toHaveBeenCalled();
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining('Memory pressure samples'),
+      }),
+      expect.any(Number),
+    );
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'info',

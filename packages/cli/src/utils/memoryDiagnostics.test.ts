@@ -209,6 +209,37 @@ describe('memoryDiagnostics', () => {
     }
   });
 
+  it('rate-limits repeated heap snapshot writes in the same directory', () => {
+    const outputDir = path.join(
+      os.tmpdir(),
+      `qwen-memory-diagnostics-rate-limit-${process.pid}`,
+    );
+    fs.rmSync(outputDir, { recursive: true, force: true });
+
+    try {
+      const writeSnapshot = (filePath: string) => {
+        fs.writeFileSync(filePath, 'snapshot');
+        return filePath;
+      };
+
+      writeMemoryHeapSnapshot({
+        outputDir,
+        now: new Date('2026-05-15T12:00:00.000Z'),
+        writeSnapshot,
+      });
+
+      expect(() =>
+        writeMemoryHeapSnapshot({
+          outputDir,
+          now: new Date('2026-05-15T12:00:30.000Z'),
+          writeSnapshot,
+        }),
+      ).toThrow('Heap snapshot rate limit');
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps only the newest heap snapshots after writing', () => {
     const outputDir = path.join(
       os.tmpdir(),
