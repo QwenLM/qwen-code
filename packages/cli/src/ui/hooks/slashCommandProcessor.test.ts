@@ -131,6 +131,7 @@ describe('useSlashCommandProcessor', () => {
     openEditorDialog: vi.fn(),
     openMemoryDialog: mockOpenMemoryDialog,
     openSettingsDialog: vi.fn(),
+    openStatusLineDialog: vi.fn(),
     openModelDialog: mockOpenModelDialog,
     openManageModelsDialog: vi.fn(),
     openTrustDialog: vi.fn(),

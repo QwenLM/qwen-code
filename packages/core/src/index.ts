@@ -134,6 +134,7 @@ export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
+export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
@@ -358,6 +359,12 @@ export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export { type StopFailureErrorType } from './hooks/types.js';
+
+// ============================================================================
+// Goals (/goal command runtime)
+// ============================================================================
+
+export * from './goals/index.js';
 
 // Export hook triggers for all hook events
 export {

@@ -132,6 +132,45 @@ export default {
     'Rename the current conversation. --auto lets the fast model pick a title.',
   'Rewind conversation to a previous turn':
     'Rewind conversation to a previous turn',
+  'Rewind Conversation': 'Rewind Conversation',
+  'No user turns to rewind to.': 'No user turns to rewind to.',
+  'Rewind to: ': 'Rewind to: ',
+  'Restore code and conversation': 'Restore code and conversation',
+  'Restore conversation only': 'Restore conversation only',
+  'Restore code only': 'Restore code only',
+  'Never mind': 'Never mind',
+  'Computing file changes...': 'Computing file changes...',
+  'Restoring...': 'Restoring...',
+  'Restored {{count}} file(s).': 'Restored {{count}} file(s).',
+  'Failed to restore files: {{error}}': 'Failed to restore files: {{error}}',
+  'Rewind failed: {{error}}': 'Rewind failed: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Cannot rewind conversation: no active model client.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code restored, but conversation could not be rewound (no active client).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversation rewound. Edit your prompt and press Enter to continue.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Rewinding does not affect files edited manually or via shell commands.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} in {{count}} file)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} in {{count}} files)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Failed to restore {{count}} file(s): {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Cannot restore files: this turn was created before file checkpointing was enabled.',
+  'No files needed to be restored.': 'No files needed to be restored.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ to navigate · Enter to select · Esc to go back',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ to navigate · Enter to select · Esc to cancel',
+  'Enter/Y to confirm · Esc/N to go back':
+    'Enter/Y to confirm · Esc/N to go back',
   'change the theme': 'change the theme',
   'Select Theme': 'Select Theme',
   Preview: 'Preview',
@@ -1841,6 +1880,8 @@ export default {
     'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
+  'Set a goal — keep working until the condition is met':
+    'Set a goal — keep working until the condition is met',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

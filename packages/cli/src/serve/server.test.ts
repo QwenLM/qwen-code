@@ -11,6 +11,14 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createServeApp } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
+import {
+  getAdvertisedServeFeatures,
+  getRegisteredServeFeatures,
+  getServeFeatures,
+  getServeProtocolVersions,
+  SERVE_CAPABILITY_REGISTRY,
+  type ServeProtocolVersion,
+} from './capabilities.js';
 import type {
   CancelNotification,
   PromptRequest,
@@ -30,11 +38,7 @@ import {
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
-import {
-  CAPABILITIES_SCHEMA_VERSION,
-  STAGE1_FEATURES,
-  type ServeOptions,
-} from './types.js';
+import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -51,6 +55,18 @@ const baseOpts: ServeOptions = {
 // WS_B).
 const WS_BOUND = path.resolve(path.sep, 'work', 'bound');
 const WS_DIFFERENT = path.resolve(path.sep, 'work', 'different');
+const EXPECTED_STAGE1_FEATURES = [
+  'health',
+  'capabilities',
+  'session_create',
+  'session_scope_override',
+  'session_list',
+  'session_prompt',
+  'session_cancel',
+  'session_events',
+  'session_set_model',
+  'permission_vote',
+] as const;
 
 interface FakeBridgeOpts {
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
@@ -190,6 +206,45 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
 }
 
 describe('createServeApp', () => {
+  describe('serve capability registry', () => {
+    it('returns a fresh ordered registered feature list', () => {
+      const features = getRegisteredServeFeatures();
+      expect(features).toEqual([...EXPECTED_STAGE1_FEATURES]);
+
+      features.pop();
+      expect(getRegisteredServeFeatures()).toEqual([
+        ...EXPECTED_STAGE1_FEATURES,
+      ]);
+    });
+
+    it('advertises current-protocol features separately from the registry', () => {
+      expect(getAdvertisedServeFeatures()).toEqual([
+        ...EXPECTED_STAGE1_FEATURES,
+      ]);
+      expect(getServeFeatures()).toEqual(getAdvertisedServeFeatures());
+    });
+
+    it('marks every current feature with its historical v1 origin', () => {
+      expect(Object.keys(SERVE_CAPABILITY_REGISTRY)).toEqual([
+        ...EXPECTED_STAGE1_FEATURES,
+      ]);
+      expect(
+        Object.values(SERVE_CAPABILITY_REGISTRY).map(({ since }) => since),
+      ).toEqual(EXPECTED_STAGE1_FEATURES.map(() => 'v1'));
+    });
+
+    it('returns protocol version metadata with a fresh supported array', () => {
+      const versions = getServeProtocolVersions();
+      expect(versions).toEqual({ current: 'v1', supported: ['v1'] });
+
+      versions.supported.push('v99' as ServeProtocolVersion);
+      expect(getServeProtocolVersions()).toEqual({
+        current: 'v1',
+        supported: ['v1'],
+      });
+    });
+  });
+
   describe('GET /health', () => {
     it('returns 200 ok', async () => {
       const app = createServeApp(baseOpts);
@@ -209,8 +264,9 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.v).toBe(CAPABILITIES_SCHEMA_VERSION);
+      expect(res.body.protocolVersions).toEqual(getServeProtocolVersions());
       expect(res.body.mode).toBe('http-bridge');
-      expect(res.body.features).toEqual([...STAGE1_FEATURES]);
+      expect(res.body.features).toEqual(getAdvertisedServeFeatures());
       expect(res.body.modelServices).toEqual([]);
     });
 
@@ -473,6 +529,61 @@ describe('createServeApp', () => {
       expect(bridge.calls).toEqual([
         { workspaceCwd: '/work/a', modelServiceId: 'qwen-prod' },
       ]);
+    });
+
+    it('passes through a valid `sessionScope` to the bridge (#4175 PR 5)', async () => {
+      // Per-request override: even when the daemon-wide default is
+      // `'single'`, the route forwards an explicit `'thread'` scope so
+      // the bridge can isolate this caller's session. Symmetric for
+      // `'single'` against a `'thread'` daemon.
+      for (const scope of ['single', 'thread'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: '/work/a', sessionScope: scope });
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toEqual([
+          { workspaceCwd: '/work/a', sessionScope: scope },
+        ]);
+      }
+    });
+
+    it('400 invalid_session_scope when `sessionScope` is not "single"/"thread"', async () => {
+      // Anything outside the enum (`'user'`, `null`, a number, an object)
+      // must 4xx with a typed `code` so HTTP clients can branch on the
+      // failure shape rather than parsing the message. Bridge must NOT
+      // be invoked — surfacing the invalid value as a clear 400 beats
+      // throwing inside the bridge later.
+      const malformed: unknown[] = ['user', '', 'SINGLE', null, 123, {}];
+      for (const sessionScope of malformed) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: '/work/a', sessionScope });
+        expect(res.status).toBe(400);
+        expect(res.body).toMatchObject({ code: 'invalid_session_scope' });
+        expect(bridge.calls).toHaveLength(0);
+      }
+    });
+
+    it('omits `sessionScope` from the bridge request when the field is absent', async () => {
+      // Backward-compat invariant: a pre-#4175-PR-5 client (no SDK
+      // upgrade) sees identical behavior. The bridge sees no
+      // `sessionScope` key, so its `defaultSessionScope` (the
+      // daemon-wide `--sessionScope` value) is used unchanged.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(200);
+      expect(bridge.calls).toEqual([{ workspaceCwd: '/work/a' }]);
+      expect(bridge.calls[0]).not.toHaveProperty('sessionScope');
     });
 
     it('500 when bridge throws', async () => {

@@ -47,6 +47,7 @@ import { hideBin } from 'yargs/helpers';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import stripJsonComments from 'strip-json-comments';
 
 import { resolvePath } from '../utils/resolvePath.js';
@@ -159,6 +160,11 @@ export interface CliArgs {
   resume: string | undefined;
   /** Specify a session ID without session resumption */
   sessionId: string | undefined;
+  /**
+   * Create a new forked session from the resumed session. Must be used with
+   * --resume or --continue.
+   */
+  forkSession?: boolean | undefined;
   /** Internal: preserve the outer session ID when relaunching in a sandbox */
   sandboxSessionId?: string | undefined;
   maxSessionTurns: number | undefined;
@@ -805,6 +811,12 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Specify a session ID for this run.',
         })
+        .option('fork-session', {
+          type: 'boolean',
+          description:
+            'Create a new forked session from the resumed session. Must be used with --resume or --continue.',
+          default: false,
+        })
         .option('sandbox-session-id', {
           type: 'string',
           hidden: true,
@@ -906,8 +918,12 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['continue'] && argv['resume']) {
             return 'Cannot use both --continue and --resume together. Use --continue to resume the latest session, or --resume <sessionId> to resume a specific session.';
           }
-          if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
+          const hasResume = argv['resume'] !== undefined;
+          if (argv['sessionId'] && (argv['continue'] || hasResume)) {
             return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
+          }
+          if (argv['forkSession'] && !(argv['continue'] || hasResume)) {
+            return '--fork-session must be used with --resume or --continue.';
           }
           if (
             argv['sandboxSessionId'] &&
@@ -1535,6 +1551,11 @@ export async function loadCliConfig(
       sessionData = await sessionService.loadLastSession();
       if (sessionData) {
         sessionId = sessionData.conversation.sessionId;
+      } else if (argv.forkSession) {
+        writeStderrLine(
+          'Cannot use --fork-session with --continue: no saved session found to fork.',
+        );
+        process.exit(1);
       }
     }
 
@@ -1550,7 +1571,30 @@ export async function loadCliConfig(
         process.exit(1);
       }
     }
+
+    if (argv.forkSession && sessionId) {
+      const sourceSessionId = sessionId;
+      const forkedSessionId = randomUUID();
+      try {
+        await sessionService.forkSession(sourceSessionId, forkedSessionId);
+      } catch (err) {
+        writeStderrLine(
+          `Failed to fork session ${sourceSessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        process.exit(1);
+      }
+      sessionId = forkedSessionId;
+      sessionData = await sessionService.loadSession(forkedSessionId);
+      if (!sessionData) {
+        writeStderrLine(`Failed to load forked session ${forkedSessionId}.`);
+        process.exit(1);
+      }
+    }
   } else if (argv.sandboxSessionId) {
+    if (!process.env['SANDBOX']) {
+      writeStderrLine('--sandbox-session-id is for internal sandbox use only.');
+      process.exit(1);
+    }
     sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
@@ -1756,10 +1800,36 @@ export async function loadCliConfig(
       );
 
       await lspService.discoverAndPrepare();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after discovery:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       await lspService.start();
+      if (config.getDebugMode()) {
+        debugLogger.debug(
+          'Native LSP status after startup:',
+          lspService.getStatusSnapshot(),
+        );
+      }
       lspClient = new NativeLspClient(lspService);
       config.setLspClient(lspClient);
+      try {
+        config.setLspInitializationError(undefined);
+      } catch {
+        debugLogger.warn(
+          'Failed to clear LSP initialization error after initialization',
+        );
+      }
     } catch (err) {
+      try {
+        config.setLspInitializationError(
+          err instanceof Error ? err : String(err),
+        );
+      } catch {
+        debugLogger.warn('LSP init error occurred after initialization:', err);
+      }
       debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }

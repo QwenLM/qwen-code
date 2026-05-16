@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  SERVE_FEATURES,
+  type ServeFeature,
+  type ServeProtocolVersions,
+} from './capabilities.js';
+
 /**
  * Stage 1 daemon mode shape.
  *
@@ -87,6 +93,11 @@ export interface ServeOptions {
  */
 export interface CapabilitiesEnvelope {
   v: 1;
+  /**
+   * Serve protocol versions supported by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  protocolVersions?: ServeProtocolVersions;
   mode: ServeMode;
   features: string[];
   /**
@@ -119,34 +130,8 @@ export interface CapabilitiesEnvelope {
 
 export const CAPABILITIES_SCHEMA_VERSION = 1 as const;
 
-/**
- * Stage 1 ships only the routes wired in `server.ts`. As routes land in
- * follow-up PRs, append the corresponding feature tag here so clients can
- * progressively enable UI affordances.
- *
- * The annotation is intentionally absent: `as const` widens to
- * `readonly ['health', 'capabilities', ...]` and the derived
- * `Stage1Feature` union catches typos at compile time. Annotating as
- * `readonly string[]` would erase the literal information.
- */
-// FIXME(stage-1.5, chiga0 finding 5):
-// `STAGE1_FEATURES` is a hard-coded constant — `extMethod` plugins
-// can't contribute to the capability set without editing the daemon.
-// Stage 1.5 should convert this to a registry that bridges and
-// plugins push into, alongside an `ext_*` event family + a
-// `POST /ext/:method` route. Tracked under #3803.
-// Reference: https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
-export const STAGE1_FEATURES = [
-  'health',
-  'capabilities',
-  'session_create',
-  'session_list',
-  'session_prompt',
-  'session_cancel',
-  'session_events',
-  'session_set_model',
-  'permission_vote',
-] as const;
+/** @deprecated Use SERVE_FEATURES from the capability registry. */
+export const STAGE1_FEATURES = SERVE_FEATURES;
 
-/** Compile-time-checked feature identifier — element of STAGE1_FEATURES. */
-export type Stage1Feature = (typeof STAGE1_FEATURES)[number];
+/** @deprecated Use ServeFeature from the capability registry. */
+export type Stage1Feature = ServeFeature;

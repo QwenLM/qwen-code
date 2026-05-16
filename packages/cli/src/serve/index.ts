@@ -19,6 +19,20 @@ export {
   type Stage1Feature,
 } from './types.js';
 export {
+  SERVE_CAPABILITY_REGISTRY,
+  SERVE_FEATURES,
+  SERVE_PROTOCOL_VERSION,
+  SUPPORTED_SERVE_PROTOCOL_VERSIONS,
+  getAdvertisedServeFeatures,
+  getRegisteredServeFeatures,
+  getServeFeatures,
+  getServeProtocolVersions,
+  type ServeCapabilityDescriptor,
+  type ServeFeature,
+  type ServeProtocolVersion,
+  type ServeProtocolVersions,
+} from './capabilities.js';
+export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
   SessionNotFoundError,

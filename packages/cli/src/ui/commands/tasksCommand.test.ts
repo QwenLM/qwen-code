@@ -9,25 +9,27 @@ import { tasksCommand } from './tasksCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type {
-  BackgroundShellEntry,
-  BackgroundTaskEntry,
-  MonitorEntry,
+  AgentTask,
+  MonitorTask,
+  ShellTask,
 } from '@qwen-code/qwen-code-core';
 
-type AgentTaskTestEntry = BackgroundTaskEntry & {
-  resumeBlockedReason?: string;
-};
+type AgentTaskTestEntry = AgentTask;
 
-function entry(
-  overrides: Partial<BackgroundShellEntry> = {},
-): BackgroundShellEntry {
+function entry(overrides: Partial<ShellTask> = {}): ShellTask {
   return {
+    id: 'bg_aaaaaaaa',
+    kind: 'shell',
     shellId: 'bg_aaaaaaaa',
     command: 'sleep 60',
+    description: 'sleep 60',
     cwd: '/tmp',
     status: 'running',
     startTime: Date.now() - 5_000,
+    outputFile: '/tmp/tasks/sess/shell-bg_aaaaaaaa.output',
     outputPath: '/tmp/tasks/sess/shell-bg_aaaaaaaa.output',
+    outputOffset: 0,
+    notified: false,
     abortController: new AbortController(),
     ...overrides,
   };
@@ -37,18 +39,26 @@ function agentEntry(
   overrides: Partial<AgentTaskTestEntry> = {},
 ): AgentTaskTestEntry {
   return {
+    id: 'agent_aaaaaaaa',
+    kind: 'agent',
     agentId: 'agent_aaaaaaaa',
     description: 'Investigate flaky test failure',
     subagentType: 'researcher',
+    isBackgrounded: true,
     status: 'running',
     startTime: Date.now() - 7_000,
+    outputFile: '/tmp/agent.jsonl',
+    outputOffset: 0,
+    notified: false,
     abortController: new AbortController(),
     ...overrides,
   };
 }
 
-function monitorEntry(overrides: Partial<MonitorEntry> = {}): MonitorEntry {
+function monitorEntry(overrides: Partial<MonitorTask> = {}): MonitorTask {
   return {
+    id: 'mon-aaaaaaaa',
+    kind: 'monitor',
     monitorId: 'mon-aaaaaaaa',
     command: 'tail -f app.log',
     description: 'watch app logs',
@@ -60,6 +70,9 @@ function monitorEntry(overrides: Partial<MonitorEntry> = {}): MonitorEntry {
     maxEvents: 1000,
     idleTimeoutMs: 300_000,
     droppedLines: 0,
+    outputFile: '/tmp/monitor.log',
+    outputOffset: 0,
+    notified: false,
     ...overrides,
   };
 }
@@ -117,6 +130,7 @@ describe('tasksCommand', () => {
         exitCode: 0,
         startTime: Date.now() - 70_000,
         endTime: Date.now() - 5_000,
+        outputFile: '/tmp/tasks/sess/shell-bg_done.output',
         outputPath: '/tmp/tasks/sess/shell-bg_done.output',
       }),
       entry({

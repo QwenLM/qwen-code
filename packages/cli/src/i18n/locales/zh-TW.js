@@ -115,6 +115,44 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '重新命名目前的對話。--auto 會讓快速模型自動產生標題。',
   'Rewind conversation to a previous turn': '將對話回退到先前的某一輪',
+  'Rewind Conversation': '回退對話',
+  'No user turns to rewind to.': '沒有可回退的使用者對話輪次。',
+  'Rewind to: ': '回退到：',
+  'Restore code and conversation': '恢復程式碼和對話',
+  'Restore conversation only': '僅恢復對話',
+  'Restore code only': '僅恢復程式碼',
+  'Never mind': '算了',
+  'Computing file changes...': '正在計算檔案變更...',
+  'Restoring...': '正在恢復...',
+  'Restored {{count}} file(s).': '已恢復 {{count}} 個檔案。',
+  'Failed to restore files: {{error}}': '恢復檔案失敗：{{error}}',
+  'Rewind failed: {{error}}': '回退失敗：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '無法回退對話：模型客戶端未啟用。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    '程式碼已恢復，但對話無法回退（模型客戶端未啟用）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '對話已回退。修改提示後按 Enter 繼續。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '無法回退到已被壓縮的輪次，請嘗試更近一些的輪次。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    '該輪次無法還原檔案（沒有擷取到檔案變更，或該輪次屬於本次會話之前）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 個檔案)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 個檔案)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '恢復 {{count}} 個檔案失敗：{{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    '無法恢復檔案：該輪對話建立時尚未啟用檔案檢查點功能。',
+  'No files needed to be restored.': '沒有檔案需要恢復。',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 導覽 · Enter 選取 · Esc 返回',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 導覽 · Enter 選取 · Esc 取消',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 確認 · Esc/N 返回',
   'change the theme': '更改主題',
   'Select Theme': '選擇主題',
   Preview: '預覽',
@@ -1418,6 +1456,8 @@ export default {
     '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看詳細工具調用結果',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
+  'Set a goal — keep working until the condition is met':
+    '設定目標 — 持續工作直到條件滿足',
   'Exited plan mode. Previous approval mode restored.':
     '已退出計劃模式，已恢復之前的審批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
