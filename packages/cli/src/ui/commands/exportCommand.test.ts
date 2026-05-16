@@ -85,6 +85,9 @@ describe('exportCommand', () => {
     },
   };
 
+  const mockWorkingDir = path.resolve('/test/dir');
+  const mockProjectRoot = path.resolve('/test/project');
+
   let mockContext: ReturnType<typeof createMockCommandContext>;
 
   beforeEach(() => {
@@ -95,8 +98,8 @@ describe('exportCommand', () => {
     mockContext = createMockCommandContext({
       services: {
         config: {
-          getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
-          getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+          getWorkingDir: vi.fn().mockReturnValue(mockWorkingDir),
+          getProjectRoot: vi.fn().mockReturnValue(mockProjectRoot),
           getSessionId: vi.fn().mockReturnValue('test-session-id'),
         },
       },
@@ -181,7 +184,7 @@ describe('exportCommand', () => {
       }
 
       const result = await mdCommand.action(mockContext, './logs');
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       const filepath = path.join(
         outputDir,
         'export-2025-01-01T00-00-00-000Z.md',
@@ -374,7 +377,7 @@ describe('exportCommand', () => {
         services: {
           config: {
             getWorkingDir: vi.fn().mockReturnValue(null),
-            getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+            getProjectRoot: vi.fn().mockReturnValue(mockProjectRoot),
             getSessionId: vi.fn().mockReturnValue('test-session-id'),
           },
         },
@@ -405,14 +408,14 @@ describe('exportCommand', () => {
       }
 
       const result = await mdCommand.action(mockContext, '../outside');
-      const outputDir = path.resolve('/test/dir', '../outside');
+      const outputDir = path.resolve(mockWorkingDir, '../outside');
 
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
         content:
           `Export directory must be within the project working directory. ` +
-          `(target path is outside cwd; target: "${outputDir}", cwd: "/test/dir")`,
+          `(target path is outside cwd; target: "${outputDir}", cwd: "${mockWorkingDir}")`,
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -426,14 +429,14 @@ describe('exportCommand', () => {
       }
 
       const result = await mdCommand.action(mockContext, '/tmp/exports');
-      const outputDir = path.resolve('/tmp/exports');
+      const outputDir = path.resolve(mockWorkingDir, '/tmp/exports');
 
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
         content:
           `Export directory must be within the project working directory. ` +
-          `(target path is outside cwd; target: "${outputDir}", cwd: "/test/dir")`,
+          `(target path is outside cwd; target: "${outputDir}", cwd: "${mockWorkingDir}")`,
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -446,7 +449,7 @@ describe('exportCommand', () => {
         throw new Error('md command not found');
       }
 
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       vi.mocked(fs.realpath).mockImplementation(async (p) =>
         p.toString() === outputDir
           ? path.resolve('/outside/logs')
@@ -460,7 +463,7 @@ describe('exportCommand', () => {
         messageType: 'error',
         content:
           `Export directory must be within the project working directory. ` +
-          `(parent path resolves outside cwd via symlink; target: "${outputDir}", cwd: "/test/dir")`,
+          `(parent path resolves outside cwd via symlink; target: "${outputDir}", cwd: "${mockWorkingDir}")`,
       });
       expect(fs.mkdir).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
@@ -472,8 +475,8 @@ describe('exportCommand', () => {
         throw new Error('md command not found');
       }
 
-      const missingOutputDir = path.resolve('/test/dir', './logs/nested');
-      const symlinkParent = path.resolve('/test/dir', './logs');
+      const missingOutputDir = path.resolve(mockWorkingDir, './logs/nested');
+      const symlinkParent = path.resolve(mockWorkingDir, './logs');
       vi.mocked(fs.realpath).mockImplementation(async (p) => {
         const pathStr = p.toString();
         if (pathStr === missingOutputDir) {
@@ -494,7 +497,7 @@ describe('exportCommand', () => {
         messageType: 'error',
         content:
           `Export directory must be within the project working directory. ` +
-          `(parent path resolves outside cwd via symlink; target: "${missingOutputDir}", cwd: "/test/dir")`,
+          `(parent path resolves outside cwd via symlink; target: "${missingOutputDir}", cwd: "${mockWorkingDir}")`,
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -507,7 +510,7 @@ describe('exportCommand', () => {
         throw new Error('md command not found');
       }
 
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       let contentFormatted = false;
       vi.mocked(toMarkdown).mockImplementation(() => {
         contentFormatted = true;
@@ -528,7 +531,7 @@ describe('exportCommand', () => {
         messageType: 'error',
         content:
           `Export directory must be within the project working directory. ` +
-          `(target path resolves outside cwd via symlink; target: "${outputDir}", cwd: "/test/dir")`,
+          `(target path resolves outside cwd via symlink; target: "${outputDir}", cwd: "${mockWorkingDir}")`,
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
         recursive: true,
@@ -544,7 +547,7 @@ describe('exportCommand', () => {
         throw new Error('md command not found');
       }
 
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       let contentFormatted = false;
       vi.mocked(toMarkdown).mockImplementation(() => {
         contentFormatted = true;
@@ -567,7 +570,7 @@ describe('exportCommand', () => {
         messageType: 'error',
         content:
           `Export target directory is not accessible (path does not exist; ` +
-          `target: "${outputDir}", cwd: "/test/dir").`,
+          `target: "${outputDir}", cwd: "${mockWorkingDir}").`,
       });
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
@@ -578,7 +581,7 @@ describe('exportCommand', () => {
         throw new Error('md command not found');
       }
 
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       let contentFormatted = false;
       vi.mocked(toMarkdown).mockImplementation(() => {
         contentFormatted = true;
@@ -614,7 +617,7 @@ describe('exportCommand', () => {
       }
 
       const result = await mdCommand.action(mockContext, './..backup');
-      const outputDir = path.resolve('/test/dir', './..backup');
+      const outputDir = path.resolve(mockWorkingDir, './..backup');
 
       expect(result).toEqual({
         type: 'message',
@@ -643,7 +646,7 @@ describe('exportCommand', () => {
       });
       vi.mocked(fs.realpath).mockImplementation(async (p) => {
         const pathStr = p.toString();
-        if (pathStr.includes('/nonexistent') && !outputDirCreated) {
+        if (pathStr.includes(`${path.sep}nonexistent`) && !outputDirCreated) {
           const err = new Error('ENOENT: no such file or directory');
           (err as NodeJS.ErrnoException).code = 'ENOENT';
           throw err;
@@ -652,7 +655,7 @@ describe('exportCommand', () => {
       });
 
       const result = await mdCommand.action(mockContext, './nonexistent/logs');
-      const outputDir = path.resolve('/test/dir', './nonexistent/logs');
+      const outputDir = path.resolve(mockWorkingDir, './nonexistent/logs');
 
       expect(result).toEqual({
         type: 'message',
@@ -674,8 +677,8 @@ describe('exportCommand', () => {
         throw new Error('md command not found');
       }
 
-      const missingOutputDir = path.resolve('/test/dir', './blocked/logs');
-      const blockedParent = path.resolve('/test/dir', './blocked');
+      const missingOutputDir = path.resolve(mockWorkingDir, './blocked/logs');
+      const blockedParent = path.resolve(mockWorkingDir, './blocked');
       vi.mocked(fs.realpath).mockImplementation(async (p) => {
         const pathStr = p.toString();
         if (pathStr === missingOutputDir) {
@@ -717,8 +720,10 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content:
-          'Failed to create export directory "/test/dir/logs": EACCES: permission denied, mkdir',
+        content: `Failed to create export directory "${path.resolve(
+          mockWorkingDir,
+          './logs',
+        )}": EACCES: permission denied, mkdir`,
       });
       expect(collectSessionData).toHaveBeenCalled();
       expect(toMarkdown).toHaveBeenCalled();
@@ -766,7 +771,7 @@ describe('exportCommand', () => {
       }
 
       const result = await exportCommand.action(mockContext, './logs');
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       const filepath = path.join(
         outputDir,
         'export-2025-01-01T00-00-00-000Z.html',
@@ -950,7 +955,7 @@ describe('exportCommand', () => {
       }
 
       const result = await jsonCommand.action(mockContext, './logs');
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       const filepath = path.join(
         outputDir,
         'export-2025-01-01T00-00-00-000Z.json',
@@ -1045,7 +1050,7 @@ describe('exportCommand', () => {
       }
 
       const result = await jsonlCommand.action(mockContext, './logs');
-      const outputDir = path.resolve('/test/dir', './logs');
+      const outputDir = path.resolve(mockWorkingDir, './logs');
       const filepath = path.join(
         outputDir,
         'export-2025-01-01T00-00-00-000Z.jsonl',
