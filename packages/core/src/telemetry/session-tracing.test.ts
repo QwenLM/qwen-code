@@ -9,6 +9,10 @@ import { SpanStatusCode } from '@opentelemetry/api';
 
 const mockState = vi.hoisted(() => ({
   sdkInitialized: true,
+  // Toggles to force span.setAttributes/setStatus to throw — exercises the
+  // try/catch hardening in end*Span helpers (span.end() must still run).
+  throwOnSetAttributes: false,
+  throwOnSetStatus: false,
 }));
 
 vi.mock('./sdk.js', () => ({
@@ -61,10 +65,16 @@ vi.mock('@opentelemetry/api', async () => {
         traceFlags: 0,
       }),
       setAttributes: (attrs: Record<string, unknown>) => {
+        if (mockState.throwOnSetAttributes) {
+          throw new Error('setAttributes failed');
+        }
         record.setAttributesCalls.push(attrs);
         Object.assign(record.attributes, attrs);
       },
       setStatus: (status: { code: number; message?: string }) => {
+        if (mockState.throwOnSetStatus) {
+          throw new Error('setStatus failed');
+        }
         record.statuses.push(status);
       },
       end: () => {
@@ -131,6 +141,8 @@ describe('session-tracing', () => {
     clearSessionTracingForTesting();
     mockSpans.length = 0;
     mockState.sdkInitialized = true;
+    mockState.throwOnSetAttributes = false;
+    mockState.throwOnSetStatus = false;
   });
 
   afterEach(() => {
@@ -499,6 +511,61 @@ describe('session-tracing', () => {
 
       // Sequence should be reset to 1
       expect(mockSpans[0]!.attributes['interaction.sequence']).toBe(1);
+    });
+  });
+
+  describe('OTel error resilience — span.end() must run on attribute/status failure', () => {
+    it('endLLMRequestSpan: end() runs and activeSpans is cleared when setStatus throws', () => {
+      const span = startLLMRequestSpan('test-model', 'prompt-x');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.llm_request')!;
+
+      mockState.throwOnSetStatus = true;
+      endLLMRequestSpan(span, { success: true });
+
+      expect(record.ended).toBe(true);
+      // Idempotency: a second call must short-circuit (spanCtx removed from activeSpans).
+      mockState.throwOnSetStatus = false;
+      endLLMRequestSpan(span, { success: true });
+      expect(record.statuses).toHaveLength(0); // no recovery status added
+    });
+
+    it('endLLMRequestSpan: end() runs when setAttributes throws', () => {
+      const span = startLLMRequestSpan('test-model', 'prompt-x');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.llm_request')!;
+
+      mockState.throwOnSetAttributes = true;
+      endLLMRequestSpan(span, { success: true });
+
+      expect(record.ended).toBe(true);
+    });
+
+    it('endToolSpan: end() runs when setStatus throws', () => {
+      const span = startToolSpan('Bash');
+      const record = mockSpans.find((s) => s.name === 'qwen-code.tool')!;
+
+      mockState.throwOnSetStatus = true;
+      endToolSpan(span, { success: true });
+
+      expect(record.ended).toBe(true);
+    });
+
+    it('endToolExecutionSpan: end() runs when setAttributes throws', () => {
+      const toolSpan = startToolSpan('Bash');
+      let execSpan!: ReturnType<typeof startToolExecutionSpan>;
+      runInToolSpanContext(toolSpan, () => {
+        execSpan = startToolExecutionSpan();
+      });
+      const execRecord = mockSpans.find(
+        (s) => s.name === 'qwen-code.tool.execution',
+      )!;
+
+      mockState.throwOnSetAttributes = true;
+      endToolExecutionSpan(execSpan, { success: true });
+
+      expect(execRecord.ended).toBe(true);
+
+      mockState.throwOnSetAttributes = false;
+      endToolSpan(toolSpan, { success: true });
     });
   });
 });

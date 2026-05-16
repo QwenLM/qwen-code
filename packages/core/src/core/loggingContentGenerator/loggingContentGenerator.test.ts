@@ -32,6 +32,17 @@ const loggingSpanRecords = vi.hoisted(
     attributes: Record<string, string | number | boolean>;
     statuses: Array<{ code: number; message?: string }>;
     ended: boolean;
+    /**
+     * Metadata passed to endLLMRequestSpan — captured so tests can assert
+     * that token counts, durationMs, success, error are forwarded correctly.
+     */
+    endMetadata?: {
+      success?: boolean;
+      inputTokens?: number;
+      outputTokens?: number;
+      durationMs?: number;
+      error?: string;
+    };
   }> => [],
 );
 const loggingSpanNamesWithSetStatusFailure = vi.hoisted(
@@ -157,6 +168,14 @@ vi.mock('../../telemetry/index.js', () => {
           error?: string;
         },
       ) => {
+        // Capture metadata on the matching span record so tests can assert
+        // token counts, durationMs, success, error are forwarded correctly.
+        const record = loggingSpanRecords.find(
+          (r) => r.name === span.__spanName && r.endMetadata === undefined,
+        );
+        if (record) {
+          record.endMetadata = metadata;
+        }
         try {
           if (metadata) {
             if (metadata.success) {
@@ -497,6 +516,99 @@ describe('LoggingContentGenerator', () => {
 
     const spanRecord = getStreamSpanRecord();
     expect(spanRecord.attributes['llm_request.stream']).toBe(true);
+  });
+
+  it('forwards token counts and duration to endLLMRequestSpan on non-stream success', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('resp', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 42,
+          candidatesTokenCount: 17,
+          totalTokenCount: 59,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-meta');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 42,
+      outputTokens: 17,
+    });
+    expect(spanRecord.endMetadata!.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('forwards error metadata to endLLMRequestSpan on non-stream failure', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('upstream-down')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-err'),
+    ).rejects.toThrow('upstream-down');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      error: 'API call failed',
+    });
+  });
+
+  it('forwards final lastUsageMetadata to endLLMRequestSpan on stream success', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r1', 'test-model', [{ text: 'a' }]);
+        yield createResponse('r2', 'test-model', [{ text: 'b' }], {
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 150,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-tok');
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 100,
+      outputTokens: 50,
+    });
   });
 
   it('preserves non-stream success when response and OpenAI logging fail', async () => {

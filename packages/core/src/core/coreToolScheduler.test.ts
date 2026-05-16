@@ -62,6 +62,11 @@ type ToolSpanRecord = {
   statusCalls: Array<{ code: number; message?: string }>;
   spanAttributes: Record<string, string | number | boolean>;
   ended: boolean;
+  /**
+   * Metadata passed to endToolSpan / endToolExecutionSpan — captured so
+   * tests can assert success/error values are forwarded correctly.
+   */
+  endMetadata?: { success?: boolean; error?: string };
 };
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
@@ -134,6 +139,7 @@ vi.mock('../telemetry/session-tracing.js', () => ({
       metadata?: { success?: boolean; error?: string },
     ) => {
       if (metadata) {
+        span.endMetadata = metadata;
         const status =
           metadata.success !== false
             ? { code: 1 }
@@ -147,9 +153,12 @@ vi.mock('../telemetry/session-tracing.js', () => ({
   startToolExecutionSpan: vi.fn(() => createMockToolSpan('tool.execution', {})),
   endToolExecutionSpan: vi.fn(
     (
-      span: ReturnType<typeof createMockToolSpan>,
-      _metadata?: { success?: boolean; error?: string },
+      span: ToolSpanRecord & ReturnType<typeof createMockToolSpan>,
+      metadata?: { success?: boolean; error?: string },
     ) => {
+      if (metadata) {
+        span.endMetadata = metadata;
+      }
       span.ended = true;
     },
   ),
@@ -3394,6 +3403,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     const exec = getExecutionSpan();
     expect(exec).toBeDefined();
     expect(exec!.ended).toBe(true);
+    expect(exec!.endMetadata).toEqual({ success: true });
   });
 
   it('execution sub-span: ended (success: false) when ToolResult.error is set', async () => {
@@ -3410,15 +3420,23 @@ describe('CoreToolScheduler telemetry spans', () => {
     const exec = getExecutionSpan();
     expect(exec).toBeDefined();
     expect(exec!.ended).toBe(true);
+    expect(exec!.endMetadata).toEqual({ success: false });
   });
 
-  it('execution sub-span: ended on thrown invocation exception', async () => {
+  it('execution sub-span: ended (success: false) with sanitized error on thrown invocation exception', async () => {
     await runSingleTool({
       execute: vi.fn().mockRejectedValue(new Error('boom')),
     });
     const exec = getExecutionSpan();
     expect(exec).toBeDefined();
     expect(exec!.ended).toBe(true);
+    expect(exec!.endMetadata?.success).toBe(false);
+    // The execution span error message is the sanitized constant
+    // (TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception'),
+    // not the raw 'boom'.
+    expect(exec!.endMetadata?.error).toBe(
+      'Tool execution failed with exception',
+    );
   });
 
   it('execution sub-span: NOT created when pre-hook denies execution', async () => {

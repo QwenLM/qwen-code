@@ -237,6 +237,11 @@ export function endLLMRequestSpan(
 
   spanCtx.ended = true;
 
+  // Use spanCtx.span for mutations to stay consistent with endToolSpan/
+  // endToolExecutionSpan. (It's the same object as the passed `span`
+  // since we just looked it up by spanId — but matching the lookup
+  // pattern across helpers prevents subtle drift if the lookup ever
+  // gains caching/normalization.)
   try {
     const duration = metadata?.durationMs ?? Date.now() - spanCtx.startTime;
     const endAttributes: Attributes = { duration_ms: duration };
@@ -250,12 +255,12 @@ export function endLLMRequestSpan(
       if (metadata.error !== undefined) endAttributes['error'] = metadata.error;
     }
 
-    span.setAttributes(endAttributes);
+    spanCtx.span.setAttributes(endAttributes);
 
     if (metadata === undefined || metadata.success) {
-      span.setStatus({ code: SpanStatusCode.OK });
+      spanCtx.span.setStatus({ code: SpanStatusCode.OK });
     } else {
-      span.setStatus({
+      spanCtx.span.setStatus({
         code: SpanStatusCode.ERROR,
         message: metadata.error ?? 'unknown error',
       });
@@ -268,7 +273,7 @@ export function endLLMRequestSpan(
   // span.end() must run even if attribute/status updates threw,
   // otherwise the span leaks (never exported, never cleared from activeSpans).
   try {
-    span.end();
+    spanCtx.span.end();
   } catch (error) {
     debugLogger.warn(
       `Failed to end LLM request span: ${error instanceof Error ? error.message : String(error)}`,
