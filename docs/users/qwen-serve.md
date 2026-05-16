@@ -190,22 +190,21 @@ Stage 1's contract is sized for prototyping. Per [#3889 chiga0 downstream-consum
 
 **Blockers for serious downstream use:**
 
-1. **Per-request `sessionScope` override** on `POST /session` — today the daemon-wide default is the only setting; a VSCode extension can't say "I want a private session for this window" against a daemon configured for shared sessions.
-2. **`loadSession` / `unstable_resumeSession` over HTTP** — without this, no integration can survive a child crash or daemon restart, and any orchestrator coordinating the daemon can't recover state either.
-3. **Persistent client identity (pair tokens + per-client revocation)** — Stage 1 uses one shared bearer; a leaked token revokes everyone, and `originatorClientId` is client-self-declared rather than daemon-stamped from authenticated identity.
+1. **`loadSession` / `unstable_resumeSession` over HTTP** — without this, no integration can survive a child crash or daemon restart, and any orchestrator coordinating the daemon can't recover state either.
+2. **Persistent client identity (pair tokens + per-client revocation)** — Stage 1 uses one shared bearer; a leaked token revokes everyone, and `originatorClientId` is client-self-declared rather than daemon-stamped from authenticated identity.
 
 **Reliability baseline:**
 
-4. **Client-initiated heartbeat path** — distinguish "agent thinking" from "daemon dead" without waiting for the 15s server heartbeat.
-5. **`permission_already_resolved` event** when a vote loses the first-responder race — currently UIs have to infer state from a `404`.
-6. **Larger / per-session-configurable replay ring** — default 4000 covers short drops; mobile / chatty-turn workloads need 8000+ or per-session config.
-7. **`slow_client_warning` event before `client_evicted`** — soft backpressure so well-behaved slow clients can self-throttle (trim render depth, drop chunks) before being terminated.
+3. **Client-initiated heartbeat path** — distinguish "agent thinking" from "daemon dead" without waiting for the 15s server heartbeat.
+4. **`permission_already_resolved` event** when a vote loses the first-responder race — currently UIs have to infer state from a `404`.
+5. **Larger / per-session-configurable replay ring** — default 4000 covers short drops; mobile / chatty-turn workloads need 8000+ or per-session config.
+6. **`slow_client_warning` event before `client_evicted`** — soft backpressure so well-behaved slow clients can self-throttle (trim render depth, drop chunks) before being terminated.
 
 **Integration ergonomics:**
 
-8. **`POST /session/:id/_meta` for IM-style context** — per-session key-value attached to subsequent prompts (chat id, sender, thread id) replaces the per-channel improvisation.
-9. **`/capabilities` actual feature negotiation** — `protocol_versions: { acp: '0.14.x', daemon_envelope: 1 }` so clients can detect drift instead of falling through to "unknown frame, ignore".
-10. **First-class durability documentation** (this section) — already shipped above.
+7. **`POST /session/:id/_meta` for IM-style context** — per-session key-value attached to subsequent prompts (chat id, sender, thread id) replaces the per-channel improvisation.
+8. **`/capabilities` actual feature negotiation** — `protocol_versions: { acp: '0.14.x', daemon_envelope: 1 }` so clients can detect drift instead of falling through to "unknown frame, ignore".
+9. **First-class durability documentation** (this section) — already shipped above.
 
 The full convergence roadmap is tracked on [#3803](https://github.com/QwenLM/qwen-code/issues/3803).
 
