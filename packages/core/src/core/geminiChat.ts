@@ -61,6 +61,7 @@ const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
 // Leave roughly 30% V8 heap headroom for compression's transient allocations.
 const HEAP_PRESSURE_COMPRESSION_RATIO = 0.7;
+const HEAP_PRESSURE_COMPRESSION_FAILURE_COOLDOWN_MS = 30_000;
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -441,6 +442,14 @@ export class GeminiChat {
   private hasFailedCompressionAttempt = false;
 
   /**
+   * Heap-pressure compaction is process-wide pressure applied per chat. If one
+   * heap-triggered attempt fails, briefly back off this chat so every
+   * subsequent send does not immediately pay for another compression side
+   * query while memory is already tight.
+   */
+  private heapPressureCompressionCooldownUntil = 0;
+
+  /**
    * Creates a new GeminiChat instance.
    *
    * @param config - The configuration object.
@@ -501,9 +510,12 @@ export class GeminiChat {
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
     const heapPressureRatio = force ? null : this.getHeapPressureRatio();
+    const heapPressureCooldownActive =
+      !force && Date.now() < this.heapPressureCompressionCooldownUntil;
     const bypassTokenThreshold =
       heapPressureRatio !== null &&
-      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO;
+      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
+      !heapPressureCooldownActive;
     if (bypassTokenThreshold) {
       // Temporary safety net: token-based compaction can be too late for
       // large-context sessions because JS heap pressure may hit first.
@@ -512,6 +524,15 @@ export class GeminiChat {
       debugLogger.warn(
         `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
           'attempting auto-compaction before token threshold.',
+      );
+    } else if (
+      heapPressureRatio !== null &&
+      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
+      heapPressureCooldownActive
+    ) {
+      debugLogger.debug(
+        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
+          'skipping heap-pressure auto-compaction during cooldown.',
       );
     }
 
@@ -553,12 +574,16 @@ export class GeminiChat {
       // Re-enable auto-compaction so a forced /compress recovers a chat
       // that an earlier auto-attempt latched off.
       this.hasFailedCompressionAttempt = false;
+      this.heapPressureCompressionCooldownUntil = 0;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only mark as failed if not forced) so we
       // stop spending compression-API calls on a chat that can't shrink.
       // Heap-pressure attempts are a safety net, not evidence that normal
       // token-threshold compaction should be latched off for this chat.
-      if (!force && !bypassTokenThreshold) {
+      if (bypassTokenThreshold) {
+        this.heapPressureCompressionCooldownUntil =
+          Date.now() + HEAP_PRESSURE_COMPRESSION_FAILURE_COOLDOWN_MS;
+      } else if (!force) {
         this.hasFailedCompressionAttempt = true;
       }
     }
@@ -567,17 +592,21 @@ export class GeminiChat {
   }
 
   private getHeapPressureRatio(): number | null {
-    const { used_heap_size: usedHeapSize, heap_size_limit: heapLimit } =
-      getHeapStatistics();
-    if (
-      !Number.isFinite(usedHeapSize) ||
-      usedHeapSize < 0 ||
-      !Number.isFinite(heapLimit) ||
-      heapLimit <= 0
-    ) {
+    try {
+      const { used_heap_size: usedHeapSize, heap_size_limit: heapLimit } =
+        getHeapStatistics();
+      if (
+        !Number.isFinite(usedHeapSize) ||
+        usedHeapSize < 0 ||
+        !Number.isFinite(heapLimit) ||
+        heapLimit <= 0
+      ) {
+        return null;
+      }
+      return usedHeapSize / heapLimit;
+    } catch {
       return null;
     }
-    return usedHeapSize / heapLimit;
   }
 
   setSystemInstruction(sysInstr: string) {

@@ -182,10 +182,11 @@ export interface CompressOptions {
    */
   originalTokenCount: number;
   /**
-   * Bypass only the token-count threshold gate while preserving automatic
-   * compaction semantics. Used for temporary heap-pressure relief where
-   * `force=true` would be too broad because it means manual `/compress`.
-   * The heap-pressure check that sets this lives in `GeminiChat.tryCompress()`.
+   * Bypass the token-count threshold gate and the failed-attempt latch while
+   * preserving automatic compaction semantics. Used for temporary heap-pressure
+   * relief where `force=true` would be too broad because it means manual
+   * `/compress`. The heap-pressure check that sets this lives in
+   * `GeminiChat.tryCompress()`.
    */
   bypassTokenThreshold?: boolean;
   /**

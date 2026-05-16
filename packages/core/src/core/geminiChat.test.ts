@@ -3665,14 +3665,17 @@ describe('GeminiChat', async () => {
 
     it('forwards force=true to the compression service', async () => {
       const compressSpy = mockCompressionService('compressed');
+      mockHeapPressure(900);
 
       await chat.tryCompress('p1', 'm1', true);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+      expect(mockGetHeapStatistics).not.toHaveBeenCalled();
     });
 
     it('uses heap pressure to bypass the token gate without manual force semantics', async () => {
       const compressSpy = mockCompressionService('noop');
-      mockHeapPressure(701);
+      mockHeapPressure(750);
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
         model: 'test-model',
@@ -3684,6 +3687,16 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0][1].force).toBe(false);
       expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
       expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(0);
+    });
+
+    it('does not bypass the token gate below the heap-pressure threshold', async () => {
+      const compressSpy = mockCompressionService('noop');
+      mockHeapPressure(650);
+
+      await chat.tryCompress('p1', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
     });
 
     it('does not let a failed heap-pressure attempt latch off later auto-compaction', async () => {
@@ -3713,6 +3726,50 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0][1].hasFailedCompressionAttempt).toBe(
         false,
       );
+    });
+
+    it('backs off repeated heap-pressure bypasses after a heap-triggered failure', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-16T00:00:00Z'));
+      try {
+        const compressSpy = mockCompressionService('failed-inflated');
+        mockHeapPressure(800);
+
+        await chat.tryCompress('p1', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+
+        compressSpy.mockClear();
+        compressSpy.mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+        await chat.tryCompress('p2', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+
+        vi.setSystemTime(new Date('2026-05-16T00:00:31Z'));
+        compressSpy.mockClear();
+
+        await chat.tryCompress('p3', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to token-threshold behavior if heap statistics are unavailable', async () => {
+      const compressSpy = mockCompressionService('noop');
+      mockGetHeapStatistics.mockImplementation(() => {
+        throw new Error('heap stats unavailable');
+      });
+
+      await chat.tryCompress('p1', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
     });
   });
 });

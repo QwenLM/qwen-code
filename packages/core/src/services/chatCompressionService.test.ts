@@ -595,6 +595,41 @@ describe('ChatCompressionService', () => {
     expect(tokenLimit).not.toHaveBeenCalled();
   });
 
+  it('should return NOOP when contextPercentageThreshold is 0 even with token threshold bypass', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue(history);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+      contextPercentageThreshold: 0,
+    });
+
+    const mockGenerateContent = vi.fn();
+    vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+      generateText: mockGenerateContent,
+    } as unknown as BaseLlmClient);
+
+    const result = await service.compress(mockChat, {
+      promptId: mockPromptId,
+      force: false,
+      bypassTokenThreshold: true,
+      model: mockModel,
+      config: mockConfig,
+      hasFailedCompressionAttempt: false,
+      originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
+    });
+
+    expect(result.info).toMatchObject({
+      compressionStatus: CompressionStatus.NOOP,
+      originalTokenCount: 0,
+      newTokenCount: 0,
+    });
+    expect(mockGenerateContent).not.toHaveBeenCalled();
+    expect(tokenLimit).not.toHaveBeenCalled();
+  });
+
   it('should return NOOP when historyToCompress is below MIN_COMPRESSION_FRACTION of total', async () => {
     // Construct a history where the split point lands on the 2nd regular user
     // message (index 2), but indices 0-1 are tiny relative to the huge content
