@@ -98,6 +98,10 @@ function parseLooseJsonObject(text: string): Record<string, unknown> | null {
   if (s.startsWith('```')) {
     s = s.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
   }
+  const firstStructuredChar = s.search(/[[{]/);
+  if (firstStructuredChar !== -1 && s[firstStructuredChar] === '[') {
+    return null;
+  }
   const first = s.indexOf('{');
   const last = s.lastIndexOf('}');
   if (first === -1 || last === -1 || last <= first) return null;
