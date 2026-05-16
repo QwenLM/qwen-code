@@ -3786,6 +3786,31 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('backs off repeated heap-pressure bypasses after a heap-triggered NOOP', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-16T00:00:00Z'));
+      try {
+        const compressSpy = mockCompressionService('noop');
+        mockHeapPressure(800);
+
+        await chat.tryCompress('p1', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+
+        compressSpy.mockClear();
+
+        await chat.tryCompress('p2', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+
+        vi.setSystemTime(new Date('2026-05-16T00:00:31Z'));
+        compressSpy.mockClear();
+
+        await chat.tryCompress('p3', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('falls back to token-threshold behavior if heap statistics are unavailable', async () => {
       const compressSpy = mockCompressionService('noop');
       mockGetHeapStatistics.mockImplementation(() => {

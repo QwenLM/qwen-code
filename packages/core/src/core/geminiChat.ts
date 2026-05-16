@@ -61,7 +61,7 @@ const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
 // Leave roughly 30% V8 heap headroom for compression's transient allocations.
 const HEAP_PRESSURE_COMPRESSION_RATIO = 0.7;
-const HEAP_PRESSURE_COMPRESSION_FAILURE_COOLDOWN_MS = 30_000;
+const HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS = 30_000;
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -443,9 +443,9 @@ export class GeminiChat {
 
   /**
    * Heap-pressure compaction is process-wide pressure applied per chat. If one
-   * heap-triggered attempt fails, briefly back off this chat so every
-   * subsequent send does not immediately pay for another compression side
-   * query while memory is already tight.
+   * heap-triggered attempt cannot reduce history, briefly back off this chat
+   * so every subsequent send does not immediately pay for another compression
+   * side query while memory is already tight.
    */
   private heapPressureCompressionCooldownUntil = 0;
 
@@ -575,15 +575,18 @@ export class GeminiChat {
       // that an earlier auto-attempt latched off.
       this.hasFailedCompressionAttempt = false;
       this.heapPressureCompressionCooldownUntil = 0;
+    } else if (bypassTokenThreshold) {
+      // If heap-pressure compaction cannot reduce history (NOOP or failure),
+      // avoid repeatedly cloning history and/or paying side-query latency while
+      // the process-wide pressure remains high.
+      this.heapPressureCompressionCooldownUntil =
+        Date.now() + HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only mark as failed if not forced) so we
       // stop spending compression-API calls on a chat that can't shrink.
       // Heap-pressure attempts are a safety net, not evidence that normal
       // token-threshold compaction should be latched off for this chat.
-      if (bypassTokenThreshold) {
-        this.heapPressureCompressionCooldownUntil =
-          Date.now() + HEAP_PRESSURE_COMPRESSION_FAILURE_COOLDOWN_MS;
-      } else if (!force) {
+      if (!force) {
         this.hasFailedCompressionAttempt = true;
       }
     }
