@@ -396,8 +396,8 @@ jobs:
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
-          OSSUTIL_URL: 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip'
-          OSSUTIL_SHA256: 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343'
+          OSSUTIL_URL: "${{ vars.OSSUTIL_URL || 'https://gosspublic.alicdn.com/ossutil/1.7.19/ossutil-v1.7.19-linux-amd64.zip' }}"
+          OSSUTIL_SHA256: "${{ vars.OSSUTIL_SHA256 || 'dcc512e4a893e16bbee63bc769339d8e56b21744fd83c8212a9d8baf28767343' }}"
         run: |-
           set -euo pipefail
 

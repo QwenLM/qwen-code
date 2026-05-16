@@ -1458,6 +1458,8 @@ describe('standalone release packaging', () => {
     expect(workflow).toContain('secrets.ALIYUN_OSS_ACCESS_KEY_SECRET');
     expect(workflow).toContain('vars.ALIYUN_OSS_BUCKET');
     expect(workflow).toContain('vars.ALIYUN_OSS_ENDPOINT');
+    expect(workflow).toContain('vars.OSSUTIL_URL');
+    expect(workflow).toContain('vars.OSSUTIL_SHA256');
     expect(workflow).toContain('releases/qwen-code/${RELEASE_TAG}');
     expect(workflow).toContain('releases/qwen-code/latest');
     expect(workflow).not.toContain(
