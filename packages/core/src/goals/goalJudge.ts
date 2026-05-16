@@ -40,7 +40,7 @@ condition is satisfied, return {"ok": false, "reason": "insufficient evidence in
 const userJudgementPrompt = (condition: string): string =>
   `Based on the conversation transcript above, has the following stopping ` +
   `condition been satisfied? Answer based on transcript evidence only.\n` +
-  `Condition: ${condition}`;
+  `Condition JSON string: ${JSON.stringify(condition)}`;
 
 const RESPONSE_SCHEMA: Schema = {
   // Schema typing in @google/genai uses an enum-like Type, but accepts the

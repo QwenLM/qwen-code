@@ -132,14 +132,20 @@ export function createGoalStopHookCallback(args: {
   config: Config;
   sessionId: string;
   condition: string;
+  getExpectedHookId?: () => string | undefined;
 }): FunctionHookCallback {
-  const { config, sessionId, condition } = args;
+  const { config, sessionId, condition, getExpectedHookId } = args;
+  const isCurrentGoal = (goal: ActiveGoal | undefined): goal is ActiveGoal => {
+    if (!goal || goal.condition !== condition) return false;
+    const expectedHookId = getExpectedHookId?.();
+    return expectedHookId === undefined || goal.hookId === expectedHookId;
+  };
   return async (input: HookInput, context) => {
     const stopInput = input as StopInput;
     const lastAssistantText = stopInput.last_assistant_message ?? '';
 
     const current = getActiveGoal(sessionId);
-    if (!current || current.condition !== condition) {
+    if (!isCurrentGoal(current)) {
       // The goal was cleared (or replaced) between turns. Let the model stop.
       return { continue: true };
     }
@@ -152,7 +158,7 @@ export function createGoalStopHookCallback(args: {
     });
 
     const latest = getActiveGoal(sessionId);
-    if (!latest || latest.condition !== condition) {
+    if (!isCurrentGoal(latest)) {
       // The goal was cleared or replaced while the async judge call was in
       // flight. Do not let a stale callback clear or mutate the replacement.
       return { continue: true };
@@ -238,7 +244,13 @@ export function registerGoalHook(args: {
   // Drop any previous goal cleanly before adding the new one.
   unregisterGoalHook(config, sessionId);
 
-  const callback = createGoalStopHookCallback({ config, sessionId, condition });
+  const hookRef: { hookId?: string } = {};
+  const callback = createGoalStopHookCallback({
+    config,
+    sessionId,
+    condition,
+    getExpectedHookId: () => hookRef.hookId,
+  });
   const hookId = system.addFunctionHook(
     sessionId,
     HookEventName.Stop,
@@ -252,6 +264,7 @@ export function registerGoalHook(args: {
       timeout: GOAL_HOOK_TIMEOUT_MS,
     },
   );
+  hookRef.hookId = hookId;
 
   const goal: ActiveGoal = {
     condition,
