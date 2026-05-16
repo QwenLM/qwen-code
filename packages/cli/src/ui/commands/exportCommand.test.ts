@@ -175,7 +175,9 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining(filepath),
+        content: expect.stringContaining(
+          path.join('./logs', 'export-2025-01-01T00-00-00-000Z.md'),
+        ),
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
       expect(fs.writeFile).toHaveBeenCalledWith(
@@ -331,6 +333,25 @@ describe('exportCommand', () => {
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
+    it('should reject absolute output directories outside the working directory', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const result = await mdCommand.action(mockContext, '/tmp/exports');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Export directory must be within the project working directory.',
+      });
+      expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should reject symlinked output directories outside the working directory', async () => {
       const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
       if (!mdCommand?.action) {
@@ -406,7 +427,9 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining(filepath),
+        content: expect.stringContaining(
+          path.join('./logs', 'export-2025-01-01T00-00-00-000Z.html'),
+        ),
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
       expect(fs.writeFile).toHaveBeenCalledWith(
@@ -585,7 +608,9 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining(filepath),
+        content: expect.stringContaining(
+          path.join('./logs', 'export-2025-01-01T00-00-00-000Z.json'),
+        ),
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
       expect(fs.writeFile).toHaveBeenCalledWith(
@@ -593,6 +618,33 @@ describe('exportCommand', () => {
         '{"messages":[]}',
         'utf-8',
       );
+    });
+
+    it('should handle errors during JSON generation', async () => {
+      const error = new Error('Failed to generate JSON');
+      vi.mocked(toJson).mockImplementation(() => {
+        throw error;
+      });
+
+      const jsonCommand = exportCommand.subCommands?.find(
+        (c) => c.name === 'json',
+      );
+      if (!jsonCommand?.action) {
+        throw new Error('json command not found');
+      }
+      const result = await jsonCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Failed to export session:'),
+      });
+      if (!result || result.type !== 'message') {
+        throw new Error('expected message result');
+      }
+      expect(result.content).toContain('Failed to generate JSON');
+      expect(result.content).toContain('JSON target:');
+      expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });
 
@@ -649,7 +701,9 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining(filepath),
+        content: expect.stringContaining(
+          path.join('./logs', 'export-2025-01-01T00-00-00-000Z.jsonl'),
+        ),
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
       expect(fs.writeFile).toHaveBeenCalledWith(
@@ -657,6 +711,33 @@ describe('exportCommand', () => {
         '{"type":"session_metadata"}',
         'utf-8',
       );
+    });
+
+    it('should handle errors during JSONL generation', async () => {
+      const error = new Error('Failed to generate JSONL');
+      vi.mocked(toJsonl).mockImplementation(() => {
+        throw error;
+      });
+
+      const jsonlCommand = exportCommand.subCommands?.find(
+        (c) => c.name === 'jsonl',
+      );
+      if (!jsonlCommand?.action) {
+        throw new Error('jsonl command not found');
+      }
+      const result = await jsonlCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Failed to export session:'),
+      });
+      if (!result || result.type !== 'message') {
+        throw new Error('expected message result');
+      }
+      expect(result.content).toContain('Failed to generate JSONL');
+      expect(result.content).toContain('JSONL target:');
+      expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });
 });

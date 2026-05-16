@@ -53,7 +53,9 @@ function resolveExportTarget(cwd: string, args: string, extension: string) {
   return {
     filepath,
     outputDir,
-    displayPath: isDefaultOutputDir ? filename : filepath,
+    displayPath: isDefaultOutputDir
+      ? filename
+      : path.join(outputDirArg, filename),
     resolvedCwd,
     shouldCreateOutputDir: Boolean(outputDirArg && !isDefaultOutputDir),
     isInsideCwd,
