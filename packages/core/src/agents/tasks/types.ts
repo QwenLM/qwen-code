@@ -72,8 +72,14 @@ export interface TaskBase {
   endTime?: number;
   /**
    * Absolute path of the per-task primary stream. Reserved at register
-   * time even when no writer is attached today (monitors). Lazily
-   * materialized by each kind's writer on first append.
+   * time even when no writer is attached today (monitors). Materialized
+   * by each kind's writer on its first append, not at register time.
+   * Note this is "first append", not "first runtime event": the agent
+   * writer seeds the launch prompt as its first record at attach time,
+   * so a foreground/background subagent with a prompt materializes its
+   * JSONL immediately — before any tool call or model turn. A subagent
+   * cancelled before any event therefore still leaves a JSONL (prompt
+   * only) plus the meta sidecar, not meta alone.
    */
   outputFile: string;
   /**

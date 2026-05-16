@@ -2394,7 +2394,32 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     if (pid !== undefined) registration.pid = pid;
     const registry = this.config.getBackgroundShellRegistry();
-    registry.register(registration);
+    // Symmetric with the promote path above: `register` is internally
+    // safe today (Map.set + emit), but a throwing subscriber would
+    // propagate here and leave the already-spawned child + open output
+    // stream unreachable by `/tasks` / `task_stop`. Best-effort abort
+    // the child, tear down the stream, and re-throw so the launch fails
+    // visibly instead of leaking.
+    try {
+      registry.register(registration);
+    } catch (e) {
+      debugLogger.warn(
+        `background shell ${shellId} register threw (pid=${pid}) — aborting orphan child: ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+      try {
+        entryAc.abort();
+      } catch {
+        /* swallow — we're already in an error path */
+      }
+      try {
+        outputStream.destroy();
+      } catch {
+        /* swallow — we're already in an error path */
+      }
+      throw e;
+    }
 
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.
