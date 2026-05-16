@@ -20,6 +20,8 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 import { getActiveGoal } from '../goals/activeGoalStore.js';
+import { abortGoalForStopHookCap } from '../goals/goalHook.js';
+import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -1576,6 +1578,26 @@ export class GeminiClient {
               stopHookCount: response.stopHookCount ?? 1,
             },
           };
+
+          const stopHookBlockingCap = this.config.getStopHookBlockingCap();
+          if (currentIterationCount >= stopHookBlockingCap) {
+            const warning = formatStopHookBlockingCapWarning(
+              'Stop',
+              stopHookBlockingCap,
+            );
+            abortGoalForStopHookCap(
+              this.config,
+              this.config.getSessionId(),
+              warning,
+            );
+            yield {
+              type: GeminiEventType.HookSystemMessage,
+              value: warning,
+            };
+            debugLogger.warn(warning);
+            if (isTopLevelInteraction) endInteractionSpan('ok');
+            return turn;
+          }
 
           const continueRequest = [{ text: continueReason }];
           const activeGoal = getActiveGoal(this.config.getSessionId());

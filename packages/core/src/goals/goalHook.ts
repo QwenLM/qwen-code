@@ -120,6 +120,25 @@ function finishGoal(
   clearGoalTerminalObserver(sessionId);
 }
 
+export function abortGoalForStopHookCap(
+  config: Config,
+  sessionId: string,
+  systemMessage: string,
+): boolean {
+  const goal = getActiveGoal(sessionId);
+  if (!goal) return false;
+
+  finishGoal(config, sessionId, goal, {
+    kind: 'aborted',
+    condition: goal.condition,
+    iterations: goal.iterations,
+    durationMs: Date.now() - goal.setAt,
+    lastReason: goal.lastReason,
+    systemMessage,
+  });
+  return true;
+}
+
 /**
  * Builds the Function hook callback that, on every Stop event, asks a fast
  * model whether the goal condition holds.

@@ -510,6 +510,7 @@ describe('Gemini Client (client.ts)', () => {
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -4330,6 +4331,65 @@ Other open files:
 
         // messageBus.request should NOT be called for Stop hook either
         expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('ends the Stop hook loop when the blocking cap is reached', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              decision: 'block',
+              reason: 'Keep working',
+            },
+            stopHookCount: 1,
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(1);
+
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'not done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-cap',
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
+        expect(events).toContainEqual({
+          type: GeminiEventType.StopHookLoop,
+          value: {
+            iterationCount: 1,
+            reasons: ['Keep working'],
+            stopHookCount: 1,
+          },
+        });
+        expect(events).toContainEqual({
+          type: GeminiEventType.HookSystemMessage,
+          value:
+            'Stop hook blocked continuation 1 consecutive times; overriding and ending the turn.',
+        });
       });
 
       it('should not skip hooks when hasHooksForEvent returns true', async () => {

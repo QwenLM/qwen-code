@@ -1708,6 +1708,7 @@ export async function loadCliConfig(
     projectHooks: bareMode ? undefined : hooksConfig?.projectHooks,
     hooks: bareMode ? undefined : settings.hooks, // Keep for backward compatibility
     disableAllHooks: bareMode ? true : (settings.disableAllHooks ?? false),
+    stopHookBlockingCap: bareMode ? undefined : settings.stopHookBlockingCap,
     channel: argv.channel,
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and

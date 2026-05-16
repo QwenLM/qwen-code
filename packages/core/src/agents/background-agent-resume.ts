@@ -27,6 +27,7 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
+import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -982,7 +983,7 @@ export class BackgroundAgentResumeService {
     const hookSystem = this.config.getHookSystem();
     if (!hookSystem) return;
     let stopHookActive = false;
-    const maxIterations = 5;
+    const maxIterations = this.config.getStopHookBlockingCap();
 
     for (let i = 0; i < maxIterations; i++) {
       try {
@@ -1022,7 +1023,10 @@ export class BackgroundAgentResumeService {
     }
 
     debugLogger.warn(
-      `[BackgroundAgentResume] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
+      `[BackgroundAgentResume] ${formatStopHookBlockingCapWarning(
+        'SubagentStop',
+        maxIterations,
+      )}`,
     );
   }
 }

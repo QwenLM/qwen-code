@@ -82,6 +82,7 @@ describe('BackgroundAgentResumeService', () => {
       getMonitorRegistry: () => monitorRegistry,
       getSubagentManager: () => subagentManager,
       getHookSystem: () => hookSystem,
+      getStopHookBlockingCap: () => 8,
       getApprovalMode: () => 'default',
       isTrustedFolder: () => true,
       getProjectRoot: () => tempDir,

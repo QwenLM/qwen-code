@@ -138,6 +138,7 @@ describe('AgentTool', () => {
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -1293,6 +1294,37 @@ describe('AgentTool', () => {
       await invocation.execute();
 
       expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses the configured SubagentStop blocking cap', async () => {
+      (
+        config as unknown as {
+          getStopHookBlockingCap: ReturnType<typeof vi.fn>;
+        }
+      ).getStopHookBlockingCap.mockReturnValue(2);
+      const mockBlockOutput = {
+        isBlockingDecision: vi.fn().mockReturnValue(true),
+        shouldStopExecution: vi.fn().mockReturnValue(false),
+        getEffectiveReason: vi.fn().mockReturnValue('Keep working'),
+      };
+
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        mockBlockOutput as never,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(3);
     });
 
     it('should allow stop when SubagentStop hook fails', async () => {

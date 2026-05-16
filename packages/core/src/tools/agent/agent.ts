@@ -69,6 +69,7 @@ import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
+import { formatStopHookBlockingCapWarning } from '../../hooks/stopHookCap.js';
 import { ApprovalMode } from '../../config/config.js';
 import {
   getAgentJsonlPath,
@@ -973,7 +974,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const effectiveTranscriptPath =
       transcriptPath ?? this.config.getTranscriptPath();
     let stopHookActive = false;
-    const maxIterations = 5;
+    const maxIterations = this.config.getStopHookBlockingCap();
 
     for (let i = 0; i < maxIterations; i++) {
       try {
@@ -1014,7 +1015,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     }
 
     debugLogger.warn(
-      `[Agent] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
+      `[Agent] ${formatStopHookBlockingCapWarning(
+        'SubagentStop',
+        maxIterations,
+      )}`,
     );
   }
 
