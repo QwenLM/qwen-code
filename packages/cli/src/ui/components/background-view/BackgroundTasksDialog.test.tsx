@@ -58,12 +58,17 @@ const mockedUseKeypress = vi.mocked(useKeypress);
 
 function entry(overrides: Partial<AgentDialogEntry> = {}): AgentDialogEntry {
   return {
+    id: 'a',
     kind: 'agent',
     agentId: 'a',
     description: 'desc',
+    isBackgrounded: true,
     status: 'running',
     startTime: 0,
     abortController: new AbortController(),
+    outputFile: '/tmp/agent.jsonl',
+    outputOffset: 0,
+    notified: false,
     ...overrides,
   } as AgentDialogEntry;
 }
@@ -310,7 +315,7 @@ describe('BackgroundTasksDialog', () => {
     const fg = entry({
       agentId: 'fg-1',
       status: 'running',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([fg]);
 
@@ -330,7 +335,7 @@ describe('BackgroundTasksDialog', () => {
     const bg = entry({
       agentId: 'bg-1',
       status: 'running',
-      flavor: 'background',
+      isBackgrounded: true,
     });
     const h = setup([bg]);
 
@@ -350,7 +355,7 @@ describe('BackgroundTasksDialog', () => {
     const completed = entry({
       agentId: 'fg-done',
       status: 'completed',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([completed]);
 
@@ -372,7 +377,7 @@ describe('BackgroundTasksDialog', () => {
     const fg = entry({
       agentId: 'fg-1',
       status: 'running',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([fg]);
 
@@ -393,7 +398,7 @@ describe('BackgroundTasksDialog', () => {
     const fg = entry({
       agentId: 'fg-1',
       status: 'running',
-      flavor: 'foreground',
+      isBackgrounded: false,
     });
     const h = setup([fg]);
 

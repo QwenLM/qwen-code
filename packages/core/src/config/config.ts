@@ -3071,9 +3071,7 @@ export class Config {
 
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
-  ): Promise<
-    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
-  > {
+  ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
     return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
       sessionId,
     );
@@ -3082,9 +3080,7 @@ export class Config {
   async resumeBackgroundAgent(
     agentId: string,
     initialMessage?: string,
-  ): Promise<
-    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
-  > {
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
       initialMessage,
