@@ -11,6 +11,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   ToolCallStatus,
+  type HistoryItemToolGroup,
   type HistoryItemWithoutId,
   type IndividualToolCallDisplay,
 } from '../types.js';
@@ -62,6 +63,11 @@ export type DaemonTuiUpdate =
       daemonEventId?: number;
     }
   | {
+      type: 'tool_group_update';
+      item: HistoryItemToolGroup;
+      daemonEventId?: number;
+    }
+  | {
       type: 'permission_resolved';
       requestId: string;
       outcome?: unknown;
@@ -85,6 +91,14 @@ export type DaemonTuiUpdate =
 export interface DaemonTuiAdapterOptions {
   session: DaemonTuiSessionClient;
   onUpdate: (update: DaemonTuiUpdate) => void;
+}
+
+export interface DaemonTuiReducerState {
+  toolCallsById: Map<string, IndividualToolCallDisplay>;
+}
+
+export function createDaemonTuiReducerState(): DaemonTuiReducerState {
+  return { toolCallsById: new Map() };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -143,16 +157,49 @@ function mapToolStatus(status: unknown): ToolCallStatus {
     case 'cancelled':
       return ToolCallStatus.Canceled;
     default:
-      return ToolCallStatus.Pending;
+      return ToolCallStatus.Error;
   }
 }
 
-function formatUnknown(value: unknown): string | undefined {
+function sanitizeReason(reason: string): string {
+  const esc = String.fromCharCode(27);
+  const withoutAnsi = reason.replace(
+    new RegExp(`${esc}\\[[0-9;?]*[ -/]*[@-~]`, 'g'),
+    '',
+  );
+  let sanitized = '';
+  for (const char of withoutAnsi) {
+    const code = char.charCodeAt(0);
+    if ((code < 32 && code !== 10) || code === 127) {
+      continue;
+    }
+    sanitized += char;
+    if (sanitized.length >= 500) {
+      break;
+    }
+  }
+  return sanitized;
+}
+
+function formatToolResultDisplay(
+  value: unknown,
+): IndividualToolCallDisplay['resultDisplay'] {
   if (value === undefined || value === null) {
     return undefined;
   }
   if (typeof value === 'string') {
     return value;
+  }
+  if (
+    isRecord(value) &&
+    (typeof value['fileDiff'] === 'string' ||
+      'ansiOutput' in value ||
+      value['type'] === 'todo_list' ||
+      value['type'] === 'plan_summary' ||
+      value['type'] === 'task_execution' ||
+      value['type'] === 'mcp_tool_progress')
+  ) {
+    return value as unknown as IndividualToolCallDisplay['resultDisplay'];
   }
   try {
     return JSON.stringify(value);
@@ -163,7 +210,8 @@ function formatUnknown(value: unknown): string | undefined {
 
 function toolUpdateToHistoryItem(
   update: Record<string, unknown>,
-): HistoryItemWithoutId | undefined {
+  state?: DaemonTuiReducerState,
+): HistoryItemToolGroup | undefined {
   const toolCallId = getString(update['toolCallId']);
   if (!toolCallId) {
     return undefined;
@@ -171,24 +219,44 @@ function toolUpdateToHistoryItem(
 
   const title = getString(update['title']);
   const kind = getString(update['kind']);
-  const rawOutput = formatUnknown(update['rawOutput']);
+  const rawOutput = formatToolResultDisplay(update['rawOutput']);
+  const previous = state?.toolCallsById.get(toolCallId);
   const tool: IndividualToolCallDisplay = {
     callId: toolCallId,
-    name: kind ?? title ?? toolCallId,
-    description: title ?? kind ?? toolCallId,
-    resultDisplay: rawOutput,
-    status: mapToolStatus(update['status']),
-    confirmationDetails: undefined,
+    name: kind ?? title ?? previous?.name ?? toolCallId,
+    description: title ?? kind ?? previous?.description ?? toolCallId,
+    resultDisplay: rawOutput ?? previous?.resultDisplay,
+    status:
+      update['status'] === undefined
+        ? (previous?.status ?? ToolCallStatus.Pending)
+        : mapToolStatus(update['status']),
+    // Confirmation UI is driven by daemon permission_request events. The
+    // in-process ToolCallConfirmationDetails shape contains callbacks and is
+    // not directly serializable across the daemon boundary.
+    confirmationDetails: previous?.confirmationDetails,
   };
 
+  state?.toolCallsById.set(toolCallId, tool);
   return {
     type: 'tool_group',
-    tools: [tool],
+    tools: Array.from(state?.toolCallsById.values() ?? [tool]),
   };
+}
+
+function isPermissionRequestData(
+  value: unknown,
+): value is RequestPermissionRequest & { requestId: string } {
+  return (
+    isRecord(value) &&
+    typeof value['requestId'] === 'string' &&
+    isRecord(value['toolCall']) &&
+    Array.isArray(value['options'])
+  );
 }
 
 export function reduceDaemonEventToTuiUpdates(
   event: DaemonTuiEvent,
+  state?: DaemonTuiReducerState,
 ): DaemonTuiUpdate[] {
   switch (event.type) {
     case 'session_update': {
@@ -196,14 +264,8 @@ export function reduceDaemonEventToTuiUpdates(
       const sessionUpdate = getString(update?.['sessionUpdate']);
       const text = getTextContent(update?.['content']);
 
-      if (sessionUpdate === 'user_message_chunk' && text) {
-        return [
-          {
-            type: 'history',
-            item: { type: 'user', text },
-            daemonEventId: event.id,
-          },
-        ];
+      if (sessionUpdate === 'user_message_chunk') {
+        return [];
       }
 
       if (sessionUpdate === 'agent_message_chunk' && text) {
@@ -230,8 +292,10 @@ export function reduceDaemonEventToTuiUpdates(
         update &&
         (sessionUpdate === 'tool_call' || sessionUpdate === 'tool_call_update')
       ) {
-        const item = toolUpdateToHistoryItem(update);
-        return item ? [{ type: 'history', item, daemonEventId: event.id }] : [];
+        const item = toolUpdateToHistoryItem(update, state);
+        return item
+          ? [{ type: 'tool_group_update', item, daemonEventId: event.id }]
+          : [];
       }
 
       if (sessionUpdate === 'plan') {
@@ -251,17 +315,14 @@ export function reduceDaemonEventToTuiUpdates(
     }
 
     case 'permission_request': {
-      if (
-        !isRecord(event.data) ||
-        typeof event.data['requestId'] !== 'string'
-      ) {
+      if (!isPermissionRequestData(event.data)) {
         return [];
       }
       return [
         {
           type: 'permission_request',
           requestId: event.data['requestId'],
-          request: event.data as unknown as RequestPermissionRequest,
+          request: event.data,
           daemonEventId: event.id,
         },
       ];
@@ -306,10 +367,11 @@ export function reduceDaemonEventToTuiUpdates(
     }
 
     case 'session_died': {
-      const reason =
+      const reason = sanitizeReason(
         isRecord(event.data) && typeof event.data['reason'] === 'string'
           ? event.data['reason']
-          : 'session_died';
+          : 'session_died',
+      );
       return [
         { type: 'disconnected', reason, daemonEventId: event.id },
         {
@@ -331,6 +393,7 @@ export function reduceDaemonEventToTuiUpdates(
 export class DaemonTuiAdapter {
   private readonly session: DaemonTuiSessionClient;
   private readonly onUpdate: (update: DaemonTuiUpdate) => void;
+  private readonly reducerState = createDaemonTuiReducerState();
   private eventController: AbortController | null = null;
   private eventPump: Promise<void> | null = null;
   private lastSeenEventId: number | undefined;
@@ -349,8 +412,15 @@ export class DaemonTuiAdapter {
     this.eventPump = this.pumpEvents(this.eventController.signal);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.eventController?.abort();
+    if (this.eventPump) {
+      try {
+        await this.eventPump;
+      } catch {
+        /* pump errors are converted into updates */
+      }
+    }
     this.eventController = null;
     this.eventPump = null;
   }
@@ -362,9 +432,7 @@ export class DaemonTuiAdapter {
       typeof prompt === 'string'
         ? ([{ type: 'text', text: prompt }] as ContentBlock[])
         : prompt;
-    const result = await this.session.prompt({ prompt: promptBlocks });
-    this.onUpdate({ type: 'turn_complete', stopReason: result.stopReason });
-    return result;
+    return await this.session.prompt({ prompt: promptBlocks });
   }
 
   async cancel(): Promise<void> {
@@ -399,24 +467,43 @@ export class DaemonTuiAdapter {
   }
 
   get lastEventId(): number | undefined {
-    return this.session.lastEventId ?? this.lastSeenEventId;
+    return this.lastSeenEventId ?? this.session.lastEventId;
   }
 
   private async pumpEvents(signal: AbortSignal): Promise<void> {
     try {
-      for await (const event of this.session.events({ signal })) {
+      const resumeId = this.lastSeenEventId ?? this.session.lastEventId;
+      for await (const event of this.session.events({
+        signal,
+        lastEventId: resumeId,
+        resume: true,
+      })) {
+        for (const update of reduceDaemonEventToTuiUpdates(
+          event,
+          this.reducerState,
+        )) {
+          this.onUpdate(update);
+        }
         if (event.id !== undefined) {
           this.lastSeenEventId = event.id;
         }
-        for (const update of reduceDaemonEventToTuiUpdates(event)) {
-          this.onUpdate(update);
-        }
+      }
+      if (!signal.aborted) {
+        this.onUpdate({
+          type: 'disconnected',
+          reason: 'event stream ended',
+        });
       }
     } catch (error) {
       if (!signal.aborted) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = sanitizeReason(
+          error instanceof Error ? error.message : String(error),
+        );
         this.onUpdate({ type: 'disconnected', reason: message });
       }
+    } finally {
+      this.eventController = null;
+      this.eventPump = null;
     }
   }
 }

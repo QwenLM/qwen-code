@@ -10,6 +10,7 @@ import type {
   RequestPermissionRequest,
 } from '@agentclientprotocol/sdk';
 import {
+  createDaemonTuiReducerState,
   DaemonTuiAdapter,
   reduceDaemonEventToTuiUpdates,
   type DaemonTuiEvent,
@@ -21,8 +22,12 @@ class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
   private events: DaemonTuiEvent[] = [];
   private waiters: Array<(value: IteratorResult<DaemonTuiEvent>) => void> = [];
   private closed = false;
+  private failure: unknown;
 
   async next(): Promise<IteratorResult<DaemonTuiEvent>> {
+    if (this.failure) {
+      throw this.failure;
+    }
     const event = this.events.shift();
     if (event) {
       return { done: false, value: event };
@@ -64,6 +69,10 @@ class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
       waiter({ done: true, value: undefined });
     }
   }
+
+  fail(error: unknown): void {
+    this.failure = error;
+  }
 }
 
 interface FakeSession extends DaemonTuiSessionClient {
@@ -80,7 +89,12 @@ function createFakeSession(events: EventQueue): FakeSession {
     workspaceCwd: '/repo',
     lastEventId: undefined,
     prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
-    events: vi.fn(() => events),
+    events: vi.fn((opts?: { signal?: AbortSignal }) => {
+      opts?.signal?.addEventListener('abort', () => events.close(), {
+        once: true,
+      });
+      return events;
+    }),
     cancel: vi.fn().mockResolvedValue(undefined),
     setModel: vi.fn().mockResolvedValue({}),
     respondToPermission: vi.fn().mockResolvedValue(true),
@@ -103,6 +117,21 @@ async function waitFor(assertion: () => void): Promise<void> {
 
 describe('reduceDaemonEventToTuiUpdates', () => {
   it('maps assistant, thought, tool, model, and disconnect daemon events', () => {
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 0,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'hello' },
+          },
+        },
+      }),
+    ).toEqual([]);
+
     expect(
       reduceDaemonEventToTuiUpdates({
         id: 1,
@@ -163,7 +192,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
     });
     expect(toolUpdates).toHaveLength(1);
     expect(toolUpdates[0]).toMatchObject({
-      type: 'history',
+      type: 'tool_group_update',
       item: {
         type: 'tool_group',
         tools: [
@@ -207,7 +236,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         id: 5,
         v: 1,
         type: 'session_died',
-        data: { sessionId: 'session-1', reason: 'agent exited' },
+        data: { sessionId: 'session-1', reason: '\x1b[31magent exited\x1b[0m' },
       }),
     ).toEqual([
       { type: 'disconnected', reason: 'agent exited', daemonEventId: 5 },
@@ -218,6 +247,112 @@ describe('reduceDaemonEventToTuiUpdates', () => {
           text: 'Daemon session disconnected: agent exited',
         },
         daemonEventId: 5,
+      },
+    ]);
+  });
+
+  it('accumulates tool updates and preserves structured result displays', () => {
+    const state = createDaemonTuiReducerState();
+    const fileDiff = {
+      fileDiff: '--- a\n+++ b',
+      fileName: 'a.txt',
+      originalContent: 'a',
+      newContent: 'b',
+    };
+
+    expect(
+      reduceDaemonEventToTuiUpdates(
+        {
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tool-1',
+              kind: 'read_file',
+              title: 'Read file',
+              status: 'running',
+            },
+          },
+        },
+        state,
+      ),
+    ).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          type: 'tool_group',
+          tools: [{ callId: 'tool-1', status: ToolCallStatus.Executing }],
+        },
+      },
+    ]);
+
+    expect(
+      reduceDaemonEventToTuiUpdates(
+        {
+          id: 2,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tool-1',
+              status: 'completed',
+              rawOutput: fileDiff,
+            },
+          },
+        },
+        state,
+      ),
+    ).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          type: 'tool_group',
+          tools: [
+            {
+              callId: 'tool-1',
+              name: 'read_file',
+              description: 'Read file',
+              status: ToolCallStatus.Success,
+              resultDisplay: fileDiff,
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(
+      reduceDaemonEventToTuiUpdates(
+        {
+          id: 3,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tool-2',
+              kind: 'shell',
+              status: 'unexpected',
+            },
+          },
+        },
+        state,
+      ),
+    ).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          type: 'tool_group',
+          tools: [
+            { callId: 'tool-1' },
+            { callId: 'tool-2', status: ToolCallStatus.Error },
+          ],
+        },
       },
     ]);
   });
@@ -271,6 +406,15 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         daemonEventId: 7,
       },
     ]);
+
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 8,
+        v: 1,
+        type: 'permission_request',
+        data: { requestId: 'req-bad' },
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -278,6 +422,7 @@ describe('DaemonTuiAdapter', () => {
   it('pumps daemon events into TUI updates and tracks replay state', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
+    Object.defineProperty(session, 'lastEventId', { value: 3 });
     const onUpdate = vi.fn();
     const adapter = new DaemonTuiAdapter({ session, onUpdate });
 
@@ -303,9 +448,46 @@ describe('DaemonTuiAdapter', () => {
       }),
     );
     expect(adapter.lastEventId).toBe(10);
+    expect(session.events).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
+      lastEventId: 3,
+      resume: true,
+    });
 
+    await adapter.stop();
+  });
+
+  it('emits disconnected when the event stream ends or fails', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const onUpdate = vi.fn();
+    const adapter = new DaemonTuiAdapter({ session, onUpdate });
+
+    adapter.start();
     events.close();
-    adapter.stop();
+    await waitFor(() =>
+      expect(onUpdate).toHaveBeenCalledWith({
+        type: 'disconnected',
+        reason: 'event stream ended',
+      }),
+    );
+
+    const failingEvents = new EventQueue();
+    failingEvents.fail(new Error('\x1b[31mboom\x1b[0m'));
+    const failingSession = createFakeSession(failingEvents);
+    const onFailingUpdate = vi.fn();
+    const failingAdapter = new DaemonTuiAdapter({
+      session: failingSession,
+      onUpdate: onFailingUpdate,
+    });
+
+    failingAdapter.start();
+    await waitFor(() =>
+      expect(onFailingUpdate).toHaveBeenCalledWith({
+        type: 'disconnected',
+        reason: 'boom',
+      }),
+    );
   });
 
   it('forwards prompt, cancel, model switch, and permission votes', async () => {
@@ -318,10 +500,9 @@ describe('DaemonTuiAdapter', () => {
     expect(session.prompt).toHaveBeenCalledWith({
       prompt: [{ type: 'text', text: 'hello daemon' }],
     });
-    expect(onUpdate).toHaveBeenCalledWith({
-      type: 'turn_complete',
-      stopReason: 'end_turn',
-    });
+    expect(onUpdate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'turn_complete' }),
+    );
 
     const blocks: ContentBlock[] = [{ type: 'text', text: 'structured' }];
     await adapter.sendPrompt(blocks);
