@@ -271,7 +271,7 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
           : ('info' as const),
       content: tokens.includes('--json')
         ? JSON.stringify(diagnostics, null, 2)
-        : formatMemoryDiagnostics(diagnostics),
+        : formatCoreDiagnostics(diagnostics),
     };
   } catch (error) {
     if (context.abortSignal?.aborted) {
@@ -321,7 +321,7 @@ function formatSmapsRollup(smapsRollup: string | undefined): string {
   return rssLine ?? t('available');
 }
 
-function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
+function formatCoreDiagnostics(diagnostics: MemoryDiagnostics): string {
   const risks =
     diagnostics.analysis.risks.length > 0
       ? diagnostics.analysis.risks
@@ -357,7 +357,11 @@ function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
     lines.push('v8HeapSpaces:', heapSpaces);
   }
 
-  lines.push('risks:', risks, `recommendation: ${diagnostics.analysis.recommendation}`);
+  lines.push(
+    'risks:',
+    risks,
+    `recommendation: ${diagnostics.analysis.recommendation}`,
+  );
   return lines.join('\n');
 }
 

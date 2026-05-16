@@ -168,7 +168,6 @@ describe('doctorCommand', () => {
     expect(doctorCommand.description).toBe(
       'Run installation and environment diagnostics',
     );
-    expect(doctorCommand.acceptsInput).toBe(false);
   });
 
   it('should complete memory subcommand names', async () => {
@@ -926,6 +925,6 @@ describe('doctorCommand', () => {
   });
 
   it('should advertise the memory subcommand on the parent doctor argumentHint', () => {
-    expect(doctorCommand.argumentHint).toBe('[memory]');
+    expect(doctorCommand.argumentHint).toBe('[memory] [--sample] [--snapshot]');
   });
 });

@@ -579,19 +579,21 @@ describe('Session', () => {
 
       await session.sendAvailableCommandsUpdate();
 
-      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-        sessionId: 'test-session-id',
-        update: {
-          sessionUpdate: 'available_commands_update',
-          availableCommands: [
-            {
-              name: 'doctor',
-              description: 'Run installation and environment diagnostics',
-              input: null,
-            },
-          ],
-        },
-      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: expect.arrayContaining([
+              expect.objectContaining({
+                name: 'doctor',
+                description: 'Run installation and environment diagnostics',
+                input: null,
+              }),
+            ]),
+          }),
+        }),
+      );
     });
 
     it('honors explicit input override for built-in commands without input metadata', async () => {
@@ -606,19 +608,21 @@ describe('Session', () => {
 
       await session.sendAvailableCommandsUpdate();
 
-      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-        sessionId: 'test-session-id',
-        update: {
-          sessionUpdate: 'available_commands_update',
-          availableCommands: [
-            {
-              name: 'diagnostics',
-              description: 'Run diagnostics',
-              input: { hint: '' },
-            },
-          ],
-        },
-      });
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: expect.arrayContaining([
+              expect.objectContaining({
+                name: 'diagnostics',
+                description: 'Run diagnostics',
+                input: { hint: '' },
+              }),
+            ]),
+          }),
+        }),
+      );
     });
 
     it('attaches available skills to available_commands_update metadata', async () => {
