@@ -34,6 +34,8 @@ type ExportFormat = {
 const EXPORT_DIR_OUT_OF_CWD =
   'Export directory must be within the project working directory.';
 
+type ExportOutputDirKind = 'default' | 'custom';
+
 function resolveExportTarget(cwd: string, args: string, extension: string) {
   const filename = generateExportFilename(extension);
   const outputDirArg = args.trim();
@@ -44,6 +46,8 @@ function resolveExportTarget(cwd: string, args: string, extension: string) {
   const filepath = path.join(outputDir, filename);
   const isDefaultOutputDir = outputDir === resolvedCwd;
   const isInsideCwd = isSubpath(resolvedCwd, outputDir);
+  const outputDirKind: ExportOutputDirKind =
+    outputDirArg && !isDefaultOutputDir ? 'custom' : 'default';
 
   return {
     filepath,
@@ -52,7 +56,7 @@ function resolveExportTarget(cwd: string, args: string, extension: string) {
       ? filename
       : path.join(outputDirArg, filename),
     resolvedCwd,
-    shouldCreateOutputDir: Boolean(outputDirArg && !isDefaultOutputDir),
+    outputDirKind,
     isInsideCwd,
   };
 }
@@ -173,9 +177,10 @@ async function exportSessionAction(
   }
 
   try {
-    const initialValidationError = target.shouldCreateOutputDir
-      ? await validateExistingExportParentWithinCwd(target)
-      : await validateExportTargetWithinCwd(target);
+    const initialValidationError =
+      target.outputDirKind === 'custom'
+        ? await validateExistingExportParentWithinCwd(target)
+        : await validateExportTargetWithinCwd(target);
     if (initialValidationError) {
       return initialValidationError;
     }
@@ -205,7 +210,7 @@ async function exportSessionAction(
 
     const content = exportFormat.format(normalizedData);
 
-    if (target.shouldCreateOutputDir) {
+    if (target.outputDirKind === 'custom') {
       try {
         await fs.mkdir(target.outputDir, { recursive: true, mode: 0o700 });
       } catch (error) {
