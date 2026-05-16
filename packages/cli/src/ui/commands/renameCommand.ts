@@ -38,7 +38,7 @@ function titleFailureMessage(reason: SessionTitleFailureReason): string {
       return t('Title generation was cancelled.');
     case 'model_error':
       return t(
-        'The fast model could not generate a title (rate limit, auth, or network error). Check debug log or try again.',
+        'The fast model could not generate a title (rate limit, auth, network error, or unexpected response format). Check debug log or try again.',
       );
     case 'no_client':
       return t('Session is still initializing — try again in a moment.');

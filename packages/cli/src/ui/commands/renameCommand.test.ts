@@ -427,7 +427,7 @@ describe('renameCommand', () => {
         messageType: 'error',
       });
       expect((result as { content: string }).content).toMatch(
-        /rate limit, auth, or network error/,
+        /rate limit, auth, network error, or unexpected response format/,
       );
     });
 
