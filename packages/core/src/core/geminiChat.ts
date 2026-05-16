@@ -457,7 +457,29 @@ export function repairOrphanedToolUseTurns(
     }));
 
     if (next?.role === 'user') {
-      next.parts = [...(next.parts ?? []), ...syntheticParts];
+      // Synthetic functionResponse parts MUST be placed before any
+      // non-functionResponse parts in the user turn. Anthropic-compatible
+      // backends reject a user message whose first content block isn't
+      // the tool_result that answers the immediately preceding tool_use
+      // ("tool result must follow tool use" / "tool_use_id ... must have
+      // a corresponding tool_use block in the previous message"). Common
+      // case after a Ctrl+Y race: the user's retry-prompt text was just
+      // pushed, so `next.parts = [text]`; appending the synthetic to the
+      // end would produce `[text, fr]` and re-trigger the wedge this PR
+      // is supposed to escape. Mirrors upstream Claude Code's
+      // `hoistToolResults` (`utils/messages.ts`).
+      //
+      // Place synthetics AFTER any pre-existing functionResponse parts
+      // (real tool_results the user is supplying in the same turn) so
+      // their original ordering is preserved.
+      const existing = next.parts ?? [];
+      const firstNonFr = existing.findIndex((part) => !part.functionResponse);
+      const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;
+      next.parts = [
+        ...existing.slice(0, insertAt),
+        ...syntheticParts,
+        ...existing.slice(insertAt),
+      ];
     } else {
       history.splice(i + 1, 0, { role: 'user', parts: syntheticParts });
       // Skip the freshly-inserted user turn so the outer loop doesn't
@@ -1489,8 +1511,22 @@ export class GeminiChat {
       .join('')
       .trim();
 
-    // Record assistant turn with raw Content and metadata
-    if (thoughtContentPart || contentText || hasToolCall || usageMetadata) {
+    // Record assistant turn with raw Content and metadata. Gate matches
+    // the in-memory `this.history.push` decision below so chat-recording
+    // JSONL never carries a partial turn we deliberately dropped from
+    // history: on `--resume` the transcript-load path would otherwise
+    // re-inject a model turn the in-session run intentionally discarded
+    // (text-only mid-stream errors, where the Retry re-issues the user
+    // prompt — a stale partial-text record would bias the resumed
+    // conversation or surface as duplicate output).
+    const willPersistToHistory =
+      streamError === null ||
+      (hasToolCall &&
+        (thoughtContentPart || consolidatedHistoryParts.length > 0));
+    if (
+      willPersistToHistory &&
+      (thoughtContentPart || contentText || hasToolCall || usageMetadata)
+    ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
       this.chatRecordingService?.recordAssistantTurn({

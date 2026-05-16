@@ -724,7 +724,7 @@ describe('useGeminiStream', () => {
     // The dedup MUST run regardless of `isResponding`, because the
     // scheduler's `onAllToolCallsComplete` is single-shot and would
     // otherwise leave the tool stuck in `completed-but-not-submitted`.
-    const lateRealResult: TrackedCompletedToolCall = {
+    const lateRealResult = {
       request: {
         callId: 'call_race_A',
         name: 'read_file',
@@ -745,13 +745,20 @@ describe('useGeminiStream', () => {
             },
           },
         ],
+        resultDisplay: undefined,
+        error: undefined,
         errorType: undefined,
       },
-      tool: { displayName: 'ReadFile' },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
       invocation: {
         getDescription: () => 'read /tmp/x.txt',
       } as unknown as AnyToolInvocation,
-    } as TrackedCompletedToolCall;
+    } as unknown as TrackedCompletedToolCall;
 
     const client = new MockedGeminiClientClass(mockConfig);
     // Simulate the chat-internal repair pass having already planted a

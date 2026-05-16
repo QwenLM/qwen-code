@@ -663,6 +663,13 @@ describe('GeminiChat', async () => {
             p.text === 'next user prompt after a stream-error-mid-tool_use',
         ),
       ).toBe(true);
+      // tool_result block must come BEFORE the text — Anthropic-
+      // compatible backends reject a user message whose first content
+      // block isn't the tool_result answering the immediately preceding
+      // tool_use. Mirrors upstream Claude Code's `hoistToolResults`.
+      expect(userTurn.parts![0]!.functionResponse?.id).toBe(
+        'call_dangling_for_send',
+      );
     });
 
     it('does NOT synthesize when the user supplies a matching tool_result', async () => {
@@ -3488,14 +3495,20 @@ describe('GeminiChat', async () => {
       );
     });
 
-    it('appends synthetic functionResponse onto an existing user turn (Race A)', () => {
+    it('hoists synthetic functionResponse to the front of an existing user turn (Race A)', () => {
       // Ctrl+Y race: the user retried while the in-flight tool was still
       // running. `stripOrphanedUserEntriesFromHistory` leaves the
       // model[functionCall] in place (trailing entry is model), then the
       // Retry pushes a fresh user turn with the user prompt. Repair must
       // splice the synthetic response onto that user turn so it sits
       // immediately after the model[tool_use] — NOT create a stray
-      // synthetic user turn between them.
+      // synthetic user turn between them. Crucially the synthetic
+      // functionResponse must come BEFORE the text part: Anthropic-
+      // compatible backends require tool_result blocks to be first in
+      // the user message (mirrors upstream Claude Code's
+      // `hoistToolResults`). Otherwise the wire payload re-triggers the
+      // "tool_use_id ... must have a corresponding tool_use block in the
+      // previous message" 400 this PR is supposed to escape.
       chat.setHistory([
         { role: 'user', parts: [{ text: 'open /tmp/a.txt' }] },
         {
@@ -3517,12 +3530,54 @@ describe('GeminiChat', async () => {
 
       expect(result.injected.map((e) => e.callId)).toEqual(['call_race_A']);
       const history = chat.getHistory();
-      // No new turn inserted — synthetic merges into existing user turn.
       expect(history.length).toBe(3);
       expect(history[2]!.role).toBe('user');
       expect(history[2]!.parts!.length).toBe(2);
-      expect(history[2]!.parts![0]).toEqual({ text: 'retry prompt' });
-      expect(history[2]!.parts![1]!.functionResponse?.id).toBe('call_race_A');
+      // synthetic fr FIRST, user text AFTER.
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('call_race_A');
+      expect(history[2]!.parts![1]).toEqual({ text: 'retry prompt' });
+    });
+
+    it('hoists synthetic functionResponse AFTER pre-existing real ones (parallel partial submit)', () => {
+      // Parallel tool_use with one real functionResponse already in the
+      // user turn — synthetic for the missing callId must slot in
+      // between the real fr and any non-fr parts so the user message
+      // shape stays `[real_fr, synthetic_fr, text]` (every tool_result
+      // before any other content, preserving the real-fr order).
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'batch read' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'call_A', name: 'read_file', args: {} },
+            },
+            {
+              functionCall: { id: 'call_B', name: 'read_file', args: {} },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_A',
+                name: 'read_file',
+                response: { output: 'a' },
+              },
+            },
+            { text: 'retry prompt' },
+          ],
+        },
+      ]);
+
+      chat.repairOrphanedToolUseTurns();
+      const parts = chat.getHistory()[2]!.parts!;
+      expect(parts.length).toBe(3);
+      expect(parts[0]!.functionResponse?.id).toBe('call_A');
+      expect(parts[1]!.functionResponse?.id).toBe('call_B');
+      expect(parts[2]).toEqual({ text: 'retry prompt' });
     });
 
     it('handles parallel tool_use turns with only some responses present', () => {

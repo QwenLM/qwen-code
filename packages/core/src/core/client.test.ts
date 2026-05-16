@@ -1026,6 +1026,80 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('startChat — repair orphan tool_use on resume', () => {
+    it('synthesizes a functionResponse for a transcript ending in a dangling model[functionCall]', async () => {
+      // --resume of a session that crashed (OOM / SIGKILL / process exit)
+      // between the partial-tool_use push in `processStreamResponse` and
+      // the React scheduler's `submitQuery(ToolResult)`. The persisted
+      // JSONL ends with `model[functionCall]` and no matching user
+      // `functionResponse`. Without the repair pass running at session
+      // load, the first API call after `--resume` would 400 with
+      // "tool_use_id ... must have a corresponding tool_use block in
+      // the previous message" — exactly the wedge this PR is supposed
+      // to escape. Covers the only resume-time integration point for
+      // the repair, so a future reorder/removal of the call in
+      // `startChat()` regresses this test.
+      await client.startChat([
+        {
+          role: 'user',
+          parts: [{ text: 'open /tmp/crash.txt' }],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_crash_resume',
+                name: 'read_file',
+                args: { path: '/tmp/crash.txt' },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      // startChat prepends a mocked env-context user/model pair, then
+      // appends the supplied extraHistory; the repair pass must then
+      // splice a synthetic user[functionResponse] AFTER the dangling
+      // model[fc]. Locate the dangling model entry by its callId and
+      // verify the immediately-following entry carries the synthetic.
+      const danglingIdx = history.findIndex(
+        (h) =>
+          h.role === 'model' &&
+          h.parts?.some((p) => p.functionCall?.id === 'call_crash_resume'),
+      );
+      expect(danglingIdx).toBeGreaterThanOrEqual(0);
+      const userAfter = history[danglingIdx + 1];
+      expect(userAfter?.role).toBe('user');
+      const fr = userAfter?.parts!.find((p) => p.functionResponse);
+      expect(fr?.functionResponse?.id).toBe('call_crash_resume');
+      expect(fr?.functionResponse?.name).toBe('read_file');
+      expect(
+        (fr?.functionResponse?.response as { error?: string })?.error,
+      ).toMatch(/interrupted/i);
+    });
+
+    it('is a no-op when the resumed transcript has no dangling tool_use', async () => {
+      // Happy resume path: don't inject a synthetic functionResponse
+      // into a transcript whose tool_use pairing is already valid (or,
+      // as here, has no tool_use at all). Defends against a future
+      // regression where the repair pass starts spuriously injecting on
+      // perfectly-formed history.
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'q' }] },
+        { role: 'model', parts: [{ text: 'plain text reply' }] },
+      ]);
+
+      const history = client.getHistory();
+      // No functionResponse anywhere — repair did nothing.
+      const hasAnyFunctionResponse = history.some((h) =>
+        h.parts?.some((p) => p.functionResponse),
+      );
+      expect(hasAnyFunctionResponse).toBe(false);
+    });
+  });
+
   describe('setTools — system instruction refresh', () => {
     // Regression coverage for the progressive-MCP wiring bug: when MCP
     // discovery completes AFTER startChat() (the new default), `setTools()`
