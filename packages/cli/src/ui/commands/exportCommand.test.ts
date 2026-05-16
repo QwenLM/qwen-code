@@ -380,8 +380,42 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory. (path resolves outside cwd via symlink)',
+          'Export directory must be within the project working directory. (parent path resolves outside cwd via symlink)',
       });
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should not create directories when the nearest existing parent resolves outside cwd', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const missingOutputDir = path.resolve('/test/dir', './logs/nested');
+      const symlinkParent = path.resolve('/test/dir', './logs');
+      vi.mocked(fs.realpath).mockImplementation(async (p) => {
+        const pathStr = p.toString();
+        if (pathStr === missingOutputDir) {
+          const err = new Error('ENOENT: no such file or directory');
+          (err as NodeJS.ErrnoException).code = 'ENOENT';
+          throw err;
+        }
+        if (pathStr === symlinkParent) {
+          return path.resolve('/outside/logs');
+        }
+        return pathStr;
+      });
+
+      const result = await mdCommand.action(mockContext, './logs/nested');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Export directory must be within the project working directory. (parent path resolves outside cwd via symlink)',
+      });
+      expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
@@ -412,7 +446,7 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory. (path resolves outside cwd via symlink)',
+          'Export directory must be within the project working directory. (target path resolves outside cwd via symlink)',
       });
       expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
       expect(toMarkdown).toHaveBeenCalled();
@@ -505,6 +539,27 @@ describe('exportCommand', () => {
         content: 'Failed to export session: EACCES: permission denied',
       });
       expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should stop before formatting when custom directory creation fails', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const error = new Error('EACCES: permission denied, mkdir');
+      vi.mocked(fs.mkdir).mockRejectedValue(error);
+
+      const result = await mdCommand.action(mockContext, './logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Failed to export session: EACCES: permission denied, mkdir',
+      });
+      expect(collectSessionData).not.toHaveBeenCalled();
+      expect(toMarkdown).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });

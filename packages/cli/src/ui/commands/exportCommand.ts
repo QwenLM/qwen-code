@@ -70,7 +70,7 @@ async function validateExportTargetWithinCwd(target: {
     return {
       type: 'message',
       messageType: 'error',
-      content: `${EXPORT_DIR_OUT_OF_CWD} (path resolves outside cwd via symlink)`,
+      content: `${EXPORT_DIR_OUT_OF_CWD} (target path resolves outside cwd via symlink)`,
     };
   }
 
@@ -98,9 +98,9 @@ async function realpathNearestExisting(
     }
   }
 
-  // Fresh nested export directories may not exist yet. If every ancestor under
-  // cwd is missing, compare against the real cwd until mkdir creates the target.
-  return fs.realpath(resolvedCwd);
+  throw new Error(
+    `Cannot resolve any existing ancestor within cwd: ${resolvedCwd}`,
+  );
 }
 
 async function validateExistingExportParentWithinCwd(target: {
@@ -116,7 +116,7 @@ async function validateExistingExportParentWithinCwd(target: {
     return {
       type: 'message',
       messageType: 'error',
-      content: `${EXPORT_DIR_OUT_OF_CWD} (path resolves outside cwd via symlink)`,
+      content: `${EXPORT_DIR_OUT_OF_CWD} (parent path resolves outside cwd via symlink)`,
     };
   }
 
@@ -159,6 +159,13 @@ async function exportSessionAction(
   }
 
   try {
+    const initialValidationError = target.shouldCreateOutputDir
+      ? await validateExistingExportParentWithinCwd(target)
+      : await validateExportTargetWithinCwd(target);
+    if (initialValidationError) {
+      return initialValidationError;
+    }
+
     // Load the current session using the current session ID
     const sessionService = new SessionService(cwd);
     const sessionId = config.getSessionId();
@@ -175,21 +182,7 @@ async function exportSessionAction(
     const { conversation } = sessionData;
 
     if (target.shouldCreateOutputDir) {
-      const parentValidationError =
-        await validateExistingExportParentWithinCwd(target);
-      if (parentValidationError) {
-        return parentValidationError;
-      }
       await fs.mkdir(target.outputDir, { recursive: true });
-      const validationError = await validateExportTargetWithinCwd(target);
-      if (validationError) {
-        return validationError;
-      }
-    } else {
-      const validationError = await validateExportTargetWithinCwd(target);
-      if (validationError) {
-        return validationError;
-      }
     }
 
     // Collect and normalize export data (SSOT)
