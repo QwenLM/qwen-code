@@ -35,6 +35,9 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 ```
 RUNTIME_DIR="${QWEN_RUNTIME_DIR:-}"
 [ -z "$RUNTIME_DIR" ] && command -v jq >/dev/null && RUNTIME_DIR=$(jq -r '.advanced.runtimeOutputDir // empty' "${QWEN_HOME:-$HOME/.qwen}/settings.json" 2>/dev/null)
+# `advanced.runtimeOutputDir` may be `~/...` or relative; mirror Storage.resolvePath() before using in globs
+[ -n "$RUNTIME_DIR" ] && RUNTIME_DIR="${RUNTIME_DIR/#\~/$HOME}"
+[ -n "$RUNTIME_DIR" ] && case "$RUNTIME_DIR" in /*) ;; *) RUNTIME_DIR="$(cd "$RUNTIME_DIR" 2>/dev/null && pwd)" || RUNTIME_DIR="" ;; esac
 RUNTIME_DIR="${RUNTIME_DIR:-${QWEN_HOME:-$HOME/.qwen}}"
 ```
 
