@@ -61,10 +61,24 @@ async function validateExportTargetWithinCwd(target: {
   outputDir: string;
   resolvedCwd: string;
 }): Promise<MessageActionReturn | undefined> {
-  const [realCwd, realOutputDir] = await Promise.all([
-    fs.realpath(target.resolvedCwd),
-    fs.realpath(target.outputDir),
-  ]);
+  let realCwd: string;
+  let realOutputDir: string;
+  try {
+    [realCwd, realOutputDir] = await Promise.all([
+      fs.realpath(target.resolvedCwd),
+      fs.realpath(target.outputDir),
+    ]);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Export target directory is not accessible (path does not exist).',
+      };
+    }
+    throw error;
+  }
 
   if (!isSubpath(realCwd, realOutputDir)) {
     return {
@@ -182,7 +196,17 @@ async function exportSessionAction(
     const { conversation } = sessionData;
 
     if (target.shouldCreateOutputDir) {
-      await fs.mkdir(target.outputDir, { recursive: true });
+      try {
+        await fs.mkdir(target.outputDir, { recursive: true, mode: 0o700 });
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Failed to create export directory "${target.outputDir}": ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
     }
 
     // Collect and normalize export data (SSOT)
@@ -195,13 +219,15 @@ async function exportSessionAction(
 
     const content = exportFormat.format(normalizedData);
 
-    const writeValidationError = await validateExportTargetWithinCwd(target);
-    if (writeValidationError) {
-      return writeValidationError;
-    }
-
     try {
-      await fs.writeFile(target.filepath, content, 'utf-8');
+      const writeValidationError = await validateExportTargetWithinCwd(target);
+      if (writeValidationError) {
+        return writeValidationError;
+      }
+      await fs.writeFile(target.filepath, content, {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
     } catch (error) {
       return {
         type: 'message',

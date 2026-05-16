@@ -164,7 +164,7 @@ describe('exportCommand', () => {
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.md'),
         '# Test Markdown',
-        'utf-8',
+        { encoding: 'utf-8', mode: 0o600 },
       );
     });
 
@@ -188,12 +188,14 @@ describe('exportCommand', () => {
           path.join('./logs', 'export-2025-01-01T00-00-00-000Z.md'),
         ),
       });
-      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        filepath,
-        '# Test Markdown',
-        'utf-8',
-      );
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
+        recursive: true,
+        mode: 0o700,
+      });
+      expect(fs.writeFile).toHaveBeenCalledWith(filepath, '# Test Markdown', {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
     });
 
     it('should keep cwd-equivalent directory output concise', async () => {
@@ -294,6 +296,71 @@ describe('exportCommand', () => {
       expect(result.content).toContain('markdown target:');
     });
 
+    it('should handle errors during markdown generation', async () => {
+      const error = new Error('Failed to generate markdown');
+      vi.mocked(toMarkdown).mockImplementation(() => {
+        throw error;
+      });
+
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+      const result = await mdCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Failed to export session:'),
+      });
+      if (!result || result.type !== 'message') {
+        throw new Error('expected message result');
+      }
+      expect(result.content).toContain('Failed to generate markdown');
+      expect(result.content).not.toContain('markdown target:');
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should handle session load errors', async () => {
+      mockSessionServiceMocks.loadSession.mockRejectedValue(
+        new Error('EIO: failed to read session'),
+      );
+
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+      const result = await mdCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Failed to export session: EIO: failed to read session',
+      });
+      expect(collectSessionData).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should handle session collection errors', async () => {
+      vi.mocked(collectSessionData).mockRejectedValue(
+        new Error('Failed to collect session data'),
+      );
+
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+      const result = await mdCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Failed to export session: Failed to collect session data',
+      });
+      expect(toMarkdown).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should use project root when working dir is not available', async () => {
       const contextWithProjectRoot = createMockCommandContext({
         services: {
@@ -319,7 +386,7 @@ describe('exportCommand', () => {
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining(`${path.sep}test${path.sep}project`),
         '# Test Markdown',
-        'utf-8',
+        { encoding: 'utf-8', mode: 0o600 },
       );
     });
 
@@ -448,8 +515,79 @@ describe('exportCommand', () => {
         content:
           'Export directory must be within the project working directory. (target path resolves outside cwd via symlink)',
       });
-      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
+        recursive: true,
+        mode: 0o700,
+      });
       expect(toMarkdown).toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should report inaccessible target directories during write revalidation', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const outputDir = path.resolve('/test/dir', './logs');
+      let contentFormatted = false;
+      vi.mocked(toMarkdown).mockImplementation(() => {
+        contentFormatted = true;
+        return '# Test Markdown';
+      });
+      vi.mocked(fs.realpath).mockImplementation(async (p) => {
+        const pathStr = p.toString();
+        if (pathStr === outputDir && contentFormatted) {
+          const err = new Error('ENOENT: no such file or directory');
+          (err as NodeJS.ErrnoException).code = 'ENOENT';
+          throw err;
+        }
+        return pathStr;
+      });
+
+      const result = await mdCommand.action(mockContext, './logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Export target directory is not accessible (path does not exist).',
+      });
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should include target context when write revalidation throws', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const outputDir = path.resolve('/test/dir', './logs');
+      let contentFormatted = false;
+      vi.mocked(toMarkdown).mockImplementation(() => {
+        contentFormatted = true;
+        return '# Test Markdown';
+      });
+      vi.mocked(fs.realpath).mockImplementation(async (p) => {
+        const pathStr = p.toString();
+        if (pathStr === outputDir && contentFormatted) {
+          throw new Error('ESTALE: stale file handle');
+        }
+        return pathStr;
+      });
+
+      const result = await mdCommand.action(mockContext, './logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('Failed to export session:'),
+      });
+      if (!result || result.type !== 'message') {
+        throw new Error('expected message result');
+      }
+      expect(result.content).toContain('ESTALE: stale file handle');
+      expect(result.content).toContain('markdown target:');
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
@@ -469,7 +607,10 @@ describe('exportCommand', () => {
           path.join('./..backup', 'export-2025-01-01T00-00-00-000Z.md'),
         ),
       });
-      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
+        recursive: true,
+        mode: 0o700,
+      });
       expect(fs.writeFile).toHaveBeenCalled();
     });
 
@@ -504,7 +645,10 @@ describe('exportCommand', () => {
           path.join('./nonexistent/logs', 'export-2025-01-01T00-00-00-000Z.md'),
         ),
       });
-      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
+        recursive: true,
+        mode: 0o700,
+      });
       expect(fs.writeFile).toHaveBeenCalled();
     });
 
@@ -556,7 +700,8 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: EACCES: permission denied, mkdir',
+        content:
+          'Failed to create export directory "/test/dir/logs": EACCES: permission denied, mkdir',
       });
       expect(collectSessionData).not.toHaveBeenCalled();
       expect(toMarkdown).not.toHaveBeenCalled();
@@ -594,7 +739,7 @@ describe('exportCommand', () => {
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.html'),
         expect.stringContaining('{"data": "test"}'),
-        'utf-8',
+        { encoding: 'utf-8', mode: 0o600 },
       );
     });
 
@@ -617,11 +762,14 @@ describe('exportCommand', () => {
           path.join('./logs', 'export-2025-01-01T00-00-00-000Z.html'),
         ),
       });
-      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
+        recursive: true,
+        mode: 0o700,
+      });
       expect(fs.writeFile).toHaveBeenCalledWith(
         filepath,
         expect.stringContaining('{"data": "test"}'),
-        'utf-8',
+        { encoding: 'utf-8', mode: 0o600 },
       );
     });
 
@@ -772,7 +920,7 @@ describe('exportCommand', () => {
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.json'),
         '{"messages":[]}',
-        'utf-8',
+        { encoding: 'utf-8', mode: 0o600 },
       );
     });
 
@@ -798,12 +946,14 @@ describe('exportCommand', () => {
           path.join('./logs', 'export-2025-01-01T00-00-00-000Z.json'),
         ),
       });
-      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
-      expect(fs.writeFile).toHaveBeenCalledWith(
-        filepath,
-        '{"messages":[]}',
-        'utf-8',
-      );
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
+        recursive: true,
+        mode: 0o700,
+      });
+      expect(fs.writeFile).toHaveBeenCalledWith(filepath, '{"messages":[]}', {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
     });
 
     it('should handle errors during JSON generation', async () => {
@@ -865,7 +1015,7 @@ describe('exportCommand', () => {
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.jsonl'),
         '{"type":"session_metadata"}',
-        'utf-8',
+        { encoding: 'utf-8', mode: 0o600 },
       );
     });
 
@@ -891,11 +1041,14 @@ describe('exportCommand', () => {
           path.join('./logs', 'export-2025-01-01T00-00-00-000Z.jsonl'),
         ),
       });
-      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, {
+        recursive: true,
+        mode: 0o700,
+      });
       expect(fs.writeFile).toHaveBeenCalledWith(
         filepath,
         '{"type":"session_metadata"}',
-        'utf-8',
+        { encoding: 'utf-8', mode: 0o600 },
       );
     });
 
