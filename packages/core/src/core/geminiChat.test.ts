@@ -27,6 +27,18 @@ import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
 import { SessionStartSource } from '../hooks/types.js';
 
+const { mockGetHeapStatistics } = vi.hoisted(() => ({
+  mockGetHeapStatistics: vi.fn(),
+}));
+
+vi.mock('node:v8', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:v8')>();
+  return {
+    ...actual,
+    getHeapStatistics: mockGetHeapStatistics,
+  };
+});
+
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
 
@@ -103,6 +115,10 @@ describe('GeminiChat', async () => {
 
     // Default mock implementation for tests that don't care about retry logic
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+    mockGetHeapStatistics.mockReturnValue({
+      used_heap_size: 0,
+      heap_size_limit: Number.MAX_SAFE_INTEGER,
+    });
     mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
@@ -3579,13 +3595,10 @@ describe('GeminiChat', async () => {
       return compressSpy;
     }
 
-    function mockHeapUsed(heapUsed: number) {
-      return vi.spyOn(process, 'memoryUsage').mockReturnValue({
-        rss: heapUsed,
-        heapTotal: heapUsed,
-        heapUsed,
-        external: 0,
-        arrayBuffers: 0,
+    function mockHeapPressure(usedHeapSize: number, heapLimit = 1000) {
+      mockGetHeapStatistics.mockReturnValue({
+        used_heap_size: usedHeapSize,
+        heap_size_limit: heapLimit,
       });
     }
 
@@ -3659,7 +3672,7 @@ describe('GeminiChat', async () => {
 
     it('uses heap pressure to bypass the token gate without manual force semantics', async () => {
       const compressSpy = mockCompressionService('noop');
-      mockHeapUsed(Number.MAX_SAFE_INTEGER);
+      mockHeapPressure(701);
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
         model: 'test-model',

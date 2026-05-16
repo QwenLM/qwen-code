@@ -58,6 +58,8 @@ import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+// Leave roughly 30% V8 heap headroom for compression's transient allocations.
 const HEAP_PRESSURE_COMPRESSION_RATIO = 0.7;
 
 /**
@@ -498,14 +500,18 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
-    const bypassTokenThreshold = !force && this.isHeapPressureHigh();
+    const heapPressureRatio = force ? null : this.getHeapPressureRatio();
+    const bypassTokenThreshold =
+      heapPressureRatio !== null &&
+      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO;
     if (bypassTokenThreshold) {
       // Temporary safety net: token-based compaction can be too late for
       // large-context sessions because JS heap pressure may hit first.
       // Do not use force=true here because that carries manual /compress
       // semantics in ChatCompressionService.
       debugLogger.warn(
-        'Heap pressure is high; attempting auto-compaction before token threshold.',
+        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
+          'attempting auto-compaction before token threshold.',
       );
     }
 
@@ -558,15 +564,18 @@ export class GeminiChat {
     return info;
   }
 
-  private isHeapPressureHigh(): boolean {
-    const heapLimit = getHeapStatistics().heap_size_limit;
-    if (!Number.isFinite(heapLimit) || heapLimit <= 0) {
-      return false;
+  private getHeapPressureRatio(): number | null {
+    const { used_heap_size: usedHeapSize, heap_size_limit: heapLimit } =
+      getHeapStatistics();
+    if (
+      !Number.isFinite(usedHeapSize) ||
+      usedHeapSize < 0 ||
+      !Number.isFinite(heapLimit) ||
+      heapLimit <= 0
+    ) {
+      return null;
     }
-    return (
-      process.memoryUsage().heapUsed / heapLimit >=
-      HEAP_PRESSURE_COMPRESSION_RATIO
-    );
+    return usedHeapSize / heapLimit;
   }
 
   setSystemInstruction(sysInstr: string) {
@@ -1184,7 +1193,8 @@ export class GeminiChat {
 
   /**
    * Returns a defensive copy of the last raw history entry without cloning the
-   * full conversation. Use this for O(1) inspections of comprehensive history.
+   * full conversation. This avoids O(history) cloning, though cloning the last
+   * entry is still proportional to that entry's own size.
    */
   getLastHistoryEntry(): Content | undefined {
     const last = this.history[this.history.length - 1];

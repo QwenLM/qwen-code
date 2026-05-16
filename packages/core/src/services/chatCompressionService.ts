@@ -219,8 +219,13 @@ export class ChatCompressionService {
       COMPRESSION_TOKEN_THRESHOLD;
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
 
-    // Cheap gates first — these don't need the curated history.
-    if (threshold <= 0 || (hasFailedCompressionAttempt && !force)) {
+    // Cheap gates first — these don't need the curated history. Heap-pressure
+    // bypass must also bypass the failed-attempt latch, otherwise one failed
+    // compression would disable this safety net for the rest of the chat.
+    if (
+      threshold <= 0 ||
+      (hasFailedCompressionAttempt && !force && !bypassTokenThreshold)
+    ) {
       return {
         newHistory: null,
         info: {
@@ -231,9 +236,9 @@ export class ChatCompressionService {
       };
     }
 
-    // Don't compress if not forced and we are under the limit. This is the
-    // steady-state path on every send; we want to exit before paying for the
-    // full `getHistory(true)` clone below.
+    // Don't compress if not forced and we are under the token limit. This is
+    // the steady-state path on every send; heap pressure may bypass it because
+    // the JS heap can become the limiting resource before token count does.
     if (!force && !bypassTokenThreshold) {
       const contextLimit =
         config.getContentGeneratorConfig()?.contextWindowSize ??

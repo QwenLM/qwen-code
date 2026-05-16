@@ -60,6 +60,8 @@ export async function checkNextSpeaker(
     return null;
   }
 
+  // Read the last raw history entry by design: functionResponse turns can be
+  // stripped from curated history, but they are decisive for next-speaker flow.
   const lastComprehensiveMessage = chat.getLastHistoryEntry();
   // If comprehensive history is empty, there is no last message to check.
   // This case should ideally be caught by the curatedHistory.length check
