@@ -19,6 +19,7 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import { getActiveGoal } from '../goals/activeGoalStore.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -312,6 +313,10 @@ export class GeminiClient {
 
   getHistory(curated: boolean = false): Content[] {
     return this.getChat().getHistory(curated);
+  }
+
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    return this.getChat().getHistoryTail(count, curated);
   }
 
   /**
@@ -1554,22 +1559,27 @@ export class GeminiClient {
             continueReason,
           ];
 
-          // Emit StopHookLoop event for iterations after the first one.
-          // The first iteration (currentIterationCount === 1) is the initial request,
-          // so there's no prior stop hook execution to report. We only emit this event
-          // when stop hooks have been executed multiple times (loop detected).
-          if (currentIterationCount > 1) {
-            yield {
-              type: GeminiEventType.StopHookLoop,
-              value: {
-                iterationCount: currentIterationCount,
-                reasons: currentReasons,
-                stopHookCount: response.stopHookCount ?? 1,
-              },
-            };
-          }
+          // Emit StopHookLoop on EVERY blocking Stop hook execution, including
+          // the first. `currentIterationCount === 1` means a Stop hook just
+          // fired once and produced a blocking decision — the user benefits
+          // from seeing that immediately (e.g. `/goal` rendering "Goal check:
+          // not yet met" on the very first not-met turn, or a configured Stop
+          // hook surfacing its blocking reason before the agent attempts a
+          // retry). The previous `>1` guard hid the first reason until the
+          // hook fired twice, which made /goal's first iteration invisible
+          // and delayed visibility for regular hooks that only fire once.
+          yield {
+            type: GeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: currentIterationCount,
+              reasons: currentReasons,
+              stopHookCount: response.stopHookCount ?? 1,
+            },
+          };
 
           const continueRequest = [{ text: continueReason }];
+          const activeGoal = getActiveGoal(this.config.getSessionId());
+          const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
           const hookTurn = yield* this.sendMessageStream(
             continueRequest,
             signal,
@@ -1582,7 +1592,7 @@ export class GeminiClient {
                 reasons: currentReasons,
               },
             },
-            boundedTurns - 1,
+            hookTurnBudget,
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');

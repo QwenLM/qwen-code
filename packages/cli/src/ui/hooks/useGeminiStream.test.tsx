@@ -77,6 +77,7 @@ const mockParseAndFormatApiError = vi.hoisted(() =>
   ),
 );
 const mockLogApiCancel = vi.hoisted(() => vi.fn());
+const mockGetActiveGoal = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -88,6 +89,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ApiCancelEvent: MockedApiCancelEvent,
     parseAndFormatApiError: mockParseAndFormatApiError,
     logApiCancel: mockLogApiCancel,
+    getActiveGoal: mockGetActiveGoal,
   };
 });
 
@@ -150,6 +152,7 @@ describe('useGeminiStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
+    mockGetActiveGoal.mockReturnValue(undefined);
     vi.mocked(findLastSafeSplitPoint).mockImplementation(
       (s: string) => s.length,
     );
@@ -4460,6 +4463,52 @@ describe('useGeminiStream', () => {
 
       // Verify streaming state transitions correctly
       expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('renders active goal StopHookLoop as a goal_status checking card', async () => {
+      mockGetActiveGoal.mockReturnValue({
+        condition: 'finish the refactor',
+        iterations: 2,
+        setAt: 100,
+        tokensAtStart: 0,
+        hookId: 'goal-hook',
+        lastReason: 'not enough evidence yet',
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 2,
+              reasons: ['controlled continuation prompt'],
+              stopHookCount: 1,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('continue goal');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'goal_status',
+            kind: 'checking',
+            condition: 'finish the refactor',
+            iterations: 2,
+            lastReason: 'not enough evidence yet',
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stop_hook_loop' }),
+        expect.any(Number),
+      );
     });
 
     it('should move pending history item before adding StopHookLoop event', async () => {

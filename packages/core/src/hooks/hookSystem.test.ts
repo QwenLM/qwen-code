@@ -238,6 +238,24 @@ describe('HookSystem', () => {
         'SessionEnd',
       );
     });
+
+    it('returns true when only a session function hook is registered', () => {
+      vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([]);
+      const sessionId = 'sess-1';
+      hookSystem.addFunctionHook(
+        sessionId,
+        HookEventName.Stop,
+        '',
+        async () => ({ continue: true }),
+        'error',
+      );
+      // Without a sessionId, hasHooksForEvent still finds it across any session.
+      expect(hookSystem.hasHooksForEvent('Stop')).toBe(true);
+      // With the correct sessionId.
+      expect(hookSystem.hasHooksForEvent('Stop', sessionId)).toBe(true);
+      // With a different sessionId.
+      expect(hookSystem.hasHooksForEvent('Stop', 'other-session')).toBe(false);
+    });
   });
 
   describe('fireStopEvent', () => {

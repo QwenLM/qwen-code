@@ -51,6 +51,7 @@ import {
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
+  getActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -1302,6 +1303,28 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      // When the active loop is driven by `/goal`, replace the generic
+      // "Ran N stop hooks ⎿ Stop hook error: ..." chip with a goal-aware
+      // `goal_status` `kind:'checking'` item. Claude Code surfaces this
+      // mid-state through a single updating "running" card; qwen-code keeps
+      // a per-iteration history trail (familiar to its other progress
+      // indicators) but drops the `error:` framing — a not-met judge is the
+      // *expected* outcome of every continuation, not a failure.
+      const activeGoal = getActiveGoal(config.getSessionId());
+      if (activeGoal && activeGoal.condition) {
+        addItem(
+          {
+            type: MessageType.GOAL_STATUS,
+            kind: 'checking',
+            condition: activeGoal.condition,
+            iterations: value.iterationCount,
+            lastReason:
+              activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
+          } as HistoryItemWithoutId,
+          userMessageTimestamp,
+        );
+        return;
+      }
       addItem(
         {
           type: 'stop_hook_loop',
@@ -1312,7 +1335,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const processGeminiStreamEvents = useCallback(
@@ -1466,6 +1489,20 @@ export const useGeminiStream = (
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
               );
+              // Seal off this turn's UI state before the parent re-enters
+              // sendMessageStream for a continuation (Stop-hook block at
+              // client.ts:1378 or next-speaker auto-continue at 1444). Both
+              // paths yield* a fresh Turn through this same stream processor,
+              // so without this seal the next turn's first content/thought
+              // chunk appends to this turn's pending item — visible in the UI
+              // as "t" → "te" → "tes" cumulative rendering even though each
+              // turn is persisted as a clean, separate assistant message.
+              if (pendingHistoryItemRef.current) {
+                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+                setPendingHistoryItem(null);
+              }
+              geminiMessageBuffer = '';
+              thoughtBuffer = '';
               break;
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();

@@ -1223,13 +1223,24 @@ export class GeminiChat {
   }
 
   /**
+   * Returns a deep-copied tail of the chat history. This avoids cloning the
+   * entire session when callers only need recent context.
+   */
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    if (count <= 0) return [];
+    const history = curated
+      ? extractCuratedHistory(this.history)
+      : this.history;
+    return structuredClone(history.slice(-count));
+  }
+
+  /**
    * Returns a defensive copy of the last raw history entry without cloning the
    * full conversation. This avoids O(history) cloning, though cloning the last
    * entry is still proportional to that entry's own size.
    */
   getLastHistoryEntry(): Content | undefined {
-    const last = this.history[this.history.length - 1];
-    return last ? structuredClone(last) : undefined;
+    return this.getHistoryTail(1)[0];
   }
 
   /**

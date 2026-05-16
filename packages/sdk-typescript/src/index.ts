@@ -16,6 +16,7 @@ export {
   type DaemonClientOptions,
   type DaemonEvent,
   type DaemonMode,
+  type DaemonProtocolVersions,
   type DaemonSession,
   type DaemonSessionSummary,
   type PermissionOutcome,

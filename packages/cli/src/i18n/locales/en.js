@@ -1841,6 +1841,8 @@ export default {
     'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
+  'Set a goal — keep working until the condition is met':
+    'Set a goal — keep working until the condition is met',
   'Exited plan mode. Previous approval mode restored.':
     'Exited plan mode. Previous approval mode restored.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

@@ -69,7 +69,9 @@ Attaches to existing sessions are NOT counted toward the cap, so an idle daemon'
 
 ## Capabilities
 
-Every Stage 1 daemon advertises 9 feature tags. Clients **must** gate UI off `features`, not off `mode` (per design §10).
+The daemon advertises its supported feature tags from the serve capability
+registry. Clients **must** gate UI off `features`, not off `mode` (per design
+§10).
 
 ```
 ['health', 'capabilities', 'session_create', 'session_list',
@@ -104,6 +106,10 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 ```json
 {
   "v": 1,
+  "protocolVersions": {
+    "current": "v1",
+    "supported": ["v1"]
+  },
   "mode": "http-bridge",
   "features": ["health", "capabilities", "..."],
   "modelServices": [],
@@ -112,6 +118,8 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 ```
 
 Stable contract: when `v` increments the frame layout has changed in a backwards-incompatible way.
+
+> **`protocolVersions`** describes the serve protocol versions the daemon can speak. `current` is the daemon's preferred protocol version and `supported` is the compatible set. Clients that require a specific protocol should check `supported`; feature-specific UI should still gate on `features`. Additive to v=1: older v=1 daemons omit this field, so SDK clients that target older builds should treat it as optional.
 
 > **`modelServices` is always `[]` in Stage 1.** The agent uses its single default model service and doesn't enumerate it over the wire. Stage 2 will populate this from registered model adapters so SDK clients can build service-pickers; until then, do NOT rely on this field being non-empty.
 
