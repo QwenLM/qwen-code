@@ -50,6 +50,7 @@ vi.mock('../utils/export/index.js', () => ({
 
 vi.mock('node:fs/promises', () => ({
   mkdir: vi.fn(),
+  realpath: vi.fn(),
   writeFile: vi.fn(),
 }));
 
@@ -101,6 +102,7 @@ describe('exportCommand', () => {
     vi.mocked(generateExportFilename).mockImplementation(
       (ext: string) => `export-2025-01-01T00-00-00-000Z.${ext}`,
     );
+    vi.mocked(fs.realpath).mockImplementation(async (p) => p.toString());
   });
 
   afterEach(() => {
@@ -272,14 +274,13 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: expect.stringContaining(
-          'Failed to export session to markdown at',
-        ),
+        content: expect.stringContaining('Failed to export session:'),
       });
       if (!result || result.type !== 'message') {
         throw new Error('expected message result');
       }
       expect(result.content).toContain('File write failed');
+      expect(result.content).toContain('markdown target:');
     });
 
     it('should use project root when working dir is not available', async () => {
@@ -288,6 +289,7 @@ describe('exportCommand', () => {
           config: {
             getWorkingDir: vi.fn().mockReturnValue(null),
             getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+            getSessionId: vi.fn().mockReturnValue('test-session-id'),
           },
         },
       });
@@ -296,7 +298,62 @@ describe('exportCommand', () => {
       if (!mdCommand?.action) {
         throw new Error('md command not found');
       }
-      await mdCommand.action(contextWithProjectRoot, '');
+      const result = await mdCommand.action(contextWithProjectRoot, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('export-2025-01-01T00-00-00-000Z.md'),
+      });
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining(`${path.sep}test${path.sep}project`),
+        '# Test Markdown',
+        'utf-8',
+      );
+    });
+
+    it('should reject output directories outside the working directory', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const result = await mdCommand.action(mockContext, '../outside');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Export directory must be within the project working directory.',
+      });
+      expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should reject symlinked output directories outside the working directory', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const outputDir = path.resolve('/test/dir', './logs');
+      vi.mocked(fs.realpath).mockImplementation(async (p) =>
+        p.toString() === outputDir
+          ? path.resolve('/outside/logs')
+          : p.toString(),
+      );
+
+      const result = await mdCommand.action(mockContext, './logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Export directory must be within the project working directory.',
+      });
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });
 
@@ -441,12 +498,13 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: expect.stringContaining('Failed to export session to HTML at'),
+        content: expect.stringContaining('Failed to export session:'),
       });
       if (!result || result.type !== 'message') {
         throw new Error('expected message result');
       }
       expect(result.content).toContain('Failed to generate HTML');
+      expect(result.content).toContain('HTML target:');
     });
 
     it('should handle errors during file write', async () => {
@@ -464,12 +522,13 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: expect.stringContaining('Failed to export session to HTML at'),
+        content: expect.stringContaining('Failed to export session:'),
       });
       if (!result || result.type !== 'message') {
         throw new Error('expected message result');
       }
       expect(result.content).toContain('File write failed');
+      expect(result.content).toContain('HTML target:');
     });
   });
 

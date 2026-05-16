@@ -31,6 +31,14 @@ type ExportFormat = {
   format: (sessionData: ExportSessionData) => string;
 };
 
+function isPathInside(parentPath: string, childPath: string): boolean {
+  const relativePath = path.relative(parentPath, childPath);
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
+  );
+}
+
 function resolveExportTarget(cwd: string, args: string, extension: string) {
   const filename = generateExportFilename(extension);
   const outputDirArg = args.trim();
@@ -40,14 +48,86 @@ function resolveExportTarget(cwd: string, args: string, extension: string) {
     : resolvedCwd;
   const filepath = path.join(outputDir, filename);
   const isDefaultOutputDir = outputDir === resolvedCwd;
+  const isInsideCwd = isPathInside(resolvedCwd, outputDir);
 
   return {
-    filename,
     filepath,
     outputDir,
     displayPath: isDefaultOutputDir ? filename : filepath,
+    resolvedCwd,
     shouldCreateOutputDir: Boolean(outputDirArg && !isDefaultOutputDir),
+    isInsideCwd,
   };
+}
+
+async function validateExportTargetWithinCwd(target: {
+  outputDir: string;
+  resolvedCwd: string;
+  isInsideCwd: boolean;
+}): Promise<MessageActionReturn | undefined> {
+  if (!target.isInsideCwd) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: 'Export directory must be within the project working directory.',
+    };
+  }
+
+  const [realCwd, realOutputDir] = await Promise.all([
+    fs.realpath(target.resolvedCwd),
+    fs.realpath(target.outputDir),
+  ]);
+
+  if (!isPathInside(realCwd, realOutputDir)) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: 'Export directory must be within the project working directory.',
+    };
+  }
+
+  return undefined;
+}
+
+async function realpathNearestExisting(
+  outputDir: string,
+  resolvedCwd: string,
+): Promise<string> {
+  let currentPath = outputDir;
+
+  while (isPathInside(resolvedCwd, currentPath)) {
+    try {
+      return await fs.realpath(currentPath);
+    } catch {
+      const parentPath = path.dirname(currentPath);
+      if (parentPath === currentPath) {
+        break;
+      }
+      currentPath = parentPath;
+    }
+  }
+
+  return fs.realpath(resolvedCwd);
+}
+
+async function validateExistingExportParentWithinCwd(target: {
+  outputDir: string;
+  resolvedCwd: string;
+}): Promise<MessageActionReturn | undefined> {
+  const [realCwd, realExistingParent] = await Promise.all([
+    fs.realpath(target.resolvedCwd),
+    realpathNearestExisting(target.outputDir, target.resolvedCwd),
+  ]);
+
+  if (!isPathInside(realCwd, realExistingParent)) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: 'Export directory must be within the project working directory.',
+    };
+  }
+
+  return undefined;
 }
 
 async function exportSessionAction(
@@ -75,7 +155,15 @@ async function exportSessionAction(
     };
   }
 
-  let targetFilepath: string | undefined;
+  const target = resolveExportTarget(cwd, args, exportFormat.extension);
+  const targetFilepath = target.filepath;
+  if (!target.isInsideCwd) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: 'Export directory must be within the project working directory.',
+    };
+  }
 
   try {
     // Load the current session using the current session ID
@@ -93,6 +181,19 @@ async function exportSessionAction(
 
     const { conversation } = sessionData;
 
+    if (target.shouldCreateOutputDir) {
+      const parentValidationError =
+        await validateExistingExportParentWithinCwd(target);
+      if (parentValidationError) {
+        return parentValidationError;
+      }
+      await fs.mkdir(target.outputDir, { recursive: true });
+      const validationError = await validateExportTargetWithinCwd(target);
+      if (validationError) {
+        return validationError;
+      }
+    }
+
     // Collect and normalize export data (SSOT)
     const exportData = await collectSessionData(conversation, config);
     const normalizedData = normalizeSessionData(
@@ -101,13 +202,8 @@ async function exportSessionAction(
       config,
     );
 
-    const target = resolveExportTarget(cwd, args, exportFormat.extension);
-    targetFilepath = target.filepath;
     const content = exportFormat.format(normalizedData);
 
-    if (target.shouldCreateOutputDir) {
-      await fs.mkdir(target.outputDir, { recursive: true });
-    }
     await fs.writeFile(target.filepath, content, 'utf-8');
 
     return {
@@ -116,13 +212,10 @@ async function exportSessionAction(
       content: `Session exported to ${exportFormat.displayName}: ${target.displayPath}`,
     };
   } catch (error) {
-    const destination = targetFilepath
-      ? ` to ${exportFormat.displayName} at "${targetFilepath}"`
-      : '';
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session${destination}: ${error instanceof Error ? error.message : String(error)}`,
+      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)} (${exportFormat.displayName} target: "${targetFilepath}")`,
     };
   }
 }
