@@ -41,7 +41,8 @@ The CLI should refuse this mode unless both are true:
 
 ## Rendering Contract
 
-The first draft should map only these daemon events:
+The first implementation adds `DaemonTuiAdapter`, a locally verifiable reducer
+and transport spike. It maps only these daemon events:
 
 | Daemon event                             | TUI handling                                 |
 | ---------------------------------------- | -------------------------------------------- |
@@ -55,6 +56,9 @@ The first draft should map only these daemon events:
 
 Unknown events must be ignored, not fatal. Typed event reducers will land in a
 later protocol PR.
+
+The adapter is not wired into the default Ink app yet. Existing interactive TUI,
+JSONL, stream-json, and dual-output behavior remains unchanged.
 
 ## Explicit Non-Goals
 
@@ -75,7 +79,8 @@ later protocol PR.
 ## Validation Plan
 
 - Unit-test event-to-TUI-state mapping with synthetic daemon events.
-- Unit-test flag/env parsing.
+- Unit-test prompt, cancel, model switch, and permission vote forwarding.
+- Unit-test flag/env parsing when the feature flag is wired.
 - Smoke-test against a local `qwen serve`:
   - prompt text streams into the TUI
   - cancel resolves the active prompt
