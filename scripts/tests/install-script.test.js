@@ -139,6 +139,10 @@ describe('installation scripts', () => {
       'curl -fL --retry 2 --connect-timeout 15 --max-time 300 --progress-bar "${url}" -o "${destination}"',
     );
     expect(script).toContain(
+      'curl -fsSL --retry 2 --connect-timeout 10 --max-time 30 "${url}"',
+    );
+    expect(script).toContain('wget -q "${wget_args[@]}" -O - "${url}"');
+    expect(script).toContain(
       'wget --progress=bar:force:noscroll "${wget_args[@]}" "${url}" -O "${destination}"',
     );
     expect(script).toContain('wget_args+=(--read-timeout=300)');
@@ -191,6 +195,8 @@ describe('installation scripts', () => {
       '& $curl --connect-timeout 15 --max-time 300 -fsSLo',
     );
     expect(script).toContain('-TimeoutSec 300');
+    expect(script).toContain('$request.Timeout = 10000');
+    expect(script).toContain('$request.ReadWriteTimeout = 30000');
     expect(script).not.toContain('PowerShell (Administrator)');
     expect(script).not.toContain('echo INFO: Installation source: %SOURCE%');
     expect(script).not.toMatch(/^\s*call\s+qwen\s*$/m);
@@ -782,6 +788,9 @@ describe('standalone release packaging', () => {
     expect(installPowerShellSource).toContain('current-cmd-shim.txt');
     expect(installPowerShellSource).toContain('Test-WritableDirectory');
     expect(installPowerShellSource).toContain('Qwen Code current-session shim');
+    expect(installPowerShellSource).toContain(
+      'QWEN_NO_MODIFY_PATH=1; skipping current-session PATH refresh.',
+    );
     expect(installPowerShellSource).not.toContain('doskey.exe');
     expect(installPowerShellSource).toContain(
       'qwen is ready to use in this PowerShell session.',
@@ -1520,10 +1529,13 @@ describe('standalone release packaging', () => {
     );
     expect(workflow).toContain('--acl public-read');
     expect(workflow).toContain(
+      'curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}"',
+    );
+    expect(workflow).toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"',
     );
     expect(workflow).toContain(
-      'latest_version="$(curl -fsSL "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d',
+      'latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d',
     );
     expect(workflow).not.toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"',

@@ -594,12 +594,16 @@ download_text() {
     local url="$1"
 
     if command_exists curl; then
-        curl -fsSL --retry 2 "${url}"
+        curl -fsSL --retry 2 --connect-timeout 10 --max-time 30 "${url}"
         return $?
     fi
 
     if command_exists wget; then
-        wget -q --tries=3 -O - "${url}"
+        local wget_args=(--tries=3 --timeout=10)
+        if wget --help 2>&1 | grep -q -- '--read-timeout'; then
+            wget_args+=(--read-timeout=30)
+        fi
+        wget -q "${wget_args[@]}" -O - "${url}"
         return $?
     fi
 

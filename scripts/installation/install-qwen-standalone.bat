@@ -586,7 +586,7 @@ exit /b %PS_STATUS%
 set "QWEN_CHECK_URL=%~1"
 rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
 rem AllowAutoRedirect=true is required for GitHub release asset URLs which return HTTP 302.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Method = 'HEAD'; if ($request -is [Net.HttpWebRequest]) { $request.AllowAutoRedirect = $true }; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Timeout = 10000; $request.Method = 'HEAD'; if ($request -is [Net.HttpWebRequest]) { $request.ReadWriteTimeout = 30000; $request.AllowAutoRedirect = $true }; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_CHECK_URL="
 exit /b %PS_STATUS%

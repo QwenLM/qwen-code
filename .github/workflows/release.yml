@@ -402,7 +402,7 @@ jobs:
           set -euo pipefail
 
           tmp_dir="$(mktemp -d)"
-          curl -fsSL "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
+          curl -fsSL --connect-timeout 15 --max-time 300 "${OSSUTIL_URL}" -o "${tmp_dir}/ossutil.zip"
           echo "${OSSUTIL_SHA256}  ${tmp_dir}/ossutil.zip" | sha256sum -c -
           unzip -q "${tmp_dir}/ossutil.zip" -d "${tmp_dir}"
 
@@ -528,7 +528,7 @@ jobs:
           printf '%s\n' "${RELEASE_TAG}" > "${RUNNER_TEMP}/qwen-code-latest-version"
           ossutil cp "${RUNNER_TEMP}/qwen-code-latest-version" "oss://${ALIYUN_OSS_BUCKET}/releases/qwen-code/latest/VERSION" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
 
-          latest_version="$(curl -fsSL "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d '[:space:]')"
+          latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d '[:space:]')"
           if [[ "${latest_version}" != "${RELEASE_TAG}" ]]; then
             echo "::error::Aliyun latest VERSION points to ${latest_version}, expected ${RELEASE_TAG}"
             exit 1

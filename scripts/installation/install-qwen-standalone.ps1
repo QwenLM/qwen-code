@@ -271,6 +271,12 @@ function Update-CurrentShell {
         return
     }
 
+    if ($env:QWEN_NO_MODIFY_PATH -eq '1') {
+        Write-Output "Run: ${qwenCommandPath}"
+        Write-Output "INFO: QWEN_NO_MODIFY_PATH=1; skipping current-session PATH refresh."
+        return
+    }
+
     $inheritedPath = $env:Path
     Update-CurrentSessionPath -BinDir $qwenInstallBinDir
 
