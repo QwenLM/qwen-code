@@ -192,15 +192,21 @@ async function checkOriginFileChanged(
     }
   }
 
-  let backupStats: Stats | null = null;
+  // Treat any failure to stat the backup (including ENOENT) as "changed" so
+  // callers attempt the restore: applySnapshot will surface the missing
+  // backup via restoreBackup → filesFailed, and makeSnapshot will create a
+  // fresh backup. The previous ENOENT branch silently reported "unchanged"
+  // when both the working file and the backup had been deleted, which let
+  // rewind report success even though the snapshot expected the file to
+  // exist.
+  let backupStats: Stats;
   try {
     backupStats = await stat(backupPath);
-  } catch (e: unknown) {
-    if (!isENOENT(e)) return true;
+  } catch {
+    return true;
   }
 
-  if ((originalStats === null) !== (backupStats === null)) return true;
-  if (originalStats === null || backupStats === null) return false;
+  if (originalStats === null) return true;
 
   if (
     originalStats.mode !== backupStats.mode ||

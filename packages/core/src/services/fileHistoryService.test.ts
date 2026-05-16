@@ -218,6 +218,32 @@ describe('FileHistoryService', () => {
       expect(result.filesFailed.length).toBeGreaterThan(0);
     });
 
+    // Edge case: both the on-disk backup and the working file have been
+    // removed externally. The target snapshot still expects the file to
+    // exist, so rewind must surface this as filesFailed instead of
+    // silently reporting success.
+    it('should report filesFailed when both backup and working file are gone', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'original');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'modified');
+      await service.makeSnapshot('p2');
+
+      const snapshots = service.getSnapshots();
+      const backupName =
+        snapshots[0].trackedFileBackups['a.txt']!.backupFileName!;
+      await rm(join(storageDir, 'file-history', 'test-session', backupName), {
+        force: true,
+      });
+      await rm(file, { force: true });
+
+      const result = await service.rewind('p1');
+      expect(result.filesChanged).toEqual([]);
+      expect(result.filesFailed.length).toBeGreaterThan(0);
+    });
+
     it('should preserve snapshot timeline when truncateHistory=false', async () => {
       const file = join(projectDir, 'a.txt');
       await writeFile(file, 'original');
