@@ -472,4 +472,132 @@ describe('exportCommand', () => {
       expect(result.content).toContain('File write failed');
     });
   });
+
+  describe('exportJsonAction', () => {
+    it('should export session to JSON file', async () => {
+      const jsonCommand = exportCommand.subCommands?.find(
+        (c) => c.name === 'json',
+      );
+      if (!jsonCommand?.action) {
+        throw new Error('json command not found');
+      }
+
+      const result = await jsonCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          'export-2025-01-01T00-00-00-000Z.json',
+        ),
+      });
+
+      expect(mockSessionServiceMocks.loadSession).toHaveBeenCalled();
+      expect(collectSessionData).toHaveBeenCalledWith(
+        mockSessionData.conversation,
+        expect.anything(),
+      );
+      expect(normalizeSessionData).toHaveBeenCalled();
+      expect(toJson).toHaveBeenCalled();
+      expect(generateExportFilename).toHaveBeenCalledWith('json');
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining('export-2025-01-01T00-00-00-000Z.json'),
+        '{"messages":[]}',
+        'utf-8',
+      );
+    });
+
+    it('should export JSON to a relative custom directory', async () => {
+      const jsonCommand = exportCommand.subCommands?.find(
+        (c) => c.name === 'json',
+      );
+      if (!jsonCommand?.action) {
+        throw new Error('json command not found');
+      }
+
+      const result = await jsonCommand.action(mockContext, './logs');
+      const outputDir = path.resolve('/test/dir', './logs');
+      const filepath = path.join(
+        outputDir,
+        'export-2025-01-01T00-00-00-000Z.json',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(filepath),
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        filepath,
+        '{"messages":[]}',
+        'utf-8',
+      );
+    });
+  });
+
+  describe('exportJsonlAction', () => {
+    it('should export session to JSONL file', async () => {
+      const jsonlCommand = exportCommand.subCommands?.find(
+        (c) => c.name === 'jsonl',
+      );
+      if (!jsonlCommand?.action) {
+        throw new Error('jsonl command not found');
+      }
+
+      const result = await jsonlCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          'export-2025-01-01T00-00-00-000Z.jsonl',
+        ),
+      });
+
+      expect(mockSessionServiceMocks.loadSession).toHaveBeenCalled();
+      expect(collectSessionData).toHaveBeenCalledWith(
+        mockSessionData.conversation,
+        expect.anything(),
+      );
+      expect(normalizeSessionData).toHaveBeenCalled();
+      expect(toJsonl).toHaveBeenCalled();
+      expect(generateExportFilename).toHaveBeenCalledWith('jsonl');
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        expect.stringContaining('export-2025-01-01T00-00-00-000Z.jsonl'),
+        '{"type":"session_metadata"}',
+        'utf-8',
+      );
+    });
+
+    it('should export JSONL to a relative custom directory', async () => {
+      const jsonlCommand = exportCommand.subCommands?.find(
+        (c) => c.name === 'jsonl',
+      );
+      if (!jsonlCommand?.action) {
+        throw new Error('jsonl command not found');
+      }
+
+      const result = await jsonlCommand.action(mockContext, './logs');
+      const outputDir = path.resolve('/test/dir', './logs');
+      const filepath = path.join(
+        outputDir,
+        'export-2025-01-01T00-00-00-000Z.jsonl',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(filepath),
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        filepath,
+        '{"type":"session_metadata"}',
+        'utf-8',
+      );
+    });
+  });
 });
