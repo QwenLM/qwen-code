@@ -34,6 +34,15 @@ vi.mock('@qwen-code/qwen-code-core', () => {
   }
 
   return {
+    isSubpath: (parentPath: string, childPath: string) => {
+      const relativePath = path.relative(parentPath, childPath);
+      return (
+        relativePath === '' ||
+        (relativePath !== '..' &&
+          !relativePath.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relativePath))
+      );
+    },
     SessionService,
   };
 });
@@ -326,7 +335,7 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory.',
+          'Export directory must be within the project working directory. (target path is outside cwd)',
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -345,7 +354,7 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory.',
+          'Export directory must be within the project working directory. (target path is outside cwd)',
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();
@@ -371,10 +380,65 @@ describe('exportCommand', () => {
         type: 'message',
         messageType: 'error',
         content:
-          'Export directory must be within the project working directory.',
+          'Export directory must be within the project working directory. (path resolves outside cwd via symlink)',
       });
       expect(fs.mkdir).not.toHaveBeenCalled();
       expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should allow output directories with names beginning with two dots', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const result = await mdCommand.action(mockContext, './..backup');
+      const outputDir = path.resolve('/test/dir', './..backup');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          path.join('./..backup', 'export-2025-01-01T00-00-00-000Z.md'),
+        ),
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.writeFile).toHaveBeenCalled();
+    });
+
+    it('should validate the nearest existing parent for fresh nested directories', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      let outputDirCreated = false;
+      vi.mocked(fs.mkdir).mockImplementation(async () => {
+        outputDirCreated = true;
+        return undefined;
+      });
+      vi.mocked(fs.realpath).mockImplementation(async (p) => {
+        const pathStr = p.toString();
+        if (pathStr.includes('/nonexistent') && !outputDirCreated) {
+          const err = new Error('ENOENT: no such file or directory');
+          (err as NodeJS.ErrnoException).code = 'ENOENT';
+          throw err;
+        }
+        return pathStr;
+      });
+
+      const result = await mdCommand.action(mockContext, './nonexistent/logs');
+      const outputDir = path.resolve('/test/dir', './nonexistent/logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          path.join('./nonexistent/logs', 'export-2025-01-01T00-00-00-000Z.md'),
+        ),
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith(outputDir, { recursive: true });
+      expect(fs.writeFile).toHaveBeenCalled();
     });
   });
 
@@ -527,7 +591,7 @@ describe('exportCommand', () => {
         throw new Error('expected message result');
       }
       expect(result.content).toContain('Failed to generate HTML');
-      expect(result.content).toContain('HTML target:');
+      expect(result.content).not.toContain('HTML target:');
     });
 
     it('should handle errors during file write', async () => {
@@ -643,7 +707,7 @@ describe('exportCommand', () => {
         throw new Error('expected message result');
       }
       expect(result.content).toContain('Failed to generate JSON');
-      expect(result.content).toContain('JSON target:');
+      expect(result.content).not.toContain('JSON target:');
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });
@@ -736,7 +800,7 @@ describe('exportCommand', () => {
         throw new Error('expected message result');
       }
       expect(result.content).toContain('Failed to generate JSONL');
-      expect(result.content).toContain('JSONL target:');
+      expect(result.content).not.toContain('JSONL target:');
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
   });

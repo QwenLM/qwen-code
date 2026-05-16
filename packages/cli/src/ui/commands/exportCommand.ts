@@ -12,7 +12,7 @@ import {
   type MessageActionReturn,
   CommandKind,
 } from './types.js';
-import { SessionService } from '@qwen-code/qwen-code-core';
+import { isSubpath, SessionService } from '@qwen-code/qwen-code-core';
 import {
   collectSessionData,
   normalizeSessionData,
@@ -31,13 +31,8 @@ type ExportFormat = {
   format: (sessionData: ExportSessionData) => string;
 };
 
-function isPathInside(parentPath: string, childPath: string): boolean {
-  const relativePath = path.relative(parentPath, childPath);
-  return (
-    relativePath === '' ||
-    (!relativePath.startsWith('..') && !path.isAbsolute(relativePath))
-  );
-}
+const EXPORT_DIR_OUT_OF_CWD =
+  'Export directory must be within the project working directory.';
 
 function resolveExportTarget(cwd: string, args: string, extension: string) {
   const filename = generateExportFilename(extension);
@@ -48,7 +43,7 @@ function resolveExportTarget(cwd: string, args: string, extension: string) {
     : resolvedCwd;
   const filepath = path.join(outputDir, filename);
   const isDefaultOutputDir = outputDir === resolvedCwd;
-  const isInsideCwd = isPathInside(resolvedCwd, outputDir);
+  const isInsideCwd = isSubpath(resolvedCwd, outputDir);
 
   return {
     filepath,
@@ -65,26 +60,17 @@ function resolveExportTarget(cwd: string, args: string, extension: string) {
 async function validateExportTargetWithinCwd(target: {
   outputDir: string;
   resolvedCwd: string;
-  isInsideCwd: boolean;
 }): Promise<MessageActionReturn | undefined> {
-  if (!target.isInsideCwd) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Export directory must be within the project working directory.',
-    };
-  }
-
   const [realCwd, realOutputDir] = await Promise.all([
     fs.realpath(target.resolvedCwd),
     fs.realpath(target.outputDir),
   ]);
 
-  if (!isPathInside(realCwd, realOutputDir)) {
+  if (!isSubpath(realCwd, realOutputDir)) {
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Export directory must be within the project working directory.',
+      content: `${EXPORT_DIR_OUT_OF_CWD} (path resolves outside cwd via symlink)`,
     };
   }
 
@@ -97,7 +83,7 @@ async function realpathNearestExisting(
 ): Promise<string> {
   let currentPath = outputDir;
 
-  while (isPathInside(resolvedCwd, currentPath)) {
+  while (isSubpath(resolvedCwd, currentPath)) {
     try {
       return await fs.realpath(currentPath);
     } catch {
@@ -109,6 +95,8 @@ async function realpathNearestExisting(
     }
   }
 
+  // Fresh nested export directories may not exist yet. If every ancestor under
+  // cwd is missing, compare against the real cwd until mkdir creates the target.
   return fs.realpath(resolvedCwd);
 }
 
@@ -121,11 +109,11 @@ async function validateExistingExportParentWithinCwd(target: {
     realpathNearestExisting(target.outputDir, target.resolvedCwd),
   ]);
 
-  if (!isPathInside(realCwd, realExistingParent)) {
+  if (!isSubpath(realCwd, realExistingParent)) {
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Export directory must be within the project working directory.',
+      content: `${EXPORT_DIR_OUT_OF_CWD} (path resolves outside cwd via symlink)`,
     };
   }
 
@@ -163,7 +151,7 @@ async function exportSessionAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Export directory must be within the project working directory.',
+      content: `${EXPORT_DIR_OUT_OF_CWD} (target path is outside cwd)`,
     };
   }
 
@@ -194,6 +182,11 @@ async function exportSessionAction(
       if (validationError) {
         return validationError;
       }
+    } else {
+      const validationError = await validateExportTargetWithinCwd(target);
+      if (validationError) {
+        return validationError;
+      }
     }
 
     // Collect and normalize export data (SSOT)
@@ -206,7 +199,15 @@ async function exportSessionAction(
 
     const content = exportFormat.format(normalizedData);
 
-    await fs.writeFile(target.filepath, content, 'utf-8');
+    try {
+      await fs.writeFile(target.filepath, content, 'utf-8');
+    } catch (error) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: `Failed to export session: ${error instanceof Error ? error.message : String(error)} (${exportFormat.displayName} target: "${targetFilepath}")`,
+      };
+    }
 
     return {
       type: 'message',
@@ -217,7 +218,7 @@ async function exportSessionAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)} (${exportFormat.displayName} target: "${targetFilepath}")`,
+      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
 }
