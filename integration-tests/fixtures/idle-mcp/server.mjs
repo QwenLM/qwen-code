@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Minimal stdio MCP server for daemon-baseline tests. Responds to the
-// MCP `initialize` + `tools/list` handshake (just enough for the daemon
-// to consider the server "connected"), then idles forever.
+// MCP `initialize` + `tools/list` handshake with one no-op tool (just
+// enough for the daemon to consider the server "connected"), then idles
+// forever.
 //
 // We need a real long-running child process so the baseline harness can
 // count it via `pgrep -P` and surface the P1 N×M amplification before
@@ -13,6 +14,17 @@
 import { exit, stdin, stdout } from 'node:process';
 
 const PROTOCOL_VERSION = '2024-11-05';
+const TOOLS = [
+  {
+    name: 'idle_ping',
+    description: 'No-op tool for daemon baseline process-count tests.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+  },
+];
 
 function send(msg) {
   stdout.write(JSON.stringify(msg) + '\n');
@@ -44,7 +56,9 @@ stdin.on('data', (chunk) => {
         serverInfo: { name: 'idle-mcp', version: '0.0.1' },
       });
     } else if (msg.method === 'tools/list') {
-      respond(msg.id, { tools: [] });
+      respond(msg.id, { tools: TOOLS });
+    } else if (msg.method === 'tools/call') {
+      respond(msg.id, { content: [{ type: 'text', text: 'ok' }] });
     } else if (msg.method === 'notifications/initialized') {
       // No response needed for notifications.
     } else if (msg.id !== undefined) {

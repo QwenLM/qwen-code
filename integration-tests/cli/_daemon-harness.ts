@@ -14,10 +14,11 @@
  *   - `getRssMB` / `startRssPolling` sample the daemon process's RSS via
  *     `ps -o rss=`. POSIX-only (no Windows). Used to capture the RSS curve
  *     across session counts.
- *   - `countDescendants` walks the daemon's process tree two levels via
- *     `pgrep -P` (matches the existing inline pattern at
- *     `qwen-serve-streaming.test.ts:144`). Used to surface the P1
- *     "MCP child × session" amplification before the M2 shared-pool fix.
+ *   - `countDescendants` walks the daemon's process tree via `pgrep -P`
+ *     (matches the existing inline pattern at
+ *     `qwen-serve-streaming.test.ts:144`, with optional filtered subtree
+ *     matching). Used to surface the P1 "MCP child × session"
+ *     amplification before the M2 shared-pool fix.
  *   - `percentiles` is a dependency-free p50/p90/p99 calculator for the
  *     prompt-latency suite.
  *   - `consumeSseEvents` drives the daemon's SSE stream at a configurable
@@ -89,6 +90,7 @@ export interface SpawnedDaemon {
 
 const LISTENING_RE = /listening on http:\/\/127\.0\.0\.1:(\d+)/;
 const DISPOSE_GRACE_MS = 5_000;
+const MATCHED_DESCENDANT_DEPTH = 4;
 
 export async function spawnDaemon(
   opts: SpawnDaemonOptions = {},
@@ -132,28 +134,49 @@ export async function spawnDaemon(
   // resolution clears it (an un-cleared 10s timer leaks past the spawn
   // promise and shows up as flaky test timeouts on slow CI).
   const port = await new Promise<number>((resolve, reject) => {
-    const bootTimer = setTimeout(
-      () => reject(new Error('daemon boot timeout')),
-      bootTimeoutMs,
-    );
+    let settled = false;
+    const cleanup = () => {
+      daemon.stdout?.off('data', onData);
+      daemon.off('exit', onExit);
+      clearTimeout(bootTimer);
+    };
+    const fail = (err: Error, kill = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (kill && daemon.exitCode === null) {
+        daemon.kill('SIGTERM');
+      }
+      reject(err);
+    };
+    const bootTimer = setTimeout(() => {
+      fail(
+        new Error(
+          `daemon boot timeout after ${bootTimeoutMs}ms:\n` +
+            `stdout=${stdoutBuf.value}\nstderr=${stderrBuf.value}`,
+        ),
+        true,
+      );
+    }, bootTimeoutMs);
     const onData = (_chunk: Buffer) => {
       const m = stdoutBuf.value.match(LISTENING_RE);
       if (m) {
-        daemon.stdout?.off('data', onData);
-        clearTimeout(bootTimer);
+        if (settled) return;
+        settled = true;
+        cleanup();
         resolve(Number(m[1]));
       }
     };
-    daemon.stdout!.on('data', onData);
-    daemon.once('exit', (code) => {
-      clearTimeout(bootTimer);
-      reject(
+    const onExit = (code: number | null) => {
+      fail(
         new Error(
           `daemon exited with ${code} before listening:\n` +
             `stdout=${stdoutBuf.value}\nstderr=${stderrBuf.value}`,
         ),
       );
-    });
+    };
+    daemon.stdout!.on('data', onData);
+    daemon.once('exit', onExit);
   });
 
   const base = `http://127.0.0.1:${port}`;
@@ -239,16 +262,20 @@ export interface RssSample {
 
 export interface RssPoller {
   samples: RssSample[];
+  droppedSamples: number;
   stop(): void;
 }
 
 export function startRssPolling(pid: number, intervalMs = 100): RssPoller {
   const startedAt = Date.now();
   const samples: RssSample[] = [];
+  let droppedSamples = 0;
   const tick = () => {
     const rssMB = getRssMB(pid);
     if (!Number.isNaN(rssMB)) {
       samples.push({ tMs: Date.now() - startedAt, rssMB });
+    } else {
+      droppedSamples++;
     }
   };
   // Capture an immediate sample so a short window still has data.
@@ -258,14 +285,21 @@ export function startRssPolling(pid: number, intervalMs = 100): RssPoller {
   handle.unref?.();
   return {
     samples,
+    get droppedSamples() {
+      return droppedSamples;
+    },
     stop: () => clearInterval(handle),
   };
 }
 
 /**
- * Walk daemon → ACP child → MCP grandchildren via two `pgrep -P` calls.
- * Pattern matches the existing inline approach at
- * `qwen-serve-streaming.test.ts:144`.
+ * Walk daemon → ACP child → MCP descendants via `pgrep -P` calls.
+ * Pattern starts with the existing inline approach at
+ * `qwen-serve-streaming.test.ts:144`. When `pgrepOpts.mcpFilter` is
+ * supplied, matching MCP processes are searched recursively within each
+ * ACP child subtree because the ACP transport can introduce an extra
+ * `qwen --acp` process between the daemon-facing ACP child and stdio MCP
+ * servers.
  *
  * `pgrepOpts.acpFilter` defaults to `'qwen.*--acp'` (matches the spawned
  * `qwen --acp` child); pass an override only if a future bridge changes
@@ -283,13 +317,23 @@ export interface DescendantCount {
 
 export function countDescendants(
   daemonPid: number,
-  pgrepOpts: { acpFilter?: string } = {},
+  pgrepOpts: { acpFilter?: string; mcpFilter?: string } = {},
 ): DescendantCount {
   const acpFilter = pgrepOpts.acpFilter ?? 'qwen.*--acp';
   const acpChildren = pgrepChildren(daemonPid, acpFilter);
   const mcpGrandchildren: number[] = [];
   for (const acpPid of acpChildren) {
-    mcpGrandchildren.push(...pgrepChildren(acpPid));
+    if (pgrepOpts.mcpFilter) {
+      mcpGrandchildren.push(
+        ...pgrepMatchingDescendants(
+          acpPid,
+          pgrepOpts.mcpFilter,
+          MATCHED_DESCENDANT_DEPTH,
+        ),
+      );
+    } else {
+      mcpGrandchildren.push(...pgrepChildren(acpPid));
+    }
   }
   return {
     acpChildren,
@@ -316,11 +360,47 @@ function pgrepChildren(parentPid: number, fullCmdFilter?: string): number[] {
       .filter(Boolean)
       .map((line) => parseInt(line, 10))
       .filter((n) => Number.isFinite(n) && n > 0);
-  } catch {
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException & {
+      status?: number;
+      signal?: NodeJS.Signals | string | null;
+    };
     // pgrep returns non-zero when no processes match; that's a normal
     // "0 children" outcome, not an error.
-    return [];
+    if (error.status === 1) {
+      return [];
+    }
+    if (error.code === 'ENOENT') {
+      throw new Error('pgrep is required for daemon descendant counting');
+    }
+    if (error.signal === 'SIGTERM') {
+      throw new Error(`pgrep timed out while listing children of ${parentPid}`);
+    }
+    const detail =
+      error instanceof Error && error.message ? `: ${error.message}` : '';
+    throw new Error(
+      `pgrep failed while listing children of ${parentPid}${detail}`,
+    );
   }
+}
+
+function pgrepMatchingDescendants(
+  parentPid: number,
+  fullCmdFilter: string,
+  maxDepth: number,
+): number[] {
+  const matches = new Set<number>();
+  const visit = (pid: number, depth: number) => {
+    if (depth <= 0) return;
+    for (const match of pgrepChildren(pid, fullCmdFilter)) {
+      matches.add(match);
+    }
+    for (const child of pgrepChildren(pid)) {
+      visit(child, depth - 1);
+    }
+  };
+  visit(parentPid, maxDepth);
+  return [...matches];
 }
 
 /**
@@ -353,7 +433,8 @@ export function percentiles(values: number[]): Percentiles {
   }
   const sorted = [...values].sort((a, b) => a - b);
   const n = sorted.length;
-  const pick = (p: number) => sorted[Math.min(n - 1, Math.ceil((p / 100) * n) - 1)];
+  const pick = (p: number) =>
+    sorted[Math.min(n - 1, Math.ceil((p / 100) * n) - 1)];
   const sum = sorted.reduce((acc, v) => acc + v, 0);
   return {
     count: n,

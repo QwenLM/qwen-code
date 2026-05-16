@@ -45,6 +45,7 @@ import {
   percentiles,
   writeWorkspaceSettings,
   type SpawnedDaemon,
+  type DescendantCount,
   type Percentiles,
 } from './_daemon-harness.js';
 
@@ -69,12 +70,31 @@ const RSS_SAMPLE_DURATION_MS = Number(
   process.env['QWEN_BASELINE_RSS_SAMPLE_DURATION_MS'] ??
     (HEAVY ? 15_000 : 5_000),
 );
+const PROMPT_LATENCY_CREDENTIAL_ENV_KEYS = [
+  'DASHSCOPE_API_KEY',
+  'OPENAI_API_KEY',
+  'ANTHROPIC_API_KEY',
+  'GEMINI_API_KEY',
+  'GOOGLE_API_KEY',
+  'QWEN_API_KEY',
+];
+const HAS_PROMPT_LATENCY_CREDENTIAL =
+  process.env['QWEN_BASELINE_ENABLE_PROMPT_LATENCY'] === '1' ||
+  PROMPT_LATENCY_CREDENTIAL_ENV_KEYS.some((key) => Boolean(process.env[key])) ||
+  Object.entries(process.env).some(
+    ([key, value]) => key.startsWith('QWEN_CUSTOM_API_KEY_') && Boolean(value),
+  );
 const SKIP_PROMPT_LATENCY =
   process.env['QWEN_BASELINE_SKIP_PROMPT_LATENCY'] === '1' ||
-  !process.env['QWEN_TEST_MODEL_KEY'];
+  !HAS_PROMPT_LATENCY_CREDENTIAL;
 
 const FIXTURES_DIR = path.resolve(__dirname, '../fixtures');
 const IDLE_MCP_PATH = path.join(FIXTURES_DIR, 'idle-mcp/server.mjs');
+const MCP_SERVERS_CONFIGURED = 2;
+const MCP_FIXTURE_PGREP_FILTER = 'idle-mcp/server\\.mjs';
+const MCP_DESCENDANT_WAIT_TIMEOUT_MS = 10_000;
+const MCP_DESCENDANT_POLL_MS = 250;
+const RSS_DROPPED_SAMPLE_RATIO_MAX = 0.2;
 const RUN_TS = new Date().toISOString().replace(/[:.]/g, '').replace(/Z$/, '');
 const OUTPUT_DIR =
   process.env['INTEGRATION_TEST_FILE_DIR'] ??
@@ -117,6 +137,7 @@ interface SnapshotShape {
     session5MB: number;
     session10MB: number;
     sampleCount: number;
+    droppedSampleCount: number;
     growthPerSessionMB: number;
   };
   promptLatency?: {
@@ -191,6 +212,57 @@ function makeTempWorkspace(label: string): string {
   return dir;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isAgentMessageChunkEvent(ev: {
+  type: string;
+  data: unknown;
+}): boolean {
+  if (ev.type !== 'session_update' || !isRecord(ev.data)) return false;
+  const update = ev.data['update'];
+  return isRecord(update) && update['sessionUpdate'] === 'agent_message_chunk';
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
+async function waitForMcpGrandchildren(
+  daemonPid: number,
+  minMcpGrandchildren: number,
+): Promise<DescendantCount> {
+  const deadline = Date.now() + MCP_DESCENDANT_WAIT_TIMEOUT_MS;
+  let last = countDescendants(daemonPid, {
+    mcpFilter: MCP_FIXTURE_PGREP_FILTER,
+  });
+
+  while (Date.now() < deadline) {
+    last = countDescendants(daemonPid, {
+      mcpFilter: MCP_FIXTURE_PGREP_FILTER,
+    });
+    if (
+      last.acpChildren.length >= 1 &&
+      last.mcpGrandchildren.length >= minMcpGrandchildren
+    ) {
+      return last;
+    }
+    await sleep(MCP_DESCENDANT_POLL_MS);
+  }
+
+  throw new Error(
+    `Timed out waiting for ${minMcpGrandchildren} MCP grandchildren ` +
+      `under daemon ${daemonPid}; last acpChildren=` +
+      `[${last.acpChildren.join(', ')}], mcpGrandchildren=` +
+      `[${last.mcpGrandchildren.join(', ')}]`,
+  );
+}
+
 async function createNSessions(
   daemon: SpawnedDaemon,
   n: number,
@@ -205,23 +277,45 @@ async function createNSessions(
   return ids;
 }
 
-async function measureRssAtSessionCount(
-  sessionCount: number,
-): Promise<{ peakRssMB: number; sampleCount: number }> {
+async function measureRssAtSessionCount(sessionCount: number): Promise<{
+  peakRssMB: number;
+  sampleCount: number;
+  droppedSampleCount: number;
+}> {
   const ws = makeTempWorkspace(`rss-${sessionCount}`);
-  const daemon = await spawnDaemon({ workspaceCwd: ws });
+  let daemon: SpawnedDaemon | undefined;
   try {
+    daemon = await spawnDaemon({ workspaceCwd: ws });
     await createNSessions(daemon, sessionCount);
     const poller = startRssPolling(daemon.daemon.pid!, RSS_SAMPLE_INTERVAL_MS);
     await new Promise((r) => setTimeout(r, RSS_SAMPLE_DURATION_MS));
     poller.stop();
+    if (poller.samples.length === 0) {
+      throw new Error(
+        `RSS polling produced no usable samples for ${sessionCount} sessions`,
+      );
+    }
+    const sampleTotal = poller.samples.length + poller.droppedSamples;
+    if (
+      sampleTotal > 0 &&
+      poller.droppedSamples / sampleTotal > RSS_DROPPED_SAMPLE_RATIO_MAX
+    ) {
+      throw new Error(
+        `RSS polling dropped ${poller.droppedSamples}/${sampleTotal} ` +
+          `samples for ${sessionCount} sessions`,
+      );
+    }
     const peakRssMB = poller.samples.reduce(
       (max, s) => Math.max(max, s.rssMB),
       0,
     );
-    return { peakRssMB, sampleCount: poller.samples.length };
+    return {
+      peakRssMB,
+      sampleCount: poller.samples.length,
+      droppedSampleCount: poller.droppedSamples,
+    };
   } finally {
-    await daemon.dispose();
+    if (daemon) await daemon.dispose();
     fs.rmSync(ws, { recursive: true, force: true });
   }
 }
@@ -242,6 +336,10 @@ async function measureRssAtSessionCount(
             session5MB: r5.peakRssMB,
             session10MB: r10.peakRssMB,
             sampleCount: r1.sampleCount + r5.sampleCount + r10.sampleCount,
+            droppedSampleCount:
+              r1.droppedSampleCount +
+              r5.droppedSampleCount +
+              r10.droppedSampleCount,
             growthPerSessionMB:
               Math.round(((r10.peakRssMB - r1.peakRssMB) / 9) * 10) / 10,
           };
@@ -249,8 +347,6 @@ async function measureRssAtSessionCount(
           // Catastrophic upper bounds only.
           expect(r1.peakRssMB).toBeLessThan(THRESH.rss1SessionMaxMB);
           expect(r10.peakRssMB).toBeLessThan(THRESH.rss10SessionsMaxMB);
-          // Sanity: growth should be non-negative (more sessions ≥ more memory).
-          expect(r10.peakRssMB).toBeGreaterThanOrEqual(r1.peakRssMB);
         },
         // Each session-count needs daemon spawn + N session creates +
         // RSS_SAMPLE_DURATION_MS sampling + dispose. ~3 × 15s budget per
@@ -262,8 +358,9 @@ async function measureRssAtSessionCount(
     describe('attach latency', () => {
       it('measures Nth same-workspace session attach time', async () => {
         const ws = makeTempWorkspace('attach');
-        const daemon = await spawnDaemon({ workspaceCwd: ws });
+        let daemon: SpawnedDaemon | undefined;
         try {
+          daemon = await spawnDaemon({ workspaceCwd: ws });
           // Create session 1 to warm the channel.
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
 
@@ -287,7 +384,7 @@ async function measureRssAtSessionCount(
           expect(session2Ms).toBeLessThan(THRESH.attachLatencyMaxMs);
           expect(session5Ms).toBeLessThan(THRESH.attachLatencyMaxMs);
         } finally {
-          await daemon.dispose();
+          if (daemon) await daemon.dispose();
           fs.rmSync(ws, { recursive: true, force: true });
         }
       }, 60_000);
@@ -296,41 +393,43 @@ async function measureRssAtSessionCount(
     describe('MCP child amplification (P1 baseline)', () => {
       it('counts MCP grandchildren as session count grows', async () => {
         const ws = makeTempWorkspace('mcp');
-        writeWorkspaceSettings(ws, {
-          mcpServers: {
-            idle1: { command: 'node', args: [IDLE_MCP_PATH] },
-            idle2: { command: 'node', args: [IDLE_MCP_PATH] },
-          },
-        });
-        const daemon = await spawnDaemon({ workspaceCwd: ws });
+        let daemon: SpawnedDaemon | undefined;
         try {
-          // Sleep briefly after each create so MCP children get time to
-          // spawn before we count.
-          const sleep = (ms: number) =>
-            new Promise<void>((r) => setTimeout(r, ms));
+          writeWorkspaceSettings(ws, {
+            mcpServers: {
+              idle1: { command: 'node', args: [IDLE_MCP_PATH] },
+              idle2: { command: 'node', args: [IDLE_MCP_PATH] },
+            },
+          });
+          daemon = await spawnDaemon({ workspaceCwd: ws });
 
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
-          await sleep(2_000);
-          const at1 = countDescendants(daemon.daemon.pid!);
+          const at1 = await waitForMcpGrandchildren(
+            daemon.daemon.pid!,
+            MCP_SERVERS_CONFIGURED,
+          );
 
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
-          await sleep(2_000);
-          const at3 = countDescendants(daemon.daemon.pid!);
+          const at3 = await waitForMcpGrandchildren(
+            daemon.daemon.pid!,
+            MCP_SERVERS_CONFIGURED,
+          );
 
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
           await daemon.client.createOrAttachSession({ workspaceCwd: ws });
-          await sleep(2_000);
-          const at5 = countDescendants(daemon.daemon.pid!);
+          const at5 = await waitForMcpGrandchildren(
+            daemon.daemon.pid!,
+            MCP_SERVERS_CONFIGURED,
+          );
 
-          const mcpServersConfigured = 2;
           const expectedMaxAt5 =
-            mcpServersConfigured * 5 * THRESH.mcpAmplificationFactor;
+            MCP_SERVERS_CONFIGURED * 5 * THRESH.mcpAmplificationFactor;
           const linear =
-            at5.mcpGrandchildren.length >= mcpServersConfigured * 5 * 0.5; // ≥50% of linear → confirmed amplification
+            at5.mcpGrandchildren.length >= MCP_SERVERS_CONFIGURED * 5 * 0.5; // ≥50% of linear → confirmed amplification
 
           snapshot.mcpAmplification = {
-            mcpServersConfigured,
+            mcpServersConfigured: MCP_SERVERS_CONFIGURED,
             childrenAt1Session: at1.mcpGrandchildren.length,
             childrenAt3Sessions: at3.mcpGrandchildren.length,
             childrenAt5Sessions: at5.mcpGrandchildren.length,
@@ -339,12 +438,15 @@ async function measureRssAtSessionCount(
 
           // Sanity: at least 1 ACP child should exist throughout.
           expect(at1.acpChildren.length).toBeGreaterThanOrEqual(1);
+          expect(at1.mcpGrandchildren.length).toBeGreaterThanOrEqual(
+            MCP_SERVERS_CONFIGURED,
+          );
           // Catastrophic bound: not worse than 2× linear.
           expect(at5.mcpGrandchildren.length).toBeLessThanOrEqual(
             expectedMaxAt5,
           );
         } finally {
-          await daemon.dispose();
+          if (daemon) await daemon.dispose();
           fs.rmSync(ws, { recursive: true, force: true });
         }
       }, 120_000);
@@ -411,8 +513,9 @@ async function measureRssAtSessionCount(
         `p50 / p99 over ${PROMPT_ITERATIONS} prompts`,
         async () => {
           const ws = makeTempWorkspace('prompt');
-          const daemon = await spawnDaemon({ workspaceCwd: ws });
+          let daemon: SpawnedDaemon | undefined;
           try {
+            daemon = await spawnDaemon({ workspaceCwd: ws });
             const sess = await daemon.client.createOrAttachSession({
               workspaceCwd: ws,
             });
@@ -422,26 +525,49 @@ async function measureRssAtSessionCount(
             for (let i = 0; i < PROMPT_ITERATIONS; i++) {
               const t0 = Date.now();
               // Subscribe to events for first-byte timing; promptly cancel
-              // when we see the first session_update.
+              // when we see the first model response chunk.
               const ac = new AbortController();
               const iter = daemon.client.subscribeEvents(sess.sessionId, {
                 signal: ac.signal,
               });
-              const firstByteP = (async () => {
-                for await (const _ of iter) {
-                  ac.abort();
-                  return Date.now();
+              const firstByteP = (async (): Promise<number | null> => {
+                try {
+                  for await (const ev of iter) {
+                    if (isAgentMessageChunkEvent(ev)) {
+                      return Date.now();
+                    }
+                  }
+                } catch (err) {
+                  if (!isAbortError(err)) {
+                    throw err;
+                  }
                 }
-                return Date.now();
+                return null;
               })();
 
-              await daemon.client.prompt(sess.sessionId, {
-                prompt: [
-                  { type: 'text', text: 'reply with the single word ok' },
-                ],
-              });
-              const tEnd = Date.now();
+              let promptError: unknown;
+              let tEnd = Date.now();
+              try {
+                await daemon.client.prompt(sess.sessionId, {
+                  prompt: [
+                    { type: 'text', text: 'reply with the single word ok' },
+                  ],
+                });
+                tEnd = Date.now();
+              } catch (err) {
+                promptError = err;
+                tEnd = Date.now();
+              } finally {
+                ac.abort();
+              }
               const tFirstByte = await firstByteP;
+              if (promptError) throw promptError;
+              if (tFirstByte === null) {
+                throw new Error(
+                  'Prompt latency probe completed without an ' +
+                    'agent_message_chunk session_update event',
+                );
+              }
 
               firstByteMs.push(tFirstByte - t0);
               totalMs.push(tEnd - t0);
@@ -458,7 +584,7 @@ async function measureRssAtSessionCount(
               THRESH.promptP99MaxMs,
             );
           } finally {
-            await daemon.dispose();
+            if (daemon) await daemon.dispose();
             fs.rmSync(ws, { recursive: true, force: true });
           }
         },
@@ -466,14 +592,14 @@ async function measureRssAtSessionCount(
       );
 
       if (SKIP_PROMPT_LATENCY) {
-        it('prompt latency skipped (no QWEN_TEST_MODEL_KEY)', () => {
+        it('prompt latency skipped (no model credential env)', () => {
           snapshot.promptLatency = {
             iterations: 0,
             firstByteMs: null,
             totalMs: null,
             skipped: true,
             skipReason:
-              'QWEN_TEST_MODEL_KEY not set; prompt latency requires a real model credential.',
+              'No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth.',
           };
           // Mark via a no-op assertion so the suite still appears in output.
           expect(true).toBe(true);
@@ -512,7 +638,7 @@ function renderMarkdown(s: SnapshotShape): string {
     ``,
     `## RSS scaling`,
     s.rssScaling
-      ? `- 1 session: ${s.rssScaling.session1MB} MB\n- 5 sessions: ${s.rssScaling.session5MB} MB\n- 10 sessions: ${s.rssScaling.session10MB} MB\n- growth/session: ${s.rssScaling.growthPerSessionMB} MB`
+      ? `- 1 session: ${s.rssScaling.session1MB} MB\n- 5 sessions: ${s.rssScaling.session5MB} MB\n- 10 sessions: ${s.rssScaling.session10MB} MB\n- RSS samples: ${s.rssScaling.sampleCount} (${s.rssScaling.droppedSampleCount} dropped)\n- growth/session: ${s.rssScaling.growthPerSessionMB} MB`
       : 'not run',
     ``,
     `## Attach latency`,

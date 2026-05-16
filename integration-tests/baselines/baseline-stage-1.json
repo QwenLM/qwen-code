@@ -22,6 +22,7 @@
     "session5MB": 224.2,
     "session10MB": 223.9,
     "sampleCount": 60,
+    "droppedSampleCount": 0,
     "growthPerSessionMB": 0
   },
   "attachLatency": {
@@ -31,9 +32,9 @@
   },
   "mcpAmplification": {
     "mcpServersConfigured": 2,
-    "childrenAt1Session": 1,
-    "childrenAt3Sessions": 1,
-    "childrenAt5Sessions": 1,
+    "childrenAt1Session": 4,
+    "childrenAt3Sessions": 4,
+    "childrenAt5Sessions": 4,
     "linearAmplification": false
   },
   "sseBackpressure": {
@@ -48,6 +49,6 @@
     "firstByteMs": null,
     "totalMs": null,
     "skipped": true,
-    "skipReason": "QWEN_TEST_MODEL_KEY not set; prompt latency requires a real model credential."
+    "skipReason": "No recognized model credential env var is set; prompt latency requires real model access. Set QWEN_BASELINE_ENABLE_PROMPT_LATENCY=1 to force-run with non-env auth."
   }
 }
