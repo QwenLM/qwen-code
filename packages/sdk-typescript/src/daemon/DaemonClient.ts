@@ -99,6 +99,22 @@ export interface CreateSessionRequest {
    */
   workspaceCwd?: string;
   modelServiceId?: string;
+  /**
+   * Per-request session-scope override. The production daemon defaults
+   * to `'single'`, which coalesces same-workspace `POST /session` calls
+   * into one shared session; passing `sessionScope: 'thread'` here
+   * forces a distinct session for this call. The reverse override
+   * (per-request `'single'` against a daemon defaulting to `'thread'`)
+   * is also supported, though the daemon's default is hardcoded to
+   * `'single'` today (#4175 may add a CLI flag in a follow-up). Omit
+   * to inherit the daemon-wide default.
+   *
+   * Only `'single'` and `'thread'` are accepted; anything else yields
+   * `400 invalid_session_scope`. Old daemons (pre-#4175 PR 5) silently
+   * ignore the field — clients should pre-flight
+   * `caps.features.session_scope_override` before sending.
+   */
+  sessionScope?: 'single' | 'thread';
 }
 
 export interface PromptRequest {
@@ -279,6 +295,15 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd: req.workspaceCwd,
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+          // `!== undefined` (not truthy) so a buggy caller passing
+          // `sessionScope: '' | null` doesn't get the field silently
+          // erased on the wire — let the daemon's `400
+          // invalid_session_scope` surface the bug. Same shape the
+          // bridge's own validation uses (`httpAcpBridge.ts:
+          // spawnOrAttach`); SDK should be a transparent layer here.
+          ...(req.sessionScope !== undefined
+            ? { sessionScope: req.sessionScope }
+            : {}),
         }),
       },
       async (res) => {

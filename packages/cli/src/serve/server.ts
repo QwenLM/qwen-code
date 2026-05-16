@@ -14,6 +14,7 @@ import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
   InvalidPermissionOptionError,
+  InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -268,10 +269,32 @@ export function createServeApp(
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
         : undefined;
+    // Per-request `sessionScope` override (#4175 PR 5). Validate at the
+    // route boundary so a 400 surfaces a clear `code: invalid_session_scope`
+    // before we touch the bridge — the bridge revalidates as a defense
+    // against direct callers, but a typed 4xx is the right shape for HTTP
+    // clients. The field is OPTIONAL: omitting it preserves pre-PR
+    // behavior bit-for-bit (the daemon-wide `BridgeOptions.sessionScope`
+    // takes effect). New clients can pre-flight `caps.features` for
+    // `session_scope_override` before sending — see
+    // `packages/cli/src/serve/capabilities.ts`.
+    const rawSessionScope = body['sessionScope'];
+    let sessionScope: 'single' | 'thread' | undefined;
+    if (rawSessionScope !== undefined) {
+      if (rawSessionScope !== 'single' && rawSessionScope !== 'thread') {
+        res.status(400).json({
+          error: '`sessionScope` must be "single" or "thread" when provided',
+          code: 'invalid_session_scope',
+        });
+        return;
+      }
+      sessionScope = rawSessionScope;
+    }
     try {
       const session = await bridge.spawnOrAttach({
         workspaceCwd: cwd,
         modelServiceId,
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -980,6 +1003,19 @@ function sendBridgeError(
       code: 'workspace_mismatch',
       boundWorkspace: err.bound,
       requestedWorkspace: err.requested,
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionScopeError) {
+    // Same wire shape as the route-layer 400 (`server.ts` validates
+    // body['sessionScope'] before calling the bridge). A direct embed
+    // / test caller bypassing the route would otherwise see a generic
+    // 500 — the typed translation keeps both layers in agreement so
+    // SDK clients can branch on `code` regardless of which layer
+    // surfaced the rejection.
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_session_scope',
     });
     return;
   }
