@@ -632,9 +632,12 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
-set "QWEN_VERSION_POINTER_FILE=!TEMP_VERSION_FILE!"
-for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = (Get-Content -LiteralPath $env:QWEN_VERSION_POINTER_FILE -Raw).Trim(); if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { if ($value.StartsWith('v')) { Write-Output $value } else { Write-Output ('v' + $value) }; exit 0 }; exit 1"') do if not defined RESOLVED_VERSION_PATH set "RESOLVED_VERSION_PATH=%%V"
-set "QWEN_VERSION_POINTER_FILE="
+set "VERSION_POINTER_VALUE="
+for /f "usebackq delims=" %%V in ("!TEMP_VERSION_FILE!") do if not defined VERSION_POINTER_VALUE set "VERSION_POINTER_VALUE=%%V"
+set "QWEN_VERSION_VALUE=!VERSION_POINTER_VALUE!"
+for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VERSION_VALUE; if ([string]::IsNullOrWhiteSpace($value)) { exit 1 }; $value = $value.Trim(); if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { if ($value.StartsWith('v')) { Write-Output $value } else { Write-Output ('v' + $value) }; exit 0 }; exit 1"') do if not defined RESOLVED_VERSION_PATH set "RESOLVED_VERSION_PATH=%%V"
+set "QWEN_VERSION_VALUE="
+set "VERSION_POINTER_VALUE="
 if exist "!TEMP_VERSION_FILE!" del /F /Q "!TEMP_VERSION_FILE!" >nul 2>&1
 set "TEMP_VERSION_FILE="
 set "QWEN_OSS_LATEST_VERSION_URL="

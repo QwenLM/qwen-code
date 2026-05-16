@@ -207,6 +207,9 @@ describe('installation scripts', () => {
     expect(script).toContain('Installed to:');
     expect(script).toContain('Uninstall:');
     expect(script).toContain('uninstall-qwen-standalone.ps1');
+    expect(script).toContain('VERSION_POINTER_VALUE');
+    expect(script).toContain('IsNullOrWhiteSpace($value)');
+    expect(script).not.toContain('QWEN_VERSION_POINTER_FILE');
     expect(script).not.toContain('rmdir /S /Q "!SUMMARY_INSTALL_DIR!"');
     expect(script).not.toContain('del /F /Q "!INSTALLED_BIN!"');
   });
