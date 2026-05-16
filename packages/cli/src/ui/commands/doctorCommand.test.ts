@@ -80,6 +80,9 @@ describe('doctorCommand', () => {
     vi.mocked(
       memoryDiagnosticsModule.formatMemoryPressureSamples,
     ).mockReturnValue('Memory pressure samples\nSample count: 1');
+    vi.mocked(memoryDiagnosticsModule.isHighHeapPressure).mockReturnValue(
+      false,
+    );
   }
 
   beforeEach(() => {
@@ -103,6 +106,18 @@ describe('doctorCommand', () => {
     expect(doctorCommand.name).toBe('doctor');
     expect(doctorCommand.description).toBe(
       'Run installation and environment diagnostics',
+    );
+  });
+
+  it('should complete memory subcommand names', async () => {
+    await expect(doctorCommand.completion!(mockContext, '')).resolves.toEqual([
+      'memory',
+    ]);
+    await expect(
+      doctorCommand.completion!(mockContext, 'mem'),
+    ).resolves.toEqual(['memory']);
+    await expect(doctorCommand.completion!(mockContext, 'x')).resolves.toEqual(
+      [],
     );
   });
 
@@ -244,29 +259,7 @@ describe('doctorCommand', () => {
   });
 
   it('should refuse heap snapshot when heap pressure is already high', async () => {
-    vi.mocked(memoryDiagnosticsModule.getMemoryDiagnostics).mockReturnValue({
-      generatedAt: '2026-05-15T12:00:00.000Z',
-      process: {
-        pid: 123,
-        nodeVersion: 'v22.0.0',
-        platform: 'linux',
-        arch: 'x64',
-        uptimeSeconds: 42,
-      },
-      memory: {
-        rss: 3900,
-        heapTotal: 3600,
-        heapUsed: 900,
-        external: 5,
-        arrayBuffers: 2,
-      },
-      v8: {
-        heapStatistics: { heap_size_limit: 1000 },
-        heapSpaces: [],
-      },
-      activeHandles: { count: 3, unavailable: false },
-      activeRequests: { count: 1, unavailable: false },
-    });
+    vi.mocked(memoryDiagnosticsModule.isHighHeapPressure).mockReturnValue(true);
 
     mockContext = createMockCommandContext({
       executionMode: 'non_interactive',
@@ -301,6 +294,7 @@ describe('doctorCommand', () => {
         text: 'Writing heap snapshot, this may take a moment...',
       }),
     );
+    expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(null);
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'info',
@@ -315,7 +309,14 @@ describe('doctorCommand', () => {
 
     expect(
       memoryDiagnosticsModule.collectMemoryPressureSamples,
-    ).toHaveBeenCalledWith({ sampleCount: 3, intervalMs: 1000 });
+    ).toHaveBeenCalledWith({
+      sampleCount: 3,
+      intervalMs: 1000,
+      signal: undefined,
+    });
+    expect(memoryDiagnosticsModule.getMemoryDiagnostics).toHaveBeenCalledTimes(
+      2,
+    );
     expect(memoryDiagnosticsModule.writeMemoryHeapSnapshot).toHaveBeenCalled();
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -342,6 +343,7 @@ describe('doctorCommand', () => {
 
     await doctorCommand.action!(mockContext, 'memory --snapshot');
 
+    expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(null);
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
@@ -420,7 +422,11 @@ describe('doctorCommand', () => {
 
     expect(
       memoryDiagnosticsModule.collectMemoryPressureSamples,
-    ).toHaveBeenCalledWith({ sampleCount: 3, intervalMs: 1000 });
+    ).toHaveBeenCalledWith({
+      sampleCount: 3,
+      intervalMs: 1000,
+      signal: undefined,
+    });
     expect(
       memoryDiagnosticsModule.formatMemoryPressureSamples,
     ).toHaveBeenCalled();
@@ -471,6 +477,36 @@ describe('doctorCommand', () => {
     ).not.toHaveBeenCalled();
     expect(mockContext.ui.addItem).not.toHaveBeenCalled();
     expect(doctorChecksModule.runDoctorChecks).not.toHaveBeenCalled();
+  });
+
+  it('should recheck heap pressure after sampling before writing snapshot', async () => {
+    vi.mocked(memoryDiagnosticsModule.isHighHeapPressure).mockReturnValue(true);
+
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await doctorCommand.action!(
+      mockContext,
+      'memory --sample --snapshot',
+    );
+
+    expect(memoryDiagnosticsModule.getMemoryDiagnostics).toHaveBeenCalledTimes(
+      2,
+    );
+    expect(
+      memoryDiagnosticsModule.writeMemoryHeapSnapshot,
+    ).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        messageType: 'error',
+        content: expect.stringContaining('Heap snapshot skipped'),
+      }),
+    );
   });
 
   it('should stop memory diagnostics when aborted before collection', async () => {

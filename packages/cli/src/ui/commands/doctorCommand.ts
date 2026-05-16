@@ -13,14 +13,18 @@ import {
   formatMemoryDiagnostics,
   formatMemoryPressureSamples,
   getMemoryDiagnostics,
+  isHighHeapPressure,
   writeMemoryHeapSnapshot,
 } from '../../utils/memoryDiagnostics.js';
 import { t } from '../../i18n/index.js';
 
 const MEMORY_SUBCOMMAND = 'memory';
 const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND] as const;
-const HEAP_SNAPSHOT_SENSITIVE_DATA_WARNING =
-  'Heap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.';
+function getHeapSnapshotSensitiveDataWarning(): string {
+  return t(
+    'Heap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.',
+  );
+}
 
 function formatErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -30,19 +34,7 @@ function formatHeapSnapshotErrorMessage(error: unknown): string {
   const message = formatErrorMessage(error);
   return message.startsWith('Heap snapshot')
     ? message
-    : `Heap snapshot failed: ${message}`;
-}
-
-function hasHighHeapPressure(
-  diagnostics: ReturnType<typeof getMemoryDiagnostics>,
-): boolean {
-  const heapSizeLimit = diagnostics.v8.heapStatistics?.['heap_size_limit'];
-  return (
-    typeof heapSizeLimit === 'number' &&
-    Number.isFinite(heapSizeLimit) &&
-    heapSizeLimit > 0 &&
-    diagnostics.memory.heapUsed / heapSizeLimit >= 0.85
-  );
+    : `${t('Heap snapshot failed:')} ${message}`;
 }
 
 export const doctorCommand: SlashCommand = {
@@ -87,6 +79,7 @@ export const doctorCommand: SlashCommand = {
 
       let report = formatMemoryDiagnostics(diagnostics);
       let messageType: 'info' | 'error' = 'info';
+      let heapSnapshotWritten = false;
 
       if (abortSignal?.aborted) {
         return;
@@ -96,6 +89,7 @@ export const doctorCommand: SlashCommand = {
         const samples = await collectMemoryPressureSamples({
           sampleCount: 3,
           intervalMs: 1000,
+          signal: abortSignal,
         });
 
         if (abortSignal?.aborted) {
@@ -118,21 +112,35 @@ export const doctorCommand: SlashCommand = {
         }
 
         try {
-          if (hasHighHeapPressure(diagnostics)) {
+          const latestDiagnostics = shouldSampleMemory
+            ? getMemoryDiagnostics()
+            : diagnostics;
+          if (isHighHeapPressure(latestDiagnostics)) {
             throw new Error(
-              'Heap snapshot skipped: V8 heap pressure is already high, and writing a synchronous heap snapshot could make the process unresponsive or trigger OOM. Restart Qwen Code first if it is unstable, or retry before memory pressure reaches the warning threshold.',
+              t(
+                'Heap snapshot skipped: V8 heap pressure is already high, and writing a synchronous heap snapshot could make the process unresponsive or trigger OOM. Restart Qwen Code first if it is unstable, or retry before memory pressure reaches the warning threshold.',
+              ),
             );
           }
 
           const heapSnapshotPath = writeMemoryHeapSnapshot();
-          report = `${report}\n\nHeap snapshot written: ${heapSnapshotPath}\n${HEAP_SNAPSHOT_SENSITIVE_DATA_WARNING}`;
+          heapSnapshotWritten = true;
+          report = `${report}\n\n${t('Heap snapshot written:')} ${heapSnapshotPath}\n${getHeapSnapshotSensitiveDataWarning()}`;
         } catch (error) {
           messageType = 'error';
           report = `${report}\n\n${formatHeapSnapshotErrorMessage(error)}`;
+        } finally {
+          if (executionMode === 'interactive') {
+            context.ui.setPendingItem(null);
+          }
         }
       }
 
-      if (abortSignal?.aborted && !report.includes('Heap snapshot written:')) {
+      if (
+        abortSignal?.aborted &&
+        shouldWriteHeapSnapshot &&
+        !heapSnapshotWritten
+      ) {
         return;
       }
 

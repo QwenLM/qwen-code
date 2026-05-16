@@ -9,6 +9,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as v8 from 'node:v8';
 
+export const HIGH_HEAP_PRESSURE_THRESHOLD = 0.85;
+
 export interface MemoryDiagnostics {
   generatedAt: string;
   process: {
@@ -40,6 +42,8 @@ function countProcessInternals(
   // These process methods are undocumented Node.js internals. They provide
   // useful diagnostic counts, but may change across Node.js major versions; if
   // unavailable or unstable, report `unavailable` instead of failing /doctor.
+  // Node.js 22 marks them deprecated (DEP0175), so this remains limited to the
+  // explicit /doctor memory diagnostic path.
   const getter = (process as unknown as Record<string, unknown>)[name];
   if (typeof getter !== 'function') {
     return { count: 0, unavailable: true };
@@ -63,18 +67,22 @@ function countProcessInternals(
 export function getMemoryDiagnostics(): MemoryDiagnostics {
   let heapStatistics: Record<string, number> | undefined;
   let heapSpaces: Array<Record<string, number | string>> = [];
-  let v8Unavailable = false;
 
   try {
     heapStatistics = v8.getHeapStatistics() as unknown as Record<
       string,
       number
     >;
+  } catch {
+    heapStatistics = undefined;
+  }
+
+  try {
     heapSpaces = v8.getHeapSpaceStatistics() as unknown as Array<
       Record<string, number | string>
     >;
   } catch {
-    v8Unavailable = true;
+    heapSpaces = [];
   }
 
   return {
@@ -90,7 +98,7 @@ export function getMemoryDiagnostics(): MemoryDiagnostics {
     v8: {
       heapStatistics,
       heapSpaces,
-      unavailable: v8Unavailable,
+      unavailable: heapStatistics === undefined,
     },
     activeHandles: countProcessInternals('_getActiveHandles'),
     activeRequests: countProcessInternals('_getActiveRequests'),
@@ -121,6 +129,7 @@ export interface MemoryPressureSample {
 export interface CollectMemoryPressureSamplesOptions {
   sampleCount?: number;
   intervalMs?: number;
+  signal?: AbortSignal;
   now?: () => Date;
   memoryUsage?: () => NodeJS.MemoryUsage;
   wait?: (ms: number) => Promise<void>;
@@ -135,13 +144,25 @@ function formatSnapshotTimestamp(now: Date): string {
 }
 
 function estimateHeapSnapshotBytes(): number {
-  const heapStats = v8.getHeapStatistics();
-  return Math.max(heapStats.total_heap_size, process.memoryUsage().heapTotal);
+  const overheadFactor = 3;
+  try {
+    const heapStats = v8.getHeapStatistics();
+    return (
+      Math.max(heapStats.total_heap_size, process.memoryUsage().heapTotal) *
+      overheadFactor
+    );
+  } catch {
+    return process.memoryUsage().heapTotal * overheadFactor;
+  }
 }
 
 function getAvailableBytes(outputDir: string): number {
-  const stats = fs.statfsSync(outputDir);
-  return stats.bavail * stats.bsize;
+  try {
+    const stats = fs.statfsSync(outputDir);
+    return stats.bavail * stats.bsize;
+  } catch {
+    return Number.MAX_SAFE_INTEGER;
+  }
 }
 
 function cleanupOldHeapSnapshots(
@@ -157,7 +178,11 @@ function cleanupOldHeapSnapshots(
         name.startsWith('qwen-code-heap-') && name.endsWith('.heapsnapshot'),
     )
     .map((name) => path.join(outputDir, name))
-    .sort((a, b) => b.localeCompare(a));
+    .sort((a, b) => {
+      const aStat = fs.statSync(a);
+      const bStat = fs.statSync(b);
+      return bStat.mtimeMs - aStat.mtimeMs;
+    });
 
   for (const filePath of snapshots.slice(maxSnapshots)) {
     fs.rmSync(filePath, { force: true });
@@ -165,6 +190,10 @@ function cleanupOldHeapSnapshots(
 }
 
 const lastHeapSnapshotWriteByDir = new Map<string, number>();
+
+export function clearHeapSnapshotRateLimit(): void {
+  lastHeapSnapshotWriteByDir.clear();
+}
 
 function enforceHeapSnapshotRateLimit(
   outputDir: string,
@@ -222,14 +251,29 @@ export function writeMemoryHeapSnapshot({
     `qwen-code-heap-${process.pid}-${formatSnapshotTimestamp(now)}.heapsnapshot`,
   );
 
-  const writtenPath = writeSnapshot(filePath);
+  let writtenPath: string;
+  try {
+    writtenPath = writeSnapshot(filePath);
+  } catch (error) {
+    try {
+      fs.rmSync(filePath, { force: true });
+    } catch {
+      // Best-effort cleanup for partial snapshots after a failed write.
+    }
+    throw error;
+  }
+
   try {
     fs.chmodSync(writtenPath, 0o600);
   } catch {
     // Best-effort hardening; the report warns that snapshots are sensitive.
   }
   recordHeapSnapshotWrite(outputDir, now);
-  cleanupOldHeapSnapshots(outputDir, maxSnapshots);
+  try {
+    cleanupOldHeapSnapshots(outputDir, maxSnapshots);
+  } catch {
+    // Snapshot was already written successfully; cleanup is best-effort.
+  }
   return writtenPath;
 }
 
@@ -248,6 +292,7 @@ function normalizeSampleCount(sampleCount: number): number {
 export async function collectMemoryPressureSamples({
   sampleCount = 3,
   intervalMs = 1000,
+  signal,
   now = () => new Date(),
   memoryUsage = process.memoryUsage,
   wait = defaultWait,
@@ -256,6 +301,10 @@ export async function collectMemoryPressureSamples({
   const samples: MemoryPressureSample[] = [];
 
   for (let index = 1; index <= count; index++) {
+    if (signal?.aborted) {
+      break;
+    }
+
     const memory = memoryUsage();
     samples.push({
       index,
@@ -267,7 +316,7 @@ export async function collectMemoryPressureSamples({
       arrayBuffers: memory.arrayBuffers,
     });
 
-    if (index < count) {
+    if (index < count && !signal?.aborted) {
       await wait(intervalMs);
     }
   }
@@ -317,12 +366,8 @@ interface MemoryInsights {
 }
 
 function buildMemoryInsights(diagnostics: MemoryDiagnostics): MemoryInsights {
-  const heapStatistics = diagnostics.v8.heapStatistics ?? {};
-  const heapSizeLimit = asFiniteNumber(heapStatistics['heap_size_limit']);
-  const heapPressure =
-    heapSizeLimit !== undefined && heapSizeLimit > 0
-      ? diagnostics.memory.heapUsed / heapSizeLimit
-      : undefined;
+  const heapPressure = getHeapPressure(diagnostics);
+  const heapIsHigh = isHighHeapPressure(diagnostics);
   const rssHeapGapBytes = Math.max(
     0,
     diagnostics.memory.rss - diagnostics.memory.heapTotal,
@@ -335,7 +380,6 @@ function buildMemoryInsights(diagnostics: MemoryDiagnostics): MemoryInsights {
   const externalMemoryIsHigh =
     externalAndBuffers >= 256 * 1024 * 1024 &&
     externalAndBuffers >= diagnostics.memory.rss * 0.3;
-  const heapIsHigh = heapPressure !== undefined && heapPressure >= 0.85;
 
   const signals: string[] = [];
   const recommendations: string[] = [];
@@ -386,6 +430,23 @@ function buildMemoryInsights(diagnostics: MemoryDiagnostics): MemoryInsights {
     signals,
     recommendations,
   };
+}
+
+export function getHeapPressure(
+  diagnostics: MemoryDiagnostics,
+): number | undefined {
+  const heapStatistics = diagnostics.v8.heapStatistics ?? {};
+  const heapSizeLimit = asFiniteNumber(heapStatistics['heap_size_limit']);
+  return heapSizeLimit !== undefined && heapSizeLimit > 0
+    ? diagnostics.memory.heapUsed / heapSizeLimit
+    : undefined;
+}
+
+export function isHighHeapPressure(diagnostics: MemoryDiagnostics): boolean {
+  const heapPressure = getHeapPressure(diagnostics);
+  return (
+    heapPressure !== undefined && heapPressure >= HIGH_HEAP_PRESSURE_THRESHOLD
+  );
 }
 
 export function formatMemoryPressureSamples(
