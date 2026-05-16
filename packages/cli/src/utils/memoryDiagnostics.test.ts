@@ -23,6 +23,8 @@ describe('memoryDiagnostics', () => {
   afterEach(() => {
     clearHeapSnapshotRateLimit();
     vi.restoreAllMocks();
+    vi.doUnmock('node:fs');
+    vi.doUnmock('node:v8');
   });
 
   it('collects baseline memory fields', () => {
@@ -449,8 +451,91 @@ describe('memoryDiagnostics', () => {
     });
 
     try {
-      expect(fs.statSync(outputDir).mode & 0o777).toBe(0o700);
-      expect(fs.statSync(writtenPath).mode & 0o777).toBe(0o600);
+      expect(fs.existsSync(outputDir)).toBe(true);
+      expect(fs.existsSync(writtenPath)).toBe(true);
+      if (process.platform !== 'win32') {
+        expect(fs.statSync(outputDir).mode & 0o777).toBe(0o700);
+        expect(fs.statSync(writtenPath).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('continues heap snapshot writes when free disk space cannot be read', async () => {
+    const outputDir = path.join(
+      os.tmpdir(),
+      `qwen-memory-diagnostics-statfs-fallback-${process.pid}`,
+    );
+    fs.rmSync(outputDir, { recursive: true, force: true });
+    vi.resetModules();
+    const statfsSync = vi.fn(() => {
+      throw new Error('statfs unavailable');
+    });
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      return { ...actual, statfsSync };
+    });
+    const { writeMemoryHeapSnapshot: writeWithMockedFs } = await import(
+      './memoryDiagnostics.js'
+    );
+
+    try {
+      const writtenPath = writeWithMockedFs({
+        outputDir,
+        now: new Date('2026-05-15T12:00:00.000Z'),
+        writeSnapshot: (filePath) => {
+          fs.writeFileSync(filePath, 'snapshot');
+          return filePath;
+        },
+      });
+
+      expect(statfsSync).toHaveBeenCalledWith(outputDir);
+      expect(fs.existsSync(writtenPath)).toBe(true);
+    } finally {
+      fs.rmSync(outputDir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to process heap total when V8 heap statistics are unavailable for snapshot sizing', async () => {
+    const outputDir = path.join(
+      os.tmpdir(),
+      `qwen-memory-diagnostics-estimate-fallback-${process.pid}`,
+    );
+    fs.rmSync(outputDir, { recursive: true, force: true });
+    vi.resetModules();
+    const getHeapStatistics = vi.fn(() => {
+      throw new Error('heap statistics unavailable');
+    });
+    vi.doMock('node:v8', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:v8')>();
+      return { ...actual, getHeapStatistics };
+    });
+    const { writeMemoryHeapSnapshot: writeWithMockedV8 } = await import(
+      './memoryDiagnostics.js'
+    );
+    vi.spyOn(process, 'memoryUsage').mockReturnValue({
+      rss: 40,
+      heapTotal: 100,
+      heapUsed: 50,
+      external: 10,
+      arrayBuffers: 5,
+    });
+
+    try {
+      expect(() =>
+        writeWithMockedV8({
+          outputDir,
+          now: new Date('2026-05-15T12:00:00.000Z'),
+          writeSnapshot: (filePath) => {
+            fs.writeFileSync(filePath, 'snapshot');
+            return filePath;
+          },
+          getAvailableBytes: () => 350,
+          minFreeBytesAfterSnapshot: 60,
+        }),
+      ).toThrow('Insufficient free disk space');
+      expect(getHeapStatistics).toHaveBeenCalled();
     } finally {
       fs.rmSync(outputDir, { recursive: true, force: true });
     }
