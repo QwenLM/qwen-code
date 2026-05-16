@@ -308,7 +308,7 @@ function formatHeapSpaces(
   return lines.join('\n');
 }
 
-function formatSmapsRollup(smapsRollup: string | undefined): string {
+function formatSmapsRollup(smapsRollup: string | null): string {
   if (!smapsRollup) {
     return t('unavailable');
   }

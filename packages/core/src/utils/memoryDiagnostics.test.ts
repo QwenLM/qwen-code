@@ -310,9 +310,9 @@ describe('collectMemoryDiagnostics', () => {
       },
     });
 
-    expect(diagnostics.v8HeapSpaces).toBeUndefined();
-    expect(diagnostics.openFileDescriptors).toBeUndefined();
-    expect(diagnostics.smapsRollup).toBeUndefined();
+    expect(diagnostics.v8HeapSpaces).toBeNull();
+    expect(diagnostics.openFileDescriptors).toBeNull();
+    expect(diagnostics.smapsRollup).toBeNull();
     expect(diagnostics.analysis.risks).toEqual([]);
     expect(diagnostics.analysis.recommendation).toContain(
       'No obvious leak indicators',

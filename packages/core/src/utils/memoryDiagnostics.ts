@@ -28,12 +28,12 @@ export interface MemoryDiagnostics {
   uptimeSeconds: number;
   memoryUsage: NodeJS.MemoryUsage;
   v8HeapStats: V8HeapStats;
-  v8HeapSpaces?: V8HeapSpaceStats[];
+  v8HeapSpaces: V8HeapSpaceStats[] | null;
   resourceUsage: MemoryResourceUsage;
   activeHandles: number;
   activeRequests: number;
-  openFileDescriptors?: number;
-  smapsRollup?: string;
+  openFileDescriptors: number | null;
+  smapsRollup: string | null;
   platform: NodeJS.Platform;
   nodeVersion: string;
   analysis: MemoryDiagnosticsAnalysis;
@@ -145,8 +145,16 @@ export async function collectMemoryDiagnostics(
       userCPUTime: resourceUsage.userCPUTime,
       systemCPUTime: resourceUsage.systemCPUTime,
     },
-    activeHandles: getActiveHandlesCount(options.activeHandles),
-    activeRequests: getActiveRequestsCount(options.activeRequests),
+    activeHandles: getProcessInternalCount(
+      'activeHandles',
+      '_getActiveHandles',
+      options.activeHandles,
+    ),
+    activeRequests: getProcessInternalCount(
+      'activeRequests',
+      '_getActiveRequests',
+      options.activeRequests,
+    ),
     openFileDescriptors,
     smapsRollup,
     platform,
@@ -172,9 +180,12 @@ function mapHeapStats(heapInfo: v8.HeapInfo): V8HeapStats {
 }
 
 function mapHeapSpaces(
-  heapSpaces: v8.HeapSpaceInfo[] | undefined,
-): V8HeapSpaceStats[] | undefined {
-  return heapSpaces?.map((space) => ({
+  heapSpaces: v8.HeapSpaceInfo[] | null,
+): V8HeapSpaceStats[] | null {
+  if (!heapSpaces) {
+    return null;
+  }
+  return heapSpaces.map((space) => ({
     name: space.space_name,
     size: space.space_size,
     used: space.space_used_size,
@@ -182,28 +193,19 @@ function mapHeapSpaces(
   }));
 }
 
-function getActiveHandlesCount(probe?: () => number): number {
+function getProcessInternalCount(
+  name: 'activeHandles' | 'activeRequests',
+  internalMethod: '_getActiveHandles' | '_getActiveRequests',
+  probe?: () => number,
+): number {
   try {
     if (probe) {
       return probe();
     }
     const internals = process as unknown as ProcessInternals;
-    return internals._getActiveHandles?.().length ?? 0;
+    return internals[internalMethod]?.().length ?? 0;
   } catch (error) {
-    logProbeFailure('activeHandles', error);
-    return 0;
-  }
-}
-
-function getActiveRequestsCount(probe?: () => number): number {
-  try {
-    if (probe) {
-      return probe();
-    }
-    const internals = process as unknown as ProcessInternals;
-    return internals._getActiveRequests?.().length ?? 0;
-  } catch (error) {
-    logProbeFailure('activeRequests', error);
+    logProbeFailure(name, error);
     return 0;
   }
 }
@@ -219,24 +221,24 @@ async function readProcSmapsRollup(): Promise<string> {
 async function optionalProbe<T>(
   name: string,
   probe: () => Promise<T>,
-): Promise<T | undefined> {
+): Promise<T | null> {
   try {
     return await probe();
   } catch (error) {
     logProbeFailure(name, error);
-    return undefined;
+    return null;
   }
 }
 
 async function optionalSyncProbe<T>(
   name: string,
   probe: () => T,
-): Promise<T | undefined> {
+): Promise<T | null> {
   try {
     return probe();
   } catch (error) {
     logProbeFailure(name, error);
-    return undefined;
+    return null;
   }
 }
 
@@ -283,7 +285,7 @@ function analyzeMemoryDiagnostics(
   }
 
   if (
-    diagnostics.openFileDescriptors !== undefined &&
+    diagnostics.openFileDescriptors !== null &&
     diagnostics.openFileDescriptors > OPEN_FD_THRESHOLD
   ) {
     risks.push({
