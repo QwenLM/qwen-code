@@ -59,6 +59,22 @@ export function HookConfigDetailStep({
     return '';
   };
 
+  // Get prompt to display
+  const getPrompt = (): string => {
+    if (hookConfig.config.type === 'prompt') {
+      return hookConfig.config.prompt;
+    }
+    return '';
+  };
+
+  // Get URL to display
+  const getUrl = (): string => {
+    if (hookConfig.config.type === 'http') {
+      return hookConfig.config.url;
+    }
+    return '';
+  };
+
   // Calculate box width for command display
   const commandBoxWidth = Math.min(terminalWidth - 6, 80);
 
@@ -133,21 +149,57 @@ export function HookConfigDetailStep({
         </Box>
       )}
 
-      {/* Command */}
-      <Box marginTop={1}>
-        <Text color={theme.text.secondary}>{t('Command:')}</Text>
-      </Box>
+      {/* Command / Prompt / URL - based on hook type */}
+      {hookConfig.config.type === 'command' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('Command:')}</Text>
+          </Box>
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.border.default}
+            paddingX={1}
+            width={commandBoxWidth}
+          >
+            <Text color={theme.text.primary}>{getCommand()}</Text>
+          </Box>
+        </>
+      )}
 
-      {/* Command box */}
-      <Box
-        flexDirection="column"
-        borderStyle="round"
-        borderColor={theme.border.default}
-        paddingX={1}
-        width={commandBoxWidth}
-      >
-        <Text color={theme.text.primary}>{getCommand()}</Text>
-      </Box>
+      {hookConfig.config.type === 'prompt' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('Prompt:')}</Text>
+          </Box>
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.border.default}
+            paddingX={1}
+            width={commandBoxWidth}
+          >
+            <Text color={theme.text.primary}>{getPrompt()}</Text>
+          </Box>
+        </>
+      )}
+
+      {hookConfig.config.type === 'http' && (
+        <>
+          <Box marginTop={1}>
+            <Text color={theme.text.secondary}>{t('URL:')}</Text>
+          </Box>
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor={theme.border.default}
+            paddingX={1}
+            width={commandBoxWidth}
+          >
+            <Text color={theme.text.primary}>{getUrl()}</Text>
+          </Box>
+        </>
+      )}
 
       {/* Help text */}
       <Box marginTop={1}>

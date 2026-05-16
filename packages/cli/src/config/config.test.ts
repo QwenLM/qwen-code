@@ -963,6 +963,17 @@ describe('loadCliConfig', () => {
     expect(mockExit).toHaveBeenCalledWith(1);
   });
 
+  it('should use internal sandbox session ID without treating it as a new session', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(mockSessionServiceInstance.sessionExists).not.toHaveBeenCalled();
+  });
+
   it('should reset context filenames to defaults when context.fileName is not configured', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

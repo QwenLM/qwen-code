@@ -30,6 +30,23 @@ vi.mock('../utils/systemEncoding.js', () => ({
   getSystemEncoding: mockGetSystemEncoding,
 }));
 
+vi.mock('../utils/atomicFileWrite.js', () => ({
+  atomicWriteFile: vi.fn(
+    async (
+      filePath: string,
+      data: string | Buffer,
+      options?: { encoding?: BufferEncoding },
+    ) => {
+      const fsMock = await import('fs/promises');
+      if (typeof data === 'string' && options?.encoding) {
+        await fsMock.default.writeFile(filePath, data, options.encoding);
+      } else {
+        await fsMock.default.writeFile(filePath, data);
+      }
+    },
+  ),
+}));
+
 vi.mock('../utils/fileUtils.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../utils/fileUtils.js')>();
   return {

@@ -13,10 +13,12 @@ export {
   type SubscribeOptions,
 } from './DaemonClient.js';
 export { parseSseStream, SseFramingError } from './sse.js';
+export { DaemonCapabilityMissingError, requireWorkspaceCwd } from './types.js';
 export type {
   DaemonCapabilities,
   DaemonEvent,
   DaemonMode,
+  DaemonProtocolVersions,
   DaemonSession,
   DaemonSessionSummary,
   PermissionOutcome,

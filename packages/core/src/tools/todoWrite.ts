@@ -15,14 +15,10 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { detectTodoChanges, HookPhase, type TodoItem } from '../hooks/types.js';
+export type { TodoItem } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
-
-export interface TodoItem {
-  id: string;
-  content: string;
-  status: 'pending' | 'in_progress' | 'completed';
-}
 
 export interface TodoWriteParams {
   todos: TodoItem[];
@@ -291,6 +287,20 @@ async function writeTodosToFile(
   await fs.writeFile(todoFilePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 
+function createBlockedTodoResult(
+  message: string,
+  systemMessage: string,
+): ToolResult {
+  return {
+    llmContent: `${message}
+
+<system-reminder>
+${systemMessage}
+</system-reminder>`,
+    returnDisplay: message,
+  };
+}
+
 class TodoWriteToolInvocation extends BaseToolInvocation<
   TodoWriteParams,
   ToolResult
@@ -315,6 +325,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
     const sessionId = this.config.getSessionId();
 
     try {
+      // 1. Read current todos (for change detection)
+      const oldTodos = await readTodosFromFile(sessionId);
+
       let finalTodos: TodoItem[];
 
       if (modified_by_user && modified_content !== undefined) {
@@ -326,17 +339,140 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         finalTodos = todos;
       }
 
+      // 2. Detect changes
+      const changes = detectTodoChanges(oldTodos, finalTodos);
+      const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
+
+      // 3. VALIDATION PHASE: Execute all hooks with Validation phase
+      // Hooks should only check and return block/approve decisions, no side effects
+      const hookSystem = this.config.getHookSystem();
+
+      // Validate TodoCreated hooks
+      if (hookSystem && changes.created.length > 0) {
+        const createdResults = await Promise.all(
+          changes.created.map((todo) =>
+            hookSystem.fireTodoCreatedEvent(
+              todo.id,
+              todo.content,
+              todo.status,
+              finalTodos,
+              HookPhase.Validation,
+              _signal,
+            ),
+          ),
+        );
+
+        const blockedCreatedResult = createdResults.find(
+          (result) => result.finalOutput?.decision === 'block',
+        );
+        if (blockedCreatedResult?.finalOutput) {
+          const reason =
+            blockedCreatedResult.finalOutput.reason ||
+            'Hook blocked todo creation';
+          return createBlockedTodoResult(
+            `Todo creation blocked: ${reason}`,
+            `Todo list was not modified because a TodoCreated hook blocked the operation: ${reason}`,
+          );
+        }
+      }
+
+      // Validate TodoCompleted hooks
+      if (hookSystem && changes.completed.length > 0) {
+        const completedResults = await Promise.all(
+          changes.completed.map((todo) => {
+            const oldTodo = oldTodosMap.get(todo.id);
+            const previousStatus = oldTodo?.status ?? 'pending';
+
+            return hookSystem.fireTodoCompletedEvent(
+              todo.id,
+              todo.content,
+              previousStatus as 'pending' | 'in_progress',
+              finalTodos,
+              HookPhase.Validation,
+              _signal,
+            );
+          }),
+        );
+
+        const blockedCompletedResult = completedResults.find(
+          (result) => result.finalOutput?.decision === 'block',
+        );
+        if (blockedCompletedResult?.finalOutput) {
+          const reason =
+            blockedCompletedResult.finalOutput.reason ||
+            'Hook blocked todo completion';
+          return createBlockedTodoResult(
+            `Todo completion blocked: ${reason}`,
+            `Todo list was not modified because a TodoCompleted hook blocked the operation: ${reason}`,
+          );
+        }
+      }
+
+      // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, sessionId);
 
-      // Create structured display object for rich UI rendering
+      // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
+      // These hooks can now safely perform side effects knowing data is persisted
+      // We don't check for blocking here since validation already passed
+      let postWriteError: Error | undefined;
+      try {
+        if (hookSystem && changes.created.length > 0) {
+          await Promise.all(
+            changes.created.map((todo) =>
+              hookSystem.fireTodoCreatedEvent(
+                todo.id,
+                todo.content,
+                todo.status,
+                finalTodos,
+                HookPhase.PostWrite,
+                _signal,
+              ),
+            ),
+          );
+        }
+
+        if (hookSystem && changes.completed.length > 0) {
+          await Promise.all(
+            changes.completed.map((todo) => {
+              const oldTodo = oldTodosMap.get(todo.id);
+              const previousStatus = oldTodo?.status ?? 'pending';
+
+              return hookSystem.fireTodoCompletedEvent(
+                todo.id,
+                todo.content,
+                previousStatus as 'pending' | 'in_progress',
+                finalTodos,
+                HookPhase.PostWrite,
+                _signal,
+              );
+            }),
+          );
+        }
+      } catch (error) {
+        postWriteError =
+          error instanceof Error ? error : new Error(String(error));
+        debugLogger.error(
+          `[TodoWriteTool] Post-write hooks failed after todos were persisted: ${postWriteError.message}`,
+        );
+      }
+
+      // 6. Create structured display object for rich UI rendering
       const todoResultDisplay = {
         type: 'todo_list' as const,
         todos: finalTodos,
+        changes,
       };
 
       // Create plain string format with system reminder
       const todosJson = JSON.stringify(finalTodos);
       let llmContent: string;
+      const postWriteReminder = postWriteError
+        ? `
+
+<system-reminder>
+Todos were persisted successfully, but post-write hooks failed with error: ${postWriteError.message}. Do not tell the user the write failed; only handle any follow-up hook issues if needed.
+</system-reminder>`
+        : '';
 
       if (finalTodos.length === 0) {
         // Special message for empty todos
@@ -344,16 +480,16 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
 <system-reminder>
 Your todo list is now empty. DO NOT mention this explicitly to the user. You have no pending tasks in your todo list.
-</system-reminder>`;
+</system-reminder>${postWriteReminder}`;
       } else {
         // Normal message for todos with items
         llmContent = `Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
 
 <system-reminder>
-Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list: 
+Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list:
 
 ${todosJson}. Continue on with the tasks at hand if applicable.
-</system-reminder>`;
+</system-reminder>${postWriteReminder}`;
       }
 
       return {

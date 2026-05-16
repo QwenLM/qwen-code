@@ -17,19 +17,11 @@ import { filterCommandsForMode } from './services/commandUtils.js';
 // Mock the CommandService
 const mockGetCommands = vi.hoisted(() => vi.fn());
 const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
+const mockGetModelInvocableCommands = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
-const mockCommandServiceFromCommands = vi.hoisted(() => vi.fn());
 vi.mock('./services/CommandService.js', () => ({
   CommandService: {
     create: mockCommandServiceCreate,
-    fromCommands: mockCommandServiceFromCommands,
-  },
-}));
-
-const mockLocalizeCommands = vi.hoisted(() => vi.fn());
-vi.mock('./services/DynamicCommandLocalizationService.js', () => ({
-  dynamicCommandLocalizationService: {
-    localizeCommands: mockLocalizeCommands,
   },
 }));
 
@@ -44,25 +36,16 @@ describe('handleSlashCommand', () => {
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
     );
-    mockCommandServiceFromCommands.mockImplementation((commands) => ({
-      getCommands: () => commands,
-      getCommandsForMode: (mode: ExecutionMode) =>
-        filterCommandsForMode(commands, mode),
-      getModelInvocableCommands: () =>
-        commands.filter(
-          (command: { modelInvocable?: boolean; hidden?: boolean }) =>
-            !command.hidden && command.modelInvocable === true,
-        ),
-    }));
-    mockLocalizeCommands.mockImplementation(
-      async (
-        _config: unknown,
-        commands: readonly unknown[],
-      ): Promise<readonly unknown[]> => commands,
+    mockGetModelInvocableCommands.mockImplementation(() =>
+      mockGetCommands().filter(
+        (command: { modelInvocable?: boolean; hidden?: boolean }) =>
+          !command.hidden && command.modelInvocable === true,
+      ),
     );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
       getCommandsForMode: mockGetCommandsForMode,
+      getModelInvocableCommands: mockGetModelInvocableCommands,
     });
 
     mockConfig = {
@@ -375,25 +358,10 @@ describe('getAvailableCommands', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    mockCommandServiceFromCommands.mockImplementation((commands) => ({
-      getCommands: () => commands,
-      getCommandsForMode: (mode: ExecutionMode) =>
-        filterCommandsForMode(commands, mode),
-      getModelInvocableCommands: () =>
-        commands.filter(
-          (command: { modelInvocable?: boolean; hidden?: boolean }) =>
-            !command.hidden && command.modelInvocable === true,
-        ),
-    }));
-    mockLocalizeCommands.mockImplementation(
-      async (
-        _config: unknown,
-        commands: readonly unknown[],
-      ): Promise<readonly unknown[]> => commands,
-    );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
       getCommandsForMode: mockGetCommandsForMode,
+      getModelInvocableCommands: mockGetModelInvocableCommands,
     });
 
     mockConfig = {
@@ -424,57 +392,5 @@ describe('getAvailableCommands', () => {
     );
 
     expect(commands.map((command) => command.name)).toContain('export');
-  });
-
-  it('does not enable dynamic localization without settings', async () => {
-    const command = {
-      name: 'review',
-      description: 'Review code',
-      kind: CommandKind.FILE,
-      supportedModes: ['acp'] as const,
-      action: vi.fn(),
-    };
-    mockGetCommands.mockReturnValue([command]);
-
-    await getAvailableCommands(mockConfig, new AbortController().signal, 'acp');
-
-    expect(mockLocalizeCommands).toHaveBeenCalledWith(
-      mockConfig,
-      [command],
-      expect.any(AbortSignal),
-      false,
-    );
-  });
-
-  it('enables dynamic localization when settings opt in', async () => {
-    const command = {
-      name: 'review',
-      description: 'Review code',
-      kind: CommandKind.FILE,
-      supportedModes: ['acp'] as const,
-      action: vi.fn(),
-    };
-    const settings = {
-      merged: {
-        general: {
-          dynamicCommandTranslation: true,
-        },
-      },
-    } as LoadedSettings;
-    mockGetCommands.mockReturnValue([command]);
-
-    await getAvailableCommands(
-      mockConfig,
-      new AbortController().signal,
-      'acp',
-      settings,
-    );
-
-    expect(mockLocalizeCommands).toHaveBeenCalledWith(
-      mockConfig,
-      [command],
-      expect.any(AbortSignal),
-      true,
-    );
   });
 });

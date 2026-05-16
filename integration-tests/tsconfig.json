@@ -5,7 +5,8 @@
     "allowJs": true,
     "baseUrl": ".",
     "paths": {
-      "@qwen-code/sdk": ["../packages/sdk-typescript/dist/index.d.ts"]
+      "//": "Resolve types from SDK source rather than dist so `tsc -p` here does not require a fresh `npm run build` of the SDK package before checking integration tests. The runtime vitest alias (`integration-tests/vitest.config.ts`) still points at the built `dist/index.mjs` to exercise the published-bundle shape; this paths entry only affects type resolution.",
+      "@qwen-code/sdk": ["../packages/sdk-typescript/src/index.ts"]
     }
   },
   "include": ["**/*.ts"],

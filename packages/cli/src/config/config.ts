@@ -165,6 +165,8 @@ export interface CliArgs {
    * --resume or --continue.
    */
   forkSession?: boolean | undefined;
+  /** Internal: preserve the outer session ID when relaunching in a sandbox */
+  sandboxSessionId?: string | undefined;
   maxSessionTurns: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
@@ -815,6 +817,10 @@ export async function parseArguments(): Promise<CliArgs> {
             'Create a new forked session from the resumed session. Must be used with --resume or --continue.',
           default: false,
         })
+        .option('sandbox-session-id', {
+          type: 'string',
+          hidden: true,
+        })
         .option('max-session-turns', {
           type: 'number',
           description: 'Maximum number of session turns',
@@ -920,10 +926,22 @@ export async function parseArguments(): Promise<CliArgs> {
             return '--fork-session must be used with --resume or --continue.';
           }
           if (
+            argv['sandboxSessionId'] &&
+            (argv['sessionId'] || argv['continue'] || argv['resume'])
+          ) {
+            return 'Cannot use internal --sandbox-session-id with --session-id, --continue, or --resume.';
+          }
+          if (
             argv['sessionId'] &&
             !isValidSessionId(argv['sessionId'] as string)
           ) {
             return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          if (
+            argv['sandboxSessionId'] &&
+            !isValidSessionId(argv['sandboxSessionId'] as string)
+          ) {
+            return `Invalid --sandbox-session-id: "${argv['sandboxSessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
           // --resume accepts either a session UUID or a custom title
           if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
@@ -1565,6 +1583,8 @@ export async function loadCliConfig(
         process.exit(1);
       }
     }
+  } else if (argv.sandboxSessionId) {
+    sessionId = argv.sandboxSessionId;
   } else if (argv['sessionId']) {
     // Use provided session ID without session resumption
     // Check if session ID is already in use

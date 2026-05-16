@@ -80,15 +80,6 @@ vi.mock('../../services/McpPromptLoader.js', () => ({
   })),
 }));
 
-const { mockLocalizeCommands } = vi.hoisted(() => ({
-  mockLocalizeCommands: vi.fn(),
-}));
-vi.mock('../../services/DynamicCommandLocalizationService.js', () => ({
-  dynamicCommandLocalizationService: {
-    localizeCommands: mockLocalizeCommands,
-  },
-}));
-
 vi.mock('../contexts/SessionContext.js', () => ({
   useSessionStats: vi.fn(() => ({ stats: {} })),
 }));
@@ -168,12 +159,6 @@ describe('useSlashCommandProcessor', () => {
     mockBuiltinLoadCommands.mockResolvedValue([]);
     mockFileLoadCommands.mockResolvedValue([]);
     mockMcpLoadCommands.mockResolvedValue([]);
-    mockLocalizeCommands.mockImplementation(
-      async (
-        _config: unknown,
-        commands: readonly SlashCommand[],
-      ): Promise<readonly SlashCommand[]> => commands,
-    );
     mockOpenModelDialog.mockClear();
     mockOpenMemoryDialog.mockClear();
   });
@@ -248,50 +233,6 @@ describe('useSlashCommandProcessor', () => {
         // @ts-expect-error - We are intentionally testing a violation of the readonly type.
         commands.push(createTestCommand({ name: 'rogue' }));
       }).toThrow(TypeError);
-    });
-
-    it('localizes dynamically loaded commands when the setting is enabled', async () => {
-      const dynamicCommand = createTestCommand(
-        {
-          name: 'review',
-          description: 'Review code changes',
-          modelDescription: 'Review code changes',
-          localizeDescription: true,
-          supportedModes: ['interactive'],
-        },
-        CommandKind.FILE,
-      );
-      mockLocalizeCommands.mockResolvedValueOnce([
-        {
-          ...dynamicCommand,
-          description: '审查代码变更',
-        },
-      ]);
-
-      const result = setupProcessorHook([], [dynamicCommand], [], vi.fn(), {
-        merged: {
-          general: {
-            dynamicCommandTranslation: true,
-          },
-        },
-      } as LoadedSettings);
-
-      await waitFor(() => {
-        expect(result.current.slashCommands[0]?.description).toBe(
-          '审查代码变更',
-        );
-      });
-      expect(mockLocalizeCommands).toHaveBeenCalledWith(
-        mockConfig,
-        expect.arrayContaining([
-          expect.objectContaining({
-            name: 'review',
-            modelDescription: 'Review code changes',
-          }),
-        ]),
-        expect.any(AbortSignal),
-        true,
-      );
     });
 
     it('should override built-in commands with file-based commands of the same name', async () => {
