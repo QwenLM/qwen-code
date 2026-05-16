@@ -59,6 +59,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'health',
   'capabilities',
   'session_create',
+  'session_scope_override',
   'session_list',
   'session_prompt',
   'session_cancel',
@@ -528,6 +529,61 @@ describe('createServeApp', () => {
       expect(bridge.calls).toEqual([
         { workspaceCwd: '/work/a', modelServiceId: 'qwen-prod' },
       ]);
+    });
+
+    it('passes through a valid `sessionScope` to the bridge (#4175 PR 5)', async () => {
+      // Per-request override: even when the daemon-wide default is
+      // `'single'`, the route forwards an explicit `'thread'` scope so
+      // the bridge can isolate this caller's session. Symmetric for
+      // `'single'` against a `'thread'` daemon.
+      for (const scope of ['single', 'thread'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: '/work/a', sessionScope: scope });
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toEqual([
+          { workspaceCwd: '/work/a', sessionScope: scope },
+        ]);
+      }
+    });
+
+    it('400 invalid_session_scope when `sessionScope` is not "single"/"thread"', async () => {
+      // Anything outside the enum (`'user'`, `null`, a number, an object)
+      // must 4xx with a typed `code` so HTTP clients can branch on the
+      // failure shape rather than parsing the message. Bridge must NOT
+      // be invoked — surfacing the invalid value as a clear 400 beats
+      // throwing inside the bridge later.
+      const malformed: unknown[] = ['user', '', 'SINGLE', null, 123, {}];
+      for (const sessionScope of malformed) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: '/work/a', sessionScope });
+        expect(res.status).toBe(400);
+        expect(res.body).toMatchObject({ code: 'invalid_session_scope' });
+        expect(bridge.calls).toHaveLength(0);
+      }
+    });
+
+    it('omits `sessionScope` from the bridge request when the field is absent', async () => {
+      // Backward-compat invariant: a pre-#4175-PR-5 client (no SDK
+      // upgrade) sees identical behavior. The bridge sees no
+      // `sessionScope` key, so its `defaultSessionScope` (the
+      // daemon-wide `--sessionScope` value) is used unchanged.
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(200);
+      expect(bridge.calls).toEqual([{ workspaceCwd: '/work/a' }]);
+      expect(bridge.calls[0]).not.toHaveProperty('sessionScope');
     });
 
     it('500 when bridge throws', async () => {

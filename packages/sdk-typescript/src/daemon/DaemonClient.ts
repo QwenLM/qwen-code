@@ -99,6 +99,21 @@ export interface CreateSessionRequest {
    */
   workspaceCwd?: string;
   modelServiceId?: string;
+  /**
+   * Per-request session-scope override. Daemons launched with
+   * `serve --sessionScope single` (the default) coalesce same-workspace
+   * `POST /session` calls into one shared session; passing
+   * `sessionScope: 'thread'` here forces a distinct session for this
+   * call regardless of the daemon-wide default. The reverse override
+   * (per-request `'single'` against a `'thread'` daemon) also works.
+   * Omit to inherit the daemon-wide default.
+   *
+   * Only `'single'` and `'thread'` are accepted; anything else yields
+   * `400 invalid_session_scope`. Old daemons (pre-#4175 PR 5) silently
+   * ignore the field — clients should pre-flight
+   * `caps.features.session_scope_override` before sending.
+   */
+  sessionScope?: 'single' | 'thread';
 }
 
 export interface PromptRequest {
@@ -279,6 +294,7 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd: req.workspaceCwd,
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+          ...(req.sessionScope ? { sessionScope: req.sessionScope } : {}),
         }),
       },
       async (res) => {

@@ -71,6 +71,21 @@ export interface BridgeSpawnRequest {
   workspaceCwd: string;
   /** Optional explicit model service id; falls back to settings default. */
   modelServiceId?: string;
+  /**
+   * Per-request override for `sessionScope`. When set, takes precedence
+   * over the daemon-wide default (`BridgeOptions.sessionScope`, set at
+   * boot via `serve --sessionScope`). When omitted, the daemon-wide
+   * default applies — preserving exact pre-#4175-PR-5 behavior for any
+   * caller that doesn't set the field.
+   *
+   * Resolves the FIXME at `BridgeOptions.sessionScope` (#3803 — VSCode
+   * needing per-window isolation against a daemon defaulting to
+   * `'single'`) and unblocks the baseline harness from honestly
+   * measuring per-session cost (the harness in
+   * `qwen-serve-baseline.test.ts` notes it cannot surface the P1 MCP
+   * N×M amplification under the shared default).
+   */
+  sessionScope?: 'single' | 'thread';
 }
 
 export interface BridgeSession {
@@ -365,12 +380,11 @@ export interface BridgeOptions {
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
    *
-   * FIXME(stage-1.5, chiga0 must-have 1):
-   * Today this is a daemon-wide setting — clients can't override per
-   * request. A VSCode extension that wants a private session per
-   * window can't ask for it against a daemon configured for `single`.
-   * Stage 1.5 should accept `sessionScope` on the `POST /session`
-   * body, treating the daemon-wide value as a hint not a hard rule.
+   * Daemon-wide default. Per-request callers can override via
+   * `BridgeSpawnRequest.sessionScope` — the override wins and the
+   * daemon-wide value acts only as the fallback when the request
+   * omits the field. See the `session_scope_override` capability on
+   * `/capabilities.features` for negotiation.
    * Reference:
    * https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427875644
    */
@@ -988,7 +1002,7 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_PENDING_PER_SESSION = 64;
 
 export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
-  const sessionScope = opts.sessionScope ?? 'single';
+  const defaultSessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 20 (intentionally tight per #3803 N≈50 cliff).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
@@ -1016,9 +1030,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   } else {
     maxSessions = opts.maxSessions;
   }
-  if (sessionScope !== 'single' && sessionScope !== 'thread') {
+  if (defaultSessionScope !== 'single' && defaultSessionScope !== 'thread') {
     throw new TypeError(
-      `Invalid sessionScope: ${JSON.stringify(sessionScope)}. ` +
+      `Invalid sessionScope: ${JSON.stringify(defaultSessionScope)}. ` +
         `Expected 'single' or 'thread'.`,
     );
   }
@@ -1399,7 +1413,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     }
   }
 
-  async function doSpawn(modelServiceId?: string): Promise<BridgeSession> {
+  async function doSpawn(
+    modelServiceId: string | undefined,
+    effectiveScope: 'single' | 'thread',
+  ): Promise<BridgeSession> {
     // #3803 §02: get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
     // process / OAuth / file-cache / hierarchy-memory parse via the
@@ -1469,10 +1486,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
-    // `defaultEntry` is the single-scope attach target — only the
-    // FIRST session wins this slot. Subsequent thread-scope sessions
-    // don't overwrite it.
-    if (!defaultEntry) defaultEntry = entry;
+    // `defaultEntry` is the single-scope attach target — only sessions
+    // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
+    // never become the attach target, otherwise a later omitted-scope
+    // (or daemon-default-`single`) caller would attach with
+    // `attached: true` to what its sender promised was an isolated
+    // session — see #4175 PR 5 (mixed-scope leak found in review).
+    // Subsequent same-scope spawns also don't overwrite (first wins).
+    if (effectiveScope === 'single' && !defaultEntry) defaultEntry = entry;
 
     // ACP `newSession` doesn't take a model id; honor the caller's
     // `modelServiceId` via `unstable_setSessionModel`. See
@@ -1681,7 +1702,25 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         throw new WorkspaceMismatchError(boundWorkspace, workspaceKey);
       }
 
-      if (sessionScope === 'single') {
+      // Resolve the effective scope for THIS call. A per-request
+      // `req.sessionScope` overrides the daemon-wide default; omitting
+      // it falls back to `defaultSessionScope` so every existing caller
+      // observes pre-#4175-PR-5 behavior bit-for-bit. The string-validation
+      // happens here (rather than at the route layer alone) so direct
+      // callers — tests, embeds, future entry points — can't bypass it.
+      if (
+        req.sessionScope !== undefined &&
+        req.sessionScope !== 'single' &&
+        req.sessionScope !== 'thread'
+      ) {
+        throw new TypeError(
+          `Invalid sessionScope: ${JSON.stringify(req.sessionScope)}. ` +
+            `Expected 'single' or 'thread'.`,
+        );
+      }
+      const effectiveScope = req.sessionScope ?? defaultSessionScope;
+
+      if (effectiveScope === 'single') {
         const existing = defaultEntry;
         if (existing) {
           // BRSCi: bump attach counter BEFORE any await so the
@@ -1787,7 +1826,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         throw new SessionLimitExceededError(maxSessions);
       }
 
-      const promise = doSpawn(req.modelServiceId);
+      const promise = doSpawn(req.modelServiceId, effectiveScope);
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
       // `spawnOrAttach` finds the entry and waits for the same
@@ -1801,7 +1840,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // simultaneous thread-scope spawns don't collide on the
       // workspace key.
       const tracker =
-        sessionScope === 'single'
+        effectiveScope === 'single'
           ? workspaceKey
           : `${workspaceKey}#${randomUUID()}`;
       inFlightSpawns.set(tracker, promise);

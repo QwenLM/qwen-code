@@ -377,6 +377,130 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
+  it('per-request sessionScope:thread overrides daemon-wide single (#4175 PR 5)', async () => {
+    // The daemon-wide default is `'single'` (the production default), so
+    // a second `spawnOrAttach` against the same workspace WITHOUT a
+    // per-request override would normally reuse the first session.
+    // With `sessionScope: 'thread'` on the request, the bridge must
+    // create a distinct session — proving the per-request override
+    // wins over the construction-time default.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({
+      sessionScope: 'single',
+      channelFactory: factory,
+    });
+
+    const first = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+
+    expect(first.sessionId).not.toBe(second.sessionId);
+    expect(first.attached).toBe(false);
+    expect(second.attached).toBe(false);
+    expect(handles).toHaveLength(1); // shared channel, distinct sessions
+    expect(bridge.sessionCount).toBe(2);
+
+    await bridge.shutdown();
+  });
+
+  it('per-request sessionScope:single overrides daemon-wide thread (#4175 PR 5)', async () => {
+    // Symmetric coverage: a daemon launched with `--sessionScope thread`
+    // (uncommon but supported) must still honor `'single'` on the
+    // request. The second call must reuse the first session.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel();
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      channelFactory: factory,
+    });
+
+    const first = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'single',
+    });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'single',
+    });
+
+    expect(first.sessionId).toBe(second.sessionId);
+    expect(first.attached).toBe(false);
+    expect(second.attached).toBe(true);
+    expect(handles).toHaveLength(1);
+    expect(bridge.sessionCount).toBe(1);
+
+    await bridge.shutdown();
+  });
+
+  it('thread-scope first call does NOT pollute the single-scope attach slot (#4175 PR 5 mixed-scope leak)', async () => {
+    // Regression for the leak the code-reviewer flagged: pre-fix, a
+    // thread-scope spawn ALSO claimed the empty `defaultEntry` slot,
+    // so a subsequent omitted-scope call (`effectiveScope = 'single'`
+    // under the daemon default) would attach to what the first caller
+    // was told was an isolated session. The fix gates the
+    // `defaultEntry` stamp on `effectiveScope === 'single'` inside
+    // `doSpawn`. This test exercises the exact mixed sequence and
+    // asserts the omitted call gets a FRESH session.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({ sessionIdPrefix: `s${handles.length}` });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({
+      sessionScope: 'single', // daemon-wide default, the production shape
+      channelFactory: factory,
+    });
+
+    const isolated = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    const shared = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    expect(isolated.sessionId).not.toBe(shared.sessionId);
+    expect(isolated.attached).toBe(false);
+    expect(shared.attached).toBe(false); // fresh, NOT attached to `isolated`
+    expect(bridge.sessionCount).toBe(2);
+
+    // A second omitted-scope call MUST attach to `shared` (the first
+    // single-scope session), proving the slot is correctly populated
+    // by the second call rather than by the thread-scope first call.
+    const reattach = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(reattach.sessionId).toBe(shared.sessionId);
+    expect(reattach.attached).toBe(true);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects an invalid per-request sessionScope', async () => {
+    // Defense-in-depth: the route-layer validates strings, but a direct
+    // bridge caller (test, embed, future entry point) could pass a
+    // non-enum value. Throw `TypeError` mirroring the construction-time
+    // validator so the failure shape is consistent.
+    const bridge = makeBridge();
+    await expect(
+      bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'bogus' as unknown as 'single',
+      }),
+    ).rejects.toThrow(/Invalid sessionScope/);
+  });
+
   it('rejects relative workspace paths', async () => {
     const bridge = makeBridge({
       channelFactory: async () => {

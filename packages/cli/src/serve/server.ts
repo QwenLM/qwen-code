@@ -268,10 +268,32 @@ export function createServeApp(
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
         : undefined;
+    // Per-request `sessionScope` override (#4175 PR 5). Validate at the
+    // route boundary so a 400 surfaces a clear `code: invalid_session_scope`
+    // before we touch the bridge — the bridge revalidates as a defense
+    // against direct callers, but a typed 4xx is the right shape for HTTP
+    // clients. The field is OPTIONAL: omitting it preserves pre-PR
+    // behavior bit-for-bit (the daemon-wide `BridgeOptions.sessionScope`
+    // takes effect). New clients can pre-flight `caps.features` for
+    // `session_scope_override` before sending — see
+    // `packages/cli/src/serve/capabilities.ts`.
+    const rawSessionScope = body['sessionScope'];
+    let sessionScope: 'single' | 'thread' | undefined;
+    if (rawSessionScope !== undefined) {
+      if (rawSessionScope !== 'single' && rawSessionScope !== 'thread') {
+        res.status(400).json({
+          error: '`sessionScope` must be "single" or "thread" when provided',
+          code: 'invalid_session_scope',
+        });
+        return;
+      }
+      sessionScope = rawSessionScope;
+    }
     try {
       const session = await bridge.spawnOrAttach({
         workspaceCwd: cwd,
         modelServiceId,
+        ...(sessionScope ? { sessionScope } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
