@@ -945,6 +945,33 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('should explain when --fork-session fails to copy the source session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const sourceData = {
+      conversation: { sessionId: sourceSessionId, messages: [] },
+      uiHistory: [],
+    };
+    mockSessionServiceInstance.loadSession.mockResolvedValue(sourceData);
+    mockSessionServiceInstance.forkSession.mockRejectedValue(
+      new Error('source session belongs to another project'),
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(
+      loadCliConfig({}, {
+        resume: sourceSessionId,
+        forkSession: true,
+      } as CliArgs),
+    ).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      `Failed to fork session ${sourceSessionId}: source session belongs to another project`,
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
   it('should explain when --continue --fork-session has no saved session to fork', async () => {
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
