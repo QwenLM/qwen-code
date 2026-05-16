@@ -124,6 +124,10 @@ function setToolSpanFailure(
 ): void {
   try {
     span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+    // Always write `success: false` so trace backends can filter tool
+    // failures with the same query they use for llm_request spans —
+    // mirrors the unconditional `success` attribute on llm_request.
+    span.setAttribute('success', false);
   } catch {
     // OTel errors must not block the failure status update.
   }
@@ -136,6 +140,7 @@ function setToolSpanFailure(
 function setToolSpanCancelled(span: Span): void {
   try {
     span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, TOOL_FAILURE_KIND_CANCELLED);
+    span.setAttribute('success', false);
   } catch {
     // OTel errors must not block the cancellation status update.
   }
@@ -2179,6 +2184,14 @@ export class CoreToolScheduler {
         };
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });
+        // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span
+        // ends with an explicit `success` attribute so backends can filter
+        // failures the same way they filter llm_request failures.
+        try {
+          span.setAttribute('success', true);
+        } catch {
+          // OTel errors must not block API behavior.
+        }
       } else {
         // It is a failure
         // PostToolUseFailure Hook

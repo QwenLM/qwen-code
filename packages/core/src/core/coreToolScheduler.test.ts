@@ -3389,6 +3389,52 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.ended).toBe(true);
   });
 
+  // tool span `success` boolean attribute — must always be present so
+  // observability backends can filter failures with the same query they
+  // use for llm_request spans (which carry `success` unconditionally).
+
+  it('tool span: success=true attribute on success', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool();
+    expect(completedCalls[0].status).toBe('success');
+    expect(spanRecord.spanAttributes).toHaveProperty('success', true);
+  });
+
+  it('tool span: success=false attribute on ToolResult.error', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'tool failed',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+    expect(completedCalls[0].status).toBe('error');
+    expect(spanRecord.spanAttributes).toHaveProperty('success', false);
+  });
+
+  it('tool span: success=false attribute on thrown invocation exception', async () => {
+    const { spanRecord, completedCalls } = await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+    expect(completedCalls[0].status).toBe('error');
+    expect(spanRecord.spanAttributes).toHaveProperty('success', false);
+  });
+
+  it('tool span: success=false attribute on cancellation', async () => {
+    const abortController = new AbortController();
+    const { spanRecord, completedCalls } = await runSingleTool({
+      abortController,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return { llmContent: 'cancelled', returnDisplay: 'cancelled' };
+      }),
+    });
+    expect(completedCalls[0].status).toBe('cancelled');
+    expect(spanRecord.spanAttributes).toHaveProperty('success', false);
+  });
+
   // tool.execution sub-span lifecycle assertions —
   // ensure the sub-span is started/ended on every meaningful path so that
   // future regressions (e.g. dropping the sub-span call or mis-marking a
