@@ -67,7 +67,12 @@ export class DaemonSessionClient {
     req: CreateSessionRequest = {},
   ): Promise<DaemonSessionClient> {
     const session = await client.createOrAttachSession(req);
-    return new DaemonSessionClient({ client, session });
+    // `modelServiceId` switch failures are reported on SSE, not the
+    // create/attach HTTP response. Seed the first subscription from the
+    // daemon replay ring so create-then-subscribe clients observe attach-time
+    // `model_switch_failed` / `model_switched` events.
+    const lastEventId = req.modelServiceId ? 0 : undefined;
+    return new DaemonSessionClient({ client, session, lastEventId });
   }
 
   get sessionId(): string {

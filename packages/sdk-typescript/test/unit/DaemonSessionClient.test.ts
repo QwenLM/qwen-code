@@ -96,6 +96,35 @@ describe('DaemonSessionClient', () => {
     });
   });
 
+  it('replays attach-time model switch events on first subscription', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return sseResponse('');
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.createOrAttach(client, {
+      workspaceCwd: '/work/a',
+      modelServiceId: 'qwen-prod',
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(calls[1]?.url).toBe('http://daemon/session/s-1/events');
+    expect(calls[1]?.headers['last-event-id']).toBe('0');
+  });
+
   it('forwards session-scoped operations through DaemonClient', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/prompt')) {

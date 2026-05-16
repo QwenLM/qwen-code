@@ -143,6 +143,14 @@ console.log(result.stopReason);
 subscription by default. Pass `{ resume: false }` to start a fresh subscription
 without sending `Last-Event-ID`.
 
+When `createOrAttach()` is called with `modelServiceId`, the returned session
+client seeds its first event subscription with `Last-Event-ID: 0`. This replays
+the daemon ring from the oldest available event so adapters can observe
+attach-time `model_switch_failed` or `model_switched` events that are not
+reported on the create/attach HTTP response. Raw `DaemonClient` callers should
+pass `{ lastEventId: 0 }` on their first `subscribeEvents()` call when they use
+`modelServiceId`.
+
 ### Message Types
 
 The SDK provides type guards to identify different message types:
