@@ -27,7 +27,10 @@ import type { ChatRecord } from '../services/chatRecordingService.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
-import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
+import {
+  appendStopHookBlockingCapWarning,
+  formatStopHookBlockingCapWarning,
+} from '../hooks/stopHookCap.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -55,14 +58,6 @@ import type {
 const debugLogger = createDebugLogger('BACKGROUND_AGENT_RESUME');
 
 const META_FILE_SUFFIX = '.meta.json';
-
-function appendSubagentStopWarning(
-  text: string,
-  warning: string | undefined,
-): string {
-  if (!warning) return text;
-  return text ? `${text}\n\n${warning}` : warning;
-}
 
 export const DEFAULT_BACKGROUND_AGENT_CONTINUATION_MESSAGE =
   'Continue working on the current task from the last completed step.';
@@ -750,7 +745,7 @@ export class BackgroundAgentResumeService {
           }
 
           const terminateMode = subagent.getTerminateMode();
-          const finalText = appendSubagentStopWarning(
+          const finalText = appendStopHookBlockingCapWarning(
             subagent.getFinalText(),
             stopHookWarning,
           );

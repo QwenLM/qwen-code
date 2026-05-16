@@ -4338,7 +4338,7 @@ Other open files:
         expect(events).toContainEqual({
           type: GeminiEventType.HookSystemMessage,
           value:
-            'Stop hook blocked continuation 1 consecutive times; overriding and ending the turn.',
+            'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
         });
       });
 

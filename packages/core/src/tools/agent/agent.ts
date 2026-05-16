@@ -69,7 +69,10 @@ import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
-import { formatStopHookBlockingCapWarning } from '../../hooks/stopHookCap.js';
+import {
+  appendStopHookBlockingCapWarning,
+  formatStopHookBlockingCapWarning,
+} from '../../hooks/stopHookCap.js';
 import { ApprovalMode } from '../../config/config.js';
 import {
   getAgentJsonlPath,
@@ -180,14 +183,6 @@ export interface AgentParams {
 }
 
 const debugLogger = createDebugLogger('AGENT');
-
-function appendSubagentStopWarning(
-  text: string,
-  warning: string | undefined,
-): string {
-  if (!warning) return text;
-  return text ? `${text}\n\n${warning}` : warning;
-}
 
 /**
  * Maps ApprovalMode to PermissionMode for hook events.
@@ -1103,7 +1098,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // Get the results
-      const finalText = appendSubagentStopWarning(
+      const finalText = appendStopHookBlockingCapWarning(
         subagent.getFinalText(),
         stopHookWarning,
       );
@@ -1834,7 +1829,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               await cleanupWorktreeIsolation(),
             );
             const finalText =
-              appendSubagentStopWarning(
+              appendStopHookBlockingCapWarning(
                 bgSubagent.getFinalText(),
                 stopHookWarning,
               ) + wtSuffix;
@@ -2157,7 +2152,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         });
 
         const stopHookWarning = await runFramed();
-        const finalText = appendSubagentStopWarning(
+        const finalText = appendStopHookBlockingCapWarning(
           subagent.getFinalText(),
           stopHookWarning,
         );

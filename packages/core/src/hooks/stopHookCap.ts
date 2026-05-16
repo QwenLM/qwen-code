@@ -37,5 +37,14 @@ export function formatStopHookBlockingCapWarning(
   // model or subagent would otherwise finish, so keep user-facing labels
   // explicit instead of accepting arbitrary hook names.
   const hookName = hookLabel === 'Stop' ? 'Stop hook' : 'SubagentStop hook';
-  return `${hookName} blocked continuation ${cap} consecutive times; overriding and ending the turn.`;
+  const timesWord = cap === 1 ? 'time' : 'times';
+  return `${hookName} blocked continuation ${cap} consecutive ${timesWord}; overriding and ending the turn.`;
+}
+
+export function appendStopHookBlockingCapWarning(
+  text: string,
+  warning: string | undefined,
+): string {
+  if (!warning) return text;
+  return text ? `${text}\n\n${warning}` : warning;
 }

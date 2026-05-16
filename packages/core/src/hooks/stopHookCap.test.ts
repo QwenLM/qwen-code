@@ -9,6 +9,7 @@ import {
   DEFAULT_STOP_HOOK_BLOCK_CAP,
   MAX_STOP_HOOK_BLOCK_CAP,
   STOP_HOOK_BLOCK_CAP_ENV,
+  appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
   normalizeStopHookBlockingCap,
   resolveStopHookBlockingCap,
@@ -57,6 +58,17 @@ describe('stop hook blocking cap', () => {
     );
     expect(formatStopHookBlockingCapWarning('SubagentStop', 2)).toContain(
       'SubagentStop hook blocked continuation 2 consecutive times',
+    );
+    expect(formatStopHookBlockingCapWarning('Stop', 1)).toBe(
+      'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+    );
+  });
+
+  it('appends cap warnings to visible subagent output', () => {
+    expect(appendStopHookBlockingCapWarning('done', undefined)).toBe('done');
+    expect(appendStopHookBlockingCapWarning('', 'warning')).toBe('warning');
+    expect(appendStopHookBlockingCapWarning('done', 'warning')).toBe(
+      'done\n\nwarning',
     );
   });
 });

@@ -2126,6 +2126,51 @@ describe('Session', () => {
             },
           });
         });
+
+        it('emits the cap warning without retrying when the blocking cap is one', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(1);
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(result).toEqual({ stopReason: 'end_turn' });
+          expect(messageBus.request).toHaveBeenCalledTimes(1);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+              },
+            },
+          });
+        });
       });
 
       describe('PreToolUse hook', () => {
