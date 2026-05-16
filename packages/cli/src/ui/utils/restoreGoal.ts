@@ -137,9 +137,13 @@ export function restoreGoalFromHistory(
   }
 
   if (!config.isTrustedFolder() || config.getDisableAllHooks()) {
+    unregisterGoalHook(config, sessionId);
     return { restored: false };
   }
-  if (!config.getHookSystem()) return { restored: false };
+  if (!config.getHookSystem()) {
+    unregisterGoalHook(config, sessionId);
+    return { restored: false };
+  }
 
   registerGoalHook({
     config,

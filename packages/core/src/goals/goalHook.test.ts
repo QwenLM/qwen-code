@@ -157,6 +157,43 @@ describe('createGoalStopHookCallback', () => {
     }
   });
 
+  it('does not clear a replacement goal when the old judge call resolves later', async () => {
+    setActiveGoal('sess-1', {
+      condition: 'old goal',
+      iterations: 0,
+      setAt: 100,
+      tokensAtStart: 0,
+      hookId: 'old-hook',
+    });
+    let resolveJudge!: (value: { ok: boolean; reason: string }) => void;
+    judgeMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveJudge = resolve;
+      }),
+    );
+
+    const cb = createGoalStopHookCallback({
+      config: {} as Config,
+      sessionId: 'sess-1',
+      condition: 'old goal',
+    });
+    const pending = cb(stopInput(), undefined);
+    setActiveGoal('sess-1', {
+      condition: 'new goal',
+      iterations: 0,
+      setAt: 200,
+      tokensAtStart: 0,
+      hookId: 'new-hook',
+    });
+    resolveJudge({ ok: true, reason: 'old goal done' });
+
+    await expect(pending).resolves.toEqual({ continue: true });
+    expect(getActiveGoal('sess-1')).toMatchObject({
+      condition: 'new goal',
+      hookId: 'new-hook',
+    });
+  });
+
   it('clears and stops the loop when MAX_GOAL_ITERATIONS is reached', async () => {
     setActiveGoal('sess-1', {
       condition: 'do x',

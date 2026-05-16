@@ -10,6 +10,7 @@ import {
   getActiveGoal,
   getLastGoalTerminal,
   notifyGoalTerminal,
+  setActiveGoal,
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { HistoryItem } from '../types.js';
@@ -120,7 +121,14 @@ describe('restoreGoalFromHistory', () => {
     expect(getActiveGoal('sess-1')).toBeUndefined();
   });
 
-  it('skips restore when workspace is no longer trusted', () => {
+  it('skips restore when workspace is no longer trusted and clears stale in-memory goal', () => {
+    setActiveGoal('sess-1', {
+      condition: 'stale goal',
+      iterations: 0,
+      setAt: 100,
+      tokensAtStart: 0,
+      hookId: 'stale-hook',
+    });
     const cfg = makeConfig({
       isTrustedFolder: vi.fn().mockReturnValue(false),
     } as unknown as Partial<Config>);

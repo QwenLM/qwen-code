@@ -151,12 +151,19 @@ export function createGoalStopHookCallback(args: {
       signal,
     });
 
+    const latest = getActiveGoal(sessionId);
+    if (!latest || latest.condition !== condition) {
+      // The goal was cleared or replaced while the async judge call was in
+      // flight. Do not let a stale callback clear or mutate the replacement.
+      return { continue: true };
+    }
+
     if (verdict.ok) {
-      finishGoal(config, sessionId, current, {
+      finishGoal(config, sessionId, latest, {
         kind: 'achieved',
-        condition: current.condition,
-        iterations: current.iterations,
-        durationMs: Date.now() - current.setAt,
+        condition: latest.condition,
+        iterations: latest.iterations,
+        durationMs: Date.now() - latest.setAt,
         lastReason: verdict.reason,
       });
       return { continue: true };
@@ -166,16 +173,16 @@ export function createGoalStopHookCallback(args: {
     // The iteration cap is a safety valve for still-not-met verdicts, not a
     // pre-judge hard stop; otherwise the final generated turn could satisfy
     // the goal but still be reported as aborted.
-    if (current.iterations >= MAX_GOAL_ITERATIONS) {
+    if (latest.iterations >= MAX_GOAL_ITERATIONS) {
       debugLogger.debug(
         `Goal exceeded MAX_GOAL_ITERATIONS=${MAX_GOAL_ITERATIONS}; clearing.`,
       );
-      finishGoal(config, sessionId, current, {
+      finishGoal(config, sessionId, latest, {
         kind: 'aborted',
-        condition: current.condition,
-        iterations: current.iterations,
-        durationMs: Date.now() - current.setAt,
-        lastReason: verdict.reason || current.lastReason,
+        condition: latest.condition,
+        iterations: latest.iterations,
+        durationMs: Date.now() - latest.setAt,
+        lastReason: verdict.reason || latest.lastReason,
         systemMessage: GOAL_ABORTED_REASON,
       });
       return {
