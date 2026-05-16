@@ -181,12 +181,27 @@ function cleanupOldHeapSnapshots(
     .sort((a, b) => {
       const aStat = fs.statSync(a);
       const bStat = fs.statSync(b);
-      return bStat.mtimeMs - aStat.mtimeMs;
+      const mtimeDelta = bStat.mtimeMs - aStat.mtimeMs;
+      if (mtimeDelta !== 0) return mtimeDelta;
+
+      return (
+        extractHeapSnapshotTimestamp(b).localeCompare(
+          extractHeapSnapshotTimestamp(a),
+        ) || path.basename(b).localeCompare(path.basename(a))
+      );
     });
 
   for (const filePath of snapshots.slice(maxSnapshots)) {
     fs.rmSync(filePath, { force: true });
   }
+}
+
+function extractHeapSnapshotTimestamp(filePath: string): string {
+  return (
+    path
+      .basename(filePath)
+      .match(/^qwen-code-heap-\d+-(.+)\.heapsnapshot$/)?.[1] ?? ''
+  );
 }
 
 const lastHeapSnapshotWriteByDir = new Map<string, number>();
