@@ -5,6 +5,16 @@ export type {
   AvailableCommand,
   ToolCallEvent,
 } from './AcpBridge.js';
+export { DaemonChannelBridge } from './DaemonChannelBridge.js';
+export type {
+  DaemonChannelBridgeOptions,
+  DaemonChannelEvent,
+  DaemonChannelSessionClient,
+  DaemonChannelSessionFactory,
+  DaemonChannelSessionFactoryRequest,
+  DaemonPermissionRequestEvent,
+  DaemonPermissionResolvedEvent,
+} from './DaemonChannelBridge.js';
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';

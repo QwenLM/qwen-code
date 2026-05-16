@@ -37,6 +37,10 @@ QWEN_DAEMON_WORKSPACE=/repo
 
 ## Minimal Channel Flow
 
+This PR adds `DaemonChannelBridge`, a locally verifiable server-side bridge for
+channel and web-backend adapters. It keeps the existing ACP bridge as the
+default and owns daemon session state inside the backend process.
+
 1. Resolve channel sender/thread to a channel session key.
 2. Use `DaemonClient` + `DaemonSessionClient.createOrAttach()`.
 3. Submit inbound user text with `session.prompt()`.
@@ -81,6 +85,9 @@ Do not silently multiplex unrelated channel threads into one daemon session.
 
 Unknown daemon events must be ignored or forwarded as debug metadata, not fatal.
 
+The bridge is not wired into `qwen channel start` yet. Existing Telegram,
+Weixin, Dingtalk, plugin channel, and browser behavior remains unchanged.
+
 ## Explicit Non-Goals
 
 - No browser direct-to-daemon fetch or EventSource.
@@ -100,6 +107,7 @@ Unknown daemon events must be ignored or forwarded as debug metadata, not fatal.
 
 - Unit-test channel session-key to daemon-session binding.
 - Unit-test daemon event to channel/web message mapping.
+- Unit-test prompt, cancel, model switch, and permission response forwarding.
 - Smoke-test one single-user channel backend against local `qwen serve`.
 - Smoke-test browser -> BFF -> daemon without exposing daemon token.
 
