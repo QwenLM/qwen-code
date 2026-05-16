@@ -150,6 +150,8 @@ export default {
     'Code restauré, mais la conversation n’a pas pu être ramenée en arrière (aucun client actif).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     'Conversation ramenée en arrière. Modifiez votre invite et appuyez sur Entrée pour continuer.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Échec de la restauration de {{count}} fichier(s) : {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

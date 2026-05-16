@@ -150,6 +150,8 @@ export default {
     'Code restored, but conversation could not be rewound (no active client).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     'Conversation rewound. Edit your prompt and press Enter to continue.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Rewinding does not affect files edited manually or via shell commands.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Failed to restore {{count}} file(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

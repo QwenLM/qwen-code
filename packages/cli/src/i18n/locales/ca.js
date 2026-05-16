@@ -150,6 +150,8 @@ export default {
     'Codi restaurat, però la conversa no s’ha pogut retrocedir (cap client actiu).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     'Conversa retrocedida. Edita la teva indicació i prem Retorn per continuar.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'El retrocés no afecta els fitxers editats manualment o mitjançant comandes de shell.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Error en restaurar {{count}} fitxer(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

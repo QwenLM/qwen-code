@@ -153,6 +153,8 @@ export default {
     'Код восстановлен, но разговор не удалось откатить (нет активного клиента).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     'Разговор откатили. Отредактируйте подсказку и нажмите Enter, чтобы продолжить.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Не удалось восстановить {{count}} файл(ов): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

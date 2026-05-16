@@ -420,6 +420,17 @@ export function RewindSelector({
                     </Box>
                   );
                 })}
+                {restoreOptions.some(
+                  (o) => o.key === 'code' || o.key === 'both',
+                ) && (
+                  <Box marginTop={1}>
+                    <Text color={theme.text.secondary} dimColor>
+                      {t(
+                        'Rewinding does not affect files edited manually or via shell commands.',
+                      )}
+                    </Text>
+                  </Box>
+                )}
               </Box>
             )}
           </Box>

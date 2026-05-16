@@ -158,6 +158,40 @@ describe('FileHistoryService', () => {
         snapshots[0].trackedFileBackups[p1Key].backupFileName,
       );
     });
+
+    // When a per-file backup attempt throws inside makeSnapshot, the new
+    // snapshot must NOT silently inherit the previous snapshot's backup
+    // and present it as the captured state of this turn — that would
+    // make a later rewind restore older content while reporting success.
+    // Instead the snapshot records a `failed: true` marker so rewind
+    // surfaces the file via filesFailed and getDiffStats omits it.
+    it('marks per-file backup failures and does not silently inherit', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'p1-content');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+
+      // Modify the file and break the backup target (replace storageDir
+      // with a regular file → ENOTDIR inside `safeCopyFile`'s recursive
+      // mkdir). The next makeSnapshot's per-file backup attempt throws.
+      await writeFile(file, 'p2-content');
+      await rm(storageDir, { recursive: true, force: true });
+      await writeFile(storageDir, '');
+
+      await service.makeSnapshot('p2');
+
+      const p2Backups = service.getSnapshots()[1].trackedFileBackups;
+      const p2Backup = p2Backups['a.txt'];
+      expect(p2Backup).toBeDefined();
+      expect(p2Backup.failed).toBe(true);
+
+      // Rewind to p2 must report the file as failed, not silently
+      // restore p1-content as if it were the captured state of p2.
+      const result = await service.rewind('p2');
+      expect(result.filesChanged).toEqual([]);
+      expect(result.filesFailed).toContain(file);
+    });
   });
 
   describe('rewind', () => {

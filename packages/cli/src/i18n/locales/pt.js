@@ -144,6 +144,8 @@ export default {
     'Código restaurado, mas a conversa não pôde ser retrocedida (sem cliente ativo).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     'Conversa retrocedida. Edite seu prompt e pressione Enter para continuar.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'O retrocesso não afeta arquivos editados manualmente ou por meio de comandos shell.',
   'Failed to restore {{count}} file(s): {{files}}':
     'Falha ao restaurar {{count}} arquivo(s): {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

@@ -129,6 +129,8 @@ export default {
     'Code wiederhergestellt, aber Konversation konnte nicht zurückgespult werden (kein aktiver Client).',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     'Konversation zurückgespult. Bearbeite deinen Prompt und drücke Enter, um fortzufahren.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Das Zurückspulen wirkt sich nicht auf Dateien aus, die manuell oder per Shell-Befehl geändert wurden.',
   'Failed to restore {{count}} file(s): {{files}}':
     '{{count}} Datei(en) konnten nicht wiederhergestellt werden: {{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

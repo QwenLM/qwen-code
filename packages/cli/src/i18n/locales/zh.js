@@ -144,6 +144,8 @@ export default {
     '代码已恢复，但对话无法回退（模型客户端未激活）。',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     '对话已回退。修改你的提示后按回车继续。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '回退不会影响手工编辑或通过 shell 命令修改的文件。',
   'Failed to restore {{count}} file(s): {{files}}':
     '恢复 {{count}} 个文件失败：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

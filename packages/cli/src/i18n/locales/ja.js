@@ -110,6 +110,8 @@ export default {
     'コードは復元されましたが、会話は巻き戻せませんでした（モデルクライアントがアクティブではありません）。',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     '会話を巻き戻しました。プロンプトを編集して Enter キーで続行してください。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
   'Failed to restore {{count}} file(s): {{files}}':
     '{{count}} 個のファイルの復元に失敗しました：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

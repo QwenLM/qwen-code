@@ -133,6 +133,8 @@ export default {
     '程式碼已恢復，但對話無法回退（模型客戶端未啟用）。',
   'Conversation rewound. Edit your prompt and press Enter to continue.':
     '對話已回退。修改提示後按 Enter 繼續。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '回退不會影響手動編輯或透過 shell 命令修改的檔案。',
   'Failed to restore {{count}} file(s): {{files}}':
     '恢復 {{count}} 個檔案失敗：{{files}}',
   'Cannot restore files: this turn was created before file checkpointing was enabled.':

@@ -27,6 +27,13 @@ export interface FileHistoryBackup {
   backupFileName: BackupFileName;
   version: number;
   backupTime: Date;
+  // Set when makeSnapshot's per-file backup attempt threw. Distinguishes
+  // "we have a confirmed backup of this file at this snapshot" from
+  // "we tried to capture this file at this snapshot but failed (so the
+  // attached backup, if any, is older than this turn)". Rewind / diff
+  // surface failed paths via filesFailed instead of silently restoring
+  // stale content as if it were current.
+  failed?: boolean;
 }
 
 export interface FileHistorySnapshot {
@@ -265,6 +272,17 @@ async function computeDiffStatsForFile(
   return { filesChanged, insertions, deletions };
 }
 
+/**
+ * Tracks file edits made through the assistant's `edit` and `write_file`
+ * tools so `/rewind` can roll the workspace back to the state at a chosen
+ * turn boundary.
+ *
+ * Scope (intentional, mirrors upstream claude-code): only files touched
+ * via `edit` and `write_file` are tracked. Changes made via
+ * `run_shell_command` (`sed -i`, `cp`, `mv`, `rm`, `npm` scripts, `git`
+ * apply, etc.) and any out-of-tool manual edits are NOT captured, and
+ * `/rewind` cannot restore them.
+ */
 export class FileHistoryService {
   private state: FileHistoryState = {
     snapshots: [],
@@ -395,6 +413,18 @@ export class FileHistoryService {
             debugLogger.error(
               `FileHistory: Failed to backup file ${trackingPath}: ${error}`,
             );
+            // Record the failure rather than letting the inheritance loop
+            // silently copy the previous snapshot's backup — that would
+            // make a rewind to this snapshot restore the file to its
+            // pre-failure content as if it were the captured state of
+            // this turn.
+            const previous = mostRecent?.trackedFileBackups[trackingPath];
+            trackedFileBackups[trackingPath] = {
+              backupFileName: previous?.backupFileName ?? null,
+              version: this.getMaxVersion(trackingPath) + 1,
+              backupTime: new Date(),
+              failed: true,
+            };
           }
         }),
       );
@@ -469,6 +499,12 @@ export class FileHistoryService {
           const filePath = this.maybeExpandFilePath(trackingPath);
           const targetBackup = targetSnapshot.trackedFileBackups[trackingPath];
 
+          // The backup attempt failed at the target snapshot; we cannot
+          // produce a meaningful diff against a content we never captured,
+          // so omit this file from the preview rather than show a diff
+          // versus an older inherited backup.
+          if (targetBackup?.failed) return null;
+
           const backupFileName: BackupFileName | undefined = targetBackup
             ? targetBackup.backupFileName
             : this.getBackupFileNameFirstVersion(trackingPath);
@@ -526,6 +562,14 @@ export class FileHistoryService {
       try {
         const filePath = this.maybeExpandFilePath(trackingPath);
         const targetBackup = targetSnapshot.trackedFileBackups[trackingPath];
+
+        // makeSnapshot couldn't capture this file at the target turn.
+        // Surface it as failed instead of restoring the carried-over
+        // (older) backup as if it were the captured state.
+        if (targetBackup?.failed) {
+          filesFailed.push(filePath);
+          continue;
+        }
 
         const backupFileName: BackupFileName | undefined = targetBackup
           ? targetBackup.backupFileName
