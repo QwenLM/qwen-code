@@ -21,14 +21,35 @@ import {
   toJson,
   toJsonl,
   generateExportFilename,
+  type ExportSessionData,
 } from '../utils/export/index.js';
 import { t } from '../../i18n/index.js';
 
-/**
- * Action for the 'md' subcommand - exports session to markdown.
- */
-async function exportMarkdownAction(
+type ExportFormat = {
+  extension: string;
+  displayName: string;
+  format: (sessionData: ExportSessionData) => string;
+};
+
+function resolveExportTarget(cwd: string, args: string, extension: string) {
+  const filename = generateExportFilename(extension);
+  const outputDirArg = args.trim();
+  const outputDir = outputDirArg ? path.resolve(cwd, outputDirArg) : cwd;
+  const filepath = path.join(outputDir, filename);
+
+  return {
+    filename,
+    filepath,
+    outputDir,
+    displayPath: outputDirArg ? filepath : filename,
+    shouldCreateOutputDir: Boolean(outputDirArg),
+  };
+}
+
+async function exportSessionAction(
   context: CommandContext,
+  args: string,
+  exportFormat: ExportFormat,
 ): Promise<MessageActionReturn> {
   const { services } = context;
   const { config } = services;
@@ -74,19 +95,18 @@ async function exportMarkdownAction(
       config,
     );
 
-    // Generate markdown from SSOT
-    const markdown = toMarkdown(normalizedData);
+    const content = exportFormat.format(normalizedData);
+    const target = resolveExportTarget(cwd, args, exportFormat.extension);
 
-    const filename = generateExportFilename('md');
-    const filepath = path.join(cwd, filename);
-
-    // Write to file
-    await fs.writeFile(filepath, markdown, 'utf-8');
+    if (target.shouldCreateOutputDir) {
+      await fs.mkdir(target.outputDir, { recursive: true });
+    }
+    await fs.writeFile(target.filepath, content, 'utf-8');
 
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to markdown: ${filename}`,
+      content: `Session exported to ${exportFormat.displayName}: ${target.displayPath}`,
     };
   } catch (error) {
     return {
@@ -95,6 +115,20 @@ async function exportMarkdownAction(
       content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
+}
+
+/**
+ * Action for the 'md' subcommand - exports session to markdown.
+ */
+async function exportMarkdownAction(
+  context: CommandContext,
+  args: string,
+): Promise<MessageActionReturn> {
+  return exportSessionAction(context, args, {
+    extension: 'md',
+    displayName: 'markdown',
+    format: toMarkdown,
+  });
 }
 
 /**
@@ -102,72 +136,13 @@ async function exportMarkdownAction(
  */
 async function exportHtmlAction(
   context: CommandContext,
+  args: string,
 ): Promise<MessageActionReturn> {
-  const { services } = context;
-  const { config } = services;
-
-  if (!config) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Configuration not available.',
-    };
-  }
-
-  const cwd = config.getWorkingDir() || config.getProjectRoot();
-  if (!cwd) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Could not determine current working directory.',
-    };
-  }
-
-  try {
-    // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
-    const sessionId = config.getSessionId();
-    const sessionData = await sessionService.loadSession(sessionId);
-
-    if (!sessionData) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: 'No active session found to export.',
-      };
-    }
-
-    const { conversation } = sessionData;
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
-
-    // Generate HTML from SSOT
-    const html = toHtml(normalizedData);
-
-    const filename = generateExportFilename('html');
-    const filepath = path.join(cwd, filename);
-
-    // Write to file
-    await fs.writeFile(filepath, html, 'utf-8');
-
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: `Session exported to HTML: ${filename}`,
-    };
-  } catch (error) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+  return exportSessionAction(context, args, {
+    extension: 'html',
+    displayName: 'HTML',
+    format: toHtml,
+  });
 }
 
 /**
@@ -175,72 +150,13 @@ async function exportHtmlAction(
  */
 async function exportJsonAction(
   context: CommandContext,
+  args: string,
 ): Promise<MessageActionReturn> {
-  const { services } = context;
-  const { config } = services;
-
-  if (!config) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Configuration not available.',
-    };
-  }
-
-  const cwd = config.getWorkingDir() || config.getProjectRoot();
-  if (!cwd) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Could not determine current working directory.',
-    };
-  }
-
-  try {
-    // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
-    const sessionId = config.getSessionId();
-    const sessionData = await sessionService.loadSession(sessionId);
-
-    if (!sessionData) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: 'No active session found to export.',
-      };
-    }
-
-    const { conversation } = sessionData;
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
-
-    // Generate JSON from SSOT
-    const json = toJson(normalizedData);
-
-    const filename = generateExportFilename('json');
-    const filepath = path.join(cwd, filename);
-
-    // Write to file
-    await fs.writeFile(filepath, json, 'utf-8');
-
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: `Session exported to JSON: ${filename}`,
-    };
-  } catch (error) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+  return exportSessionAction(context, args, {
+    extension: 'json',
+    displayName: 'JSON',
+    format: toJson,
+  });
 }
 
 /**
@@ -248,72 +164,13 @@ async function exportJsonAction(
  */
 async function exportJsonlAction(
   context: CommandContext,
+  args: string,
 ): Promise<MessageActionReturn> {
-  const { services } = context;
-  const { config } = services;
-
-  if (!config) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Configuration not available.',
-    };
-  }
-
-  const cwd = config.getWorkingDir() || config.getProjectRoot();
-  if (!cwd) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Could not determine current working directory.',
-    };
-  }
-
-  try {
-    // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
-    const sessionId = config.getSessionId();
-    const sessionData = await sessionService.loadSession(sessionId);
-
-    if (!sessionData) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: 'No active session found to export.',
-      };
-    }
-
-    const { conversation } = sessionData;
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
-
-    // Generate JSONL from SSOT
-    const jsonl = toJsonl(normalizedData);
-
-    const filename = generateExportFilename('jsonl');
-    const filepath = path.join(cwd, filename);
-
-    // Write to file
-    await fs.writeFile(filepath, jsonl, 'utf-8');
-
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: `Session exported to JSONL: ${filename}`,
-    };
-  } catch (error) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+  return exportSessionAction(context, args, {
+    extension: 'jsonl',
+    displayName: 'JSONL',
+    format: toJsonl,
+  });
 }
 
 /**

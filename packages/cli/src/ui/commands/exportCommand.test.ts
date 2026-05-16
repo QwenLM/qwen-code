@@ -44,6 +44,7 @@ vi.mock('../utils/export/index.js', () => ({
 }));
 
 vi.mock('node:fs/promises', () => ({
+  mkdir: vi.fn(),
   writeFile: vi.fn(),
 }));
 
@@ -143,6 +144,31 @@ describe('exportCommand', () => {
       expect(generateExportFilename).toHaveBeenCalledWith('md');
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.md'),
+        '# Test Markdown',
+        'utf-8',
+      );
+    });
+
+    it('should export markdown to a relative custom directory', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      const result = await mdCommand.action(mockContext, './logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          '/test/dir/logs/export-2025-01-01T00-00-00-000Z.md',
+        ),
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith('/test/dir/logs', {
+        recursive: true,
+      });
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/dir/logs/export-2025-01-01T00-00-00-000Z.md',
         '# Test Markdown',
         'utf-8',
       );
@@ -271,6 +297,30 @@ describe('exportCommand', () => {
       expect(generateExportFilename).toHaveBeenCalledWith('html');
       expect(fs.writeFile).toHaveBeenCalledWith(
         expect.stringContaining('export-2025-01-01T00-00-00-000Z.html'),
+        expect.stringContaining('{"data": "test"}'),
+        'utf-8',
+      );
+    });
+
+    it('should export default HTML to a relative custom directory', async () => {
+      if (!exportCommand.action) {
+        throw new Error('export command action not found');
+      }
+
+      const result = await exportCommand.action(mockContext, './logs');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          '/test/dir/logs/export-2025-01-01T00-00-00-000Z.html',
+        ),
+      });
+      expect(fs.mkdir).toHaveBeenCalledWith('/test/dir/logs', {
+        recursive: true,
+      });
+      expect(fs.writeFile).toHaveBeenCalledWith(
+        '/test/dir/logs/export-2025-01-01T00-00-00-000Z.html',
         expect.stringContaining('{"data": "test"}'),
         'utf-8',
       );
