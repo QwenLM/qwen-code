@@ -334,6 +334,28 @@ describe('useSlashCommandProcessor', () => {
       );
     });
 
+    it('should display warning message command results as warnings', async () => {
+      const command = createTestCommand({
+        name: 'warn',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'warning',
+          content: 'Check diagnostics.',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/warn');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.WARNING, text: 'Check diagnostics.' },
+        expect.any(Number),
+      );
+    });
+
     it('should correctly find and execute a nested subcommand', async () => {
       const childAction = vi.fn();
       const parentCommand: SlashCommand = {

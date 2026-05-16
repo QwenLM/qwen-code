@@ -128,6 +128,20 @@ describe('doctorCommand', () => {
         detachedContexts: 0,
         nativeContexts: 1,
       },
+      v8HeapSpaces: [
+        {
+          name: 'old_space',
+          size: 4_096,
+          used: 2_048,
+          available: 2_048,
+        },
+        {
+          name: 'new_space',
+          size: 2_048,
+          used: 1_024,
+          available: 1_024,
+        },
+      ],
       resourceUsage: {
         maxRSS: 4_000,
         userCPUTime: 10,
@@ -135,6 +149,7 @@ describe('doctorCommand', () => {
       },
       activeHandles: 2,
       activeRequests: 0,
+      smapsRollup: 'Rss:               5000 kB\nPss:               1000 kB\n',
       platform: 'darwin',
       nodeVersion: 'v20.19.0',
       analysis: {
@@ -722,8 +737,28 @@ describe('doctorCommand', () => {
       'heapUsed: 1.0 KB',
     );
     expect(result?.type === 'message' ? result.content : '').not.toContain(
-      '0.00 MiB',
+      'heapUsed: 0.0 MB',
     );
+  });
+
+  it('should pass session metadata to memory diagnostics', async () => {
+    const getSessionId = vi.fn(() => 'session-123');
+    const getCliVersion = vi.fn(() => '0.15.11');
+    mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getSessionId,
+          getCliVersion,
+        },
+      },
+    } as unknown as CommandContext);
+
+    await getMemoryCommand().action!(mockContext, '--json');
+
+    expect(collectMemoryDiagnostics).toHaveBeenCalledWith({
+      sessionId: 'session-123',
+      qwenVersion: '0.15.11',
+    });
   });
 
   it('should register memory as a real doctor subcommand', () => {
@@ -772,7 +807,7 @@ describe('doctorCommand', () => {
     expect(result).toEqual(
       expect.objectContaining({
         type: 'message',
-        messageType: 'info',
+        messageType: 'warning',
       }),
     );
     expect(result?.type === 'message' ? result.content : '').toContain(
@@ -885,7 +920,9 @@ describe('doctorCommand', () => {
     expect(content).toContain('maxRSS:');
     expect(content).toContain('userCPUTime:');
     expect(content).toContain('systemCPUTime:');
-    expect(content).toContain('smapsRollup:');
+    expect(content).toContain('smapsRollup: Rss: 5000 kB');
+    expect(content).toContain('v8HeapSpaces:');
+    expect(content).toContain('old_space: used 2.0 KB');
   });
 
   it('should advertise the memory subcommand on the parent doctor argumentHint', () => {

@@ -254,7 +254,10 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
   }
 
   try {
-    const diagnostics = await collectMemoryDiagnostics();
+    const diagnostics = await collectMemoryDiagnostics({
+      sessionId: context.services.config?.getSessionId(),
+      qwenVersion: context.services.config?.getCliVersion(),
+    });
 
     if (context.abortSignal?.aborted) {
       return;
@@ -262,7 +265,10 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
 
     return {
       type: 'message' as const,
-      messageType: 'info' as const,
+      messageType:
+        diagnostics.analysis.risks.length > 0
+          ? ('warning' as const)
+          : ('info' as const),
       content: tokens.includes('--json')
         ? JSON.stringify(diagnostics, null, 2)
         : formatMemoryDiagnostics(diagnostics),
@@ -302,6 +308,19 @@ function formatHeapSpaces(
   return lines.join('\n');
 }
 
+function formatSmapsRollup(smapsRollup: string | undefined): string {
+  if (!smapsRollup) {
+    return t('unavailable');
+  }
+
+  const rssLine = smapsRollup
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/\s+/g, ' '))
+    .find((line) => line.startsWith('Rss:'));
+
+  return rssLine ?? t('available');
+}
+
 function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
   const risks =
     diagnostics.analysis.risks.length > 0
@@ -330,7 +349,7 @@ function formatMemoryDiagnostics(diagnostics: MemoryDiagnostics): string {
     `activeHandles: ${diagnostics.activeHandles}`,
     `activeRequests: ${diagnostics.activeRequests}`,
     `openFileDescriptors: ${diagnostics.openFileDescriptors ?? t('unavailable')}`,
-    `smapsRollup: ${diagnostics.smapsRollup ? t('available') : t('unavailable')}`,
+    `smapsRollup: ${formatSmapsRollup(diagnostics.smapsRollup)}`,
   ];
 
   const heapSpaces = formatHeapSpaces(diagnostics.v8HeapSpaces);

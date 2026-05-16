@@ -131,7 +131,7 @@ export interface QuitActionReturn {
  */
 export interface MessageActionReturn {
   type: 'message';
-  messageType: 'info' | 'error';
+  messageType: 'info' | 'warning' | 'error';
   content: string;
 }
 
@@ -142,7 +142,7 @@ export interface MessageActionReturn {
 export interface StreamMessagesActionReturn {
   type: 'stream_messages';
   messages: AsyncGenerator<
-    { messageType: 'info' | 'error'; content: string },
+    { messageType: 'info' | 'warning' | 'error'; content: string },
     void,
     unknown
   >;

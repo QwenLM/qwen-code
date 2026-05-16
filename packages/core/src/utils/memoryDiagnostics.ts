@@ -133,7 +133,7 @@ export async function collectMemoryDiagnostics(
   const maxRSSBytes =
     platform === 'linux' ? resourceUsage.maxRSS * 1024 : resourceUsage.maxRSS;
 
-  const diagnostics: MemoryDiagnostics = {
+  const diagnostics = {
     timestamp: now().toISOString(),
     sessionId: options.sessionId,
     qwenVersion: options.qwenVersion,
@@ -152,14 +152,12 @@ export async function collectMemoryDiagnostics(
     smapsRollup,
     platform,
     nodeVersion: options.nodeVersion ?? process.version,
-    analysis: {
-      risks: [],
-      recommendation: '',
-    },
-  };
+  } satisfies Omit<MemoryDiagnostics, 'analysis'>;
 
-  diagnostics.analysis = analyzeMemoryDiagnostics(diagnostics);
-  return diagnostics;
+  return {
+    ...diagnostics,
+    analysis: analyzeMemoryDiagnostics(diagnostics),
+  };
 }
 
 function mapHeapStats(heapInfo: v8.HeapInfo): V8HeapStats {
@@ -248,7 +246,7 @@ function logProbeFailure(name: string, error: unknown): void {
 }
 
 function analyzeMemoryDiagnostics(
-  diagnostics: MemoryDiagnostics,
+  diagnostics: Omit<MemoryDiagnostics, 'analysis'>,
 ): MemoryDiagnosticsAnalysis {
   const risks: MemoryRisk[] = [];
   const heapRatio =
