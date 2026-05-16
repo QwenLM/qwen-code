@@ -40,6 +40,7 @@ describe('EditTool', () => {
   let geminiClient: any;
   let baseLlmClient: any;
   let fileReadCache: FileReadCache;
+  let mockFileHistoryService: { trackEdit: ReturnType<typeof vi.fn> };
   let fsService: StandardFileSystemService;
 
   beforeEach(() => {
@@ -48,6 +49,7 @@ describe('EditTool', () => {
     rootDir = path.join(tempDir, 'root');
     fs.mkdirSync(rootDir);
     fileReadCache = new FileReadCache();
+    mockFileHistoryService = { trackEdit: vi.fn() };
     fsService = new StandardFileSystemService();
 
     geminiClient = {
@@ -86,6 +88,7 @@ describe('EditTool', () => {
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
+      getFileHistoryService: () => mockFileHistoryService,
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -497,10 +500,38 @@ describe('EditTool', () => {
         /Showing lines \d+-\d+ of \d+ from the edited file:/,
       );
       expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileDiff).toMatch(initialContent);
       expect(display.fileDiff).toMatch(newContent);
       expect(display.fileName).toBe(testFile);
+    });
+
+    // trackEdit is best-effort: a FileHistoryService failure (disk full,
+    // permissions, corrupted state) must never break the edit tool.
+    it('completes the edit even when trackEdit throws', async () => {
+      const initialContent = 'This is some old text.';
+      const newContent = 'This is some new text.';
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      seedPriorRead(filePath);
+      mockFileHistoryService.trackEdit.mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockFileHistoryService.trackEdit).toHaveBeenCalledWith(filePath);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(newContent);
+      expect(result.llmContent).toMatch(
+        /Showing lines \d+-\d+ of \d+ from the edited file:/,
+      );
     });
 
     // The Edit tool feeds the commit-attribution singleton on success so

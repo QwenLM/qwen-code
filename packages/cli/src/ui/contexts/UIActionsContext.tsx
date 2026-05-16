@@ -13,6 +13,7 @@ import { type EditorType, type ApprovalMode } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import type { AuthController } from '../auth/useAuth.js';
 import type { HistoryItem } from '../types.js';
+import type { RestoreOption } from '../components/RewindSelector.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
 
 export type HelpTab = 'general' | 'commands' | 'custom-commands';
@@ -98,7 +99,7 @@ export interface UIActions {
   // Rewind selector
   openRewindSelector: () => void;
   closeRewindSelector: () => void;
-  handleRewindConfirm: (userItem: HistoryItem) => void;
+  handleRewindConfirm: (userItem: HistoryItem, option: RestoreOption) => void;
 }
 
 export const UIActionsContext = createContext<UIActions | null>(null);

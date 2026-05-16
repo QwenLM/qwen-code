@@ -134,6 +134,45 @@ export default {
     'Переименовать текущий разговор. --auto позволит быстрой модели выбрать заголовок.',
   'Rewind conversation to a previous turn':
     'Откатить разговор к предыдущему ходу',
+  'Rewind Conversation': 'Перемотка разговора',
+  'No user turns to rewind to.': 'Нет пользовательских ходов для перемотки.',
+  'Rewind to: ': 'Перемотать к: ',
+  'Restore code and conversation': 'Восстановить код и беседу',
+  'Restore conversation only': 'Восстановить только беседу',
+  'Restore code only': 'Восстановить только код',
+  'Never mind': 'Неважно',
+  'Computing file changes...': 'Вычисление изменений файлов...',
+  'Restoring...': 'Восстановление...',
+  'Restored {{count}} file(s).': 'Восстановлено файлов: {{count}}.',
+  'Failed to restore files: {{error}}':
+    'Не удалось восстановить файлы: {{error}}',
+  'Rewind failed: {{error}}': 'Сбой отката: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Невозможно откатить разговор: нет активного клиента модели.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Код восстановлен, но разговор не удалось откатить (нет активного клиента).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Разговор откатили. Отредактируйте подсказку и нажмите Enter, чтобы продолжить.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Не удаётся откатиться к сжатому ходу. Попробуйте более недавний ход.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'Восстановление файлов недоступно для этого хода (нет записанных изменений или ход был до текущей сессии).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} в {{count}} файле)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} в {{count}} файлах)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Не удалось восстановить {{count}} файл(ов): {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Невозможно восстановить файлы: этот ход был создан до включения контрольных точек файлов.',
+  'No files needed to be restored.': 'Файлы не нуждались в восстановлении.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ навигация · Enter выбор · Esc назад',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ навигация · Enter выбор · Esc отмена',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y подтвердить · Esc/N назад',
   'change the theme': 'Изменение темы',
   'Select Theme': 'Выбор темы',
   Preview: 'Предпросмотр',

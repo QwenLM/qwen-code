@@ -1229,6 +1229,14 @@ export class GeminiClient {
 
         this.sessionTurnCount++;
 
+        if (messageType === SendMessageType.UserQuery) {
+          try {
+            await this.config.getFileHistoryService().makeSnapshot(prompt_id);
+          } catch (e) {
+            debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+          }
+        }
+
         if (
           this.config.getMaxSessionTurns() > 0 &&
           this.sessionTurnCount > this.config.getMaxSessionTurns()

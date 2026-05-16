@@ -797,7 +797,11 @@ export const useGeminiStream = (
         // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
         if (submitType !== SendMessageType.Cron) {
           const insertedId = addItem(
-            { type: MessageType.USER, text: trimmedQuery },
+            {
+              type: MessageType.USER,
+              text: trimmedQuery,
+              promptId: prompt_id,
+            } as HistoryItemWithoutId,
             userMessageTimestamp,
           );
           // Capture id+text so the cancel handler can verify identity,

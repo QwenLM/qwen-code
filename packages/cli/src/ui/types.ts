@@ -95,6 +95,7 @@ export interface HistoryItemBase {
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  promptId?: string;
 };
 
 export type HistoryItemGemini = HistoryItemBase & {
