@@ -309,6 +309,9 @@ export class LspConnectionFactory {
             MAX_STDERR_TAIL_BYTES,
           );
         });
+        processInstance.stderr?.on('error', (err) => {
+          debugLogger.warn(`LSP stderr stream error for ${command}:`, err);
+        });
 
         const connection = new JsonRpcConnection(
           (payload) => processInstance.stdin?.write(payload),

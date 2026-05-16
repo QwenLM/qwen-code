@@ -1815,11 +1815,21 @@ export async function loadCliConfig(
       }
       lspClient = new NativeLspClient(lspService);
       config.setLspClient(lspClient);
-      config.setLspInitializationError(undefined);
+      try {
+        config.setLspInitializationError(undefined);
+      } catch {
+        debugLogger.warn(
+          'Failed to clear LSP initialization error after initialization',
+        );
+      }
     } catch (err) {
-      config.setLspInitializationError(
-        err instanceof Error ? err : String(err),
-      );
+      try {
+        config.setLspInitializationError(
+          err instanceof Error ? err : String(err),
+        );
+      } catch {
+        debugLogger.warn('LSP init error occurred after initialization:', err);
+      }
       debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }
