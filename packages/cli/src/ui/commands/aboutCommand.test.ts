@@ -340,5 +340,37 @@ describe('aboutCommand', () => {
       expect(result.content).toContain('abc1234');
       expect(result.content).toContain('vscode');
     });
+
+    it('should include LSP status when available', async () => {
+      if (!aboutCommand.action) throw new Error('No action');
+
+      vi.mocked(systemInfoUtils.getExtendedSystemInfo).mockResolvedValue({
+        cliVersion: 'test-version',
+        osPlatform: 'test-os',
+        osArch: 'x64',
+        osRelease: '22.0.0',
+        nodeVersion: 'v20.0.0',
+        npmVersion: '10.0.0',
+        sandboxEnv: 'no sandbox',
+        modelVersion: 'test-model',
+        selectedAuthType: 'test-auth',
+        ideClient: '',
+        sessionId: 'sess-1',
+        memoryUsage: '100 MB',
+        baseUrl: undefined,
+        lspStatus: 'enabled, 1/1 ready',
+      });
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      } as unknown as Partial<CommandContext>);
+
+      const result = (await aboutCommand.action(nonInteractiveContext, '')) as {
+        type: string;
+        content: string;
+      };
+
+      expect(result.content).toContain('LSP: enabled, 1/1 ready');
+    });
   });
 });
