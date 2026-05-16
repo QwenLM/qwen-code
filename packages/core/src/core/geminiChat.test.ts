@@ -3685,5 +3685,34 @@ describe('GeminiChat', async () => {
       expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
       expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(0);
     });
+
+    it('does not let a failed heap-pressure attempt latch off later auto-compaction', async () => {
+      const compressSpy = mockCompressionService('failed-inflated');
+      mockHeapPressure(701);
+
+      const first = await chat.tryCompress('p1', 'm1');
+      expect(first.compressionStatus).toBe(
+        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      );
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+
+      compressSpy.mockClear();
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      mockHeapPressure(0);
+
+      await chat.tryCompress('p2', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+      expect(compressSpy.mock.calls[0][1].hasFailedCompressionAttempt).toBe(
+        false,
+      );
+    });
   });
 });

@@ -556,7 +556,9 @@ export class GeminiChat {
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only mark as failed if not forced) so we
       // stop spending compression-API calls on a chat that can't shrink.
-      if (!force) {
+      // Heap-pressure attempts are a safety net, not evidence that normal
+      // token-threshold compaction should be latched off for this chat.
+      if (!force && !bypassTokenThreshold) {
         this.hasFailedCompressionAttempt = true;
       }
     }
