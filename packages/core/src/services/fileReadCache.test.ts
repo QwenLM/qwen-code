@@ -537,10 +537,7 @@ describe('FileReadCache', () => {
       expect(cache.size()).toBeLessThanOrEqual(4096);
     });
 
-    // TODO(bump): once upsert() re-inserts existing keys to the end of the
-    // Map, unskip this test. Currently ino=0 stays at the front and is
-    // evicted first, so the expectation documents desired behaviour.
-    it.skip('should have bumped entries survive eviction', () => {
+    it('should have bumped entries survive eviction', () => {
       const cache = new FileReadCache();
       // Fill to capacity.
       for (let i = 0; i < 4096; i++) {
