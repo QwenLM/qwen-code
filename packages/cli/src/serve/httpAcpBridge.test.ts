@@ -295,6 +295,11 @@ describe('createHttpAcpBridge', () => {
     expect(() =>
       makeBridge({ eventRingSize: Number.POSITIVE_INFINITY }),
     ).toThrow(/Invalid eventRingSize/);
+    // Upper-bound typo defense (1M cap). `80_000_000` here mimics the
+    // common shell typo `--event-ring-size 80000000` vs `8000000`.
+    expect(() => makeBridge({ eventRingSize: 80_000_000 })).toThrow(
+      /Invalid eventRingSize/,
+    );
   });
 
   it('spawns a session and returns the agent-assigned id', async () => {

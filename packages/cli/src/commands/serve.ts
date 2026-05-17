@@ -11,6 +11,7 @@ import type { Argv, CommandModule } from 'yargs';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
 
 /**
  * Pause the current async function indefinitely. Used after the daemon
@@ -87,7 +88,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('event-ring-size', {
         type: 'number',
-        default: 8000,
+        // Single source of truth — `DEFAULT_RING_SIZE` (currently 8000,
+        // #3803 §02) is also what the bridge falls back to when the
+        // option is undefined. Importing here keeps a future bump in
+        // one place rather than drifting between CLI and bus.
+        default: DEFAULT_RING_SIZE,
         description:
           'Per-session SSE replay ring depth (#3803 §02 target). Sets the ' +
           'replay backlog available to `GET /session/:id/events` reconnects ' +

@@ -1079,8 +1079,14 @@ function parseMaxQueuedQuery(
   // are positive integers in [16, 2048]).
   if (raw === undefined) return undefined;
   if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    // Sanitize via JSON.stringify so an attacker-controlled value
+    // containing `\n` / `\r` / other control chars can't inject extra
+    // log lines into stderr (line-based shipper like
+    // journald/Loki/Splunk would otherwise treat the injected line as
+    // a fresh entry). Matches the `workspace_mismatch` log style in
+    // `sendBridgeError`.
     writeStderrLine(
-      `qwen serve: rejected ?maxQueued "${String(raw).slice(0, 80)}" ` +
+      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
         `(not a decimal integer)`,
     );
     res.status(400).json({
@@ -1096,7 +1102,7 @@ function parseMaxQueuedQuery(
     n > MAX_QUERY_MAX_QUEUED
   ) {
     writeStderrLine(
-      `qwen serve: rejected ?maxQueued "${raw.slice(0, 80)}" ` +
+      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
         `(outside [${MIN_QUERY_MAX_QUEUED}, ${MAX_QUERY_MAX_QUEUED}])`,
     );
     res.status(400).json({
@@ -1106,6 +1112,18 @@ function parseMaxQueuedQuery(
     return null;
   }
   return n;
+}
+
+/**
+ * Wrap an attacker-controllable string for safe interpolation into a
+ * stderr log line. `JSON.stringify` escapes control characters
+ * (`\n`, `\r`, etc.) and wraps the result in quotes — any injection
+ * attempt surfaces as visible-as-quoted-noise rather than a
+ * forged log line. Truncated AFTER stringify to keep the budget
+ * predictable even for control-heavy inputs.
+ */
+function safeLogValue(raw: unknown): string {
+  return JSON.stringify(String(raw)).slice(0, 82);
 }
 
 function parseLastEventId(raw: unknown): number | undefined {
@@ -1120,7 +1138,7 @@ function parseLastEventId(raw: unknown): number | undefined {
     // "first connect, no resume").
     if (typeof raw === 'string' && raw.length > 0) {
       writeStderrLine(
-        `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+        `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
           `(not a decimal integer)`,
       );
     }
@@ -1132,7 +1150,7 @@ function parseLastEventId(raw: unknown): number | undefined {
   // tries to resume from beyond that is either malicious or broken.
   if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) {
     writeStderrLine(
-      `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+      `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
         `(exceeds Number.MAX_SAFE_INTEGER)`,
     );
     return undefined;

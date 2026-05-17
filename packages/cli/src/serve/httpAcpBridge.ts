@@ -1162,6 +1162,14 @@ class BridgeClient implements Client {
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
+/**
+ * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
+ * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
+ * 1 000 000-frame ring already pins ~500 MB per session — well past
+ * any realistic workload. Not a security boundary (the flag is
+ * operator-controlled), just typo defense.
+ */
+const MAX_EVENT_RING_SIZE = 1_000_000;
 // Bd1yh: per-permission-request wall clock. Without this, an agent
 // calling `requestPermission` while no SSE subscriber is connected
 // would hang the per-session FIFO promptQueue forever (the prompt
@@ -1219,15 +1227,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // `maxSessions`: silently disabling SSE backpressure on a config
   // typo is worse than failing to start. Unlike `maxSessions` there
   // is NO unlimited sentinel — an unbounded ring would grow forever.
+  // Soft upper bound MAX_EVENT_RING_SIZE catches operator typos
+  // (`--event-ring-size 80000000` instead of `8000000`); at 1M
+  // frames × ~500 B/frame the per-session ceiling is already
+  // ~500 MB, well past any legitimate use.
   const eventRingSize = opts.eventRingSize ?? DEFAULT_RING_SIZE;
+  // `Number.isInteger` already rejects NaN / Infinity / non-finite
+  // — no separate `Number.isFinite` guard needed.
   if (
-    !Number.isFinite(eventRingSize) ||
     !Number.isInteger(eventRingSize) ||
-    eventRingSize < 1
+    eventRingSize < 1 ||
+    eventRingSize > MAX_EVENT_RING_SIZE
   ) {
     throw new TypeError(
       `Invalid eventRingSize: ${opts.eventRingSize}. ` +
-        `Must be a positive finite integer.`,
+        `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;

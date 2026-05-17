@@ -293,7 +293,10 @@ export class EventBus {
           data: {
             queueSize: liveSize,
             maxQueued: sub.maxQueued,
-            lastEventId: event.id ?? this.lastEventId,
+            // `event.id` is always defined here — the just-published
+            // `event` is constructed at the top of `publish()` with
+            // `id: this.nextId++`. No `??` fallback needed.
+            lastEventId: event.id as number,
           },
         };
         sub.queue.forcePush(warningFrame);
