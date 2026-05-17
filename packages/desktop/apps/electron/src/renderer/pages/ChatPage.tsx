@@ -8,7 +8,7 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { AlertCircle, Info } from 'lucide-react'
+import { AlertCircle, Flag, Info } from 'lucide-react'
 import { ChatDisplay, type ChatDisplayHandle } from '@/components/app-shell/ChatDisplay'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { SessionMenu } from '@/components/app-shell/SessionMenu'
@@ -560,6 +560,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   }, [isCompactMode, sessionId, session?.sessionFolderPath, sessionMeta])
 
   const headerActions = isCompactMode ? compactInfoButton : undefined
+  const titleBadge = isFlagged ? (
+    <Flag className="h-3.5 w-3.5 shrink-0 text-info" />
+  ) : undefined
 
   const messageLoadErrorView = messageLoadError ? (
     <div className="flex-1 flex flex-col items-center justify-center gap-3 px-6 text-center text-muted-foreground">
@@ -632,7 +635,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       return (
         <>
           <div className="h-full flex flex-col">
-            <PanelHeader  title={displayTitle} titleMenu={titleMenu} leadingAction={leadingAction} actions={headerActions} isRegeneratingTitle={isAsyncOperationOngoing} />
+            <PanelHeader title={displayTitle} badge={titleBadge} titleMenu={titleMenu} leadingAction={leadingAction} actions={headerActions} isRegeneratingTitle={isAsyncOperationOngoing} />
             <div className="flex-1 flex flex-col min-h-0">
               {messageLoadErrorView ?? (
                 <ChatDisplay
@@ -709,7 +712,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   return (
     <>
       <div className="h-full flex flex-col">
-        <PanelHeader  title={displayTitle} titleMenu={titleMenu} leadingAction={leadingAction} actions={headerActions} isRegeneratingTitle={isAsyncOperationOngoing} />
+        <PanelHeader title={displayTitle} badge={titleBadge} titleMenu={titleMenu} leadingAction={leadingAction} actions={headerActions} isRegeneratingTitle={isAsyncOperationOngoing} />
         <div className="flex-1 flex flex-col min-h-0">
           {messageLoadError && session.messages.length === 0 ? messageLoadErrorView : (
             <ChatDisplay

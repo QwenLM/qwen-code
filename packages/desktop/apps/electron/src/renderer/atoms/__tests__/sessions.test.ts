@@ -15,6 +15,7 @@ import {
   updateSessionMetaAtom,
   removeSessionAtom,
   extractSessionMeta,
+  compareSessionsByFlaggedThenActivityDesc,
   getWorkspaceSessionMetas,
   mergeStableSessionMetaList,
   workspaceSessionMetaCacheAtom,
@@ -80,6 +81,18 @@ describe('mergeStableSessionMetaList', () => {
     expect(merged.map(session => session.id)).toEqual(['newer', 'old-a', 'old-b'])
     expect(merged[1]?.name).toBe('Updated A')
     expect(merged[2]?.name).toBe('Updated B')
+  })
+
+  it('orders flagged sessions before unflagged sessions for display sorting', () => {
+    const sessions = [
+      extractSessionMeta(makeSession({ id: 'recent', lastMessageAt: 300 })),
+      extractSessionMeta(makeSession({ id: 'flagged-old', lastMessageAt: 100, isFlagged: true })),
+      extractSessionMeta(makeSession({ id: 'flagged-new', lastMessageAt: 200, isFlagged: true })),
+    ]
+
+    const sorted = [...sessions].sort(compareSessionsByFlaggedThenActivityDesc)
+
+    expect(sorted.map(session => session.id)).toEqual(['flagged-new', 'flagged-old', 'recent'])
   })
 })
 
@@ -460,6 +473,28 @@ describe('initializeWorkspaceSessionsAtom', () => {
     const metas = getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a')
     expect(metas.map(session => session.id)).toEqual(['s1', 's2'])
     expect(metas[1]?.name).toBe('Updated S2')
+  })
+
+  it('pins flagged workspace sessions above unflagged sessions without changing group order', () => {
+    const store = createStore()
+
+    store.set(initializeWorkspaceSessionsAtom, {
+      workspaceIds: ['workspace-a'],
+      sessions: [
+        makeSession({ id: 's1', workspaceId: 'workspace-a', lastMessageAt: 300 }),
+        makeSession({ id: 's2', workspaceId: 'workspace-a', lastMessageAt: 200, isFlagged: true }),
+        makeSession({ id: 's3', workspaceId: 'workspace-a', lastMessageAt: 100, isFlagged: true }),
+        makeSession({ id: 's4', workspaceId: 'workspace-a', lastMessageAt: 50 }),
+      ],
+    })
+
+    expect(getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a').map(session => session.id))
+      .toEqual(['s2', 's3', 's1', 's4'])
+
+    store.set(updateSessionMetaAtom, 's4', { isFlagged: true })
+
+    expect(getWorkspaceSessionMetas(store.get(workspaceSessionsAtom), 'workspace-a').map(session => session.id))
+      .toEqual(['s2', 's3', 's4', 's1'])
   })
 
   it('adds new sessions to the front and removes them from all workspace states', () => {
