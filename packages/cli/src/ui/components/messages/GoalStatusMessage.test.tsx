@@ -9,6 +9,12 @@ import { describe, expect, it } from 'vitest';
 import { GoalStatusMessage } from './GoalStatusMessage.js';
 
 describe('<GoalStatusMessage />', () => {
+  it('is wrapped in React.memo to avoid unnecessary scrollback rerenders', () => {
+    expect(
+      (GoalStatusMessage as unknown as { $$typeof?: symbol }).$$typeof,
+    ).toBe(Symbol.for('react.memo'));
+  });
+
   it('shows the goal and judge reason on checking cards', () => {
     const { lastFrame } = render(
       <GoalStatusMessage

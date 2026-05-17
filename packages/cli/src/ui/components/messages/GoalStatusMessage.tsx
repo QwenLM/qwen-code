@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type React from 'react';
+import React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration } from '../../utils/formatters.js';
@@ -24,7 +24,7 @@ function assertNeverGoalStatusKind(kind: never): never {
   throw new Error(`Unexpected goal status kind: ${kind}`);
 }
 
-export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
+const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
   kind,
   condition,
   iterations,
@@ -157,3 +157,5 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
     </Box>
   );
 };
+
+export const GoalStatusMessage = React.memo(GoalStatusMessageInternal);

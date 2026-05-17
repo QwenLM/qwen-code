@@ -124,6 +124,21 @@ describe('judgeGoal', () => {
     expect(verdict).toEqual({ ok: true, reason: 'tests passed' });
   });
 
+  it('ignores non-boolean impossible values', async () => {
+    const client = makeMockClient({
+      reply:
+        '{"ok": false, "impossible": "true", "reason": "looks impossible"}',
+    });
+    const config = makeConfig({ client });
+    const verdict = await judgeGoal(config, {
+      condition: 'finish',
+      lastAssistantText: 'blocked',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toEqual({ ok: false, reason: 'looks impossible' });
+  });
+
   it('falls back to main model when no fast model is configured', async () => {
     const client = makeMockClient({});
     const config = makeConfig({ client, model: 'big-main' });
