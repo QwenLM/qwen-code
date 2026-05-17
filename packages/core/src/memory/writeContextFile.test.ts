@@ -217,4 +217,21 @@ describe('writeWorkspaceContextFile', () => {
       fs.access(path.join(workspace, DEFAULT_CONTEXT_FILENAME)),
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
+
+  it('does not create the parent directory on a no-op append', async () => {
+    // Whitespace-only append targeting a non-existent nested path
+    // must NOT call fs.mkdir — the no-op detection short-circuits
+    // BEFORE acquiring the lock or touching the filesystem. Without
+    // this, an empty POST would still bump the parent directory's
+    // mtime even though the helper reports `changed: false`.
+    const nested = path.join(workspace, 'never-exists');
+    const result = await writeWorkspaceContextFile({
+      scope: 'workspace',
+      mode: 'append',
+      content: '\n\n',
+      projectRoot: nested,
+    });
+    expect(result.changed).toBe(false);
+    await expect(fs.access(nested)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
 });

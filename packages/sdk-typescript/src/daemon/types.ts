@@ -316,6 +316,19 @@ export interface DaemonWriteMemoryResult {
   filePath: string;
   bytesWritten: number;
   mode: 'append' | 'replace';
+  /**
+   * `true` when the daemon actually mutated the file on disk. `false`
+   * for whitespace-only `append` requests that short-circuited
+   * upstream — the route accepted the request as well-formed (200
+   * OK) but the helper detected the trimmed content was empty and
+   * skipped the write to avoid an mtime bump + a misleading
+   * `memory_changed` event. SDK consumers can branch on this to
+   * suppress redundant cache invalidation. Optional at the type
+   * level for forward-compat with daemons that predate the field —
+   * those return undefined and callers should treat that as
+   * `changed: true` (the legacy contract).
+   */
+  changed?: boolean;
 }
 
 /**

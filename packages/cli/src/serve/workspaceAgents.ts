@@ -6,6 +6,7 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
+  APPROVAL_MODES,
   BuiltinAgentRegistry,
   SubagentError,
   SubagentErrorCode,
@@ -245,8 +246,27 @@ export function mountWorkspaceAgentsRoutes(
       const updates = parseAgentUpdates(body, res);
       if (!updates) return;
 
-      const scopeQuery =
-        typeof req.query['scope'] === 'string' ? req.query['scope'] : undefined;
+      // Fail-closed on `?scope=` malformations. `req.query['scope']`
+      // is `undefined` when absent, a `string` when supplied once, an
+      // array when repeated (`?scope=workspace&scope=global`), or a
+      // ParsedQs object on a nested form. We only accept a single
+      // string; anything else returns `invalid_scope` rather than
+      // silently treating "?scope=...&scope=..." as if no scope were
+      // provided. Matches the fail-closed posture of
+      // `parseMaxQueuedQuery` for the SSE route.
+      const rawScope = req.query['scope'];
+      let scopeQuery: string | undefined;
+      if (rawScope === undefined) {
+        scopeQuery = undefined;
+      } else if (typeof rawScope === 'string') {
+        scopeQuery = rawScope;
+      } else {
+        res.status(400).json({
+          error: '`scope` query must be a single "workspace" or "global" value',
+          code: 'invalid_scope',
+        });
+        return;
+      }
       let preferredLevel: SubagentLevel | undefined;
       if (scopeQuery !== undefined) {
         if (scopeQuery !== 'workspace' && scopeQuery !== 'global') {
@@ -279,6 +299,32 @@ export function mountWorkspaceAgentsRoutes(
           code: 'agent_readonly',
           name: existing.name,
           level: existing.level,
+        });
+        return;
+      }
+
+      // Empty / no-op update detection. An empty body or a body whose
+      // recognized fields all match `existing` would otherwise rewrite
+      // the file (mtime bump) AND fan out an `agent_changed` event for
+      // a request that didn't change anything — the same misleading
+      // signal the memory route avoids for whitespace-only appends.
+      // Reject empty payloads with 400; short-circuit no-op updates
+      // with 200 + `changed: false` so adapters can suppress redundant
+      // toasts without re-fetching.
+      if (Object.keys(updates).length === 0) {
+        res.status(400).json({
+          error:
+            '`POST /workspace/agents/:agentType` requires at least one updatable field in the body',
+          code: 'invalid_config',
+          name: agentType,
+        });
+        return;
+      }
+      if (isNoOpUpdate(existing, updates)) {
+        res.status(200).json({
+          ok: true,
+          agent: toDetail(existing),
+          changed: false,
         });
         return;
       }
@@ -363,7 +409,9 @@ export function mountWorkspaceAgentsRoutes(
         data: { change: 'updated', name: existing.name, level: eventLevel },
         ...(originatorClientId ? { originatorClientId } : {}),
       });
-      res.status(200).json({ ok: true, agent: toDetail(updated) });
+      res
+        .status(200)
+        .json({ ok: true, agent: toDetail(updated), changed: true });
     },
   );
 
@@ -383,8 +431,27 @@ export function mountWorkspaceAgentsRoutes(
       if (clientIdResult === null) return;
       const originatorClientId = clientIdResult;
 
-      const scopeQuery =
-        typeof req.query['scope'] === 'string' ? req.query['scope'] : undefined;
+      // Fail-closed on `?scope=` malformations. `req.query['scope']`
+      // is `undefined` when absent, a `string` when supplied once, an
+      // array when repeated (`?scope=workspace&scope=global`), or a
+      // ParsedQs object on a nested form. We only accept a single
+      // string; anything else returns `invalid_scope` rather than
+      // silently treating "?scope=...&scope=..." as if no scope were
+      // provided. Matches the fail-closed posture of
+      // `parseMaxQueuedQuery` for the SSE route.
+      const rawScope = req.query['scope'];
+      let scopeQuery: string | undefined;
+      if (rawScope === undefined) {
+        scopeQuery = undefined;
+      } else if (typeof rawScope === 'string') {
+        scopeQuery = rawScope;
+      } else {
+        res.status(400).json({
+          error: '`scope` query must be a single "workspace" or "global" value',
+          code: 'invalid_scope',
+        });
+        return;
+      }
       let scopedLevel: SubagentLevel | undefined;
       if (scopeQuery !== undefined) {
         if (scopeQuery !== 'workspace' && scopeQuery !== 'global') {
@@ -490,14 +557,22 @@ function parseAgentConfig(
   level: SubagentLevel,
   res: Response,
 ): SubagentConfig | undefined {
-  const name = body['name'];
-  if (typeof name !== 'string' || name.trim().length === 0) {
+  const rawName = body['name'];
+  if (typeof rawName !== 'string' || rawName.trim().length === 0) {
     res.status(422).json({
       error: '`name` is required and must be a non-empty string',
       code: 'invalid_config',
     });
     return undefined;
   }
+  // Trim leading/trailing whitespace BEFORE storing. Without this, a
+  // client posting `{ name: " tester " }` would land a file whose
+  // frontmatter `name` field literally contains the spaces; the
+  // resolver's case-insensitive cascade still wouldn't match `/agents/
+  // tester` because the lookup name and the on-disk name differ.
+  // Better to normalize at the boundary than carry untrimmed names
+  // through validation + serialization.
+  const name = rawName.trim();
   // Reject names that shadow a built-in subagent. Without this check a
   // client could `POST /workspace/agents { name: "general-purpose" }`
   // and write a project-level file at `<workspace>/.qwen/agents/
@@ -548,28 +623,45 @@ function parseAgentConfig(
   };
   if (tools !== undefined) config.tools = tools;
   if (disallowedTools !== undefined) config.disallowedTools = disallowedTools;
+
+  // Optional scalar fields. Present-but-wrong-type fails closed (422)
+  // rather than silently dropping the field — `SubagentValidator`
+  // doesn't reject these, and `serializeSubagent` only writes recognized
+  // values, so without explicit validation a `model: 123` payload would
+  // 201 with no `model` field on the file (masking client-serialization
+  // bugs).
+  if (rejectIfPresentWrongType(body, 'model', 'string', res)) return undefined;
   if (typeof body['model'] === 'string') config.model = body['model'];
+
+  if (rejectIfPresentWrongType(body, 'color', 'string', res)) return undefined;
   if (typeof body['color'] === 'string') config.color = body['color'];
+
+  if (rejectIfPresentWrongType(body, 'approvalMode', 'string', res)) {
+    return undefined;
+  }
   if (typeof body['approvalMode'] === 'string') {
-    config.approvalMode = body['approvalMode'];
-  }
-  if (typeof body['background'] === 'boolean') {
-    config.background = body['background'];
-  }
-  const runConfig = body['runConfig'];
-  if (runConfig !== undefined) {
-    if (
-      typeof runConfig !== 'object' ||
-      runConfig === null ||
-      Array.isArray(runConfig)
-    ) {
+    if (!APPROVAL_MODES.includes(body['approvalMode'] as never)) {
       res.status(422).json({
-        error: '`runConfig` must be an object when provided',
+        error: `\`approvalMode\` must be one of ${JSON.stringify(APPROVAL_MODES)}`,
         code: 'invalid_config',
       });
       return undefined;
     }
-    config.runConfig = runConfig as SubagentConfig['runConfig'];
+    config.approvalMode = body['approvalMode'];
+  }
+
+  if (rejectIfPresentWrongType(body, 'background', 'boolean', res)) {
+    return undefined;
+  }
+  if (typeof body['background'] === 'boolean') {
+    config.background = body['background'];
+  }
+
+  const runConfig = body['runConfig'];
+  if (runConfig !== undefined) {
+    const sanitized = sanitizeRunConfig(runConfig, res);
+    if (sanitized === null) return undefined;
+    config.runConfig = sanitized;
   }
   return config;
 }
@@ -615,32 +707,40 @@ function parseAgentUpdates(
       updates.disallowedTools = disallowedTools;
     }
   }
-  if ('model' in body && typeof body['model'] === 'string') {
-    updates.model = body['model'];
+  // Optional scalar fields. Match the create-side fail-closed posture
+  // so a typo like `model: 123` returns 422 instead of silently
+  // succeeding with no model change.
+  if (rejectIfPresentWrongType(body, 'model', 'string', res)) return undefined;
+  if (typeof body['model'] === 'string') updates.model = body['model'];
+
+  if (rejectIfPresentWrongType(body, 'color', 'string', res)) return undefined;
+  if (typeof body['color'] === 'string') updates.color = body['color'];
+
+  if (rejectIfPresentWrongType(body, 'approvalMode', 'string', res)) {
+    return undefined;
   }
-  if ('color' in body && typeof body['color'] === 'string') {
-    updates.color = body['color'];
-  }
-  if ('approvalMode' in body && typeof body['approvalMode'] === 'string') {
-    updates.approvalMode = body['approvalMode'];
-  }
-  if ('background' in body && typeof body['background'] === 'boolean') {
-    updates.background = body['background'];
-  }
-  if ('runConfig' in body) {
-    const runConfig = body['runConfig'];
-    if (
-      typeof runConfig !== 'object' ||
-      runConfig === null ||
-      Array.isArray(runConfig)
-    ) {
+  if (typeof body['approvalMode'] === 'string') {
+    if (!APPROVAL_MODES.includes(body['approvalMode'] as never)) {
       res.status(422).json({
-        error: '`runConfig` must be an object when provided',
+        error: `\`approvalMode\` must be one of ${JSON.stringify(APPROVAL_MODES)}`,
         code: 'invalid_config',
       });
       return undefined;
     }
-    updates.runConfig = runConfig as SubagentConfig['runConfig'];
+    updates.approvalMode = body['approvalMode'];
+  }
+
+  if (rejectIfPresentWrongType(body, 'background', 'boolean', res)) {
+    return undefined;
+  }
+  if (typeof body['background'] === 'boolean') {
+    updates.background = body['background'];
+  }
+
+  if ('runConfig' in body) {
+    const sanitized = sanitizeRunConfig(body['runConfig'], res);
+    if (sanitized === null) return undefined;
+    updates.runConfig = sanitized;
   }
   return updates;
 }
@@ -659,6 +759,165 @@ function parseStringArray(
     return null;
   }
   return value as string[];
+}
+
+/**
+ * Returns `true` and sends a 422 when `body[key]` is present but the
+ * wrong scalar type. The caller then returns `undefined` to short-
+ * circuit the route. `false` covers both "absent" and "right type" so
+ * the caller proceeds. Used to give scalar fields the same fail-closed
+ * posture as `parseStringArray` / `sanitizeRunConfig`.
+ */
+function rejectIfPresentWrongType(
+  body: Record<string, unknown>,
+  key: string,
+  expected: 'string' | 'boolean',
+  res: Response,
+): boolean {
+  if (!(key in body)) return false;
+  if (typeof body[key] === expected) return false;
+  res.status(422).json({
+    error: `\`${key}\` must be a ${expected} when provided`,
+    code: 'invalid_config',
+  });
+  return true;
+}
+
+/**
+ * Detect a no-op update — every supplied field already matches the
+ * existing agent's value. Without this check an empty (or
+ * value-unchanged) PATCH still rewrites the file, bumps mtime, and
+ * fans out a misleading `agent_changed` event. The recognized-field
+ * comparison covers what `parseAgentUpdates` produces; unknown keys
+ * are dropped upstream so we don't need to handle them here.
+ */
+function isNoOpUpdate(
+  existing: SubagentConfig,
+  updates: Partial<SubagentConfig>,
+): boolean {
+  if (
+    updates.description !== undefined &&
+    updates.description !== existing.description
+  ) {
+    return false;
+  }
+  if (
+    updates.systemPrompt !== undefined &&
+    updates.systemPrompt !== existing.systemPrompt
+  ) {
+    return false;
+  }
+  if (
+    updates.tools !== undefined &&
+    !shallowArrayEqual(updates.tools, existing.tools)
+  ) {
+    return false;
+  }
+  if (
+    updates.disallowedTools !== undefined &&
+    !shallowArrayEqual(updates.disallowedTools, existing.disallowedTools)
+  ) {
+    return false;
+  }
+  if (updates.model !== undefined && updates.model !== existing.model) {
+    return false;
+  }
+  if (updates.color !== undefined && updates.color !== existing.color) {
+    return false;
+  }
+  if (
+    updates.approvalMode !== undefined &&
+    updates.approvalMode !== existing.approvalMode
+  ) {
+    return false;
+  }
+  if (
+    updates.background !== undefined &&
+    updates.background !== existing.background
+  ) {
+    return false;
+  }
+  if (updates.runConfig !== undefined) {
+    const e = existing.runConfig ?? {};
+    const u = updates.runConfig;
+    if (
+      u['max_time_minutes'] !== e['max_time_minutes'] ||
+      u['max_turns'] !== e['max_turns']
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function shallowArrayEqual(
+  a: readonly string[] | undefined,
+  b: readonly string[] | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Sanitize `runConfig` to only the documented fields. Without this
+ * filter `SubagentManager.serializeSubagent` writes whatever object the
+ * client sent into the agent's frontmatter, including unknown or
+ * YAML-sensitive keys that downstream parsers may choke on. Returning
+ * a fresh whitelist-shaped object also makes the wire contract
+ * self-documenting at the route boundary.
+ *
+ * - `undefined` is impossible here (caller checks `'runConfig' in body`).
+ * - `null` (sent) → 422 invalid_config (the route handler converts
+ *   the null sentinel to a short-circuit).
+ * - Right-shape object → returns a new object with only `max_time_minutes`
+ *   and `max_turns` if they validate as finite positive numbers.
+ */
+function sanitizeRunConfig(
+  raw: unknown,
+  res: Response,
+): SubagentConfig['runConfig'] | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    res.status(422).json({
+      error: '`runConfig` must be an object when provided',
+      code: 'invalid_config',
+    });
+    return null;
+  }
+  const input = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+
+  if ('max_time_minutes' in input) {
+    const v = input['max_time_minutes'];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) {
+      res.status(422).json({
+        error:
+          '`runConfig.max_time_minutes` must be a positive finite number when provided',
+        code: 'invalid_config',
+      });
+      return null;
+    }
+    out['max_time_minutes'] = v;
+  }
+  if ('max_turns' in input) {
+    const v = input['max_turns'];
+    if (
+      typeof v !== 'number' ||
+      !Number.isFinite(v) ||
+      v <= 0 ||
+      !Number.isInteger(v)
+    ) {
+      res.status(422).json({
+        error: '`runConfig.max_turns` must be a positive integer when provided',
+        code: 'invalid_config',
+      });
+      return null;
+    }
+    out['max_turns'] = v;
+  }
+  return out as SubagentConfig['runConfig'];
 }
 
 function toSummary(config: SubagentConfig): ServeWorkspaceAgentSummary {

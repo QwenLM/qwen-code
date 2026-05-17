@@ -456,14 +456,24 @@ export class DaemonClient {
    * Update a project- or user-level subagent definition. Built-in /
    * extension / session-level agents are read-only and return 403
    * `agent_readonly`; missing agents return 404 `agent_not_found`.
+   *
+   * Optional `scope` mirrors the delete helper: when a project agent
+   * shadows a user-level agent of the same name, pass
+   * `{ scope: 'global' }` to update the user-level definition
+   * specifically. Without the scope the daemon resolves through the
+   * default precedence (project > user) and updates the project entry.
    */
   async updateWorkspaceAgent(
     agentType: string,
     req: DaemonUpdateAgentRequest,
+    opts: { scope?: 'workspace' | 'global' } = {},
     clientId?: string,
   ): Promise<DaemonAgentMutationResult> {
+    const url = opts.scope
+      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`,
+      url,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
@@ -502,13 +512,30 @@ export class DaemonClient {
         headers: this.headers({}, clientId),
       },
       async (res) => {
-        if (res.status === 204 || res.status === 404) {
+        if (res.status === 204) {
           try {
             await res.body?.cancel();
           } catch {
             /* body already consumed or no body */
           }
           return;
+        }
+        // Treat as idempotent ONLY when the daemon explicitly says
+        // `agent_not_found`. A bare 404 (e.g. an HTTP proxy returning
+        // a generic page, an older daemon that doesn't know the
+        // route, a misrouted load balancer) would otherwise be
+        // silently swallowed and the SDK caller would believe the
+        // agent was deleted when the request never reached a route
+        // that understands workspace agents. Failing on non-
+        // structured 404s makes routing errors visible.
+        if (res.status === 404) {
+          const err = await this.failOnError(
+            res,
+            'DELETE /workspace/agents/:agentType',
+          );
+          const body = err.body as { code?: unknown } | undefined;
+          if (body && body.code === 'agent_not_found') return;
+          throw err;
         }
         throw await this.failOnError(
           res,

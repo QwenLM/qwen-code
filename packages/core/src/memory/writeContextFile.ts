@@ -98,6 +98,22 @@ export async function writeWorkspaceContextFile(
   }
   const filePath = resolveContextFilePath(options.scope, options.projectRoot);
 
+  // Append-mode no-op detection BEFORE acquiring the lock or
+  // creating directories. Re-writing the same bytes would bump
+  // mtime + the parent dir mtime AND fan out a misleading
+  // `memory_changed` event; whitespace-only POSTs from a flaky
+  // pipeline shouldn't reach the filesystem at all.
+  if (options.mode === 'append' && isWhitespaceOnly(options.content)) {
+    let bytes = 0;
+    try {
+      const stat = await fs.stat(filePath);
+      bytes = stat.size;
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    return { filePath, bytesWritten: bytes, changed: false };
+  }
+
   // Hold the per-file mutex for the entire read-compose-write sequence.
   // Concurrent `POST /workspace/memory` appends from different SSE
   // clients would otherwise interleave reads and lose entries on the
@@ -117,23 +133,6 @@ export async function writeWorkspaceContextFile(
         bytesWritten: Buffer.byteLength(options.content, 'utf8'),
         changed: true,
       };
-    }
-
-    // Append mode. When the trimmed content is empty (whitespace-only
-    // input from a flaky pipeline / accidental empty POST), short-circuit
-    // BEFORE re-writing the file. Re-writing the same bytes would still
-    // bump mtime AND trigger `memory_changed` SSE fan-out across every
-    // subscribed client — a misleading "memory just changed" toast for a
-    // request that changed nothing.
-    if (options.content.replace(/^\s+|\s+$/g, '').length === 0) {
-      let bytes = 0;
-      try {
-        const stat = await fs.stat(filePath);
-        bytes = stat.size;
-      } catch (err) {
-        if (!isEnoent(err)) throw err;
-      }
-      return { filePath, bytesWritten: bytes, changed: false };
     }
 
     const next = await composeAppendedContent(filePath, options.content);
@@ -167,7 +166,7 @@ async function composeAppendedContent(
     if (!isEnoent(err)) throw err;
   }
 
-  const trimmed = newContent.replace(/^\n+|\n+$/g, '');
+  const trimmed = trimNewlines(newContent);
   if (trimmed.length === 0) return existing;
 
   if (existing.length === 0) {
@@ -190,4 +189,46 @@ function isEnoent(err: unknown): boolean {
     err !== null &&
     (err as { code?: string }).code === 'ENOENT'
   );
+}
+
+/**
+ * Hand-rolled `^\s+|\s+$` substitute. CodeQL's polynomial-regex
+ * detector flags `\s+` with anchors as a ReDoS risk on
+ * attacker-controlled input; the linear loop sidesteps the rule
+ * without changing behavior. Mirrors the same pattern used by
+ * `auth.ts:120-125` for header-credential parsing.
+ */
+function isWhitespaceOnly(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    // ASCII space, tab, line feed, carriage return, form feed,
+    // vertical tab. All non-printable whitespace control chars the
+    // route's "no-op append" check should treat as empty content.
+    if (
+      c !== 0x20 &&
+      c !== 0x09 &&
+      c !== 0x0a &&
+      c !== 0x0d &&
+      c !== 0x0c &&
+      c !== 0x0b
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Hand-rolled `^\n+|\n+$` substitute. Same CodeQL rationale as
+ * `isWhitespaceOnly`. Trims only `\n` so the section-header insert
+ * path keeps its newline framing semantics — a leading `\t` in
+ * `newContent` is preserved as part of the user's bullet, while
+ * `\n\n- entry\n` collapses to `- entry`.
+ */
+function trimNewlines(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && s.charCodeAt(start) === 0x0a) start++;
+  while (end > start && s.charCodeAt(end - 1) === 0x0a) end--;
+  return start === 0 && end === s.length ? s : s.slice(start, end);
 }

@@ -500,4 +500,136 @@ describe('workspace agents routes', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_client_id');
   });
+
+  it('trims leading/trailing whitespace on the agent name', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: '  trimmed-name  ',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a trimmed name agent',
+      scope: 'workspace',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.agent.name).toBe('trimmed-name');
+    // File on disk uses the trimmed name; the original-with-spaces
+    // version must NOT exist (would otherwise be unfindable via
+    // case-insensitive lookup).
+    const onDisk = await fs.readFile(
+      path.join(workspace, QWEN_DIR, 'agents', 'trimmed-name.md'),
+      'utf8',
+    );
+    expect(onDisk).toContain('name: trimmed-name');
+  });
+
+  it('returns 422 invalid_config when scalar field has wrong type on create', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: 'wrong-type',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a wrong-type test agent',
+      scope: 'workspace',
+      model: 123,
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/model.*string/);
+  });
+
+  it('returns 422 invalid_config for unknown approvalMode', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: 'bad-mode',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a bad-mode test agent',
+      scope: 'workspace',
+      approvalMode: 'rampage',
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/approvalMode/);
+  });
+
+  it('strips unknown runConfig keys and rejects malformed values', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    // Unknown keys are silently dropped, valid known keys preserved.
+    const res = await request(app)
+      .post('/workspace/agents')
+      .send({
+        name: 'run-config',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a run-config test agent',
+        scope: 'workspace',
+        runConfig: { max_turns: 5, mystery_field: 'oops' },
+      });
+    expect(res.status).toBe(201);
+    expect(res.body.agent.runConfig).toEqual({ max_turns: 5 });
+
+    // Malformed known field fails closed.
+    const res2 = await request(app)
+      .post('/workspace/agents')
+      .send({
+        name: 'run-config-bad',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a run-config bad agent',
+        scope: 'workspace',
+        runConfig: { max_turns: -1 },
+      });
+    expect(res2.status).toBe(422);
+    expect(res2.body.code).toBe('invalid_config');
+  });
+
+  it('rejects 400 invalid_scope on repeated ?scope= query', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    // Express parses repeated query params as an array; we should
+    // fail-closed rather than treating it as absent.
+    const res = await request(app).delete(
+      '/workspace/agents/some-name?scope=workspace&scope=global',
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_scope');
+  });
+
+  it('rejects 400 invalid_config for empty update body', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'has-fields',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a has-fields test agent',
+      scope: 'workspace',
+    });
+    const res = await request(app)
+      .post('/workspace/agents/has-fields')
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_config');
+  });
+
+  it('short-circuits no-op updates with changed: false and no event', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'noop-target',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a noop-target agent',
+      scope: 'workspace',
+    });
+    const eventsBefore = (bridge as unknown as { events: RecordedEvent[] })
+      .events.length;
+
+    const res = await request(app)
+      .post('/workspace/agents/noop-target')
+      .send({ description: 'a description longer than ten chars' });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(false);
+
+    // No new agent_changed event for the no-op update.
+    const events = (bridge as unknown as { events: RecordedEvent[] }).events;
+    expect(events.length).toBe(eventsBefore);
+  });
 });
