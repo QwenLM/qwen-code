@@ -39,6 +39,7 @@ import {
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
@@ -4497,6 +4498,26 @@ describe('createHttpAcpBridge', () => {
 
       await bridge.closeSession(session.sessionId);
       await drain;
+      await bridge.shutdown();
+    });
+
+    it('rejects displayName values with control characters', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'bad\nname',
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
+      await bridge.closeSession(session.sessionId);
       await bridge.shutdown();
     });
 

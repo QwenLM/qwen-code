@@ -653,10 +653,15 @@ describe('DaemonClient', () => {
   });
 
   describe('updateSessionMetadata', () => {
-    it('sends PATCH to /session/:id/metadata', async () => {
-      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+    it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          displayName: 'My Session',
+        }),
+      );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      await client.updateSessionMetadata('s-1', {
+      const result = await client.updateSessionMetadata('s-1', {
         displayName: 'My Session',
       });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/metadata');
@@ -664,6 +669,7 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         displayName: 'My Session',
       });
+      expect(result).toEqual({ displayName: 'My Session' });
     });
 
     it('sends client identity header', async () => {

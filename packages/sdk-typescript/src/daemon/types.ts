@@ -164,6 +164,11 @@ export interface DaemonSessionSummary {
   hasActivePrompt?: boolean;
 }
 
+/** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
+export interface SessionMetadataResult {
+  displayName?: string;
+}
+
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;

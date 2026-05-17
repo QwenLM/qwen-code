@@ -1820,6 +1820,7 @@ describe('createServeApp', () => {
         .send({ displayName: 123 });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('displayName');
     });
 
     it('404 on unknown session', async () => {

@@ -333,7 +333,10 @@ describe('DaemonSessionClient', () => {
         return new Response(null, { status: 204 });
       }
       if (req.url.endsWith('/session/s-1/metadata')) {
-        return jsonResponse(200, {});
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          displayName: 'My Session',
+        });
       }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
     });
@@ -371,7 +374,7 @@ describe('DaemonSessionClient', () => {
     ).resolves.toBe(true);
     await expect(
       session.updateMetadata({ displayName: 'My Session' }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ displayName: 'My Session' });
     await expect(session.close()).resolves.toBeUndefined();
 
     expect(calls.map((c) => c.url)).toEqual([

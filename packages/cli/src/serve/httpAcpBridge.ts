@@ -917,6 +917,16 @@ export class InvalidPermissionOptionError extends Error {
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
+function hasControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export class InvalidSessionMetadataError extends Error {
   readonly field: string;
   constructor(field: string, reason: string) {
@@ -2902,6 +2912,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (context?.clientId !== undefined) {
         originatorClientId = resolveTrustedClientId(entry, context.clientId);
       }
+      writeStderrLine(
+        `qwen serve: closing session ${JSON.stringify(sessionId)}` +
+          (originatorClientId
+            ? ` by client ${JSON.stringify(originatorClientId)}`
+            : ''),
+      );
       if (defaultEntry === entry) defaultEntry = undefined;
       byId.delete(sessionId);
       const ci = channelInfo;
@@ -2923,6 +2939,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       } catch {
         /* bus already closed */
       }
+      // `session_closed` is terminal. Close the bus before ACP cancel so any
+      // late cancellation frames from the agent are intentionally dropped.
       entry.events.close();
       try {
         await entry.connection.cancel({ sessionId });
@@ -2931,7 +2949,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
       if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
         ci.isDying = true;
-        await ci.channel.kill().catch(() => {});
+        await ci.channel.kill().catch((err) => {
+          writeStderrLine(
+            `qwen serve: closeSession channel kill failed for session ` +
+              `${JSON.stringify(sessionId)}: ${String(err)}`,
+          );
+        });
       }
     },
 
@@ -2951,14 +2974,30 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             `must be a string of at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
           );
         }
-        entry.displayName = metadata.displayName || undefined;
-        try {
-          entry.events.publish({
-            type: 'session_metadata_updated',
-            data: { sessionId, displayName: entry.displayName },
-          });
-        } catch {
-          /* bus already closed */
+        if (hasControlCharacter(metadata.displayName)) {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not contain control characters',
+          );
+        }
+        const nextDisplayName = metadata.displayName || undefined;
+        if (entry.displayName !== nextDisplayName) {
+          entry.displayName = nextDisplayName;
+          writeStderrLine(
+            `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
+              `displayName=${entry.displayName === undefined ? 'cleared' : 'set'}` +
+              (context?.clientId
+                ? ` by client ${JSON.stringify(context.clientId)}`
+                : ''),
+          );
+          try {
+            entry.events.publish({
+              type: 'session_metadata_updated',
+              data: { sessionId, displayName: entry.displayName },
+            });
+          } catch {
+            /* bus already closed */
+          }
         }
       }
       return { displayName: entry.displayName };

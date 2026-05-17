@@ -19,6 +19,7 @@ import type {
   PermissionResponse,
   PromptResult,
   SetModelResult,
+  SessionMetadataResult,
 } from './types.js';
 
 export interface DaemonSessionClientOptions {
@@ -222,7 +223,9 @@ export class DaemonSessionClient {
     return await this.client.closeSession(this.sessionId, this.clientId);
   }
 
-  async updateMetadata(metadata: { displayName?: string }): Promise<void> {
+  async updateMetadata(metadata: {
+    displayName?: string;
+  }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(
       this.sessionId,
       metadata,

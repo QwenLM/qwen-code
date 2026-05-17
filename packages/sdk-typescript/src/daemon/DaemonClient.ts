@@ -16,6 +16,7 @@ import type {
   PromptContentBlock,
   PromptResult,
   SetModelResult,
+  SessionMetadataResult,
 } from './types.js';
 
 /**
@@ -717,7 +718,7 @@ export class DaemonClient {
     sessionId: string,
     metadata: { displayName?: string },
     clientId?: string,
-  ): Promise<void> {
+  ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/metadata`,
       {
@@ -727,12 +728,12 @@ export class DaemonClient {
       },
       async (res) => {
         if (res.status === 200) {
-          try {
-            await res.body?.cancel();
-          } catch {
-            /* body already consumed or no body */
-          }
-          return;
+          const body = (await res.json()) as {
+            displayName?: unknown;
+          };
+          return typeof body.displayName === 'string'
+            ? { displayName: body.displayName }
+            : {};
         }
         throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },

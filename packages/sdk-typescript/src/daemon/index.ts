@@ -47,6 +47,7 @@ export type {
   DaemonPermissionResolvedEvent,
   DaemonSessionClosedData,
   DaemonSessionClosedEvent,
+  DaemonSessionClosedReason,
   DaemonSessionDiedData,
   DaemonSessionDiedEvent,
   DaemonSessionEvent,
@@ -80,4 +81,5 @@ export type {
   PromptResult,
   PromptTextContent,
   SetModelResult,
+  SessionMetadataResult,
 } from './types.js';

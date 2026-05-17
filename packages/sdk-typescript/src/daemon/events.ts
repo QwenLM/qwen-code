@@ -85,9 +85,11 @@ export interface DaemonSessionDiedData {
   [key: string]: unknown;
 }
 
+export type DaemonSessionClosedReason = 'client_close' | (string & {});
+
 export interface DaemonSessionClosedData {
   sessionId: string;
-  reason: string;
+  reason: DaemonSessionClosedReason;
   closedBy?: string;
   [key: string]: unknown;
 }
@@ -240,6 +242,7 @@ export function createDaemonSessionViewState(
     lastEventId: seed.lastEventId,
     sessionId: seed.sessionId,
     currentModelId: seed.currentModelId,
+    displayName: seed.displayName,
     lastSessionUpdate: seed.lastSessionUpdate,
     lastModelSwitchFailure: seed.lastModelSwitchFailure,
     terminalEvent: seed.terminalEvent,
@@ -481,15 +484,15 @@ function isKnownDaemonEventTypeName(
   return DAEMON_KNOWN_EVENT_TYPES.has(type);
 }
 
-// Prefer the first stream-local terminal frame, but upgrade to
-// session_died / session_closed once the daemon confirms the session ended.
+// Session-lifecycle terminals outrank stream-local terminals in
+// `terminalEvent`; they prove the underlying daemon session ended.
 type TerminalEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonClientEvictedEvent
   | DaemonStreamErrorEvent;
 
-function isSessionTerminalType(type: string): boolean {
+function isSessionLifecycleTerminal(type: string): boolean {
   return type === 'session_died' || type === 'session_closed';
 }
 
@@ -499,8 +502,8 @@ function chooseTerminalEvent(
 ): TerminalEvent {
   if (!current) return next;
   if (
-    !isSessionTerminalType(current.type) &&
-    isSessionTerminalType(next.type)
+    !isSessionLifecycleTerminal(current.type) &&
+    isSessionLifecycleTerminal(next.type)
   ) {
     return next;
   }

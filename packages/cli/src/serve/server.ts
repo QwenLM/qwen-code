@@ -622,6 +622,7 @@ export function createServeApp(
       res.status(400).json({
         error: '`displayName` must be a string',
         code: 'invalid_metadata',
+        field: 'displayName',
       });
       return;
     }

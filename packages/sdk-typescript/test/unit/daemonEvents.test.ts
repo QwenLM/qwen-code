@@ -233,6 +233,14 @@ describe('daemon event schema', () => {
     expect(state.currentModelId).toBe('qwen3-next');
   });
 
+  it('preserves seeded displayName when creating session view state', () => {
+    const state = createDaemonSessionViewState({
+      displayName: 'Investigation',
+    });
+
+    expect(state.displayName).toBe('Investigation');
+  });
+
   it('records session updates without replacing a known session id with junk', () => {
     const event: DaemonEvent = {
       id: 10,
