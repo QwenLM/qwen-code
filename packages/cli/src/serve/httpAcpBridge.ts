@@ -22,6 +22,7 @@ import {
   type SubscribeOptions,
 } from './eventBus.js';
 import {
+  BridgeTimeoutError,
   SERVE_STATUS_EXT_METHODS,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
@@ -3685,10 +3686,7 @@ async function withTimeout<T>(
 ): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeoutP = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`HttpAcpBridge ${label} timed out after ${ms}ms`)),
-      ms,
-    );
+    timer = setTimeout(() => reject(new BridgeTimeoutError(label, ms)), ms);
   });
   try {
     return await Promise.race([p, timeoutP]);

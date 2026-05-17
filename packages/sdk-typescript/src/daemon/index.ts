@@ -27,7 +27,11 @@ export {
   reduceDaemonSessionEvents,
 } from './events.js';
 export { parseSseStream, SseFramingError } from './sse.js';
-export { DaemonCapabilityMissingError, requireWorkspaceCwd } from './types.js';
+export {
+  DAEMON_ERROR_KINDS,
+  DaemonCapabilityMissingError,
+  requireWorkspaceCwd,
+} from './types.js';
 export type {
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
@@ -66,6 +70,7 @@ export type {
 export type {
   DaemonAvailableCommand,
   DaemonCapabilities,
+  DaemonErrorKind,
   DaemonEvent,
   DaemonMcpDiscoveryState,
   DaemonMcpServerRuntimeStatus,

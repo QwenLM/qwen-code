@@ -35,11 +35,15 @@ export {
   type ServeProtocolVersions,
 } from './capabilities.js';
 export {
+  BridgeTimeoutError,
+  SERVE_ERROR_KINDS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
   createIdleWorkspaceSkillsStatus,
+  mapDomainErrorToErrorKind,
+  type ServeErrorKind,
   type ServeMcpDiscoveryState,
   type ServeMcpServerRuntimeStatus,
   type ServeMcpTransport,

@@ -177,11 +177,28 @@ export type DaemonStatus =
   | 'not_started'
   | 'unknown';
 
+/**
+ * Closed taxonomy of structured error categories surfaced on diagnostic
+ * status cells (workspace preflight, env, MCP guardrails). SDK consumers
+ * can switch on a known set rather than parsing free-form messages.
+ */
+export const DAEMON_ERROR_KINDS = [
+  'missing_binary',
+  'blocked_egress',
+  'auth_env_error',
+  'init_timeout',
+  'protocol_error',
+  'missing_file',
+  'parse_error',
+] as const;
+
+export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
+
 export interface DaemonStatusCell {
   kind: string;
   status: DaemonStatus;
   error?: string;
-  errorKind?: string;
+  errorKind?: DaemonErrorKind;
   hint?: string;
 }
 
