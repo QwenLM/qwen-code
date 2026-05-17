@@ -203,6 +203,40 @@ describe('workspace agents routes', () => {
     expect(reviewerEntry?.systemPrompt).toBeUndefined();
   });
 
+  it('GET /workspace/agents reflects out-of-band agent file changes', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+
+    // First call populates SubagentManager's cache.
+    let res = await request(app).get('/workspace/agents');
+    expect(res.status).toBe(200);
+    const before = (res.body.agents as Array<{ name: string }>).map(
+      (a) => a.name,
+    );
+    expect(before).not.toContain('fresh-out-of-band');
+
+    // Out-of-band: a developer / IDE adapter writes a new agent file
+    // directly to disk, bypassing the daemon's POST route. Without
+    // `force: true` on the LIST handler, `listSubagents()` would
+    // serve the stale cache from the first call and silently miss
+    // the new entry — diverging from the detail route, which always
+    // re-reads disk.
+    const projectAgentsDir = path.join(workspace, QWEN_DIR, 'agents');
+    await fs.mkdir(projectAgentsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(projectAgentsDir, 'fresh-out-of-band.md'),
+      `---\nname: fresh-out-of-band\ndescription: out-of-band agent description\n---\nyou are the fresh out-of-band agent\n`,
+      'utf8',
+    );
+
+    res = await request(app).get('/workspace/agents');
+    expect(res.status).toBe(200);
+    const after = (res.body.agents as Array<{ name: string }>).map(
+      (a) => a.name,
+    );
+    expect(after).toContain('fresh-out-of-band');
+  });
+
   it('returns the full detail (with systemPrompt) on GET /workspace/agents/:agentType', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
@@ -303,6 +337,32 @@ describe('workspace agents routes', () => {
     const second = await request(app).post('/workspace/agents').send(body);
     expect(second.status).toBe(409);
     expect(second.body.code).toBe('agent_already_exists');
+  });
+
+  it('rejects 422 invalid_config when create uses a builtin agent name', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: 'general-purpose',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'this is a system prompt',
+      scope: 'workspace',
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/built-in/i);
+
+    // BuiltinAgentRegistry.isBuiltinAgent is case-insensitive — both
+    // `Explore` and `explore` must reject so a project-level shadow
+    // can never land regardless of how the client cases the name.
+    const res2 = await request(app).post('/workspace/agents').send({
+      name: 'explore',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'this is a system prompt',
+      scope: 'workspace',
+    });
+    expect(res2.status).toBe(422);
+    expect(res2.body.code).toBe('invalid_config');
   });
 
   it('returns 422 invalid_config for missing required fields', async () => {

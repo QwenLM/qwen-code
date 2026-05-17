@@ -174,6 +174,36 @@ describe('writeWorkspaceContextFile', () => {
     expect(after.mtimeMs).toBe(before.mtimeMs);
   });
 
+  it('serializes concurrent appends so no entry is lost', async () => {
+    // Spawn 10 parallel appends with unique content. Without the
+    // per-file mutex, the read-compose-write race in
+    // `composeAppendedContent` lets later writes overwrite earlier
+    // ones — at least one entry would be missing from the final file.
+    const PARALLEL = 10;
+    const writes = Array.from({ length: PARALLEL }, (_, i) =>
+      writeWorkspaceContextFile({
+        scope: 'workspace',
+        mode: 'append',
+        content: `- entry ${i}`,
+        projectRoot: workspace,
+      }),
+    );
+    const results = await Promise.all(writes);
+
+    const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+    const written = await fs.readFile(filePath, 'utf8');
+    for (let i = 0; i < PARALLEL; i++) {
+      expect(written).toContain(`- entry ${i}`);
+    }
+    // All N writes report changed; none short-circuited.
+    expect(results.every((r) => r.changed)).toBe(true);
+    // Exactly one section header — the lock keeps the
+    // "is-section-present" check consistent across the group, so we
+    // never insert duplicate headers.
+    const headerCount = written.split(MEMORY_SECTION_HEADER).length - 1;
+    expect(headerCount).toBe(1);
+  });
+
   it('marks `changed: false` for a no-op append against a missing file', async () => {
     const result = await writeWorkspaceContextFile({
       scope: 'workspace',

@@ -6,6 +6,7 @@
 
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
+  BuiltinAgentRegistry,
   SubagentError,
   SubagentErrorCode,
   SubagentManager,
@@ -59,7 +60,16 @@ export function mountWorkspaceAgentsRoutes(
 
   app.get('/workspace/agents', async (_req, res) => {
     try {
-      const agents = await manager.listSubagents();
+      // `force: true` re-walks `.qwen/agents/` on every call so out-of-
+      // band edits (a developer editing an agent file in their IDE
+      // while the daemon is running) appear immediately. Without it
+      // `SubagentManager.listSubagents()` serves a stale cache and
+      // diverges from `GET /workspace/agents/:agentType`, which always
+      // reads from disk (`loadSubagent → findSubagentByNameAtLevel →
+      // listSubagentsAtLevel`). Bringing the LIST route to parity is
+      // sub-millisecond for the typical 0-50 agents and matches the
+      // detail route's "filesystem is the source of truth" contract.
+      const agents = await manager.listSubagents({ force: true });
       const status: ServeWorkspaceAgentsStatus = {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: deps.boundWorkspace,
@@ -485,6 +495,24 @@ function parseAgentConfig(
     res.status(422).json({
       error: '`name` is required and must be a non-empty string',
       code: 'invalid_config',
+    });
+    return undefined;
+  }
+  // Reject names that shadow a built-in subagent. Without this check a
+  // client could `POST /workspace/agents { name: "general-purpose" }`
+  // and write a project-level file at `<workspace>/.qwen/agents/
+  // general-purpose.md`. List/load resolve the project entry first
+  // (project > builtin), but `SubagentManager.deleteSubagent` rejects
+  // by name alone (`subagent-manager.ts:302`) — so DELETE returns 403
+  // `agent_readonly` and the file becomes undeleteable through the
+  // API. Surface the conflict at create time instead. The check is
+  // case-insensitive (`BuiltinAgentRegistry.isBuiltinAgent` lowercases
+  // both sides), matching `loadSubagent`'s case-insensitive cascade.
+  if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
+    res.status(422).json({
+      error: `"${name}" shadows a built-in subagent and cannot be used as a project- or user-level agent name. Choose a different name.`,
+      code: 'invalid_config',
+      name,
     });
     return undefined;
   }

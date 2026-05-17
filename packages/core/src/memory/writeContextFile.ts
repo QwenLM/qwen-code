@@ -6,8 +6,34 @@
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
+import { Mutex } from 'async-mutex';
 import { Storage } from '../config/storage.js';
 import { DEFAULT_CONTEXT_FILENAME, MEMORY_SECTION_HEADER } from './const.js';
+
+/**
+ * Per-resolved-file mutex map. Two simultaneous `writeWorkspaceContextFile`
+ * calls targeting the same file would otherwise race read-then-write:
+ * both reads see the same existing content, both compose new content in
+ * memory, and the later `fs.writeFile` overwrites the earlier append.
+ * Result is a silently-lost entry with both callers observing success.
+ *
+ * Pattern mirrors `packages/core/src/utils/jsonl-utils.ts:36-46`. The
+ * Map grows by one entry per unique resolved path; production has at
+ * most two (workspace QWEN.md + global QWEN.md), so no cleanup is
+ * required. Tests use tmpdirs and clean up with `afterEach` — the Map
+ * keeps inert entries between tests but each entry is a single Mutex
+ * that acquires no resources when idle.
+ */
+const fileLocks = new Map<string, Mutex>();
+
+function getFileLock(filePath: string): Mutex {
+  let lock = fileLocks.get(filePath);
+  if (!lock) {
+    lock = new Mutex();
+    fileLocks.set(filePath, lock);
+  }
+  return lock;
+}
 
 export type WriteContextFileScope = 'workspace' | 'global';
 export type WriteContextFileMode = 'append' | 'replace';
@@ -71,44 +97,53 @@ export async function writeWorkspaceContextFile(
     );
   }
   const filePath = resolveContextFilePath(options.scope, options.projectRoot);
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
 
-  if (options.mode === 'replace') {
-    await fs.writeFile(filePath, options.content, {
-      encoding: 'utf8',
-      mode: 0o644,
-    });
+  // Hold the per-file mutex for the entire read-compose-write sequence.
+  // Concurrent `POST /workspace/memory` appends from different SSE
+  // clients would otherwise interleave reads and lose entries on the
+  // later `fs.writeFile`. `replace` mode also acquires the lock so a
+  // concurrent `replace` + `append` against the same file produces a
+  // deterministic last-write rather than a partial composite.
+  return await getFileLock(filePath).runExclusive(async () => {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+    if (options.mode === 'replace') {
+      await fs.writeFile(filePath, options.content, {
+        encoding: 'utf8',
+        mode: 0o644,
+      });
+      return {
+        filePath,
+        bytesWritten: Buffer.byteLength(options.content, 'utf8'),
+        changed: true,
+      };
+    }
+
+    // Append mode. When the trimmed content is empty (whitespace-only
+    // input from a flaky pipeline / accidental empty POST), short-circuit
+    // BEFORE re-writing the file. Re-writing the same bytes would still
+    // bump mtime AND trigger `memory_changed` SSE fan-out across every
+    // subscribed client — a misleading "memory just changed" toast for a
+    // request that changed nothing.
+    if (options.content.replace(/^\s+|\s+$/g, '').length === 0) {
+      let bytes = 0;
+      try {
+        const stat = await fs.stat(filePath);
+        bytes = stat.size;
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
+      return { filePath, bytesWritten: bytes, changed: false };
+    }
+
+    const next = await composeAppendedContent(filePath, options.content);
+    await fs.writeFile(filePath, next, { encoding: 'utf8', mode: 0o644 });
     return {
       filePath,
-      bytesWritten: Buffer.byteLength(options.content, 'utf8'),
+      bytesWritten: Buffer.byteLength(next, 'utf8'),
       changed: true,
     };
-  }
-
-  // Append mode. When the trimmed content is empty (whitespace-only
-  // input from a flaky pipeline / accidental empty POST), short-circuit
-  // BEFORE re-writing the file. Re-writing the same bytes would still
-  // bump mtime AND trigger `memory_changed` SSE fan-out across every
-  // subscribed client — a misleading "memory just changed" toast for a
-  // request that changed nothing.
-  if (options.content.replace(/^\s+|\s+$/g, '').length === 0) {
-    let bytes = 0;
-    try {
-      const stat = await fs.stat(filePath);
-      bytes = stat.size;
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    return { filePath, bytesWritten: bytes, changed: false };
-  }
-
-  const next = await composeAppendedContent(filePath, options.content);
-  await fs.writeFile(filePath, next, { encoding: 'utf8', mode: 0o644 });
-  return {
-    filePath,
-    bytesWritten: Buffer.byteLength(next, 'utf8'),
-    changed: true,
-  };
+  });
 }
 
 function resolveContextFilePath(
