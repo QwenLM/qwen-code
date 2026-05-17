@@ -156,7 +156,7 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
-  it('resumes an existing daemon session without forcing replay', async () => {
+  it('resumes an existing daemon session and seeds replay from the start', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/resume')) {
         return jsonResponse(200, {
@@ -180,7 +180,10 @@ describe('DaemonSessionClient', () => {
     for await (const _event of session.events()) {
       /* empty */
     }
-    expect(calls[1]?.headers['last-event-id']).toBeUndefined();
+    // Symmetric to load(): `unstable_resumeSession` schedules an
+    // `available_commands_update` via setTimeout(0) on the agent side,
+    // so the SDK seeds the subscription from the start of the ring.
+    expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
   it('forwards session-scoped operations through DaemonClient', async () => {

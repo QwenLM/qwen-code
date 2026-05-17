@@ -1952,7 +1952,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         restoreEvents,
       );
       registeredEntry = entry;
-      if (!defaultEntry) defaultEntry = entry;
+      // Mirror doSpawn (`effectiveScope === 'single' && !defaultEntry`):
+      // `defaultEntry` is the omitted-scope attach target, so it must
+      // never point at a session that wouldn't have claimed it via
+      // spawn. Restore can't read the persisted session's original
+      // scope, so the only safe gate is the daemon-wide default — when
+      // it's `'thread'`, omitted-scope `POST /session` callers go
+      // through the spawn path and `defaultEntry` should stay
+      // unclaimed.
+      if (defaultSessionScope === 'single' && !defaultEntry) {
+        defaultEntry = entry;
+      }
       return {
         sessionId: entry.sessionId,
         workspaceCwd: entry.workspaceCwd,

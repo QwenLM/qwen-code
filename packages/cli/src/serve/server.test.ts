@@ -29,6 +29,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   InvalidPermissionOptionError,
+  RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -63,7 +64,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_create',
   'session_scope_override',
   'session_load',
-  'session_resume',
+  'unstable_session_resume',
   'session_list',
   'session_prompt',
   'session_cancel',
@@ -749,6 +750,28 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('409 + Retry-After when the bridge throws RestoreInProgressError', async () => {
+      const bridge = fakeBridge({
+        loadImpl: async () => {
+          throw new RestoreInProgressError('persisted-race', 'resume', 'load');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-race/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(409);
+      expect(res.headers['retry-after']).toBe('1');
+      expect(res.body).toMatchObject({
+        code: 'restore_in_progress',
+        sessionId: 'persisted-race',
+        activeAction: 'resume',
+        requestedAction: 'load',
+      });
     });
   });
 

@@ -102,6 +102,12 @@ export class DaemonSessionClient {
 
   /**
    * Resumes an existing daemon session without requesting history replay.
+   * Seeds the first event subscription from the start of the daemon
+   * replay ring (`lastEventId: 0`) symmetric with `load()` — the agent's
+   * `unstable_resumeSession` schedules an `available_commands_update`
+   * via `setTimeout(0)`, which can publish to the daemon bus between
+   * the HTTP response and the consumer's first `events()` call. Seeding
+   * ensures that frame is observed instead of dropped.
    */
   static async resume(
     client: DaemonClient,
@@ -109,7 +115,12 @@ export class DaemonSessionClient {
     req: RestoreSessionRequest = {},
   ): Promise<DaemonSessionClient> {
     const { state, ...session } = await client.resumeSession(sessionId, req);
-    return new DaemonSessionClient({ client, session, state });
+    return new DaemonSessionClient({
+      client,
+      session,
+      state,
+      lastEventId: 0,
+    });
   }
 
   get sessionId(): string {
