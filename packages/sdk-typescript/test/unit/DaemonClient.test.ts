@@ -15,7 +15,14 @@ import {
   DaemonCapabilityMissingError,
   requireWorkspaceCwd,
 } from '../../src/daemon/types.js';
-import type { DaemonCapabilities } from '../../src/daemon/types.js';
+import type {
+  DaemonCapabilities,
+  DaemonSessionContextStatus,
+  DaemonSessionSupportedCommandsStatus,
+  DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
+} from '../../src/daemon/types.js';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -127,6 +134,129 @@ describe('DaemonClient', () => {
       const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.capabilities()).resolves.toEqual(envelope);
+    });
+  });
+
+  describe('read-only status routes', () => {
+    it('GETs workspace status routes and returns payloads unchanged', async () => {
+      const mcp: DaemonWorkspaceMcpStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'docs',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+        ],
+      };
+      const skills: DaemonWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'project',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const providers: DaemonWorkspaceProvidersStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        current: { authType: 'qwen', modelId: 'qwen3(qwen)' },
+        providers: [
+          {
+            kind: 'model_provider',
+            status: 'ok',
+            authType: 'qwen',
+            current: true,
+            models: [
+              {
+                modelId: 'qwen3(qwen)',
+                baseModelId: 'qwen3',
+                name: 'Qwen 3',
+                description: null,
+                contextLimit: 4096,
+                isCurrent: true,
+                isRuntime: false,
+              },
+            ],
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/workspace/mcp')) return jsonResponse(200, mcp);
+        if (req.url.endsWith('/workspace/skills')) {
+          return jsonResponse(200, skills);
+        }
+        if (req.url.endsWith('/workspace/providers')) {
+          return jsonResponse(200, providers);
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcp()).resolves.toEqual(mcp);
+      await expect(client.workspaceSkills()).resolves.toEqual(skills);
+      await expect(client.workspaceProviders()).resolves.toEqual(providers);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp'],
+        ['GET', 'http://daemon/workspace/skills'],
+        ['GET', 'http://daemon/workspace/providers'],
+      ]);
+    });
+
+    it('GETs session status routes with encoded session ids', async () => {
+      const context: DaemonSessionContextStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        workspaceCwd: '/work/a',
+        state: { models: { currentModelId: 'qwen3' } },
+      };
+      const supportedCommands: DaemonSessionSupportedCommandsStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        availableCommands: [
+          {
+            name: 'init',
+            description: 'Initialize',
+            input: null,
+          },
+        ],
+        availableSkills: ['review'],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/with%2Fslash/context')) {
+          return jsonResponse(200, context);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/supported-commands')) {
+          return jsonResponse(200, supportedCommands);
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.sessionContext('with/slash')).resolves.toEqual(
+        context,
+      );
+      await expect(
+        client.sessionSupportedCommands('with/slash'),
+      ).resolves.toEqual(supportedCommands);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/session/with%2Fslash/context'],
+        ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
+      ]);
     });
   });
 

@@ -106,6 +106,11 @@ interface FakeAgentOpts {
     p: ResumeSessionRequest,
     self: FakeAgent,
   ) => Promise<ResumeSessionResponse> | ResumeSessionResponse;
+  extMethodImpl?: (
+    method: string,
+    params: Record<string, unknown>,
+    self: FakeAgent,
+  ) => Promise<Record<string, unknown>> | Record<string, unknown>;
 }
 
 class FakeAgent implements Agent {
@@ -114,6 +119,8 @@ class FakeAgent implements Agent {
   resumeSessionCalls: ResumeSessionRequest[] = [];
   promptCalls: PromptRequest[] = [];
   cancelCalls: CancelNotification[] = [];
+  extMethodCalls: Array<{ method: string; params: Record<string, unknown> }> =
+    [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
 
   async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
@@ -182,6 +189,16 @@ class FakeAgent implements Agent {
     _p: SetSessionConfigOptionRequest,
   ): Promise<SetSessionConfigOptionResponse> {
     throw new Error('not implemented in test fake');
+  }
+  async extMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    this.extMethodCalls.push({ method, params });
+    if (this.opts.extMethodImpl) {
+      return this.opts.extMethodImpl(method, params, this);
+    }
+    return {};
   }
 }
 
@@ -346,6 +363,160 @@ describe('createHttpAcpBridge', () => {
     expect(bridge.sessionCount).toBe(1);
 
     await bridge.shutdown();
+  });
+
+  it('does not spawn a channel for idle workspace status snapshots', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await expect(bridge.getWorkspaceMcpStatus()).resolves.toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: false,
+      servers: [],
+    });
+    await expect(bridge.getWorkspaceSkillsStatus()).resolves.toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: false,
+      skills: [],
+    });
+    await expect(bridge.getWorkspaceProvidersStatus()).resolves.toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: false,
+      providers: [],
+    });
+    expect(handles).toHaveLength(0);
+  });
+
+  it('requests workspace status through the existing ACP channel', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/status/workspace/mcp') {
+              return {
+                v: 1,
+                workspaceCwd: WS_A,
+                initialized: true,
+                servers: [],
+              };
+            }
+            if (method === 'qwen/status/workspace/skills') {
+              return {
+                v: 1,
+                workspaceCwd: WS_A,
+                initialized: true,
+                skills: [],
+              };
+            }
+            return {
+              v: 1,
+              workspaceCwd: WS_A,
+              initialized: true,
+              providers: [],
+            };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await expect(bridge.getWorkspaceMcpStatus()).resolves.toMatchObject({
+      initialized: true,
+    });
+    await expect(bridge.getWorkspaceSkillsStatus()).resolves.toMatchObject({
+      initialized: true,
+    });
+    await expect(bridge.getWorkspaceProvidersStatus()).resolves.toMatchObject({
+      initialized: true,
+    });
+
+    expect(handles).toHaveLength(1);
+    expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
+      'qwen/status/workspace/mcp',
+      'qwen/status/workspace/skills',
+      'qwen/status/workspace/providers',
+    ]);
+    expect(handles[0]?.agent.extMethodCalls.map((c) => c.params)).toEqual([
+      { cwd: WS_A },
+      { cwd: WS_A },
+      { cwd: WS_A },
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('requests session status through the existing ACP channel', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/status/session/context') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                workspaceCwd: WS_A,
+                state: {},
+              };
+            }
+            return {
+              v: 1,
+              sessionId: params['sessionId'],
+              availableCommands: [],
+              availableSkills: [],
+            };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.getSessionContextStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      state: {},
+    });
+    await expect(
+      bridge.getSessionSupportedCommandsStatus(session.sessionId),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      availableCommands: [],
+      availableSkills: [],
+    });
+    expect(handles[0]?.agent.extMethodCalls.map((c) => c.method)).toEqual([
+      'qwen/status/session/context',
+      'qwen/status/session/supported_commands',
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects session status requests for unknown sessions', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+
+    await expect(
+      bridge.getSessionContextStatus('missing'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await expect(
+      bridge.getSessionSupportedCommandsStatus('missing'),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
   it('reuses an echoed daemon-issued client id on attach', async () => {

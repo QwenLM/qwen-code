@@ -51,6 +51,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   client_heartbeat: { since: 'v1' },
   session_permission_vote: { since: 'v1' },
   permission_vote: { since: 'v1' },
+  workspace_mcp: { since: 'v1' },
+  workspace_skills: { since: 'v1' },
+  workspace_providers: { since: 'v1' },
+  session_context: { since: 'v1' },
+  session_supported_commands: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;

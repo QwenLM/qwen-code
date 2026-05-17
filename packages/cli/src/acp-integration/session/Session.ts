@@ -187,6 +187,59 @@ function isUserPromptRecord(record: ChatRecord): boolean {
   );
 }
 
+export interface AvailableCommandsSnapshot {
+  availableCommands: AvailableCommand[];
+  availableSkills?: string[];
+}
+
+export async function buildAvailableCommandsSnapshot(
+  config: Config,
+): Promise<AvailableCommandsSnapshot> {
+  const abortController = new AbortController();
+  const slashCommands = await getAvailableCommands(
+    config,
+    abortController.signal,
+    'acp',
+  );
+
+  const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
+    const acceptsInput =
+      cmd.kind !== CommandKind.BUILT_IN ||
+      cmd.completion != null ||
+      cmd.argumentHint != null ||
+      (cmd.subCommands != null && cmd.subCommands.length > 0);
+    return {
+      name: cmd.name,
+      description: cmd.description,
+      input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+      _meta: {
+        argumentHint: cmd.argumentHint,
+        source: cmd.source,
+        sourceLabel: cmd.sourceLabel,
+        supportedModes: getEffectiveSupportedModes(cmd),
+        subcommands: getCommandSubcommandNames(cmd),
+        modelInvocable: cmd.modelInvocable === true,
+      },
+    };
+  });
+
+  let availableSkills: string[] | undefined;
+  try {
+    const skillManager = config.getSkillManager();
+    if (skillManager) {
+      const skills = await skillManager.listSkills();
+      availableSkills = skills.map((skill) => skill.name);
+    }
+  } catch (error) {
+    debugLogger.error('Error loading available skills:', error);
+  }
+
+  return {
+    availableCommands,
+    ...(availableSkills !== undefined ? { availableSkills } : {}),
+  };
+}
+
 /**
  * Session represents an active conversation session with the AI model.
  * It uses modular components for consistent event emission:
@@ -1434,61 +1487,14 @@ export class Session implements SessionContext {
   }
 
   async sendAvailableCommandsUpdate(): Promise<void> {
-    const abortController = new AbortController();
     try {
-      // Load commands available in ACP mode
-      const slashCommands = await getAvailableCommands(
-        this.config,
-        abortController.signal,
-        'acp',
-      );
-
-      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.
-      // Commands that accept arguments get input: { hint } so the client can
-      // let users type arguments before submitting.  Commands with no argument
-      // support get input: null so the client auto-submits them on selection.
-      //
-      // A command is considered to accept arguments when any of:
-      //   - it is not a BUILT_IN command (skills, file commands, etc.)
-      //   - it has a completion function
-      //   - it declares an argumentHint
-      //   - it has subCommands
-      const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
-        const acceptsInput =
-          cmd.kind !== CommandKind.BUILT_IN ||
-          cmd.completion != null ||
-          cmd.argumentHint != null ||
-          (cmd.subCommands != null && cmd.subCommands.length > 0);
-        return {
-          name: cmd.name,
-          description: cmd.description,
-          input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
-          _meta: {
-            argumentHint: cmd.argumentHint,
-            source: cmd.source,
-            sourceLabel: cmd.sourceLabel,
-            supportedModes: getEffectiveSupportedModes(cmd),
-            subcommands: getCommandSubcommandNames(cmd),
-            modelInvocable: cmd.modelInvocable === true,
-          },
-        };
-      });
-
-      let availableSkills: string[] | undefined;
-      try {
-        const skillManager = this.config.getSkillManager();
-        if (skillManager) {
-          const skills = await skillManager.listSkills();
-          availableSkills = skills.map((skill) => skill.name);
-        }
-      } catch (error) {
-        debugLogger.error('Error loading available skills:', error);
-      }
+      const { availableCommands, availableSkills } =
+        await buildAvailableCommandsSnapshot(this.config);
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
-        ...(availableSkills
+        ...(availableSkills !== undefined
           ? {
               _meta: {
                 availableSkills,

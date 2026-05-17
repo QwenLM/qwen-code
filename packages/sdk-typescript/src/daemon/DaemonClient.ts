@@ -8,9 +8,14 @@ import { parseSseStream } from './sse.js';
 import type {
   DaemonCapabilities,
   DaemonEvent,
+  DaemonSessionContextStatus,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
+  DaemonSessionSupportedCommandsStatus,
+  DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -45,8 +50,8 @@ export interface DaemonClientOptions {
   /**
    * Per-call request timeout in milliseconds. Applied to short-lived
    * methods (`health`, `capabilities`, `createOrAttachSession`,
-   * `listWorkspaceSessions`, `setSessionModel`, `cancel`,
-   * `respondToPermission`) so an unresponsive daemon doesn't block
+   * `listWorkspaceSessions`, read-only status routes, `setSessionModel`,
+   * `cancel`, `respondToPermission`) so an unresponsive daemon doesn't block
    * callers indefinitely. **NOT** applied to `prompt()` — model + tool
    * turns can take minutes, so prompt explicitly bypasses
    * `fetchTimeoutMs`; cancellation is via the optional `signal` arg.
@@ -297,6 +302,43 @@ export class DaemonClient {
     );
   }
 
+  async workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
+        return (await res.json()) as DaemonWorkspaceMcpStatus;
+      },
+    );
+  }
+
+  async workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/skills');
+        }
+        return (await res.json()) as DaemonWorkspaceSkillsStatus;
+      },
+    );
+  }
+
+  async workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/providers`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/providers');
+        }
+        return (await res.json()) as DaemonWorkspaceProvidersStatus;
+      },
+    );
+  }
+
   // -- Sessions ----------------------------------------------------------
 
   async createOrAttachSession(
@@ -377,6 +419,37 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('resume', sessionId, req, clientId);
+  }
+
+  async sessionContext(sessionId: string): Promise<DaemonSessionContextStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/context`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/context');
+        }
+        return (await res.json()) as DaemonSessionContextStatus;
+      },
+    );
+  }
+
+  async sessionSupportedCommands(
+    sessionId: string,
+  ): Promise<DaemonSessionSupportedCommandsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/supported-commands`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/supported-commands',
+          );
+        }
+        return (await res.json()) as DaemonSessionSupportedCommandsStatus;
+      },
+    );
   }
 
   /**

@@ -13,8 +13,10 @@ import {
 } from './DaemonClient.js';
 import type {
   DaemonEvent,
+  DaemonSessionContextStatus,
   DaemonSessionState,
   DaemonSession,
+  DaemonSessionSupportedCommandsStatus,
   HeartbeatResult,
   PermissionResponse,
   PromptResult,
@@ -193,6 +195,14 @@ export class DaemonSessionClient {
       modelId,
       this.clientId,
     );
+  }
+
+  async context(): Promise<DaemonSessionContextStatus> {
+    return await this.client.sessionContext(this.sessionId);
+  }
+
+  async supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
+    return await this.client.sessionSupportedCommands(this.sessionId);
   }
 
   async respondToPermission(
