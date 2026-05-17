@@ -93,11 +93,10 @@ export function isUnattendedMode(): boolean {
  * @returns A promise that resolves after the delay.
  */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
-    return Promise.reject(new Error('Retry aborted by signal'));
-  }
-
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new Error('Retry aborted by signal'));
+    }
     const cleanup = () => {
       signal?.removeEventListener('abort', onAbort);
     };
@@ -112,6 +111,12 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       resolve();
     }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
+    // Re-check after listener registration to close the TOCTOU race window.
+    if (signal?.aborted) {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new Error('Retry aborted by signal'));
+    }
   });
 }
 
@@ -208,6 +213,8 @@ export async function retryWithBackoff<T>(
         shouldRetryOnContent(result as GenerateContentResponse)
       ) {
         const delayMs = getRetryDelayMs({
+          // attempt: 1 — currentDelay already tracks exponential growth;
+          // getRetryDelayMs is called here only for jitter calculation.
           attempt: 1,
           initialDelayMs: currentDelay,
           maxDelayMs,
@@ -316,6 +323,8 @@ export async function retryWithBackoff<T>(
         } else {
           logRetryAttempt(attempt, error, retryClassification, errorStatus);
           const delayMs = getRetryDelayMs({
+            // attempt: 1 — currentDelay already tracks exponential growth;
+            // getRetryDelayMs is called here only for jitter calculation.
             attempt: 1,
             initialDelayMs: currentDelay,
             maxDelayMs,
