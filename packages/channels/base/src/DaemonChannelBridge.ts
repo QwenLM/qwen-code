@@ -116,6 +116,28 @@ function isPermissionRequestData(
   );
 }
 
+function summarizeProtocolDetails(details: unknown): unknown {
+  if (!isRecord(details)) {
+    return { type: typeof details };
+  }
+  const summary: Record<string, unknown> = {};
+  for (const key of [
+    'requestId',
+    'sessionId',
+    'sessionUpdate',
+    'modelId',
+    'requestedModelId',
+    'toolCallId',
+    'kind',
+  ]) {
+    const value = details[key];
+    if (typeof value === 'string') {
+      summary[key] = value;
+    }
+  }
+  return summary;
+}
+
 async function drainDaemonEventLoop(): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
@@ -255,7 +277,10 @@ export class DaemonChannelBridge extends EventEmitter {
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
       controllers.delete(controller);
-      if (controllers.size === 0) {
+      if (
+        controllers.size === 0 &&
+        this.activePromptControllers.get(sessionId) === controllers
+      ) {
         this.activePromptControllers.delete(sessionId);
       }
     }
@@ -263,8 +288,9 @@ export class DaemonChannelBridge extends EventEmitter {
 
   async cancelSession(sessionId: string): Promise<void> {
     const session = this.ensureSession(sessionId);
-    this.abortActivePrompts(sessionId);
     await session.cancel();
+    this.abortActivePrompts(sessionId);
+    this.activePrompts.delete(sessionId);
   }
 
   async setSessionModel(
@@ -287,24 +313,24 @@ export class DaemonChannelBridge extends EventEmitter {
       this.requestToSession.delete(requestId);
       return false;
     }
-    return await session.respondToPermission(requestId, response);
+    try {
+      return await session.respondToPermission(requestId, response);
+    } catch (error) {
+      this.requestToSession.delete(requestId);
+      throw error;
+    }
   }
 
   stop(): void {
     for (const sessionId of Array.from(this.sessions.keys())) {
+      const session = this.sessions.get(sessionId);
+      if (session) {
+        void session.cancel().catch((error: unknown) => {
+          this.lastError = error;
+        });
+      }
       this.dropSession(sessionId, 'bridge_stopped');
     }
-    this.eventControllers.clear();
-    this.sessions.clear();
-    this.requestToSession.clear();
-    for (const controllers of this.activePromptControllers.values()) {
-      for (const controller of controllers) {
-        controller.abort();
-      }
-    }
-    this.activePromptControllers.clear();
-    this.activePrompts.clear();
-    this.availableCommandsBySession.clear();
     this.latestAvailableCommandsSessionId = undefined;
     this.connected = false;
   }
@@ -436,10 +462,16 @@ export class DaemonChannelBridge extends EventEmitter {
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const toolCallId = getString(update['toolCallId']);
+        const kind = getString(update['kind']);
+        if (!toolCallId || !kind) {
+          this.emitProtocolError(`Malformed daemon ${type} event`, update);
+          break;
+        }
         const event: ToolCallEvent = {
           sessionId,
-          toolCallId: getString(update['toolCallId']) ?? '',
-          kind: getString(update['kind']) ?? '',
+          toolCallId,
+          kind,
           title: getString(update['title']) ?? '',
           status: getString(update['status']) ?? 'pending',
           rawInput: isRecord(update['rawInput'])
@@ -502,6 +534,7 @@ export class DaemonChannelBridge extends EventEmitter {
       return;
     }
     if (mappedSessionId !== sessionId) {
+      this.requestToSession.delete(requestId);
       this.emitProtocolError(
         `Ignoring daemon permission_resolved for request ${requestId} from non-owning session ${sessionId}`,
         data,
@@ -593,7 +626,7 @@ export class DaemonChannelBridge extends EventEmitter {
 
   private emitProtocolError(message: string, details: unknown): void {
     const error = new Error(message) as Error & { details?: unknown };
-    error.details = details;
+    error.details = summarizeProtocolDetails(details);
     this.emit('error', error);
   }
 }

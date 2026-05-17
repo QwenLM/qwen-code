@@ -576,6 +576,11 @@ describe('DaemonChannelBridge', () => {
       outcome: { outcome: 'selected', optionId: 'proceed_once' },
     });
     expect(secondSession.respondToPermission).not.toHaveBeenCalled();
+    await expect(
+      bridge.respondToPermission('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      }),
+    ).resolves.toBe(false);
 
     firstEvents.close();
     secondEvents.close();
@@ -780,6 +785,7 @@ describe('DaemonChannelBridge', () => {
 
     bridge.stop();
     await expect(promptPromise).rejects.toThrow('aborted');
+    expect(session.cancel).toHaveBeenCalledOnce();
     expect(sessionDied).toHaveBeenCalledWith({
       sessionId: 'session-1',
       reason: 'bridge_stopped',
@@ -789,12 +795,19 @@ describe('DaemonChannelBridge', () => {
   it('aborts in-flight prompts when cancelling a session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
+    const order: string[] = [];
+    session.cancel.mockImplementation(async () => {
+      order.push('cancel');
+    });
     session.prompt.mockImplementation(
       (_req: unknown, signal?: AbortSignal) =>
         new Promise((_resolve, reject) => {
           signal?.addEventListener(
             'abort',
-            () => reject(new DOMException('aborted', 'AbortError')),
+            () => {
+              order.push('abort');
+              reject(new DOMException('aborted', 'AbortError'));
+            },
             { once: true },
           );
         }),
@@ -813,6 +826,56 @@ describe('DaemonChannelBridge', () => {
 
     await expect(promptPromise).rejects.toThrow('aborted');
     expect(session.cancel).toHaveBeenCalledOnce();
+    expect(order).toEqual(['cancel', 'abort']);
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('clears permission ownership when daemon permission responses fail', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const permissionRequest = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-fail',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledOnce());
+
+    session.respondToPermission.mockRejectedValueOnce(
+      new Error('permission failed'),
+    );
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    };
+    await expect(
+      bridge.respondToPermission('req-fail', response),
+    ).rejects.toThrow('permission failed');
+    await expect(
+      bridge.respondToPermission('req-fail', response),
+    ).resolves.toBe(false);
 
     events.close();
     bridge.stop();
@@ -1004,8 +1067,19 @@ describe('DaemonChannelBridge', () => {
       type: 'model_switched',
       data: {},
     });
+    events.push({
+      id: 4,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call_update',
+          status: 'running',
+        },
+      },
+    });
 
-    await waitFor(() => expect(errors).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(errors).toHaveBeenCalledTimes(4));
     expect(errors).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -1024,8 +1098,14 @@ describe('DaemonChannelBridge', () => {
         message: 'Malformed daemon model_switched event',
       }),
     );
+    expect(errors).toHaveBeenNthCalledWith(
+      4,
+      expect.objectContaining({
+        message: 'Malformed daemon tool_call_update event',
+      }),
+    );
     expect(bridge.lastDaemonError).toMatchObject({
-      message: 'Malformed daemon model_switched event',
+      message: 'Malformed daemon tool_call_update event',
     });
 
     events.close();
