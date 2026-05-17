@@ -36,10 +36,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * and proxy matches.
    *
    * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
-   * DashScope-compatible endpoint by design. If a future internal service
-   * under these domains is not DashScope-compatible, narrow the match via
-   * a runtime provider property rather than re-introducing business-name
-   * subdomains here.
+   * DashScope-compatible endpoint by design. Keep this generic and avoid
+   * embedding business-specific internal hostnames in provider detection.
    */
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
@@ -97,6 +95,12 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     ) {
       debugLogger.debug(
         `DASHSCOPE_PROXY_BASE_URL is configured but the request baseUrl does not match. DashScope headers/cache control will be skipped.`,
+      );
+    }
+
+    if (isInternalOrigin) {
+      debugLogger.debug(
+        `DashScope provider activated via internal origin: ${hostname}`,
       );
     }
 
