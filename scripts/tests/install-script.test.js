@@ -3048,34 +3048,40 @@ describe('Windows installer end-to-end', () => {
 });
 
 function ensureMinimalDist() {
-  const backupPath = existsSync('dist')
+  const distPath = path.resolve('dist');
+  const backupPath = existsSync(distPath)
     ? path.join(
-        tmpdir(),
+        path.dirname(distPath),
         `qwen-dist-backup-${process.pid}-${Date.now()}-${Math.random()
           .toString(16)
           .slice(2)}`,
       )
     : null;
   if (backupPath) {
-    renameSync('dist', backupPath);
+    renameSync(distPath, backupPath);
   }
 
-  mkdirSync('dist/chunks', { recursive: true });
-  mkdirSync('dist/vendor', { recursive: true });
-  mkdirSync('dist/bundled/qc-helper/docs', { recursive: true });
-  writeFileSync('dist/cli.js', 'console.log("qwen");\n');
-  writeFileSync('dist/chunks/index.js', 'export {};\n');
+  mkdirSync(path.join(distPath, 'chunks'), { recursive: true });
+  mkdirSync(path.join(distPath, 'vendor'), { recursive: true });
+  mkdirSync(path.join(distPath, 'bundled/qc-helper/docs'), {
+    recursive: true,
+  });
+  writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
+  writeFileSync(path.join(distPath, 'chunks/index.js'), 'export {};\n');
   writeFileSync(
-    'dist/package.json',
+    path.join(distPath, 'package.json'),
     JSON.stringify({ name: '@qwen-code/qwen-code', version: '0.0.0' }),
   );
-  return { backupPath };
+  return { backupPath, distPath };
 }
 
 function restoreMinimalDist(state) {
-  rmSync('dist', { recursive: true, force: true });
+  rmSync(state?.distPath || path.resolve('dist'), {
+    recursive: true,
+    force: true,
+  });
   if (state?.backupPath) {
-    renameSync(state.backupPath, 'dist');
+    renameSync(state.backupPath, state.distPath);
   }
 }
 
