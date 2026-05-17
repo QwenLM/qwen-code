@@ -2157,6 +2157,28 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(seen).toEqual([undefined]);
   });
 
+  it('400s a present-but-empty ?maxQueued= before opening the SSE stream', async () => {
+    // `?maxQueued=` (typed explicitly without a value) is malformed
+    // and must fail-CLOSED, not silently fall back to the default
+    // queue cap. Symmetric to non-decimal / out-of-range rejection.
+    const bridge = fakeBridge({
+      subscribeImpl: () => {
+        throw new Error('bridge must not be touched');
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/sess-A/events?maxQueued=`,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'invalid_max_queued' });
+  });
+
   it('400s a non-decimal ?maxQueued before opening the SSE stream', async () => {
     const bridge = fakeBridge({
       subscribeImpl: () => {

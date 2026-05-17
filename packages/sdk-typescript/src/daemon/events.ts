@@ -485,11 +485,15 @@ function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
 function isSlowClientWarningData(
   value: unknown,
 ): value is DaemonSlowClientWarningData {
+  // Mirror the sibling predicates' finite-number guard
+  // (`isOptionalNumber` → `isFiniteNumber`): `typeof NaN === 'number'`
+  // and `typeof Infinity === 'number'` both pass a bare `typeof`
+  // check but would be schema garbage for a queue-size measurement.
   return (
     isRecord(value) &&
-    typeof value['queueSize'] === 'number' &&
-    typeof value['maxQueued'] === 'number' &&
-    typeof value['lastEventId'] === 'number'
+    isFiniteNumber(value['queueSize']) &&
+    isFiniteNumber(value['maxQueued']) &&
+    isFiniteNumber(value['lastEventId'])
   );
 }
 

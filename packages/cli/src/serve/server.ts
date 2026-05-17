@@ -127,6 +127,13 @@ export function createServeApp(
     deps.bridge ??
     createHttpAcpBridge({
       maxSessions: opts.maxSessions,
+      // Symmetric with `runQwenServe.ts` — direct embeds / tests that
+      // call `createServeApp` without supplying their own bridge and
+      // pass `ServeOptions.eventRingSize` would otherwise silently
+      // get the default 8000 ring instead of their configured value.
+      ...(opts.eventRingSize !== undefined
+        ? { eventRingSize: opts.eventRingSize }
+        : {}),
       boundWorkspace,
     });
 
@@ -1065,7 +1072,12 @@ function parseMaxQueuedQuery(
   raw: unknown,
   res: import('express').Response,
 ): number | undefined | null {
-  if (raw === undefined || raw === '') return undefined;
+  // Absent param → undefined (use bus default). Present-but-empty
+  // (`?maxQueued=` typed explicitly) → fail-CLOSED 400 — the API
+  // documents fail-closed for any malformed value before opening
+  // SSE, and an empty string is unambiguously malformed (real values
+  // are positive integers in [16, 2048]).
+  if (raw === undefined) return undefined;
   if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
     writeStderrLine(
       `qwen serve: rejected ?maxQueued "${String(raw).slice(0, 80)}" ` +

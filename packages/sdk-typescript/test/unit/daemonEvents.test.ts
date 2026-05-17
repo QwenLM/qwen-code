@@ -482,6 +482,28 @@ describe('daemon event schema', () => {
         data: { queueSize: 192, lastEventId: 42 },
       }),
     ).toBeUndefined();
+
+    // NaN / Infinity pass a bare `typeof === 'number'` check but are
+    // schema garbage for a queue-size measurement — finite-number
+    // validation must reject them (sibling predicates do the same).
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: Number.NaN, maxQueued: 256, lastEventId: 42 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: Number.POSITIVE_INFINITY,
+          lastEventId: 42,
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it('reduces slow_client_warning into the view state without ending the stream', () => {

@@ -211,11 +211,13 @@ export class EventBus {
       ...input,
     };
     this.ring.push(event);
-    // Eviction-by-shift is O(n) once the ring is full. With ringSize=4000
-    // and per-publish work measured in hundreds of microseconds even on
-    // chatty sessions, this isn't a real hotspot today. A circular-buffer
-    // refactor would push it to O(1) but adds index bookkeeping; deferred
-    // until profiling actually flags it.
+    // Eviction-by-shift is O(n) once the ring is full. At the current
+    // default `ringSize=8000` (#3803 §02) the per-publish shift work
+    // measures in low milliseconds on chatty sessions — still well
+    // below per-frame latency budgets. A circular-buffer refactor
+    // would push it to O(1) but adds index bookkeeping; deferred until
+    // profiling actually flags it, or the operator bumps
+    // `--event-ring-size` to an order of magnitude larger.
     if (this.ring.length > this.ringSize) this.ring.shift();
     // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
     // (the new immediate-eviction cleanup below) doesn't mutate the
