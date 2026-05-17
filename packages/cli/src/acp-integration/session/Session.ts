@@ -194,13 +194,9 @@ export interface AvailableCommandsSnapshot {
 
 export async function buildAvailableCommandsSnapshot(
   config: Config,
+  abortSignal: AbortSignal = AbortSignal.timeout(10_000),
 ): Promise<AvailableCommandsSnapshot> {
-  const abortController = new AbortController();
-  const slashCommands = await getAvailableCommands(
-    config,
-    abortController.signal,
-    'acp',
-  );
+  const slashCommands = await getAvailableCommands(config, abortSignal, 'acp');
 
   const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
     const acceptsInput =

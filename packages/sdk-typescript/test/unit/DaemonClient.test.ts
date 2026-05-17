@@ -247,15 +247,19 @@ describe('DaemonClient', () => {
       });
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
-      await expect(client.sessionContext('with/slash')).resolves.toEqual(
-        context,
-      );
       await expect(
-        client.sessionSupportedCommands('with/slash'),
+        client.sessionContext('with/slash', 'client-1'),
+      ).resolves.toEqual(context);
+      await expect(
+        client.sessionSupportedCommands('with/slash', 'client-1'),
       ).resolves.toEqual(supportedCommands);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['GET', 'http://daemon/session/with%2Fslash/context'],
         ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
+      ]);
+      expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
+        'client-1',
       ]);
     });
   });

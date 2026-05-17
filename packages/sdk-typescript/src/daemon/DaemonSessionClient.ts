@@ -199,11 +199,14 @@ export class DaemonSessionClient {
   }
 
   async context(): Promise<DaemonSessionContextStatus> {
-    return await this.client.sessionContext(this.sessionId);
+    return await this.client.sessionContext(this.sessionId, this.clientId);
   }
 
   async supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
-    return await this.client.sessionSupportedCommands(this.sessionId);
+    return await this.client.sessionSupportedCommands(
+      this.sessionId,
+      this.clientId,
+    );
   }
 
   async respondToPermission(

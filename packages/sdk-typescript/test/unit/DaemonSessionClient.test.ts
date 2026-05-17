@@ -432,8 +432,8 @@ describe('DaemonSessionClient', () => {
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
       'client-1',
       'client-1',
-      undefined,
-      undefined,
+      'client-1',
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

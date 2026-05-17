@@ -422,10 +422,13 @@ export class DaemonClient {
     return this.restoreSession('resume', sessionId, req, clientId);
   }
 
-  async sessionContext(sessionId: string): Promise<DaemonSessionContextStatus> {
+  async sessionContext(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionContextStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/context`,
-      { headers: this.headers() },
+      { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(res, 'GET /session/:id/context');
@@ -437,10 +440,11 @@ export class DaemonClient {
 
   async sessionSupportedCommands(
     sessionId: string,
+    clientId?: string,
   ): Promise<DaemonSessionSupportedCommandsStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/supported-commands`,
-      { headers: this.headers() },
+      { headers: this.headers({}, clientId) },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(
