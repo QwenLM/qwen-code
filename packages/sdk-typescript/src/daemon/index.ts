@@ -69,6 +69,7 @@ export type {
   DaemonSession,
   DaemonSessionState,
   DaemonSessionSummary,
+  HeartbeatResult,
   PermissionOutcome,
   PermissionOutcomeCancelled,
   PermissionOutcomeSelected,

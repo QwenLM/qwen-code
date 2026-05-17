@@ -15,6 +15,7 @@ import type {
   DaemonEvent,
   DaemonSessionState,
   DaemonSession,
+  HeartbeatResult,
   PermissionResponse,
   PromptResult,
   SetModelResult,
@@ -51,7 +52,8 @@ export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
  * IDE, and web backends: it binds one daemon session, forwards the existing
  * Stage 1 routes, and preserves SSE replay state. It intentionally does not
  * interpret daemon event payloads; typed event reducers belong to the protocol
- * schema layer.
+ * schema layer — see `asKnownDaemonEvent` and `reduceDaemonSessionEvent` in
+ * `./events.js` for the typed consumption surface.
  */
 export class DaemonSessionClient {
   readonly client: DaemonClient;
@@ -172,6 +174,17 @@ export class DaemonSessionClient {
 
   async cancel(): Promise<void> {
     await this.client.cancel(this.sessionId, this.clientId);
+  }
+
+  /**
+   * Bump the daemon's last-seen bookkeeping for this session. Adapters
+   * with a long-lived view of a session (TUI/IDE/web) can fire this on
+   * an interval to keep diagnostics fresh and feed PR 24 revocation
+   * policy. Forwards the bound `clientId` so identified clients update
+   * their per-client timestamp instead of just the session-wide one.
+   */
+  async heartbeat(): Promise<HeartbeatResult> {
+    return await this.client.heartbeat(this.sessionId, this.clientId);
   }
 
   async setModel(modelId: string): Promise<SetModelResult> {

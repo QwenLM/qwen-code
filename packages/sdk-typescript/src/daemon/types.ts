@@ -169,6 +169,20 @@ export interface SetModelResult {
   [key: string]: unknown;
 }
 
+/**
+ * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
+ * server-side `Date.now()` epoch (ms) the daemon stored for this
+ * session. `clientId` is echoed back only when the caller supplied a
+ * trusted one through `X-Qwen-Client-Id`. Older daemons (pre-PR 9) do
+ * not expose this route — clients should pre-flight
+ * `caps.features.client_heartbeat` before sending.
+ */
+export interface HeartbeatResult {
+  sessionId: string;
+  clientId?: string;
+  lastSeenAt: number;
+}
+
 /** A frame in the SSE event stream. */
 export interface DaemonEvent {
   /**

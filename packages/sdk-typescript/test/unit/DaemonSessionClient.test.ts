@@ -283,6 +283,35 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBeUndefined();
   });
 
+  it('forwards heartbeat through DaemonClient with the bound clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        clientId: 'client-1',
+        lastSeenAt: 1_700_000_000_002,
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+    const result = await session.heartbeat();
+    expect(result).toEqual({
+      sessionId: 's-1',
+      clientId: 'client-1',
+      lastSeenAt: 1_700_000_000_002,
+    });
+    expect(calls[0]?.url).toBe('http://daemon/session/s-1/heartbeat');
+    expect(calls[0]?.method).toBe('POST');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
   it('forwards session-scoped operations through DaemonClient', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/prompt')) {
