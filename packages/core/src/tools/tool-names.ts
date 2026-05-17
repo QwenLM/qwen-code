@@ -41,6 +41,8 @@ export const ToolNames = {
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
   TOOL_SEARCH: 'tool_search',
+  ENTER_WORKTREE: 'enter_worktree',
+  EXIT_WORKTREE: 'exit_worktree',
 } as const;
 
 /**
@@ -72,6 +74,8 @@ export const ToolDisplayNames = {
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
   TOOL_SEARCH: 'ToolSearch',
+  ENTER_WORKTREE: 'EnterWorktree',
+  EXIT_WORKTREE: 'ExitWorktree',
 } as const;
 
 // Migration from old tool names to new tool names

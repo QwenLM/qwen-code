@@ -127,6 +127,44 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '重命名当前对话。--auto 会让快速模型自动生成标题。',
   'Rewind conversation to a previous turn': '将对话回退到之前的某一轮',
+  'Rewind Conversation': '回退对话',
+  'No user turns to rewind to.': '没有可回退的用户对话轮次。',
+  'Rewind to: ': '回退到：',
+  'Restore code and conversation': '恢复代码和对话',
+  'Restore conversation only': '仅恢复对话',
+  'Restore code only': '仅恢复代码',
+  'Never mind': '算了',
+  'Computing file changes...': '正在计算文件变更...',
+  'Restoring...': '正在恢复...',
+  'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
+  'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
+  'Rewind failed: {{error}}': '回退失败：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '无法回退对话：模型客户端未激活。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    '代码已恢复，但对话无法回退（模型客户端未激活）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '对话已回退。修改你的提示后按回车继续。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '回退不会影响手工编辑或通过 shell 命令修改的文件。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '无法回退到已被压缩的轮次，请尝试更近一些的轮次。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    '该轮次无法恢复文件（没有捕获到文件变更，或该轮次属于本次会话之前）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 个文件)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 个文件)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '恢复 {{count}} 个文件失败：{{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    '无法恢复文件：该轮对话创建时尚未启用文件检查点功能。',
+  'No files needed to be restored.': '没有文件需要恢复。',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 导航 · Enter 选择 · Esc 返回',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 导航 · Enter 选择 · Esc 取消',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 确认 · Esc/N 返回',
   'change the theme': '更改主题',
   'Select Theme': '选择主题',
   Preview: '预览',
@@ -509,8 +547,8 @@ export default {
     '扩展 "{{name}}" 已是最新版本。',
   'Updates all extensions or a named extension to the latest version.':
     '将所有扩展或指定扩展更新到最新版本。',
-  'The name of the extension to update.': '要更新的扩展名称。',
   'Update all extensions.': '更新所有扩展。',
+  'The name of the extension to update.': '要更新的扩展名称。',
   'Either an extension name or --all must be provided':
     '必须提供扩展名称或 --all',
   'Lists installed extensions.': '列出已安装的扩展。',
@@ -611,6 +649,7 @@ export default {
     '按 Escape、Ctrl+C 或 Ctrl+D 取消',
   'Press Space, Enter, or Escape to dismiss': '按 Space、Enter 或 Escape 关闭',
   'No hook selected': '未选择 Hook',
+  'Session (temporary)': '会话（临时）',
   // Hooks - List Step
   'No hook events found.': '未找到 Hook 事件。',
   '{{count}} hook configured': '{{count}} 个 Hook 已配置',
@@ -656,7 +695,6 @@ export default {
   'User Settings': '用户设置',
   'System Settings': '系统设置',
   Extensions: '扩展',
-  'Session (temporary)': '会话（临时）',
   // Hooks - Event Descriptions (short)
   'Before tool execution': '工具执行前',
   'After tool execution': '工具执行后',
@@ -671,6 +709,8 @@ export default {
   'Before conversation compaction': '对话压缩前',
   'When a session is ending': '会话结束时',
   'When a permission dialog is displayed': '显示权限对话框时',
+  'When a new todo item is created': '创建新待办事项时',
+  'When a todo item is marked as completed': '待办事项标记为完成时',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     '命令输入为工具调用参数的 JSON。',
@@ -694,6 +734,10 @@ export default {
     '命令输入为包含压缩详情的 JSON。',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     '命令输入为包含 tool_name、tool_input 和 tool_use_id 的 JSON。输出包含 hookSpecificOutput 的 JSON，其中包含允许或拒绝的决定。',
+  'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令输入为包含 todo_id、todo_content、todo_status、all_todos 和 phase 的 JSON。在 validation 中，输出包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 会被忽略。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.':
+    '命令输入为包含 todo_id、todo_content、previous_status、all_todos 和 phase 的 JSON。在 validation 中，输出包含 decision（allow/block/deny）和 reason 的 JSON。在 postWrite 中，block/deny 会被忽略。',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr 不显示',
   'show stderr to model and continue conversation':
@@ -718,6 +762,12 @@ export default {
   'show stderr to user only but continue with compaction':
     '仅向用户显示 stderr 但继续压缩',
   'use hook decision if provided': '如果提供则使用 Hook 决定',
+  'allow todo creation': '允许创建待办事项',
+  'block todo creation and show reason to model':
+    '阻止创建待办事项并向模型显示原因',
+  'allow todo completion': '允许完成待办事项',
+  'block todo completion and show reason to model':
+    '阻止完成待办事项并向模型显示原因',
   // Hooks - Messages
   'Config not loaded.': '配置未加载。',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
@@ -1291,6 +1341,8 @@ export default {
     '上下文空间不足，用 /compress 释放空间。',
   'Long conversation? /compress summarizes history to free context.':
     '对话太长？用 /compress 总结历史，释放上下文。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况明细。使用 "/context detail" 查看逐项明细。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1457,7 +1509,7 @@ export default {
   // ============================================================================
   'API key cannot be empty.': 'API Key 不能为空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    '无效的 API Key，Coding Plan API Key 均以 "sk-sp-" 开头，请检查',
+    '无效的 API Key。Coding Plan API Key 以 "sk-sp-" 开头，请检查。',
   'You can get your Coding Plan API key here':
     '您可以在这里获取 Coding Plan API Key',
   'You can get your Token Plan API key here':
@@ -1523,8 +1575,6 @@ export default {
     '暂无 API 响应。发送消息以查看实际使用情况。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
-  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
-    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -1606,6 +1656,8 @@ export default {
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Set a goal — keep working until the condition is met':
+    '设定目标 — 持续工作直到条件满足',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1672,25 +1724,6 @@ export default {
   'Manage extension settings': '管理扩展设置',
 
   // === Core: added from PR #3328 ===
-  'Manage dynamic translation cache': '管理动态翻译缓存',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    '重新翻译当前 UI 语言的动态斜杠命令描述',
-  'Clear cached translations for the current UI language':
-    '清除当前 UI 语言的缓存翻译',
-  'Manage AI translation for dynamic slash command descriptions':
-    '管理动态斜杠命令描述的 AI 翻译',
-  'Enable AI translation for dynamic slash command descriptions':
-    '启用动态斜杠命令描述的 AI 翻译',
-  'Disable AI translation for dynamic slash command descriptions':
-    '禁用动态斜杠命令描述的 AI 翻译',
-  'Show AI translation status for dynamic slash command descriptions':
-    '显示动态斜杠命令描述的 AI 翻译状态',
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    '动态斜杠命令描述的 AI 翻译处于{{status}}状态。',
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    '动态斜杠命令描述的 AI 翻译现已启用。',
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    '动态斜杠命令描述的 AI 翻译现已禁用。',
   'Background tasks': '后台任务',
   'No tasks currently running': '当前没有正在运行的任务',
   'No entry to show.': '没有可显示的条目。',

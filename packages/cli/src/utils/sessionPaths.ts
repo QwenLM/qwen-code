@@ -110,8 +110,7 @@ async function findLatestOpenAILogForSession(
   const files = await listLogFiles(logDir, (name) =>
     /^openai-.*\.json$/.test(name),
   );
-  const recentFiles = files.slice(0, OPENAI_LOG_SCAN_LIMIT);
-  for (const file of recentFiles) {
+  for (const file of files) {
     try {
       const raw = await fs.readFile(file, 'utf-8');
       const parsed: unknown = JSON.parse(raw);
@@ -137,16 +136,34 @@ async function listLogFiles(
 ): Promise<string[]> {
   try {
     const entries = await fs.readdir(dir, { withFileTypes: true });
-    return entries
-      .filter((entry) => entry.isFile() && predicate(entry.name))
-      .map((entry) => path.join(dir, entry.name))
-      .sort()
-      .reverse();
+    const files: string[] = [];
+    for (const entry of entries) {
+      if (!entry.isFile() || !predicate(entry.name)) {
+        continue;
+      }
+      insertRecentFile(files, path.join(dir, entry.name));
+    }
+    return files;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
       debugLogger.warn('Unable to list OpenAI log directory', dir, error);
     }
     return [];
+  }
+}
+
+function insertRecentFile(files: string[], file: string): void {
+  const insertAt = files.findIndex((existing) => file > existing);
+  if (insertAt === -1) {
+    if (files.length < OPENAI_LOG_SCAN_LIMIT) {
+      files.push(file);
+    }
+    return;
+  }
+
+  files.splice(insertAt, 0, file);
+  if (files.length > OPENAI_LOG_SCAN_LIMIT) {
+    files.pop();
   }
 }
 

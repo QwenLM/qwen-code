@@ -48,7 +48,6 @@ export class McpPromptLoader implements ICommandLoader {
           name: commandName,
           description,
           modelDescription: description,
-          localizeDescription: true,
           kind: CommandKind.MCP_PROMPT,
           source: 'mcp-prompt' as const,
           sourceLabel: `MCP: ${serverName}`,
@@ -57,7 +56,6 @@ export class McpPromptLoader implements ICommandLoader {
               name: 'help',
               description: 'Show help for this prompt',
               modelDescription: 'Show help for this prompt',
-              localizeDescription: true,
               kind: CommandKind.MCP_PROMPT,
               source: 'mcp-prompt' as const,
               action: async (): Promise<SlashCommandActionReturn> => {

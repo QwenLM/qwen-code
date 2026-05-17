@@ -42,6 +42,19 @@ with status `400`.
 
 with status `404`.
 
+`WorkspaceMismatchError` for a `POST /session` whose `cwd` doesn't canonicalize to the daemon's bound workspace (#3803 §02 — 1 daemon = 1 workspace) returns `400` with:
+
+```json
+{
+  "error": "Workspace mismatch: daemon is bound to \"…\" but request asked for \"…\". …",
+  "code": "workspace_mismatch",
+  "boundWorkspace": "/path/the/daemon/binds",
+  "requestedWorkspace": "/path/in/the/request"
+}
+```
+
+Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` and omit `cwd` from `POST /session` (it falls back to the bound workspace), or route the request to a daemon bound to `requestedWorkspace`.
+
 `POST /session` past the daemon's `--max-sessions` cap returns `503` with a `Retry-After: 5` header and:
 
 ```json
@@ -56,13 +69,17 @@ Attaches to existing sessions are NOT counted toward the cap, so an idle daemon'
 
 ## Capabilities
 
-Every Stage 1 daemon advertises 9 feature tags. Clients **must** gate UI off `features`, not off `mode` (per design §10).
+The daemon advertises its supported feature tags from the serve capability
+registry. Clients **must** gate UI off `features`, not off `mode` (per design
+§10).
 
 ```
-['health', 'capabilities', 'session_create', 'session_list',
- 'session_prompt', 'session_cancel', 'session_events',
+['health', 'capabilities', 'session_create', 'session_scope_override',
+ 'session_list', 'session_prompt', 'session_cancel', 'session_events',
  'session_set_model', 'permission_vote']
 ```
+
+`session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
 ## Routes
 
@@ -91,15 +108,24 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 ```json
 {
   "v": 1,
+  "protocolVersions": {
+    "current": "v1",
+    "supported": ["v1"]
+  },
   "mode": "http-bridge",
   "features": ["health", "capabilities", "..."],
-  "modelServices": []
+  "modelServices": [],
+  "workspaceCwd": "/canonical/path/to/workspace"
 }
 ```
 
 Stable contract: when `v` increments the frame layout has changed in a backwards-incompatible way.
 
+> **`protocolVersions`** describes the serve protocol versions the daemon can speak. `current` is the daemon's preferred protocol version and `supported` is the compatible set. Clients that require a specific protocol should check `supported`; feature-specific UI should still gate on `features`. Additive to v=1: older v=1 daemons omit this field, so SDK clients that target older builds should treat it as optional.
+
 > **`modelServices` is always `[]` in Stage 1.** The agent uses its single default model service and doesn't enumerate it over the wire. Stage 2 will populate this from registered model adapters so SDK clients can build service-pickers; until then, do NOT rely on this field being non-empty.
+
+> **`workspaceCwd`** is the canonical absolute path this daemon binds to (#3803 §02 — 1 daemon = 1 workspace). Use it to (a) detect mismatch before posting `/session` and (b) omit `cwd` on `POST /session` (the route falls back to this path). Multi-workspace deployments expose multiple daemons on different ports, each with its own `workspaceCwd`. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
 
 ### `POST /session`
 
@@ -110,14 +136,16 @@ Request:
 ```json
 {
   "cwd": "/absolute/path/to/workspace",
-  "modelServiceId": "qwen-prod"
+  "modelServiceId": "qwen-prod",
+  "sessionScope": "thread"
 }
 ```
 
 | Field            | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cwd`            | yes      | Absolute path. Relative paths return `400`. Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't fork sessions per spelling.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `cwd`            | no       | Absolute path matching the daemon's bound workspace. If omitted, the route falls back to `boundWorkspace` (read it off `/capabilities.workspaceCwd`). A mismatched non-empty `cwd` returns `400 workspace_mismatch` (#3803 §02 — 1 daemon = 1 workspace). Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't reject sessions per spelling.                                                                                                                                                                          |
 | `modelServiceId` | no       | Selects which configured _model service_ the agent will route through (the back-end provider — Alibaba ModelStudio, OpenRouter, etc). If omitted the agent uses its default. If the workspace already has a session, this calls `setSessionModel` on the existing one and broadcasts `model_switched`. Distinct from `modelId` on `POST /session/:id/model`, which selects the model **within** an already-bound service. The `modelServices` array on `/capabilities` is reserved for advertising configured services; in Stage 1 it is always `[]` (the agent's default service is used and not enumerated over HTTP). |
+| `sessionScope`   | no       | Per-request override for session sharing. `'single'` (the daemon-wide default) makes a second same-workspace `POST /session` reuse the existing session (`attached: true`); `'thread'` forces a fresh distinct session every call. Omit to inherit the daemon-wide default. Values outside the enum return `400 { code: 'invalid_session_scope' }`. Old daemons (pre-#4175 PR 5) silently ignore the field — pre-flight `caps.features.session_scope_override` before sending. The daemon-wide default is hardcoded to `'single'` in production today; #4175 may add a `--sessionScope` CLI flag in a follow-up.         |
 
 Response:
 

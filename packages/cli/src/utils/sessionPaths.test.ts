@@ -186,6 +186,77 @@ describe('sessionPaths', () => {
     expect(text).toContain('Latest for session: none yet');
   });
 
+  it('keeps session output when the OpenAI log directory is missing', async () => {
+    const sessionId = '2a25a035-da35-4722-850e-b8aa074bd244';
+    const openAILogDir = path.join(tmpDir, 'missing-openai-logs');
+    const readdirSpy = vi
+      .spyOn(fs, 'readdir')
+      .mockRejectedValue(
+        Object.assign(new Error('missing'), { code: 'ENOENT' }),
+      );
+
+    const context = createMockCommandContext({
+      services: {
+        config: {
+          getSessionId: vi.fn().mockReturnValue(sessionId),
+          getTranscriptPath: vi.fn().mockReturnValue(`/tmp/${sessionId}.jsonl`),
+          getDebugMode: vi.fn().mockReturnValue(false),
+          getPlanFilePath: vi.fn().mockReturnValue(''),
+          getWorkingDir: vi.fn().mockReturnValue(tmpDir),
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            enableOpenAILogging: true,
+            openAILoggingDir: openAILogDir,
+          }),
+        },
+      },
+    } as unknown as CommandContext);
+
+    const text = formatSessionPathInfo(await collectSessionPathInfo(context));
+
+    expect(readdirSpy).toHaveBeenCalledOnce();
+    expect(text).toContain(`Session ID: ${sessionId}`);
+    expect(text).toContain(`Directory: ${openAILogDir}`);
+    expect(text).toContain('Latest for session: none yet');
+  });
+
+  it('handles an unknown session id without derived path lookups', async () => {
+    const openAILogDir = path.join(tmpDir, 'openai-logs');
+    const readdirSpy = vi.spyOn(fs, 'readdir');
+    const accessSpy = vi.spyOn(fs, 'access');
+
+    const context = createMockCommandContext({
+      session: {
+        stats: {
+          sessionId: undefined,
+        },
+      },
+      services: {
+        config: {
+          getSessionId: vi.fn().mockReturnValue(''),
+          getTranscriptPath: vi.fn().mockReturnValue('/tmp/unknown.jsonl'),
+          getDebugMode: vi.fn().mockReturnValue(true),
+          getPlanFilePath: vi.fn().mockReturnValue(''),
+          getWorkingDir: vi.fn().mockReturnValue(tmpDir),
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            enableOpenAILogging: true,
+            openAILoggingDir: openAILogDir,
+          }),
+        },
+      },
+    } as unknown as CommandContext);
+
+    const text = formatSessionPathInfo(await collectSessionPathInfo(context));
+
+    expect(text).toContain('Session ID: unknown');
+    expect(text).toContain('Transcript: /tmp/unknown.jsonl');
+    expect(text).toContain(`Directory: ${openAILogDir}`);
+    expect(text).toContain('Latest for session: none yet');
+    expect(text).not.toContain('Debug log:');
+    expect(text).not.toContain('Plan file:');
+    expect(readdirSpy).not.toHaveBeenCalled();
+    expect(accessSpy).not.toHaveBeenCalled();
+  });
+
   it('hides disabled or absent log sections and missing plan files', async () => {
     const sessionId = 'session-id';
     const context = createMockCommandContext({

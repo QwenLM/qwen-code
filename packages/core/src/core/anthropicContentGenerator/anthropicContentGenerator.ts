@@ -28,6 +28,7 @@ type RawMessageStreamEvent = Anthropic.RawMessageStreamEvent;
 import { RequestTokenEstimator } from '../../utils/request-tokenizer/index.js';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
+import { buildAnthropicUsageMetadata } from './usage.js';
 import {
   buildRuntimeFetchOptions,
   redactProxyError,
@@ -770,6 +771,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let messageId: string | undefined;
     let model = this.contentGeneratorConfig.model;
     let cachedTokens = 0;
+    let cacheCreationTokens = 0;
     let promptTokens = 0;
     let completionTokens = 0;
     let finishReason: string | undefined;
@@ -784,6 +786,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
           model = event.message.model ?? model;
           cachedTokens =
             event.message.usage?.cache_read_input_tokens ?? cachedTokens;
+          cacheCreationTokens =
+            event.message.usage?.cache_creation_input_tokens ??
+            cacheCreationTokens;
           promptTokens = event.message.usage?.input_tokens ?? promptTokens;
           break;
         }
@@ -910,6 +915,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
               cachedTokens = cacheRead;
             }
           }
+          if (usageRecord?.['cache_creation_input_tokens'] !== undefined) {
+            const cacheCreate = usageRecord['cache_creation_input_tokens'];
+            if (typeof cacheCreate === 'number') {
+              cacheCreationTokens = cacheCreate;
+            }
+          }
 
           if (finishReason || event.usage) {
             const chunk = this.buildGeminiChunk(
@@ -917,12 +928,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
               messageId,
               model,
               finishReason,
-              {
-                cachedContentTokenCount: cachedTokens,
-                promptTokenCount: cachedTokens + promptTokens,
-                candidatesTokenCount: completionTokens,
-                totalTokenCount: cachedTokens + promptTokens + completionTokens,
-              },
+              buildAnthropicUsageMetadata({
+                inputTokens: promptTokens,
+                cacheReadTokens: cachedTokens,
+                cacheCreationTokens,
+                outputTokens: completionTokens,
+              }),
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -936,12 +947,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
               messageId,
               model,
               finishReason,
-              {
-                cachedContentTokenCount: cachedTokens,
-                promptTokenCount: cachedTokens + promptTokens,
-                candidatesTokenCount: completionTokens,
-                totalTokenCount: cachedTokens + promptTokens + completionTokens,
-              },
+              buildAnthropicUsageMetadata({
+                inputTokens: promptTokens,
+                cacheReadTokens: cachedTokens,
+                cacheCreationTokens,
+                outputTokens: completionTokens,
+              }),
             );
             collectedResponses.push(chunk);
             yield chunk;
