@@ -117,7 +117,23 @@ export interface DaemonSession {
   attached: boolean;
 }
 
-/** ACP state returned by session load/resume routes. */
+/**
+ * ACP state returned by session load/resume routes.
+ *
+ * Fields mirror the ACP `LoadSessionResponse` / `ResumeSessionResponse`
+ * shapes (see `@agentclientprotocol/sdk`):
+ * - `models`: the agent's `SessionModelState` — current model id +
+ *   available models the session can switch to.
+ * - `modes`: the agent's `SessionModeState` — current mode id +
+ *   available approval / interaction modes.
+ * - `configOptions`: array of `SessionConfigOption` describing
+ *   per-session toggles the client can flip via
+ *   `POST /session/:id/config-option`.
+ *
+ * They are typed as `unknown` here to avoid coupling the SDK to ACP's
+ * internal protocol types, which the SDK doesn't re-export. Callers
+ * that need richer typing should narrow to the ACP shapes themselves.
+ */
 export interface DaemonSessionState {
   _meta?: Record<string, unknown> | null;
   models?: unknown;

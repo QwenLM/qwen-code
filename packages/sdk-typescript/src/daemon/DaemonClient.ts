@@ -358,6 +358,13 @@ export class DaemonClient {
     return this.restoreSession('resume', sessionId, req);
   }
 
+  /**
+   * Shared transport for `loadSession` / `resumeSession`. Both routes
+   * share an identical wire shape (POST /session/:id/{load|resume}
+   * with optional `cwd` body) and identical error envelopes from the
+   * daemon, so they collapse into a single fetch path that only
+   * differs in the URL suffix and the route name reported on errors.
+   */
   private async restoreSession(
     action: 'load' | 'resume',
     sessionId: string,

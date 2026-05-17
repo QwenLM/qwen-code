@@ -374,6 +374,14 @@ export function createServeApp(
           action === 'load'
             ? await bridge.loadSession({ sessionId, workspaceCwd: cwd })
             : await bridge.resumeSession({ sessionId, workspaceCwd: cwd });
+        // Mirror the `POST /session` disconnect-cleanup path (see the
+        // long comment above the matching `if (!res.writable)` there
+        // for the rationale around `res.writable` vs `req.aborted` /
+        // `req.destroyed`, plus the BQ9tV `requireZeroAttaches` race
+        // and the tanzhenxin attach-rollback case). Restore needs the
+        // same cleanup because a client that disconnects during a
+        // multi-second `session/load` would otherwise leave a freshly
+        // restored session in `byId` with no client holding its id.
         if (!res.writable) {
           if (!session.attached) {
             bridge
