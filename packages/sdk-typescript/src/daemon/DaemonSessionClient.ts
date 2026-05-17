@@ -73,8 +73,9 @@ export class DaemonSessionClient {
   static async createOrAttach(
     client: DaemonClient,
     req: CreateSessionRequest = {},
+    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const session = await client.createOrAttachSession(req);
+    const session = await client.createOrAttachSession(req, clientId);
     // `modelServiceId` switch failures are reported on SSE, not the
     // create/attach HTTP response. Seed the first subscription from the
     // daemon replay ring so create-then-subscribe clients observe attach-time
@@ -95,8 +96,13 @@ export class DaemonSessionClient {
     client: DaemonClient,
     sessionId: string,
     req: RestoreSessionRequest = {},
+    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.loadSession(sessionId, req);
+    const { state, ...session } = await client.loadSession(
+      sessionId,
+      req,
+      clientId,
+    );
     return new DaemonSessionClient({
       client,
       session,
@@ -118,8 +124,13 @@ export class DaemonSessionClient {
     client: DaemonClient,
     sessionId: string,
     req: RestoreSessionRequest = {},
+    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.resumeSession(sessionId, req);
+    const { state, ...session } = await client.resumeSession(
+      sessionId,
+      req,
+      clientId,
+    );
     return new DaemonSessionClient({
       client,
       session,
@@ -140,6 +151,10 @@ export class DaemonSessionClient {
     return this.session.attached;
   }
 
+  get clientId(): string | undefined {
+    return this.session.clientId;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
   }
@@ -152,22 +167,30 @@ export class DaemonSessionClient {
     req: PromptRequest,
     signal?: AbortSignal,
   ): Promise<PromptResult> {
-    return await this.client.prompt(this.sessionId, req, signal);
+    return await this.client.prompt(this.sessionId, req, signal, this.clientId);
   }
 
   async cancel(): Promise<void> {
-    await this.client.cancel(this.sessionId);
+    await this.client.cancel(this.sessionId, this.clientId);
   }
 
   async setModel(modelId: string): Promise<SetModelResult> {
-    return await this.client.setSessionModel(this.sessionId, modelId);
+    return await this.client.setSessionModel(
+      this.sessionId,
+      modelId,
+      this.clientId,
+    );
   }
 
   async respondToPermission(
     requestId: string,
     response: PermissionResponse,
   ): Promise<boolean> {
-    return await this.client.respondToPermission(requestId, response);
+    return await this.client.respondToPermission(
+      requestId,
+      response,
+      this.clientId,
+    );
   }
 
   events(

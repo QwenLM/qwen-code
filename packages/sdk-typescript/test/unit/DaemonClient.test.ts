@@ -226,6 +226,25 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('sends client identity in a header, not the request body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const session = await client.createOrAttachSession(
+        { workspaceCwd: '/work/a' },
+        'client-1',
+      );
+      expect(session.clientId).toBe('client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+    });
+
     it('forwards sessionScope when supplied (#4175 PR 5)', async () => {
       // Per-request scope override: clients pre-flight
       // `caps.features.session_scope_override` and pass `'single'` /
@@ -308,6 +327,20 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe('http://daemon/session/with%2Fslash/prompt');
     });
 
+    it('sends client identity header on prompts', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { stopReason: 'end_turn' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.prompt(
+        's-1',
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        'client-1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('forwards a caller AbortSignal through to fetch (A-UsQ)', async () => {
       // The bridge already supports per-prompt cancellation via the
       // signal arg on `sendPrompt`; the SDK had the parameter wired
@@ -355,6 +388,24 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
     });
 
+    it('sends client identity headers on restore requests', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.loadSession('s-1', {}, 'client-1');
+      await client.resumeSession('s-1', {}, 'client-1');
+
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('POSTs /session/:id/resume and omits cwd when absent', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -393,6 +444,15 @@ describe('DaemonClient', () => {
       expect(calls[0]?.method).toBe('POST');
     });
 
+    it('sends client identity header on cancel', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.cancel('s-1', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('throws on 404', async () => {
       const { fetch } = recordingFetch(() =>
         jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
@@ -413,6 +473,17 @@ describe('DaemonClient', () => {
       });
       expect(accepted).toBe(true);
       expect(calls[0]?.url).toBe('http://daemon/permission/req-1');
+    });
+
+    it('sends client identity header on permission votes', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.respondToPermission(
+        'req-1',
+        { outcome: { outcome: 'cancelled' } },
+        'client-1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
     it('returns false on 404 (lost the race)', async () => {
@@ -517,6 +588,13 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/model');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]!.body!)).toEqual({ modelId: 'qwen3-coder' });
+    });
+
+    it('sends client identity header on model switches', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionModel('s-1', 'qwen3-coder', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
     it('throws on 404 (unknown session)', async () => {

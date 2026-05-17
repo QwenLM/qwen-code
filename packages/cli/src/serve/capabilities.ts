@@ -37,6 +37,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_set_model: { since: 'v1' },
+  client_identity: { since: 'v1' },
   permission_vote: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 

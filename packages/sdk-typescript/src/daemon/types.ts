@@ -115,6 +115,11 @@ export interface DaemonSession {
   workspaceCwd: string;
   /** True when an existing session was reused under sessionScope:single. */
   attached: boolean;
+  /**
+   * Opaque id stamped by the daemon for this attached HTTP client. Newer
+   * daemons return it from create/load/resume; older daemons omit it.
+   */
+  clientId?: string;
 }
 
 /**

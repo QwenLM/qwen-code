@@ -93,6 +93,7 @@ describe('DaemonSessionClient', () => {
         sessionId: 's-1',
         workspaceCwd: '/work/a',
         attached: false,
+        clientId: 'client-1',
       }),
     );
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -105,11 +106,58 @@ describe('DaemonSessionClient', () => {
     expect(session.sessionId).toBe('s-1');
     expect(session.workspaceCwd).toBe('/work/a');
     expect(session.attached).toBe(false);
+    expect(session.clientId).toBe('client-1');
     expect(calls[0]?.url).toBe('http://daemon/session');
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       cwd: '/work/a',
       modelServiceId: 'qwen-prod',
     });
+  });
+
+  it('forwards a persisted client id through create, load, and resume', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-reuse',
+        });
+      }
+      if (
+        req.url.endsWith('/session/s-1/load') ||
+        req.url.endsWith('/session/s-1/resume')
+      ) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-reuse',
+          state: {},
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await DaemonSessionClient.createOrAttach(
+      client,
+      { workspaceCwd: '/work/a' },
+      'client-reuse',
+    );
+    await DaemonSessionClient.load(
+      client,
+      's-1',
+      { workspaceCwd: '/work/a' },
+      'client-reuse',
+    );
+    await DaemonSessionClient.resume(client, 's-1', {}, 'client-reuse');
+
+    expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-reuse',
+      'client-reuse',
+      'client-reuse',
+    ]);
   });
 
   it('replays attach-time model switch events on first subscription', async () => {
@@ -148,6 +196,7 @@ describe('DaemonSessionClient', () => {
           sessionId: 's-1',
           workspaceCwd: '/work/a',
           attached: false,
+          clientId: 'client-1',
           state: { configOptions: [] },
         });
       }
@@ -163,6 +212,7 @@ describe('DaemonSessionClient', () => {
     });
 
     expect(session.sessionId).toBe('s-1');
+    expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ configOptions: [] });
     expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
 
@@ -179,6 +229,7 @@ describe('DaemonSessionClient', () => {
           sessionId: 's-1',
           workspaceCwd: '/work/a',
           attached: true,
+          clientId: 'client-1',
           state: { modes: null },
         });
       }
@@ -192,6 +243,7 @@ describe('DaemonSessionClient', () => {
     const session = await DaemonSessionClient.resume(client, 's-1');
 
     expect(session.attached).toBe(true);
+    expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ modes: null });
     for await (const _event of session.events()) {
       /* empty */
@@ -254,6 +306,7 @@ describe('DaemonSessionClient', () => {
         sessionId: 's-1',
         workspaceCwd: '/work/a',
         attached: true,
+        clientId: 'client-1',
       },
     });
 
@@ -281,6 +334,12 @@ describe('DaemonSessionClient', () => {
       'http://daemon/permission/req-1',
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
+    expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+      'client-1',
+    ]);
   });
 
   it('surfaces permission races and session operation failures', async () => {
