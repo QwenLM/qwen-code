@@ -40,9 +40,18 @@ export const getCacheKey = (
 
 /**
  * Reads cached data from the in-memory cache.
+ * Bumps the entry to the end of the FIFO queue on hit so that
+ * frequently-read crawl results survive eviction by auxiliary crawls.
  * Returns undefined if the key is not found.
  */
-export const read = (key: string): string[] | undefined => crawlCache.get(key);
+export const read = (key: string): string[] | undefined => {
+  const result = crawlCache.get(key);
+  if (result !== undefined) {
+    crawlCache.delete(key);
+    crawlCache.set(key, result);
+  }
+  return result;
+};
 
 /**
  * Writes data to the in-memory cache and sets a timer to evict it after the TTL.

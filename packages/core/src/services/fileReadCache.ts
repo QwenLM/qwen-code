@@ -262,9 +262,13 @@ export class FileReadCache {
     const key = FileReadCache.inodeKey(stats);
     const existing = this.byInode.get(key);
     if (existing) {
+      // Bump: move existing entry to the end of the FIFO queue so that
+      // frequently-updated entries survive eviction.
+      this.byInode.delete(key);
       existing.realPath = absPath;
       existing.mtimeMs = stats.mtimeMs;
       existing.sizeBytes = stats.size;
+      this.byInode.set(key, existing);
       return existing;
     }
     // Evict oldest entry when cache exceeds MAX_ENTRIES (FIFO)
