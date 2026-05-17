@@ -276,10 +276,10 @@ export class DaemonIdeConnection {
             eventId: event.id,
             error: toSafeErrorMessage(error),
           });
-          continue;
-        }
-        if (event.id !== undefined) {
-          this.lastSeenEventId = event.id;
+        } finally {
+          if (event.id !== undefined) {
+            this.lastSeenEventId = event.id;
+          }
         }
       }
       if (!signal.aborted) {
@@ -419,11 +419,10 @@ export class DaemonIdeConnection {
       return undefined;
     }
 
-    if (
-      preferredOptionId &&
-      options.some((option) => option.optionId === preferredOptionId)
-    ) {
-      return preferredOptionId;
+    if (preferredOptionId) {
+      return options.some((option) => option.optionId === preferredOptionId)
+        ? preferredOptionId
+        : undefined;
     }
 
     return (

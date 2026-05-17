@@ -287,6 +287,21 @@ describe('DaemonIdeConnection', () => {
       } satisfies RequestPermissionResponse),
     );
 
+    connection.onPermissionRequest = vi
+      .fn()
+      .mockResolvedValue({ optionId: 'stale-option' });
+    events.push({
+      id: 3,
+      v: 1,
+      type: 'permission_request',
+      data: { ...request, requestId: 'request-3' },
+    });
+    await waitFor(() =>
+      expect(session.respondToPermission).toHaveBeenCalledWith('request-3', {
+        outcome: { outcome: 'cancelled' },
+      } satisfies RequestPermissionResponse),
+    );
+
     events.close();
     await connection.disconnect();
   });
@@ -462,6 +477,48 @@ describe('DaemonIdeConnection', () => {
       expect(endedDisconnected).toHaveBeenCalledWith(null, 'stream_ended'),
     );
     expect(endedConnection.isConnected).toBe(false);
+    warn.mockRestore();
+  });
+
+  it('continues after handler failures while advancing replay state', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const connection = new DaemonIdeConnection();
+    connection.onSessionUpdate = () => {
+      throw new Error('handler failed');
+    };
+
+    await connection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    events.push({
+      id: 20,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    });
+
+    await waitFor(() => expect(connection.lastEventId).toBe(20));
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonIdeConnection] Event handler failed:',
+      {
+        eventType: 'session_update',
+        eventId: 20,
+        error: 'handler failed',
+      },
+    );
+
+    events.close();
+    await connection.disconnect();
     warn.mockRestore();
   });
 
