@@ -4,6 +4,7 @@ import type {
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
 import type { AvailableCommand, ToolCallEvent } from './AcpBridge.js';
+import type { SessionScope } from './types.js';
 
 export interface DaemonChannelEvent {
   id?: number;
@@ -40,6 +41,7 @@ export interface DaemonChannelSessionFactoryRequest {
   workspaceCwd: string;
   modelServiceId?: string;
   sessionId?: string;
+  sessionScope?: SessionScope;
 }
 
 export type DaemonChannelSessionFactory = (
@@ -50,6 +52,7 @@ export interface DaemonChannelBridgeOptions {
   cwd: string;
   sessionFactory: DaemonChannelSessionFactory;
   modelServiceId?: string;
+  sessionScope?: SessionScope;
 }
 
 export interface DaemonPermissionRequestEvent {
@@ -89,6 +92,28 @@ function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
     return undefined;
   }
   return data['update'];
+}
+
+function isAvailableCommand(value: unknown): value is AvailableCommand {
+  return isRecord(value) && typeof value['name'] === 'string';
+}
+
+function isPermissionRequestData(
+  value: unknown,
+): value is RequestPermissionRequest & { requestId: string } {
+  if (
+    !isRecord(value) ||
+    typeof value['requestId'] !== 'string' ||
+    !isRecord(value['toolCall']) ||
+    typeof value['toolCall']['toolCallId'] !== 'string' ||
+    typeof value['toolCall']['kind'] !== 'string' ||
+    !Array.isArray(value['options'])
+  ) {
+    return false;
+  }
+  return value['options'].every(
+    (option) => isRecord(option) && typeof option['optionId'] === 'string',
+  );
 }
 
 async function drainDaemonEventLoop(): Promise<void> {
@@ -148,6 +173,7 @@ export class DaemonChannelBridge extends EventEmitter {
     const session = await this.options.sessionFactory({
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
+      sessionScope: this.options.sessionScope ?? 'thread',
     });
     this.attachSession(session);
     return session.sessionId;
@@ -158,6 +184,7 @@ export class DaemonChannelBridge extends EventEmitter {
       workspaceCwd: cwd || this.options.cwd,
       modelServiceId: this.options.modelServiceId,
       sessionId,
+      sessionScope: this.options.sessionScope ?? 'thread',
     });
     if (session.sessionId !== sessionId) {
       throw new Error(
@@ -315,13 +342,16 @@ export class DaemonChannelBridge extends EventEmitter {
         lastEventId: session.lastEventId,
         resume: true,
       })) {
+        if (!this.isCurrentPump(session, signal)) {
+          return;
+        }
         this.handleEvent(session, event);
       }
-      if (!signal.aborted) {
+      if (!signal.aborted && this.isCurrentPump(session, signal)) {
         this.dropSession(session.sessionId, 'stream_ended');
       }
     } catch (error) {
-      if (!signal.aborted) {
+      if (!signal.aborted && this.isCurrentPump(session, signal)) {
         this.emit('error', error);
         this.dropSession(
           session.sessionId,
@@ -329,6 +359,16 @@ export class DaemonChannelBridge extends EventEmitter {
         );
       }
     }
+  }
+
+  private isCurrentPump(
+    session: DaemonChannelSessionClient,
+    signal: AbortSignal,
+  ): boolean {
+    return (
+      this.sessions.get(session.sessionId) === session &&
+      this.eventControllers.get(session.sessionId)?.signal === signal
+    );
   }
 
   private handleEvent(
@@ -411,7 +451,8 @@ export class DaemonChannelBridge extends EventEmitter {
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          const commands = update['availableCommands'] as AvailableCommand[];
+          const commands =
+            update['availableCommands'].filter(isAvailableCommand);
           this.availableCommandsBySession.set(sessionId, commands);
           this.latestAvailableCommandsSessionId = sessionId;
         } else {
@@ -430,12 +471,7 @@ export class DaemonChannelBridge extends EventEmitter {
   }
 
   private handlePermissionRequest(sessionId: string, data: unknown): void {
-    if (
-      !isRecord(data) ||
-      typeof data['requestId'] !== 'string' ||
-      !isRecord(data['toolCall']) ||
-      !Array.isArray(data['options'])
-    ) {
+    if (!isPermissionRequestData(data)) {
       this.emitProtocolError('Malformed daemon permission_request event', data);
       return;
     }

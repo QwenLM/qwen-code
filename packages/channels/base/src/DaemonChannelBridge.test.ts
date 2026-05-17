@@ -161,6 +161,7 @@ describe('DaemonChannelBridge', () => {
     expect(factory).toHaveBeenCalledWith({
       workspaceCwd: '/repo',
       modelServiceId: undefined,
+      sessionScope: 'thread',
     });
     expect(session.prompt).toHaveBeenCalledWith(
       {
@@ -269,6 +270,8 @@ describe('DaemonChannelBridge', () => {
           sessionUpdate: 'available_commands_update',
           availableCommands: [
             { name: '/help', description: 'Show help', input: null },
+            null,
+            { description: 'Missing name', input: null },
           ],
         },
       },
@@ -583,7 +586,9 @@ describe('DaemonChannelBridge', () => {
     const firstEvents = new EventQueue();
     const secondEvents = new EventQueue();
     const firstSession = createFakeSession(firstEvents, 'session-1');
+    firstSession.events.mockImplementation(() => firstEvents);
     const secondSession = createFakeSession(secondEvents, 'session-1');
+    secondSession.prompt.mockResolvedValue({ stopReason: 'end_turn' });
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       sessionFactory: vi
@@ -636,6 +641,17 @@ describe('DaemonChannelBridge', () => {
         outcome: { outcome: 'selected', optionId: 'proceed_once' },
       }),
     ).resolves.toBe(false);
+
+    firstEvents.push({
+      id: 2,
+      v: 1,
+      type: 'session_died',
+      data: { reason: 'old pump finished late' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(sessionDied).toHaveBeenCalledTimes(1);
+    await expect(bridge.prompt('session-1', 'still alive')).resolves.toBe('');
+    expect(secondSession.prompt).toHaveBeenCalledOnce();
 
     firstEvents.close();
     secondEvents.close();
@@ -906,6 +922,7 @@ describe('DaemonChannelBridge', () => {
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       modelServiceId: 'default',
+      sessionScope: 'user',
       sessionFactory: factory,
     });
 
@@ -920,6 +937,7 @@ describe('DaemonChannelBridge', () => {
       workspaceCwd: '/repo',
       modelServiceId: 'default',
       sessionId: 'existing-session',
+      sessionScope: 'user',
     });
     expect(session.cancel).toHaveBeenCalledOnce();
     expect(session.setModel).toHaveBeenCalledWith('qwen3-coder-plus');
