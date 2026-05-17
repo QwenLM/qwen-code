@@ -1107,6 +1107,25 @@ export class McpClientManager {
         // absent, so the trailing `finally`-block call becomes a no-op.
         this.stopHealthCheck(serverName);
         this.clients.delete(serverName);
+        // PR 14 fix (review #4247 wenshao R5 line 956): the timeout
+        // handler must release the budget slot too. Pre-fix only
+        // `clients.delete` ran here, so a timed-out server in
+        // `enforce` mode permanently held its reservation — N
+        // consecutive timeouts permanently degraded daemon capacity.
+        // The slot is released because the operator's "this server
+        // should run" intent is invalidated by a hard timeout
+        // (`runWithDiscoveryTimeout` rejection IS the operator-
+        // visible "server unreachable" signal); a later manual
+        // `/mcp reconnect` will re-reserve.
+        this.reservedSlots.delete(serverName);
+        // And drop any stale refusal entry — operator intent shifts
+        // when a slot becomes free again, and snapshot consumers
+        // shouldn't keep tagging a now-slotless server as
+        // `disabledReason: 'budget'`.
+        const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
+        if (refusedIdx >= 0) {
+          this.lastRefusedServerNames.splice(refusedIdx, 1);
+        }
         reject(
           new Error(
             `MCP server '${serverName}' discovery timed out after ${timeoutMs}ms`,
@@ -1278,6 +1297,22 @@ export class McpClientManager {
         );
       }
       weReservedSlot = reservation === 'reserved';
+
+      // PR 14 fix (review #4247 wenshao R5 line 1268-1): a server
+      // that was refused at discovery time stays in
+      // `lastRefusedServerNames` so the snapshot reports it. If a
+      // later `readResource` call successfully reserves a slot for
+      // that server (e.g., another server was disconnected and
+      // freed capacity), the refusal entry becomes stale — the
+      // snapshot would keep tagging the now-connected server as
+      // `disabledReason: 'budget'`. Drop the stale entry here so
+      // the next snapshot reflects the late-reservation success.
+      if (weReservedSlot) {
+        const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
+        if (refusedIdx >= 0) {
+          this.lastRefusedServerNames.splice(refusedIdx, 1);
+        }
+      }
 
       const sdkCallback = isSdkMcpServerConfig(serverConfig)
         ? this.sendSdkMcpMessage

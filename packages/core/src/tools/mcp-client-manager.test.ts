@@ -962,6 +962,7 @@ describe('McpClientManager — PR 14 guardrails', () => {
       discover: vi.fn().mockResolvedValue(undefined),
       disconnect: vi.fn().mockResolvedValue(undefined),
       getStatus: vi.fn(() => state.status),
+      readResource: vi.fn().mockResolvedValue({ contents: [] }),
     };
   }
 
@@ -1606,6 +1607,73 @@ describe('McpClientManager — PR 14 guardrails', () => {
         'x',
       ),
     ).toBe(false);
+  });
+
+  it('runWithDiscoveryTimeout timeout handler releases the budget slot (wenshao R5 line 956)', async () => {
+    vi.useFakeTimers();
+    // McpClient.connect never resolves → timeout fires.
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect: vi.fn(() => new Promise(() => {})),
+          discover: vi.fn(),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = new McpClientManager(
+      config,
+      { removeMcpToolsByServer: () => undefined } as unknown as ToolRegistry,
+      undefined,
+      undefined,
+      {
+        autoReconnect: false,
+        checkIntervalMs: 100,
+        maxConsecutiveFailures: 1,
+        reconnectDelayMs: 100,
+      },
+      { clientBudget: 2, budgetMode: 'enforce' },
+    );
+    const discoveryPromise = manager.discoverAllMcpToolsIncremental(config);
+    // Advance past the stdio default discovery timeout (30s).
+    await vi.advanceTimersByTimeAsync(31_000);
+    await discoveryPromise;
+    // Pre-fix the timeout cleaned up clients but not reservedSlots,
+    // permanently consuming a budget slot.
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it('readResource late re-reserve clears stale refused entry (wenshao R5 line 1268)', async () => {
+    // First: discoverAllMcpTools refuses `b` (budget=1, both a+b configured).
+    // Then: disconnect `a` freeing the slot; readResource('b') succeeds and
+    // must drop `b` from lastRefusedServerNames (pre-fix the snapshot kept
+    // reporting `b` as `disabledReason: 'budget'` even after it connected).
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
+    // Free a slot.
+    await manager.disconnectServer('a');
+    // Lazy spawn b — should now succeed (slot available).
+    await manager.readResource('b', 'file:///x');
+    // Stale refusal entry must be cleared.
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([]);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['b']);
   });
 
   it('discoverMcpToolsForServer reconnect-attempt connect-failure KEEPS slot (wenshao R4 C2 already_held)', async () => {
