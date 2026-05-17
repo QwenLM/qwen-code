@@ -10,6 +10,7 @@ export {
   type CreateSessionRequest,
   type DaemonClientOptions,
   type PromptRequest,
+  type RestoreSessionRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
 export {
@@ -58,7 +59,9 @@ export type {
   DaemonEvent,
   DaemonMode,
   DaemonProtocolVersions,
+  DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionState,
   DaemonSessionSummary,
   PermissionOutcome,
   PermissionOutcomeCancelled,
