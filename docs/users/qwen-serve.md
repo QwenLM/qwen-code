@@ -173,16 +173,48 @@ To host **multiple workspaces** (one user, several repos; or several users on th
 
 To handle multiple **users** (each with their own quota, audit log, sandbox) or to scale beyond one process's reach (cold-start budget, FD count, RSS), spawn one daemon per workspace per user behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
 
+## Loading and resuming a persisted session
+
+The daemon exposes ACP's `session/load` and `session/unstable_resumeSession` over HTTP via two routes:
+
+| Route                      | Use when                                                                                                                                                                                                                      |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /session/:id/load`   | The client has **no** history rendered (cold reconnect, picker-then-open). The daemon replays every persisted turn through SSE so subscribers see the full transcript. Capability tag: `session_load`.                        |
+| `POST /session/:id/resume` | The client already has the turns on screen and only needs the daemon-side handle back. Model context is restored on the agent side without UI replay — the SSE stream stays clean. Capability tag: `unstable_session_resume`. |
+
+The TypeScript SDK exposes both as static factories on `DaemonSessionClient`:
+
+```ts
+import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
+
+const client = new DaemonClient({ baseUrl: 'http://127.0.0.1:4170' });
+
+// Cold reconnect — daemon will replay history through SSE.
+const session = await DaemonSessionClient.load(client, 'persisted-id');
+
+// Or, if your UI already has the history, skip the replay:
+// const session = await DaemonSessionClient.resume(client, 'persisted-id');
+
+for await (const event of session.events()) {
+  // First the replayed `session_update` frames (load only),
+  // then live events.
+}
+```
+
+Pre-flight `caps.features.session_load` / `caps.features.unstable_session_resume` before calling — older daemons return `404`. Concurrent same-action requests for the same id coalesce; cross-action races (a `load` racing a `resume`) get `409 restore_in_progress` with `Retry-After: 5`. See the [protocol reference](../developers/qwen-serve-protocol.md) for the full error envelope.
+
+Note: history replay is bounded by the SSE ring (default 4000 frames). Long histories with chatty turns can exceed that — earliest frames are dropped silently. For very long sessions, prefer `resume` and rely on the client's local persisted UI.
+
 ## Durability model
 
-**Sessions are ephemeral in Stage 1.** Plan accordingly:
+**Sessions are still ephemeral in Stage 1 across daemon restarts**, but persisted sessions on disk can be reloaded:
 
-- A child process crash publishes `session_died` and removes the session from the daemon's maps. There is **no resume** — clients must `POST /session` again.
-- A daemon restart loses every in-flight session. ACP's `loadSession` / `unstable_resumeSession` are **not exposed via HTTP** in Stage 1; sessions don't outlive the daemon.
-- Long client disconnects (>5 min on a chatty turn) can outrun the SSE replay ring (default 4000 frames) — `Last-Event-ID` reconnect succeeds but state may be incoherent. For mobile / flaky-network clients, plan to re-create the session and re-open SSE on long drops.
+- A child process crash publishes `session_died` and removes the live session from the daemon's maps. The persisted on-disk session **can** be reloaded via `POST /session/:id/load` if a fresh agent child is spawnable.
+- A daemon restart loses every in-flight live session. The persisted sessions remain on disk and can be loaded against a new daemon process, subject to the same workspace binding rules.
+- Long client disconnects (>5 min on a chatty turn) can outrun the SSE replay ring (default 4000 frames) — `Last-Event-ID` reconnect succeeds but state may be incoherent. For mobile / flaky-network clients, plan to re-open SSE on long drops or call `POST /session/:id/load` to replay from disk.
 - File operations (`writeTextFile`) are atomic across crashes (write-then-rename); they aren't atomic across daemon restarts in the sense of replaying — the file write either landed or it didn't.
 
-If your integration needs cross-restart durability, you need either Stage 1.5+ (`loadSession` over HTTP, persistence layer) or your own application-level state recovery. Don't hold long-running, restart-sensitive state inside the daemon's session.
+If your integration needs server-side cross-restart durability beyond what `session/load` covers (e.g. server-managed retry queues), you still need application-level state recovery. Don't hold long-running, restart-sensitive state inside the daemon's session.
 
 ## Stage 1.5+ runtime guarantees
 
