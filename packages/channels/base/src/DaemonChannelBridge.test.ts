@@ -171,11 +171,13 @@ describe('DaemonChannelBridge', () => {
     const thoughtChunk = vi.fn();
     const toolCall = vi.fn();
     const modelSwitched = vi.fn();
+    const modelSwitchFailed = vi.fn();
     const sessionDied = vi.fn();
 
     bridge.on('thoughtChunk', thoughtChunk);
     bridge.on('toolCall', toolCall);
     bridge.on('modelSwitched', modelSwitched);
+    bridge.on('modelSwitchFailed', modelSwitchFailed);
     bridge.on('sessionDied', sessionDied);
 
     await bridge.start();
@@ -241,6 +243,16 @@ describe('DaemonChannelBridge', () => {
     events.push({
       id: 6,
       v: 1,
+      type: 'model_switch_failed',
+      data: {
+        sessionId: 'session-1',
+        requestedModelId: 'missing-model',
+        error: 'not configured',
+      },
+    });
+    events.push({
+      id: 7,
+      v: 1,
       type: 'session_died',
       data: { sessionId: 'session-1', reason: 'agent exited' },
     });
@@ -260,6 +272,13 @@ describe('DaemonChannelBridge', () => {
       expect(modelSwitched).toHaveBeenCalledWith({
         sessionId: 'session-1',
         modelId: 'qwen3-coder-plus',
+      }),
+    );
+    await waitFor(() =>
+      expect(modelSwitchFailed).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        requestedModelId: 'missing-model',
+        error: 'not configured',
       }),
     );
     await waitFor(() =>
@@ -452,7 +471,34 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('treats stream errors and normal stream completion as session death', async () => {
+  it('aborts in-flight prompts when the bridge stops', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(
+      (_req: unknown, signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    const promptPromise = bridge.prompt('session-1', 'hello');
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+
+    bridge.stop();
+    await expect(promptPromise).rejects.toThrow('aborted');
+  });
+
+  it('treats terminal stream frames and completion as session death', async () => {
     const failedEvents = new EventQueue();
     failedEvents.fail(new Error('network down'));
     const failedSession = createFakeSession(failedEvents);
@@ -491,6 +537,57 @@ describe('DaemonChannelBridge', () => {
       expect(endedDied).toHaveBeenCalledWith({
         sessionId: 'session-1',
         reason: 'stream_ended',
+      }),
+    );
+
+    const terminalEvents = new EventQueue();
+    const terminalSession = createFakeSession(terminalEvents);
+    const terminalBridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(terminalSession),
+    });
+    const terminalDied = vi.fn();
+    terminalBridge.on('sessionDied', terminalDied);
+
+    await terminalBridge.start();
+    await terminalBridge.newSession('/repo');
+    terminalEvents.push({
+      id: 20,
+      v: 1,
+      type: 'stream_error',
+      data: { error: 'subscriber limit reached' },
+    });
+    await waitFor(() =>
+      expect(terminalDied).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        reason: 'subscriber limit reached',
+      }),
+    );
+    await expect(terminalBridge.prompt('session-1', 'hello')).rejects.toThrow(
+      'No daemon session bound for session-1',
+    );
+
+    const evictedEvents = new EventQueue();
+    const evictedSession = createFakeSession(evictedEvents);
+    const evictedBridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(evictedSession),
+    });
+    const evictedDied = vi.fn();
+    evictedBridge.on('sessionDied', evictedDied);
+
+    await evictedBridge.start();
+    await evictedBridge.newSession('/repo');
+    evictedEvents.push({
+      id: 21,
+      v: 1,
+      type: 'client_evicted',
+      data: { reason: 'queue_overflow' },
+    });
+    await waitFor(() =>
+      expect(evictedDied).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        reason: 'queue_overflow',
       }),
     );
   });

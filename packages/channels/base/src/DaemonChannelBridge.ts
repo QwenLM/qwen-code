@@ -91,6 +91,10 @@ export class DaemonChannelBridge extends EventEmitter {
   private readonly eventControllers = new Map<string, AbortController>();
   private readonly requestToSession = new Map<string, string>();
   private readonly activePrompts = new Set<string>();
+  private readonly activePromptControllers = new Map<
+    string,
+    Set<AbortController>
+  >();
   private readonly availableCommandsBySession = new Map<
     string,
     AvailableCommand[]
@@ -149,6 +153,13 @@ export class DaemonChannelBridge extends EventEmitter {
     this.activePrompts.add(sessionId);
 
     const controller = new AbortController();
+    let controllers = this.activePromptControllers.get(sessionId);
+    if (!controllers) {
+      controllers = new Set();
+      this.activePromptControllers.set(sessionId, controllers);
+    }
+    controllers.add(controller);
+
     const chunks: string[] = [];
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) {
@@ -179,6 +190,10 @@ export class DaemonChannelBridge extends EventEmitter {
       this.off('textChunk', onChunk);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
+      controllers.delete(controller);
+      if (controllers.size === 0) {
+        this.activePromptControllers.delete(sessionId);
+      }
     }
 
     return chunks.join('');
@@ -218,6 +233,12 @@ export class DaemonChannelBridge extends EventEmitter {
     this.eventControllers.clear();
     this.sessions.clear();
     this.requestToSession.clear();
+    for (const controllers of this.activePromptControllers.values()) {
+      for (const controller of controllers) {
+        controller.abort();
+      }
+    }
+    this.activePromptControllers.clear();
     this.activePrompts.clear();
     this.availableCommandsBySession.clear();
     this._availableCommands = [];
@@ -289,8 +310,23 @@ export class DaemonChannelBridge extends EventEmitter {
       case 'model_switched':
         this.handleModelSwitched(session.sessionId, event.data);
         break;
+      case 'model_switch_failed':
+        this.handleModelSwitchFailed(session.sessionId, event.data);
+        break;
       case 'session_died':
         this.handleSessionDied(session.sessionId, event.data);
+        break;
+      case 'client_evicted':
+        this.dropSession(
+          session.sessionId,
+          this.getReason(event.data, 'client_evicted'),
+        );
+        break;
+      case 'stream_error':
+        this.dropSession(
+          session.sessionId,
+          this.getError(event.data, 'stream_error'),
+        );
         break;
       default:
         break;
@@ -389,12 +425,19 @@ export class DaemonChannelBridge extends EventEmitter {
     });
   }
 
+  private handleModelSwitchFailed(sessionId: string, data: unknown): void {
+    if (!isRecord(data)) {
+      return;
+    }
+    this.emit('modelSwitchFailed', {
+      sessionId,
+      requestedModelId: getString(data['requestedModelId']),
+      error: getString(data['error']) ?? 'model_switch_failed',
+    });
+  }
+
   private handleSessionDied(sessionId: string, data: unknown): void {
-    const reason =
-      isRecord(data) && typeof data['reason'] === 'string'
-        ? data['reason']
-        : 'session_died';
-    this.dropSession(sessionId, reason);
+    this.dropSession(sessionId, this.getReason(data, 'session_died'));
   }
 
   private dropSession(sessionId: string, reason: string): void {
@@ -404,6 +447,13 @@ export class DaemonChannelBridge extends EventEmitter {
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
+    const promptControllers = this.activePromptControllers.get(sessionId);
+    if (promptControllers) {
+      for (const controller of promptControllers) {
+        controller.abort();
+      }
+      this.activePromptControllers.delete(sessionId);
+    }
     this.activePrompts.delete(sessionId);
     this.availableCommandsBySession.delete(sessionId);
     this._availableCommands =
@@ -414,5 +464,17 @@ export class DaemonChannelBridge extends EventEmitter {
       }
     }
     this.emit('sessionDied', { sessionId, reason });
+  }
+
+  private getReason(data: unknown, fallback: string): string {
+    return isRecord(data) && typeof data['reason'] === 'string'
+      ? data['reason']
+      : fallback;
+  }
+
+  private getError(data: unknown, fallback: string): string {
+    return isRecord(data) && typeof data['error'] === 'string'
+      ? data['error']
+      : fallback;
   }
 }
