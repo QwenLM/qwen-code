@@ -682,8 +682,13 @@ race_mirror_head() {
     local gh_url="$2"
     local oss_url="$3"
     local tmpdir
-    tmpdir=$(mktemp -d -t qwen-mirror.XXXXXX 2>/dev/null) || tmpdir="/tmp/qwen-mirror.$$"
-    mkdir -p "${tmpdir}" 2>/dev/null || true
+    if ! tmpdir=$(mktemp -d -t qwen-mirror.XXXXXX 2>/dev/null); then
+        # Refuse to fall back to a predictable PID-based path; a local attacker
+        # could pre-create it to influence mirror selection.
+        echo "mirror probe: mktemp failed" >&2
+        echo "github"
+        return 0
+    fi
     register_temp_dir "${tmpdir}"
 
     (probe_url_available "${oss_url}" "${timeout}" && : > "${tmpdir}/aliyun") &

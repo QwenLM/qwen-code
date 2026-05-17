@@ -434,7 +434,6 @@ jobs:
             exit 1
           fi
 
-          trap 'rm -f "${RUNNER_TEMP}/.ossutilconfig"' EXIT
           ossutil config \
             -e "${ALIYUN_OSS_ENDPOINT}" \
             -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \
@@ -589,6 +588,12 @@ jobs:
           }
           (cd "${hosted_tmp_dir}/versioned" && sha256sum -c SHA256SUMS)
           (cd "${hosted_tmp_dir}/global" && sha256sum -c SHA256SUMS)
+
+      - name: 'Cleanup Aliyun OSS Credentials'
+        if: |-
+          ${{ always() && needs.prepare.outputs.is_dry_run == 'false' }}
+        run: |-
+          rm -f "${RUNNER_TEMP}/.ossutilconfig"
 
       - name: 'Create PR to merge release branch into main'
         if: |-
