@@ -894,6 +894,19 @@ export class SkillManager {
       const skills: SkillConfig[] = [];
       for (const extension of extensions) {
         extension.skills?.forEach((skill) => {
+          // Extension skills bypass parseSkillContent / validateConfig, so a
+          // non-number `priority` would silently sort at the bottom (via
+          // normalizeSkillPriority) with no diagnostic. Warn here so the
+          // extension author sees the same signal a SKILL.md author would.
+          if (
+            skill.priority !== undefined &&
+            (typeof skill.priority !== 'number' ||
+              !Number.isFinite(skill.priority))
+          ) {
+            debugLogger.warn(
+              `Extension "${extension.name}" skill "${skill.name}" has invalid priority (${typeof skill.priority}: ${String(skill.priority)}); treating as 0.`,
+            );
+          }
           skills.push({ ...skill, extensionName: extension.name });
         });
       }
