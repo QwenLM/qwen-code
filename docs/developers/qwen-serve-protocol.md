@@ -99,7 +99,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
  'workspace_providers', 'session_context', 'session_supported_commands',
- 'session_close', 'session_metadata']
+ 'session_close', 'session_metadata', 'mcp_guardrails']
 ```
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
@@ -114,11 +114,15 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
 
+`mcp_guardrails` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14) covers the workspace MCP budget surface: the `clientCount` / `clientBudget` / `budgetMode` / `budgets[]` fields on `GET /workspace/mcp`, the `disabledReason` field on per-server cells, and the `--mcp-client-budget` / `--mcp-budget-mode` CLI flags. Older daemons omit the new fields entirely; SDK clients pre-flight this tag before relying on `budgets[]` semantics. The registry descriptor also carries `modes: ['warn', 'enforce']` for future feature-modes exposure — for now, clients infer mode from the snapshot's `budgetMode` field. Server refusal under `enforce` mode is deterministic by `Object.entries(mcpServers)` declaration order; a future scope-precedence layer (if qwen-code adopts one) would shift this to "lowest-precedence first" to mirror claude-code's `plugin < user < project < local` convention.
+
 **Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
 
 | Tag            | Advertised when …                                                                                                                                                            |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds. |
+
+`mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
 
 ## Routes
 
@@ -228,6 +232,68 @@ filesystem paths, or hook definitions.
 `discoveryState` is one of `not_started`, `in_progress`, or `completed`.
 `transport` is one of `stdio`, `sse`, `http`, `websocket`, `sdk`, or
 `unknown`. `errors` is omitted when discovery succeeds.
+
+**MCP client guardrails (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14).** Post-PR-14 daemons extend the payload with four additive fields and one workspace-level cell:
+
+```jsonc
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "discoveryState": "completed",
+  "clientCount": 3,
+  "clientBudget": 2,
+  "budgetMode": "enforce",
+  "budgets": [
+    {
+      "kind": "mcp_budget",
+      "scope": "workspace",
+      "status": "error",
+      "errorKind": "budget_exhausted",
+      "hint": "Raise --mcp-client-budget or remove servers from mcpServers config.",
+      "liveCount": 2,
+      "budget": 2,
+      "mode": "enforce",
+      "refusedCount": 1,
+    },
+  ],
+  "servers": [
+    {
+      "kind": "mcp_server",
+      "status": "ok",
+      "name": "a",
+      "mcpStatus": "connected",
+      "transport": "stdio",
+      "disabled": false,
+    },
+    {
+      "kind": "mcp_server",
+      "status": "ok",
+      "name": "b",
+      "mcpStatus": "connected",
+      "transport": "stdio",
+      "disabled": false,
+    },
+    {
+      "kind": "mcp_server",
+      "status": "error",
+      "name": "c",
+      "mcpStatus": "disconnected",
+      "transport": "stdio",
+      "disabled": false,
+      "disabledReason": "budget",
+      "errorKind": "budget_exhausted",
+      "hint": "...",
+    },
+  ],
+}
+```
+
+`budgetMode` is one of `enforce`, `warn`, or `off`. `clientBudget` is absent when no budget was set. `budgets[]` is **always an array** on post-PR-14 daemons (possibly empty when `budgetMode === 'off'`); pre-PR-14 daemons omit the field entirely. Consumers MUST tolerate additional `budgets[]` entries with unrecognized `scope` values — Wave 5 PR 23 will add a `scope: 'pool'` cell alongside `workspace` without a schema bump.
+
+`disabledReason` on per-server cells distinguishes operator-disabled (`'config'` — `disabledMcpServers` config list) from budget-refused (`'budget'` — discovered but never connected due to `enforce` mode). Refusals are deterministic by `Object.entries(mcpServers)` declaration order. The per-server `status: 'error', errorKind: 'budget_exhausted'` shadows the raw `mcpStatus: 'disconnected'` (which is true but not the operator-facing severity).
+
+Budget enforcement is **per-workspace**, not per-session — Mode B daemons are `1 daemon = 1 workspace × N sessions` post-#4113, so the MCP client set is shared across the workspace's sessions.
 
 ### `GET /workspace/skills`
 

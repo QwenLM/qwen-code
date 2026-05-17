@@ -98,6 +98,11 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_supported_commands',
   'session_close',
   'session_metadata',
+  // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
+  // guardrail surface (`--mcp-client-budget`, `clientCount` /
+  // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
+  // refused per-server cells).
+  'mcp_guardrails',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -606,6 +611,19 @@ describe('createServeApp', () => {
       ).toEqual(EXPECTED_REGISTERED_FEATURES.map(() => 'v1'));
     });
 
+    it('exposes `modes` metadata on mcp_guardrails (#4175 PR 14)', () => {
+      // `modes` is currently registry-only documentation (no wire
+      // surface yet) — a client wanting to feature-detect `enforce`
+      // semantics reads `caps.features.includes('mcp_guardrails')`,
+      // not a separate `featureModes` field. The descriptor still
+      // carries `modes` so future PRs that DO expose it on the wire
+      // don't have to chase down every entry to backfill metadata.
+      expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrails']).toEqual({
+        since: 'v1',
+        modes: ['warn', 'enforce'],
+      });
+    });
+
     it('returns protocol version metadata with a fresh supported array', () => {
       const versions = getServeProtocolVersions();
       expect(versions).toEqual({ current: 'v1', supported: ['v1'] });
@@ -727,6 +745,86 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual(payload);
       expect(bridge.workspaceMcpCalls).toBe(1);
+    });
+
+    it('round-trips PR 14 budget fields on /workspace/mcp', async () => {
+      // Issue #4175 PR 14. The route is a thin JSON forwarder, so the
+      // assertion is structural: the new fields (`clientCount`,
+      // `clientBudget`, `budgetMode`, `budgets[]`, per-server
+      // `disabledReason`) must survive verbatim. Catches future
+      // serialization regressions that drop unknown optional fields.
+      const payload: ServeWorkspaceMcpStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        discoveryState: 'completed',
+        clientCount: 3,
+        clientBudget: 2,
+        budgetMode: 'enforce',
+        budgets: [
+          {
+            kind: 'mcp_budget',
+            scope: 'workspace',
+            status: 'error',
+            errorKind: 'budget_exhausted',
+            hint: 'Raise --mcp-client-budget or remove servers.',
+            liveCount: 2,
+            budget: 2,
+            mode: 'enforce',
+            refusedCount: 1,
+          },
+        ],
+        servers: [
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'a',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'b',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+          {
+            kind: 'mcp_server',
+            status: 'error',
+            errorKind: 'budget_exhausted',
+            hint: 'Raise --mcp-client-budget or remove servers from mcpServers config.',
+            name: 'c',
+            mcpStatus: 'disconnected',
+            transport: 'stdio',
+            disabled: false,
+            disabledReason: 'budget',
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceMcpImpl: async () => payload });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/mcp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(payload);
+      expect(res.body.budgets).toHaveLength(1);
+      expect(res.body.budgets[0]).toMatchObject({
+        kind: 'mcp_budget',
+        scope: 'workspace',
+        status: 'error',
+        errorKind: 'budget_exhausted',
+        refusedCount: 1,
+      });
+      expect(res.body.servers[2].disabledReason).toBe('budget');
     });
 
     it('returns workspace skills and providers status from the bridge', async () => {

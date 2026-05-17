@@ -46,6 +46,131 @@ const DEFAULT_HEALTH_CONFIG: MCPHealthMonitorConfig = {
 };
 
 /**
+ * Budget enforcement mode for MCP client guardrails (issue #4175 PR 14).
+ *
+ * `off` — no accounting-driven enforcement (default when no budget is
+ *   configured). `getMcpClientAccounting()` still works as pure
+ *   observability; slot reservation is a no-op.
+ * `warn` — measure-only. Reserved slots track the configured set even
+ *   beyond the budget so operators see `liveCount > budget` in the
+ *   snapshot. No connect is refused. Snapshot consumers render a
+ *   warning cell when `liveCount >= 0.75 * budget`.
+ * `enforce` — hard cap. Connects beyond the budget are refused, the
+ *   per-server cell shows `errorKind: 'budget_exhausted'`, and the
+ *   server name lands in `refusedServerNames`. Refusal is deterministic
+ *   by `Object.entries(servers)` declaration order.
+ */
+export type McpBudgetMode = 'enforce' | 'warn' | 'off';
+
+export interface McpBudgetConfig {
+  /** Cap on live MCP clients per workspace. `undefined` = unlimited. */
+  clientBudget?: number;
+  /** Behavior at and above the cap. `off` when `clientBudget` is undefined. */
+  budgetMode: McpBudgetMode;
+}
+
+/** Transport family per `MCPServerConfig`. `unknown` covers misconfigured entries. */
+export type McpTransportKind =
+  | 'stdio'
+  | 'sse'
+  | 'http'
+  | 'websocket'
+  | 'sdk'
+  | 'unknown';
+
+/**
+ * Snapshot of the manager's live + reserved MCP state. The daemon's
+ * read-only `GET /workspace/mcp` route fans this out via the ACP
+ * `qwen/status/workspace/mcp` ext-method. `subprocessCount` is the
+ * value PR 1's `pgrep -P` baseline harness can validate against.
+ */
+export interface McpClientAccounting {
+  /** Live (`MCPServerStatus.CONNECTED`) client count, all transports. */
+  total: number;
+  /** Live client count split by transport family. */
+  byTransport: Record<McpTransportKind, number>;
+  /** stdio + websocket — the only transports that spawn an OS process. */
+  subprocessCount: number;
+  /** Server names currently holding a budget slot (in or over the cap). */
+  reservedSlots: string[];
+  /** Server names refused during the most recent `discoverAllMcpTools*` pass. */
+  refusedServerNames: string[];
+}
+
+/**
+ * Thrown by `readResource` lazy-spawn path when the live count is
+ * already at `clientBudget` and `budgetMode === 'enforce'`. Discovery-
+ * time refusals don't throw (they're recorded in `refusedServerNames`
+ * and reported via the snapshot), because the discovery loop is
+ * best-effort and a thrown error would cancel sibling connects.
+ */
+export class BudgetExhaustedError extends Error {
+  readonly serverName: string;
+  readonly budget: number;
+  readonly liveCount: number;
+  constructor(serverName: string, budget: number, liveCount: number) {
+    super(
+      `MCP client budget exhausted: cannot reserve slot for '${serverName}' ` +
+        `(budget=${budget}, liveCount=${liveCount}). ` +
+        `Raise --mcp-client-budget or remove servers from mcpServers config.`,
+    );
+    this.name = 'BudgetExhaustedError';
+    this.serverName = serverName;
+    this.budget = budget;
+    this.liveCount = liveCount;
+  }
+}
+
+/**
+ * Map an `MCPServerConfig` to its transport family. Mirrors the
+ * detection order in `mcp-client.ts:createTransport` so the snapshot's
+ * transport tag matches the actual wire protocol the client uses.
+ *
+ * `sdk` is checked first because `SDK_MCP_SERVER_FIELDS` may coexist
+ * with a placeholder `command` — without the sdk-first order, an
+ * in-process SDK server would mis-report as `stdio`.
+ */
+export function mcpTransportOf(config: MCPServerConfig): McpTransportKind {
+  if (isSdkMcpServerConfig(config)) return 'sdk';
+  if (typeof config.httpUrl === 'string') return 'http';
+  if (typeof config.url === 'string') return 'sse';
+  if (typeof config.tcp === 'string') return 'websocket';
+  if (typeof config.command === 'string') return 'stdio';
+  return 'unknown';
+}
+
+/**
+ * Resolve budget config from env vars when the constructor caller
+ * doesn't pass one. Daemon-mode (`qwen serve`) sets these when
+ * spawning the `qwen --acp` child; standalone `qwen` invocations
+ * leave them unset and get `{ budgetMode: 'off' }` — the historical
+ * behavior, no enforcement.
+ *
+ * `QWEN_SERVE_MCP_CLIENT_BUDGET` — positive integer; non-numeric /
+ *   zero / negative / NaN are silently ignored (treated as unset).
+ * `QWEN_SERVE_MCP_BUDGET_MODE` — `enforce|warn|off`. Defaults to
+ *   `warn` when a budget is set, `off` otherwise.
+ */
+function readBudgetFromEnv(): McpBudgetConfig {
+  const rawBudget = process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+  const rawMode = process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+  let clientBudget: number | undefined;
+  if (rawBudget !== undefined && rawBudget !== '') {
+    const parsed = Number(rawBudget);
+    if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
+      clientBudget = parsed;
+    }
+  }
+  let budgetMode: McpBudgetMode;
+  if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
+    budgetMode = rawMode;
+  } else {
+    budgetMode = clientBudget === undefined ? 'off' : 'warn';
+  }
+  return { clientBudget, budgetMode };
+}
+
+/**
  * Manages the lifecycle of multiple MCP clients, including local child processes.
  * This class is responsible for starting, stopping, and discovering tools from
  * a collection of MCP servers defined in the configuration.
@@ -63,12 +188,32 @@ export class McpClientManager {
   private isReconnecting: Map<string, boolean> = new Map();
   private serverDiscoveryPromises: Map<string, Promise<void>> = new Map();
 
+  /**
+   * Budget bookkeeping. Slots are reserved synchronously by server name
+   * inside the discovery loop BEFORE any `await client.connect()`, so
+   * `Promise.all(discoveryPromises)` cannot interleave a second connect
+   * past the cap. `enforce` mode refuses past the cap; `warn` mode
+   * over-reserves so accounting reflects the configured set; `off`
+   * doesn't reserve at all.
+   */
+  private readonly reservedSlots = new Set<string>();
+  private readonly clientBudget?: number;
+  private readonly budgetMode: McpBudgetMode;
+  /**
+   * Servers refused during the most recent `discoverAllMcpTools*` pass.
+   * Reset at the start of each pass; survives between passes so a
+   * snapshot taken between discoveries still shows the last set of
+   * refusals to operators.
+   */
+  private lastRefusedServerNames: string[] = [];
+
   constructor(
     config: Config,
     toolRegistry: ToolRegistry,
     eventEmitter?: EventEmitter,
     sendSdkMcpMessage?: SendSdkMcpMessage,
     healthConfig?: Partial<MCPHealthMonitorConfig>,
+    budgetConfig?: McpBudgetConfig,
   ) {
     this.cliConfig = config;
     this.toolRegistry = toolRegistry;
@@ -76,6 +221,89 @@ export class McpClientManager {
     this.eventEmitter = eventEmitter;
     this.sendSdkMcpMessage = sendSdkMcpMessage;
     this.healthConfig = { ...DEFAULT_HEALTH_CONFIG, ...healthConfig };
+
+    // Tests inject `budgetConfig` directly; production reads env vars
+    // set by `qwen serve --mcp-client-budget=N --mcp-budget-mode=X`
+    // when spawning the ACP child. Standalone `qwen` invocations
+    // leave both unset and get `mode: 'off'` — the pre-PR-14 default.
+    const resolved = budgetConfig ?? readBudgetFromEnv();
+    this.clientBudget = resolved.clientBudget;
+    this.budgetMode = resolved.budgetMode;
+  }
+
+  /**
+   * Atomic budget check + slot reservation. Synchronous so the
+   * concurrent discovery loop (`Promise.all` over server entries) can't
+   * interleave a second connect past the cap at any `await` boundary.
+   *
+   * Returns:
+   *   `reserved`     — slot newly held (or `off`-mode no-op)
+   *   `already_held` — slot was already reserved (reconnect / dup)
+   *   `refused`      — `enforce` mode and the cap is full
+   */
+  private tryReserveSlot(
+    serverName: string,
+  ): 'reserved' | 'already_held' | 'refused' {
+    if (this.reservedSlots.has(serverName)) return 'already_held';
+    if (this.clientBudget === undefined || this.budgetMode === 'off') {
+      return 'reserved';
+    }
+    if (
+      this.budgetMode === 'enforce' &&
+      this.reservedSlots.size >= this.clientBudget
+    ) {
+      return 'refused';
+    }
+    // `warn` mode (and `enforce` under cap) — track in the configured set.
+    this.reservedSlots.add(serverName);
+    return 'reserved';
+  }
+
+  /**
+   * Snapshot the manager's MCP accounting for the daemon's read-only
+   * `GET /workspace/mcp` route. Cheap to call — iterates `this.clients`
+   * once and constructs a fresh struct each time so callers can mutate
+   * the returned arrays without affecting internal state.
+   *
+   * `total` counts only `CONNECTED` clients; `reservedSlots` includes
+   * the configured set (which under `enforce` mode is bounded by
+   * `clientBudget`, but under `warn` mode can exceed it).
+   */
+  getMcpClientAccounting(): McpClientAccounting {
+    const byTransport: Record<McpTransportKind, number> = {
+      stdio: 0,
+      sse: 0,
+      http: 0,
+      websocket: 0,
+      sdk: 0,
+      unknown: 0,
+    };
+    let total = 0;
+    const servers = this.cliConfig.getMcpServers() ?? {};
+    for (const [name, client] of this.clients) {
+      if (client.getStatus() !== MCPServerStatus.CONNECTED) continue;
+      const cfg = servers[name];
+      const transport: McpTransportKind = cfg ? mcpTransportOf(cfg) : 'unknown';
+      byTransport[transport] += 1;
+      total += 1;
+    }
+    return {
+      total,
+      byTransport,
+      subprocessCount: byTransport.stdio + byTransport.websocket,
+      reservedSlots: Array.from(this.reservedSlots),
+      refusedServerNames: [...this.lastRefusedServerNames],
+    };
+  }
+
+  /** Resolved budget mode (env-var or constructor-supplied). */
+  getMcpBudgetMode(): McpBudgetMode {
+    return this.budgetMode;
+  }
+
+  /** Resolved client budget, or `undefined` when unlimited. */
+  getMcpClientBudget(): number | undefined {
+    return this.clientBudget;
   }
 
   /**
@@ -95,6 +323,11 @@ export class McpClientManager {
     );
 
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    // Reset per-pass refusal log so a snapshot taken after this pass
+    // reflects THIS pass's refusals, not a stale one. Reservations
+    // (this.reservedSlots) persist across passes — they're keyed by
+    // server name, which is the operator's intent unit.
+    this.lastRefusedServerNames = [];
 
     this.eventEmitter?.emit('mcp-client-update', this.clients);
     const discoveryPromises = Object.entries(servers).map(
@@ -102,6 +335,20 @@ export class McpClientManager {
         // Skip disabled servers
         if (cliConfig.isMcpServerDisabled(name)) {
           debugLogger.debug(`Skipping disabled MCP server: ${name}`);
+          return;
+        }
+
+        // Budget gate (PR 14): synchronous slot reservation BEFORE the
+        // `await client.connect()` below. Refusal only happens under
+        // `enforce` mode; `warn` mode reserves regardless so accounting
+        // reflects the configured set. `off` is a no-op.
+        const reservation = this.tryReserveSlot(name);
+        if (reservation === 'refused') {
+          this.lastRefusedServerNames.push(name);
+          process.stderr.write(
+            `qwen serve: MCP server '${name}' refused (budget exhausted, ` +
+              `budget=${this.clientBudget}, mode=enforce)\n`,
+          );
           return;
         }
 
@@ -140,6 +387,20 @@ export class McpClientManager {
 
     await Promise.all(discoveryPromises);
     this.discoveryState = MCPDiscoveryState.COMPLETED;
+    // PR 14: post-discovery budget telemetry (legacy non-incremental
+    // path; the incremental path emits the same event near its
+    // `mcp_all_servers_settled`).
+    if (this.budgetMode !== 'off') {
+      // Invariant: `mode !== 'off'` ⇒ `clientBudget` was resolved
+      // (env-var fallback would have flipped mode to `off` otherwise).
+      recordStartupEvent('mcp_budget_decision', {
+        mode: this.budgetMode,
+        budget: this.clientBudget ?? 0,
+        configured: Object.keys(servers).length,
+        reserved: this.reservedSlots.size,
+        refused: this.lastRefusedServerNames.length,
+      });
+    }
   }
 
   /**
@@ -262,6 +523,12 @@ export class McpClientManager {
     this.consecutiveFailures.clear();
     this.isReconnecting.clear();
     this.serverDiscoveryPromises.clear();
+    // PR 14: clean shutdown releases ALL budget slots. A subsequent
+    // `discoverAllMcpTools*` (e.g. the `discoverAllMcpTools` call in
+    // its own body line 90, which awaits `this.stop()` first) starts
+    // from an empty reservation set.
+    this.reservedSlots.clear();
+    this.lastRefusedServerNames = [];
   }
 
   /**
@@ -285,6 +552,12 @@ export class McpClientManager {
         this.consecutiveFailures.delete(serverName);
         this.isReconnecting.delete(serverName);
         this.serverDiscoveryPromises.delete(serverName);
+        // PR 14: explicit operator-driven disconnect releases the
+        // budget slot. The internal reconnect path
+        // (`discoverMcpToolsForServerInternal`) calls
+        // `existingClient.disconnect()` directly, NOT this public
+        // method, so reconnect doesn't release.
+        this.reservedSlots.delete(serverName);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
       }
     }
@@ -459,6 +732,9 @@ export class McpClientManager {
     );
 
     this.discoveryState = MCPDiscoveryState.IN_PROGRESS;
+    // Reset per-pass refusal log; see the sibling reset in
+    // `discoverAllMcpTools` for rationale.
+    this.lastRefusedServerNames = [];
     recordStartupEvent('mcp_discovery_start', {
       serverCount: Object.keys(servers).length,
       incremental: true,
@@ -502,6 +778,19 @@ export class McpClientManager {
       }
       const existingClient = this.clients.get(name);
       if (!existingClient) {
+        // Budget gate (PR 14): a brand-new server connect would push
+        // `clients.size` past the cap under `enforce` mode. Reconnects
+        // (the `else if` branch below) already hold a reservation
+        // from their first successful connect — they pass through.
+        const reservation = this.tryReserveSlot(name);
+        if (reservation === 'refused') {
+          this.lastRefusedServerNames.push(name);
+          process.stderr.write(
+            `qwen serve: MCP server '${name}' refused (budget exhausted, ` +
+              `budget=${this.clientBudget}, mode=enforce)\n`,
+          );
+          continue;
+        }
         // New server
         serversToUpdate.push(name);
       } else if (existingClient.getStatus() === MCPServerStatus.DISCONNECTED) {
@@ -586,6 +875,20 @@ export class McpClientManager {
       serverCount: Object.keys(servers).length,
       incremental: true,
     });
+    // PR 14: post-discovery budget telemetry. Operators see the active
+    // policy + outcome in the startup event sink without parsing
+    // `/workspace/mcp` or `/capabilities`.
+    if (this.budgetMode !== 'off') {
+      // Invariant: `mode !== 'off'` ⇒ `clientBudget` was resolved
+      // (env-var fallback would have flipped mode to `off` otherwise).
+      recordStartupEvent('mcp_budget_decision', {
+        mode: this.budgetMode,
+        budget: this.clientBudget ?? 0,
+        configured: Object.keys(servers).length,
+        reserved: this.reservedSlots.size,
+        refused: this.lastRefusedServerNames.length,
+      });
+    }
     // Trailing `mcp-client-update` AFTER flipping discoveryState to
     // COMPLETED. Without this the per-server updates above all fire while
     // the state is still IN_PROGRESS, so the AppContainer batch-flush
@@ -735,6 +1038,12 @@ export class McpClientManager {
       this.consecutiveFailures.delete(serverName);
     }
 
+    // PR 14: server gone from config (or disabled mid-session) releases
+    // the budget slot too — operator intent is "this server should not
+    // be running", so it must not block a different server from taking
+    // its place on the next discovery pass.
+    this.reservedSlots.delete(serverName);
+
     // Remove tools for this server from registry
     this.toolRegistry.removeMcpToolsByServer(serverName);
 
@@ -759,6 +1068,24 @@ export class McpClientManager {
       const serverConfig = servers[serverName];
       if (!serverConfig) {
         throw new Error(`MCP server '${serverName}' is not configured.`);
+      }
+
+      // Budget gate (PR 14): a lazy `readResource` against a server
+      // that was refused at discovery time (or that the operator has
+      // never connected) must NOT silently spawn a new MCP client past
+      // the cap. Discovery-time refusals don't throw (best-effort
+      // semantics), but the resource-read caller has a synchronous
+      // consumer that benefits from a typed error it can render.
+      const reservation = this.tryReserveSlot(serverName);
+      if (reservation === 'refused') {
+        if (!this.lastRefusedServerNames.includes(serverName)) {
+          this.lastRefusedServerNames.push(serverName);
+        }
+        throw new BudgetExhaustedError(
+          serverName,
+          this.clientBudget as number,
+          this.reservedSlots.size,
+        );
       }
 
       const sdkCallback = isSdkMcpServerConfig(serverConfig)

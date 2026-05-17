@@ -211,6 +211,34 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   disabled: boolean;
   description?: string;
   extensionName?: string;
+  /**
+   * Why this server is not live, when known (issue #4175 PR 14).
+   * `'config'`  — operator-disabled via `disabledMcpServers`.
+   * `'budget'`  — refused by the workspace MCP client budget
+   *               (snapshot also surfaces `errorKind:
+   *               'budget_exhausted'`).
+   * Absent on pre-PR-14 daemons.
+   */
+  disabledReason?: 'config' | 'budget';
+}
+
+/** Budget enforcement mode for MCP client guardrails (issue #4175 PR 14). */
+export type DaemonMcpBudgetMode = 'enforce' | 'warn' | 'off';
+
+/**
+ * Workspace-level budget status cell. Issue #4175 PR 14 introduced
+ * one entry (`scope: 'workspace'`); future PRs (e.g. Wave 5 PR 23
+ * shared pool) may add additional entries with new scope values.
+ * Consumers MUST tolerate unrecognized scope values — drop, don't fail.
+ */
+export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
+  kind: 'mcp_budget';
+  scope: 'workspace';
+  liveCount: number;
+  /** Configured cap. Absent when mode is `off`. */
+  budget?: number;
+  mode: DaemonMcpBudgetMode;
+  refusedCount: number;
 }
 
 export interface DaemonWorkspaceMcpStatus {
@@ -220,6 +248,18 @@ export interface DaemonWorkspaceMcpStatus {
   discoveryState?: DaemonMcpDiscoveryState;
   servers: DaemonWorkspaceMcpServerStatus[];
   errors?: DaemonStatusCell[];
+  /** PR 14: live MCP client count, all transports. Absent on pre-PR-14 daemons. */
+  clientCount?: number;
+  /** PR 14: configured budget. Absent when no cap set. */
+  clientBudget?: number;
+  /** PR 14: active enforcement mode. Absent on pre-PR-14 daemons. */
+  budgetMode?: DaemonMcpBudgetMode;
+  /**
+   * PR 14: workspace-level budget cells. Empty array (not absent)
+   * on post-PR-14 daemons when no budget is configured AND mode
+   * resolves to `off`. Pre-PR-14 daemons omit the field.
+   */
+  budgets?: DaemonMcpBudgetStatusCell[];
 }
 
 export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';

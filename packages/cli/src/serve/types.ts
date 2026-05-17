@@ -108,6 +108,30 @@ export interface ServeOptions {
    * irrespective of this flag.
    */
   requireAuth?: boolean;
+  /**
+   * Issue #4175 PR 14. Cap on live MCP clients spawned inside the
+   * ACP child for the bound workspace. When set, the daemon
+   * forwards `QWEN_SERVE_MCP_CLIENT_BUDGET` to the child's env so
+   * core's `McpClientManager` picks it up. Combined with
+   * `mcpBudgetMode`:
+   *   - `warn` (default when budget set): no refusal, snapshot
+   *     surfaces `status: 'warning'` at >=75% of budget.
+   *   - `enforce`: connects past the cap are refused, per-server
+   *     cell shows `disabledReason: 'budget'`, deterministic by
+   *     `Object.entries(mcpServers)` declaration order.
+   *   - `off`: no accounting-driven enforcement (the implicit
+   *     default when no budget is configured).
+   *
+   * Positive integer required; non-positive / NaN values throw at
+   * boot.
+   */
+  mcpClientBudget?: number;
+  /**
+   * Issue #4175 PR 14. Enforcement mode for `mcpClientBudget`.
+   * Boot rejects `enforce` without a budget; otherwise resolves to
+   * `warn` when budget set / `off` when budget unset.
+   */
+  mcpBudgetMode?: 'enforce' | 'warn' | 'off';
 }
 
 /**

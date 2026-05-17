@@ -177,6 +177,21 @@ export async function runQwenServe(
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
   const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
+  // Issue #4175 PR 14. The MCP client guardrails enforce in the ACP
+  // child process (where `McpClientManager` lives), not the daemon.
+  // Forward the budget config via env vars so the child's
+  // `readBudgetFromEnv()` picks them up. Set BEFORE the bridge is
+  // constructed because `defaultSpawnChannelFactory` snapshots
+  // `process.env` via `{...process.env}` at spawn time. Standalone
+  // `qwen` invocations (no daemon) leave the env untouched, so
+  // direct CLI usage retains the historical no-enforcement default.
+  if (opts.mcpClientBudget !== undefined) {
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = String(opts.mcpClientBudget);
+  }
+  if (opts.mcpBudgetMode !== undefined) {
+    process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = opts.mcpBudgetMode;
+  }
+
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({

@@ -929,3 +929,343 @@ describe('McpClientManager', () => {
     expect(observedStatesAtEmit[0]).toBe(MCPDiscoveryState.IN_PROGRESS);
   });
 });
+
+// Issue #4175 PR 14: MCP client guardrails (counter + slot reservation +
+// budget enforcement). Kept in its own describe so the existing test
+// suite stays untouched and a future revert of PR 14 drops a single
+// contiguous block.
+describe('McpClientManager — PR 14 guardrails', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+  });
+
+  /**
+   * Mock factory: returns a fresh stub McpClient whose `getStatus()`
+   * returns CONNECTED after `connect()` resolves. Mirrors the
+   * `discoverAllMcpTools` happy path — counter sees the client as
+   * live only when `getStatus === CONNECTED`, so without flipping
+   * the mock status the accounting would always read zero.
+   */
+  function makeConnectedMcpClientMock() {
+    // Real McpClient.getStatus is sync — start CONNECTED so accounting
+    // sees it as live immediately after construction. `connect()` is a
+    // no-op (we don't simulate handshake state machinery in unit
+    // tests; the accounting cares only about the final status).
+    const state = { status: undefined as unknown };
+    return {
+      connect: vi.fn().mockImplementation(async () => {
+        const { MCPServerStatus } = await import('./mcp-client.js');
+        state.status = MCPServerStatus.CONNECTED;
+      }),
+      discover: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      getStatus: vi.fn(() => state.status),
+    };
+  }
+
+  function configWithServers(
+    servers: Record<string, unknown>,
+    overrides: Partial<Config> = {},
+  ): Config {
+    return {
+      isTrustedFolder: () => true,
+      getMcpServers: () => servers,
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      ...overrides,
+    } as unknown as Config;
+  }
+
+  it('getMcpClientAccounting returns zero on an empty manager', async () => {
+    const { McpClientManager: MgrCtor } = await import(
+      './mcp-client-manager.js'
+    );
+    const config = configWithServers({});
+    const manager = new MgrCtor(config, {} as ToolRegistry);
+    const accounting = manager.getMcpClientAccounting();
+    expect(accounting.total).toBe(0);
+    expect(accounting.subprocessCount).toBe(0);
+    expect(accounting.reservedSlots).toEqual([]);
+    expect(accounting.refusedServerNames).toEqual([]);
+    expect(accounting.byTransport).toEqual({
+      stdio: 0,
+      sse: 0,
+      http: 0,
+      websocket: 0,
+      sdk: 0,
+      unknown: 0,
+    });
+  });
+
+  it('mcpTransportOf maps each transport family correctly', async () => {
+    const { mcpTransportOf } = await import('./mcp-client-manager.js');
+    const cfg = (overrides: Record<string, unknown>) =>
+      overrides as unknown as import('../config/config.js').MCPServerConfig;
+    expect(mcpTransportOf(cfg({ command: 'node' }))).toBe('stdio');
+    expect(mcpTransportOf(cfg({ httpUrl: 'http://x' }))).toBe('http');
+    expect(mcpTransportOf(cfg({ url: 'http://x' }))).toBe('sse');
+    expect(mcpTransportOf(cfg({ tcp: 'ws://x' }))).toBe('websocket');
+    expect(mcpTransportOf(cfg({}))).toBe('unknown');
+    // SDK detection short-circuits: even with a placeholder command,
+    // an SDK-marked server reports `sdk` (not `stdio`).
+    expect(mcpTransportOf(cfg({ type: 'sdk', command: 'node' }))).toBe('sdk');
+  });
+
+  it('enforce mode refuses connects past the budget', async () => {
+    const created: Array<ReturnType<typeof makeConnectedMcpClientMock>> = [];
+    vi.mocked(McpClient).mockImplementation(() => {
+      const m = makeConnectedMcpClientMock();
+      created.push(m);
+      return m as unknown as McpClient;
+    });
+    // 4 stdio servers, budget 2. enforce mode refuses 2.
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+      d: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 2, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(created).toHaveLength(2); // only 2 McpClient instances created
+    const accounting = manager.getMcpClientAccounting();
+    expect(accounting.total).toBe(2);
+    expect(accounting.byTransport.stdio).toBe(2);
+    expect(accounting.subprocessCount).toBe(2);
+    expect(accounting.reservedSlots.sort()).toEqual(['a', 'b']);
+    expect(accounting.refusedServerNames.sort()).toEqual(['c', 'd']);
+  });
+
+  it('warn mode never refuses but tracks oversized reservations', async () => {
+    const created: Array<ReturnType<typeof makeConnectedMcpClientMock>> = [];
+    vi.mocked(McpClient).mockImplementation(() => {
+      const m = makeConnectedMcpClientMock();
+      created.push(m);
+      return m as unknown as McpClient;
+    });
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+      c: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 2, budgetMode: 'warn' },
+    );
+    await manager.discoverAllMcpTools(config);
+    // warn mode: all 3 connect; reservedSlots grows past budget; no refusals.
+    expect(created).toHaveLength(3);
+    const accounting = manager.getMcpClientAccounting();
+    expect(accounting.total).toBe(3);
+    expect(accounting.reservedSlots.sort()).toEqual(['a', 'b', 'c']);
+    expect(accounting.refusedServerNames).toEqual([]);
+  });
+
+  it('off mode does not reserve any slot', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { budgetMode: 'off' },
+    );
+    await manager.discoverAllMcpTools(config);
+    const accounting = manager.getMcpClientAccounting();
+    expect(accounting.total).toBe(2);
+    // `off` skips reservation altogether — operators see live count via
+    // `total`, but reservedSlots stays empty.
+    expect(accounting.reservedSlots).toEqual([]);
+    expect(accounting.refusedServerNames).toEqual([]);
+  });
+
+  it('refusal is deterministic by config-declaration order', async () => {
+    const created: string[] = [];
+    vi.mocked(McpClient).mockImplementation((name: string) => {
+      created.push(name);
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    // Insertion order: zulu, alpha, mike. Budget 2 → zulu+alpha survive.
+    const config = configWithServers({
+      zulu: { command: 'node' },
+      alpha: { command: 'node' },
+      mike: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 2, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(created).toEqual(['zulu', 'alpha']);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([
+      'mike',
+    ]);
+  });
+
+  it('discoverAllMcpTools resets lastRefusedServerNames each pass', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
+
+    // Second pass: stop()→clear→re-run. The reset happens at the start
+    // of discoverAllMcpTools (see also stop() clearing reservedSlots).
+    await manager.discoverAllMcpTools(config);
+    // Same outcome (still budget 1, still 2 servers), but the array
+    // is fresh — not appended to.
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
+  });
+
+  it('readResource throws BudgetExhaustedError in enforce mode when full', async () => {
+    const { BudgetExhaustedError } = await import('./mcp-client-manager.js');
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    // `a` was reserved; `b` was refused. A `readResource('b', ...)` would
+    // lazy-spawn — must throw rather than silently exceed the cap.
+    await expect(manager.readResource('b', 'file:///x')).rejects.toBeInstanceOf(
+      BudgetExhaustedError,
+    );
+  });
+
+  it('disconnectServer releases the slot for re-use', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    await manager.disconnectServer('a');
+    // Slot released — accounting shows the configured set shrank.
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+  });
+
+  it('env var fallback resolves budget + mode when constructor omits opts', async () => {
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '7';
+    process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = 'enforce';
+    const config = configWithServers({});
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    expect(manager.getMcpClientBudget()).toBe(7);
+    expect(manager.getMcpBudgetMode()).toBe('enforce');
+  });
+
+  it('env var fallback defaults mode to warn when only budget is set', async () => {
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '5';
+    // No mode env var. Resolved mode is `warn` (the safe default).
+    const config = configWithServers({});
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    expect(manager.getMcpClientBudget()).toBe(5);
+    expect(manager.getMcpBudgetMode()).toBe('warn');
+  });
+
+  it('env var fallback rejects non-positive budgets silently', async () => {
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '-3';
+    const config = configWithServers({});
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    // Invalid values fall through to `undefined` budget + `off` mode —
+    // no enforcement, no boot-time crash. Validation lives in the CLI
+    // flag handler (`packages/cli/src/commands/serve.ts`).
+    expect(manager.getMcpClientBudget()).toBeUndefined();
+    expect(manager.getMcpBudgetMode()).toBe('off');
+  });
+
+  it('disabled servers do not consume a budget slot', async () => {
+    const created: string[] = [];
+    vi.mocked(McpClient).mockImplementation((name: string) => {
+      created.push(name);
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    // `b` is disabled — must not even attempt to reserve. With budget=1,
+    // `a` and `c` should both succeed (b is invisible to the gate).
+    const config = configWithServers(
+      {
+        a: { command: 'node' },
+        b: { command: 'node' },
+        c: { command: 'node' },
+      },
+      {
+        isMcpServerDisabled: ((name: string) =>
+          name === 'b') as Config['isMcpServerDisabled'],
+      },
+    );
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 2, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(created.sort()).toEqual(['a', 'c']);
+    expect(manager.getMcpClientAccounting().reservedSlots.sort()).toEqual([
+      'a',
+      'c',
+    ]);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([]);
+  });
+});
