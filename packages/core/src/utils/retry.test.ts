@@ -1020,6 +1020,38 @@ describe('retryWithBackoff - Retry-After handling in normal mode', () => {
     expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(300_000);
     expect(fn).toHaveBeenCalledTimes(2);
   });
+
+  it('should grow the fallback delay by attempt when Retry-After is zero', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const firstError = Object.assign(new Error('Rate limited'), {
+      status: 429,
+      headers: { 'retry-after': '3' },
+    });
+    const secondError = Object.assign(new Error('Rate limited'), {
+      status: 429,
+      headers: { 'retry-after': '0' },
+    });
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(firstError)
+      .mockRejectedValueOnce(secondError)
+      .mockResolvedValue('ok');
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 100,
+      maxDelayMs: 1000,
+    });
+
+    await vi.runAllTimersAsync();
+    await expect(promise).resolves.toBe('ok');
+
+    expect(setTimeoutSpy.mock.calls[0]?.[1]).toBe(3000);
+    expect(setTimeoutSpy.mock.calls[1]?.[1]).toBe(200);
+    expect(randomSpy).toHaveBeenCalled();
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
 });
 
 describe('getErrorStatus', () => {

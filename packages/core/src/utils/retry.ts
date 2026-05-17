@@ -9,7 +9,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
-import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
+import { getRetryDelayMs } from './retryPolicy.js';
 import { classifyRetryError } from './retryErrorClassification.js';
 
 const debugLogger = createDebugLogger('RETRY');
@@ -202,7 +202,6 @@ export async function retryWithBackoff<T>(
       return result;
     } catch (error) {
       const errorStatus = getErrorStatus(error);
-      const retryClassification = classifyRetryError(error, { authType });
 
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
@@ -215,6 +214,10 @@ export async function retryWithBackoff<T>(
             `After setting up your API key, run /auth to configure your provider.`,
         );
       }
+
+      // Classification is diagnostic-only in this PR; retry control still
+      // follows shouldRetryOnError and the persistent retry policy below.
+      const retryClassification = classifyRetryError(error, { authType });
 
       // Determine if this error qualifies for persistent retry.
       // Persistent mode still respects shouldRetryOnError — callers can force
@@ -236,18 +239,14 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
-
-        if (retryAfterMs !== null && retryAfterMs > 0) {
-          // Retry-After is a server-specified wait — respect it, only cap at
-          // the absolute limit (capMs/6h), NOT at maxBackoff (5min).
+        if (errorStatus === 429) {
           delayMs = getRetryDelayMs({
             attempt: persistentAttempt,
             initialDelayMs,
-            maxDelayMs: maxBackoff,
+            maxDelayMs: Math.min(maxBackoff, capMs),
             retryAfterMode: 'prefer',
             retryAfterMaxDelayMs: capMs,
+            jitterRatio: 0.25,
             error,
           });
         } else {
@@ -283,25 +282,26 @@ export async function retryWithBackoff<T>(
         }
       } else {
         // Normal retry path.
-        const retryAfterMs =
-          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
-
-        if (retryAfterMs !== null && retryAfterMs > 0) {
+        if (errorStatus === 429) {
           const delayMs = getRetryDelayMs({
-            attempt: 1,
-            initialDelayMs: currentDelay,
+            attempt,
+            initialDelayMs,
             maxDelayMs,
             retryAfterMode: 'prefer',
             retryAfterMaxDelayMs: INTERACTIVE_RETRY_AFTER_CAP_MS,
+            jitterRatio: 0.3,
             error,
           });
           debugLogger.warn(
-            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${delayMs}ms...`,
+            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying in ${delayMs}ms...`,
             retryClassification,
             error,
           );
           await delay(delayMs);
-          currentDelay = initialDelayMs;
+          currentDelay = Math.min(
+            maxDelayMs,
+            initialDelayMs * Math.pow(2, attempt),
+          );
         } else {
           logRetryAttempt(attempt, error, retryClassification, errorStatus);
           const delayMs = getRetryDelayMs({

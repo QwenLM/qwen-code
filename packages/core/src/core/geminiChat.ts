@@ -437,63 +437,64 @@ export class GeminiChat {
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
-            if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
-              rateLimitRetryCount++;
-              const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
-                ...RATE_LIMIT_RETRY_OPTIONS,
-                error,
-              });
-              const message = parseAndFormatApiError(
-                error instanceof Error ? error.message : String(error),
-              );
+            if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
               const classification = classifyRetryError(error, {
                 authType: cgConfig?.authType,
               });
-              debugLogger.warn('Rate limit retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
+              // The classifier is observation-only here; stream retry control
+              // remains governed by isRateLimitError and the retry budget.
+              const diagnosticFields = {
                 classificationDecision: classification.decision,
                 errorKind: classification.kind,
                 classificationReason: classification.reason,
-                attempt: rateLimitRetryCount,
-                maxRetries: maxRateLimitRetries,
-                retryDelayMs: delayMs,
                 ...details,
-              });
-              const { promise: delayPromise, skip } = delay(
-                delayMs,
-                params.config?.abortSignal,
-              );
-              yield {
-                type: StreamEventType.RETRY,
-                retryInfo: {
-                  message,
+              };
+
+              if (rateLimitRetryCount >= maxRateLimitRetries) {
+                debugLogger.warn('Rate limit retry exhausted', {
+                  retryPath: 'stream',
+                  retryDecision: 'exhausted',
+                  attempts: rateLimitRetryCount,
+                  maxRetries: maxRateLimitRetries,
+                  ...diagnosticFields,
+                });
+              } else {
+                rateLimitRetryCount++;
+                const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+                  ...RATE_LIMIT_RETRY_OPTIONS,
+                  error,
+                });
+                const message = parseAndFormatApiError(
+                  error instanceof Error ? error.message : String(error),
+                );
+                debugLogger.warn('Rate limit retry scheduled', {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
                   attempt: rateLimitRetryCount,
                   maxRetries: maxRateLimitRetries,
+                  retryDelayMs: delayMs,
+                  ...diagnosticFields,
+                });
+                const { promise: delayPromise, skip } = delay(
                   delayMs,
-                  skipDelay: skip,
-                },
-              };
-              // Don't count rate-limit retries against the content retry limit
-              attempt--;
-              await delayPromise;
-              continue;
-            }
-            if (isRateLimit) {
-              const classification = classifyRetryError(error, {
-                authType: cgConfig?.authType,
-              });
-              debugLogger.warn('Rate limit retry exhausted', {
-                retryPath: 'stream',
-                retryDecision: 'exhausted',
-                classificationDecision: classification.decision,
-                errorKind: classification.kind,
-                classificationReason: classification.reason,
-                attempts: rateLimitRetryCount,
-                maxRetries: maxRateLimitRetries,
-                ...getRateLimitErrorDetails(error),
-              });
+                  params.config?.abortSignal,
+                );
+                yield {
+                  type: StreamEventType.RETRY,
+                  retryInfo: {
+                    message,
+                    attempt: rateLimitRetryCount,
+                    maxRetries: maxRateLimitRetries,
+                    delayMs,
+                    skipDelay: skip,
+                  },
+                };
+                // Don't count rate-limit retries against the content retry limit
+                attempt--;
+                await delayPromise;
+                continue;
+              }
             }
 
             // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):

@@ -5,7 +5,7 @@
  */
 
 import { AuthType } from '../core/contentGenerator.js';
-import { getErrorStatus, isAbortError } from './errors.js';
+import { isAbortError } from './errors.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { getRateLimitErrorDetails, isRateLimitError } from './rateLimit.js';
 
@@ -49,7 +49,7 @@ export function classifyRetryError(
   error: unknown,
   context: RetryErrorClassificationContext = {},
 ): RetryErrorClassification {
-  if (isAbortError(error)) {
+  if (isRetryAbortError(error)) {
     return {
       kind: 'abort',
       decision: 'fail-fast',
@@ -58,7 +58,7 @@ export function classifyRetryError(
   }
 
   const details = getRateLimitErrorDetails(error);
-  const statusCode = getErrorStatus(error);
+  const statusCode = details.statusCode;
   const providerFields = getProviderFields(error);
   const providerCode = details.providerCode ?? providerFields.providerCode;
   const providerMessage =
@@ -83,7 +83,7 @@ export function classifyRetryError(
     };
   }
 
-  if (isAllocatedQuotaExceeded(providerCode, providerMessage)) {
+  if (isAllocatedQuotaExceeded(providerCode)) {
     return {
       kind: 'provider-business',
       decision: 'fail-fast',
@@ -173,6 +173,14 @@ export function classifyRetryError(
   };
 }
 
+function isRetryAbortError(error: unknown): boolean {
+  if (isAbortError(error)) {
+    return true;
+  }
+
+  return error instanceof Error && error.name === 'CanceledError';
+}
+
 function getTransportCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null) {
     return undefined;
@@ -214,17 +222,8 @@ const TRANSPORT_ERROR_CODES = new Set([
   'UND_ERR_SOCKET',
 ]);
 
-function isAllocatedQuotaExceeded(
-  providerCode?: string,
-  providerMessage?: string,
-): boolean {
-  if (providerCode === 'Throttling.AllocationQuota') {
-    return true;
-  }
-
-  return (
-    providerMessage?.toLowerCase().includes('allocated quota exceeded') ?? false
-  );
+function isAllocatedQuotaExceeded(providerCode?: string): boolean {
+  return providerCode === 'Throttling.AllocationQuota';
 }
 
 interface ProviderFields {
@@ -235,6 +234,10 @@ interface ProviderFields {
 
 function getProviderFields(error: unknown): ProviderFields {
   if (typeof error !== 'object' || error === null) {
+    return {};
+  }
+
+  if (error instanceof Error) {
     return {};
   }
 

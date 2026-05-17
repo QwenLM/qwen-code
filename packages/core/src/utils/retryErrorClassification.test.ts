@@ -91,6 +91,16 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('does not treat allocation quota text without the structured provider code as fail-fast', () => {
+    expect(
+      classifyRetryError(new Error('previously allocated quota exceeded')),
+    ).toMatchObject({
+      kind: 'unknown',
+      decision: 'unknown',
+      reason: 'unclassified',
+    });
+  });
+
   it('marks Qwen OAuth free-tier quota errors as fail-fast', () => {
     expect(
       classifyRetryError(
@@ -122,6 +132,26 @@ describe('classifyRetryError', () => {
       decision: 'fail-fast',
       statusCode: 400,
       providerCode: 'invalid_request_error',
+      reason: 'client-error',
+    });
+  });
+
+  it('pins 408 and 425 as current client-error fail-fast classifications', () => {
+    expect(
+      classifyRetryError({ status: 408, message: 'Request Timeout' }),
+    ).toMatchObject({
+      kind: 'http',
+      decision: 'fail-fast',
+      statusCode: 408,
+      reason: 'client-error',
+    });
+
+    expect(
+      classifyRetryError({ status: 425, message: 'Too Early' }),
+    ).toMatchObject({
+      kind: 'http',
+      decision: 'fail-fast',
+      statusCode: 425,
       reason: 'client-error',
     });
   });
@@ -216,23 +246,67 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('classifies transport codes from Error causes as retryable', () => {
+    const error = new Error('request failed', {
+      cause: Object.assign(new Error('socket reset'), {
+        code: 'ECONNRESET',
+      }),
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'transport',
+      decision: 'retryable',
+      transportCode: 'ECONNRESET',
+      reason: 'transport-error',
+    });
+  });
+
   it('does not treat generic SDK error codes as transport retry errors', () => {
-    expect(
-      classifyRetryError(
-        Object.assign(new Error('invalid request'), {
-          code: 'ERR_BAD_REQUEST',
-        }),
-      ),
-    ).toMatchObject({
+    const classification = classifyRetryError(
+      Object.assign(new Error('invalid request'), {
+        code: 'ERR_BAD_REQUEST',
+      }),
+    );
+
+    expect(classification).toMatchObject({
       kind: 'unknown',
       decision: 'unknown',
       reason: 'unclassified',
     });
+    expect(classification).not.toHaveProperty('providerCode');
+    expect(classification).not.toHaveProperty('providerMessage');
+  });
+
+  it('does not copy unparsed SSE frames into providerMessage', () => {
+    const classification = classifyRetryError(
+      new Error('id:1\nevent:error\n:HTTP_STATUS/429\ndata:not-json'),
+    );
+
+    expect(classification).toMatchObject({
+      kind: 'sse-provider',
+      decision: 'retryable',
+      statusCode: 429,
+      reason: 'rate-limit',
+    });
+    expect(classification).not.toHaveProperty('providerMessage');
   });
 
   it('marks abort errors as fail-fast', () => {
     const error = Object.assign(new Error('The operation was aborted'), {
       name: 'AbortError',
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'abort',
+      decision: 'fail-fast',
+      reason: 'aborted',
+    });
+  });
+
+  it('marks axios-style canceled errors as fail-fast aborts', () => {
+    const error = Object.assign(new Error('canceled'), {
+      name: 'CanceledError',
+      code: 'ECONNABORTED',
     });
 
     expect(classifyRetryError(error)).toMatchObject({
