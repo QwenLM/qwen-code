@@ -12,6 +12,7 @@ import request from 'supertest';
 import { createServeApp } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
 import {
+  CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
   getRegisteredServeFeatures,
   getServeFeatures,
@@ -361,6 +362,47 @@ describe('createServeApp', () => {
       expect(
         getAdvertisedServeFeatures(undefined, {}),
       ).not.toContain('require_auth');
+    });
+
+    it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
+      // Iterate the Map so any future conditional tag added here whose
+      // predicate isn't honored by `getAdvertisedServeFeatures` fails
+      // the suite — the test is the adoption-of-record for the
+      // "conditional features advertise via predicate" contract,
+      // replacing the previous hand-maintained Set + branch shape that
+      // could fail-CLOSED silently.
+      //
+      // For each entry: synthesize toggles that the predicate accepts
+      // and toggles that it rejects. The predicate must be deterministic
+      // and only read from `AdvertiseFeatureToggles` fields (no global
+      // state, no Date.now() etc.) — that's the contract any future
+      // entry must keep. We also assert the inverse: with toggles {} the
+      // predicate must be false, otherwise the tag would fail the
+      // "default-off" property baseline tags get for free.
+      for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'require_auth') {
+          expect(predicate({ requireAuth: true })).toBe(true);
+          expect(predicate({ requireAuth: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(
+            getAdvertisedServeFeatures(undefined, {}),
+          ).not.toContain(feature);
+          continue;
+        }
+        // Future conditional tag. Authors must add a branch above with
+        // the toggle field that drives this predicate. Failing here is
+        // intentional: it forces the new conditional tag to ship with a
+        // matching test rather than relying on the Map shape alone.
+        throw new Error(
+          `CONDITIONAL_SERVE_FEATURES added "${feature}" without an ` +
+            `assertion branch in this test — add one (synthesize toggles ` +
+            `the predicate accepts AND rejects) so drift insurance stays ` +
+            `enforced.`,
+        );
+      }
     });
 
     it('marks every current feature with its historical v1 origin', () => {

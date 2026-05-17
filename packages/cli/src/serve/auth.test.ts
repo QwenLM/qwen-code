@@ -101,4 +101,26 @@ describe('createMutationGate (#4175 PR 15)', () => {
     const b = gate({ strict: true });
     expect(a).toBe(b);
   });
+
+  it('caches both passthrough and strict denier across calls on no-token loopback (allocation symmetry, PR #4236 review #3254467193)', () => {
+    // Symmetric to the test above but for the no-token branch: with N
+    // strict routes in a Wave 4 route table, the denier must be cached
+    // too so we don't allocate N identical 401 closures. Identity
+    // checks anchor the cache; non-strict and strict gates yield
+    // distinct singletons (one passthrough, one denier).
+    const gate = createMutationGate({
+      tokenConfigured: false,
+      requireAuth: false,
+    });
+    const passA = gate();
+    const passB = gate({ strict: false });
+    const strictA = gate({ strict: true });
+    const strictB = gate({ strict: true });
+    expect(passA).toBe(passB);
+    expect(strictA).toBe(strictB);
+    // And the two singletons must be distinct — otherwise the gate
+    // would degenerate to a single shape and lose the "strict gates
+    // refuse" property.
+    expect(passA).not.toBe(strictA);
+  });
 });

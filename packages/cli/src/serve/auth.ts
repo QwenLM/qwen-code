@@ -252,24 +252,43 @@ export function createMutationGate(
   // No token configured (loopback developer default). Non-strict
   // routes preserve the legacy "open on loopback" behavior; strict
   // routes refuse with a structured 401 the SDK can surface.
-  return (opts: MutationGateOptions = {}): RequestHandler => {
-    if (!opts.strict) return passthrough;
-    return (_req: Request, res: Response) => {
-      // Only list remediations that work standalone. `--require-auth`
-      // is paired-required-with-a-token at boot (`runQwenServe.ts`
-      // refuses to start with the flag set but no token), so naming
-      // it as a third standalone option here would loop the operator
-      // into a different boot error. Configuring a token via
-      // `QWEN_SERVER_TOKEN` or `--token` IS the fix; the operator can
-      // decide separately whether to also harden loopback with
-      // `--require-auth`.
-      res.status(401).json({
-        error:
-          'This route requires the daemon to be configured with a bearer ' +
-          'token. Set QWEN_SERVER_TOKEN or pass --token to enable bearer ' +
-          'auth.',
-        code: 'token_required',
-      });
-    };
+  //
+  // Body-parser ordering (PR #4236 review #3254485915): the strict 401
+  // fires AFTER `express.json()` because the gate is per-route
+  // middleware, not app-level. On no-token loopback defaults a strict
+  // route therefore parses the request body before refusing it —
+  // bounded by `express.json({limit: '10mb'})` × `--max-connections`
+  // (256 default). Loopback-only attack surface, so the worst case is
+  // ~2.5 GB transient on a fully-saturated listener. The strict routes
+  // Wave 4 actually adds (memory writes / file edits / device-flow
+  // auth) carry small bodies in legitimate use, so the parsing-cost
+  // amplification isn't a production hot path. If a future strict
+  // route accepts large bodies, lift its gate to app-level (maintain a
+  // strict-path Set in `createServeApp` and check it before
+  // `express.json()`); tracked as a Wave 4 follow-up rather than
+  // re-architecting the helper here.
+  //
+  // Allocation symmetry (PR #4236 review #3254467193): cache the strict
+  // denier alongside `passthrough` so a route table with N strict
+  // routes doesn't allocate N identical closures. The auth.test.ts
+  // identity assertion anchors this — a future change that loses the
+  // cache is visible.
+  const strictDenier: RequestHandler = (_req: Request, res: Response) => {
+    // Only list remediations that work standalone. `--require-auth` is
+    // paired-required-with-a-token at boot (`runQwenServe.ts` refuses
+    // to start with the flag set but no token), so naming it as a
+    // third standalone option here would loop the operator into a
+    // different boot error. Configuring a token via `QWEN_SERVER_TOKEN`
+    // or `--token` IS the fix; the operator can decide separately
+    // whether to also harden loopback with `--require-auth`.
+    res.status(401).json({
+      error:
+        'This route requires the daemon to be configured with a bearer ' +
+        'token. Set QWEN_SERVER_TOKEN or pass --token to enable bearer ' +
+        'auth.',
+      code: 'token_required',
+    });
   };
+  return (opts: MutationGateOptions = {}): RequestHandler =>
+    opts.strict ? strictDenier : passthrough;
 }

@@ -54,29 +54,53 @@ export const SERVE_CAPABILITY_REGISTRY = {
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
 
 /**
+ * Per-deployment feature toggles surfaced through `/capabilities`.
+ *
+ * `requireAuth` controls whether the conditional `require_auth` tag is
+ * advertised. Other Wave 4 follow-ups can extend this object as more
+ * deployment-shape capability tags appear (e.g. `redact_errors`).
+ */
+export interface AdvertiseFeatureToggles {
+  requireAuth?: boolean;
+}
+
+/**
  * Subset of `ServeFeature` whose advertisement depends on runtime config
  * (currently just `require_auth`, which is announced only when the
- * daemon was started with `--require-auth`). Kept as a single source of
- * truth so `getAdvertisedServeFeatures` and the route layer stay in
- * agreement about which tags are baseline-on vs. opt-in.
+ * daemon was started with `--require-auth`). Each entry pairs the
+ * feature key with a predicate over `AdvertiseFeatureToggles` — the
+ * toggle decision lives next to the feature key, so adding a new
+ * conditional tag is **two coordinated changes** instead of four:
  *
- * **Drift insurance — required when adding a new conditional tag:**
  * 1. Register the tag in `SERVE_CAPABILITY_REGISTRY` above with its
  *    `since` protocol version (just like baseline tags).
- * 2. Add the same tag identifier to THIS set. Forgetting this step
- *    silently advertises the tag to every client regardless of operator
- *    opt-in, defeating the "tag presence = behavior is on" contract.
- * 3. Extend `AdvertiseFeatureToggles` with the matching boolean toggle.
- * 4. Add a branch in `getAdvertisedServeFeatures`'s
- *    `CONDITIONAL_SERVE_FEATURES.has(feature)` block to map the
- *    feature to its toggle field.
+ * 2. Add an entry to THIS Map mapping the tag to a toggle predicate
+ *    (extend `AdvertiseFeatureToggles` first if the predicate needs a
+ *    new field to read).
  *
- * When this set grows past one entry, fold steps 2-4 into a
- * `Map<ServeFeature, (toggles) => boolean>` so the toggle decision
- * lives in one place per feature instead of two.
+ * The previous `Set` + per-feature `if`-branch shape needed FOUR
+ * coordinated changes (registry, set, toggles interface, predicate
+ * branch) and silently fail-CLOSED when the branch was missed —
+ * fail-CLOSED is good, but invisible to the contributor adding the
+ * tag. The Map shape collapses the predicate-decision and the
+ * set-membership into one entry, so a future contributor either
+ * registers the predicate (advertised when toggle on) or doesn't
+ * register the tag in the Map at all (advertised unconditionally
+ * like baseline tags) — both are intentional, neither is a silent
+ * miss.
+ *
+ * Reviewed-through-failure: the
+ * `every conditional tag advertises when its toggle is on` test in
+ * `server.test.ts` iterates this Map's keys, so a future tag added
+ * here whose predicate isn't honored by `getAdvertisedServeFeatures`
+ * fails the suite — adoption-of-record for the Map shape rather than
+ * relying on a hand-maintained invariant.
  */
-export const CONDITIONAL_SERVE_FEATURES: ReadonlySet<ServeFeature> = new Set([
-  'require_auth',
+export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
+  ServeFeature,
+  (toggles: AdvertiseFeatureToggles) => boolean
+> = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
+  ['require_auth', (toggles) => toggles.requireAuth === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(
@@ -101,31 +125,19 @@ export function getRegisteredServeFeatures(): ServeFeature[] {
   return [...SERVE_FEATURES];
 }
 
-/**
- * Per-deployment feature toggles surfaced through `/capabilities`.
- *
- * `requireAuth` controls whether the conditional `require_auth` tag is
- * advertised. Other Wave 4 follow-ups can extend this object as more
- * deployment-shape capability tags appear (e.g. `redact_errors`).
- */
-export interface AdvertiseFeatureToggles {
-  requireAuth?: boolean;
-}
-
 export function getAdvertisedServeFeatures(
   protocolVersion: ServeProtocolVersion = SERVE_PROTOCOL_VERSION,
   toggles: AdvertiseFeatureToggles = {},
 ): ServeFeature[] {
   return SERVE_FEATURES.filter((feature) => {
     if (!isFeatureAvailableInProtocol(feature, protocolVersion)) return false;
-    // Conditional tags require an explicit toggle. Without this gate
-    // every daemon would advertise `require_auth` regardless of whether
-    // the operator opted in, breaking the "tag presence = behavior is
-    // on" contract clients depend on.
-    if (CONDITIONAL_SERVE_FEATURES.has(feature)) {
-      if (feature === 'require_auth') return toggles.requireAuth === true;
-      return false;
-    }
+    // Conditional tags route through the per-feature toggle predicate;
+    // baseline tags (no Map entry) advertise unconditionally. Without
+    // this gate every daemon would advertise the conditional tags
+    // regardless of operator opt-in, breaking the "tag presence =
+    // behavior is on" contract clients depend on.
+    const predicate = CONDITIONAL_SERVE_FEATURES.get(feature);
+    if (predicate !== undefined) return predicate(toggles);
     return true;
   });
 }

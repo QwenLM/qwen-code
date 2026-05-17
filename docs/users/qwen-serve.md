@@ -97,7 +97,7 @@ qwen serve --hostname 0.0.0.0 --port 4170
 
 Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request. `/health` is exempted **only on loopback binds** so k8s/Compose liveness probes inside the pod (where the daemon listens on `127.0.0.1`) don't need credentials. On non-loopback binds (`--hostname 0.0.0.0` etc.) `/health` requires the token like every other route — otherwise an attacker can probe arbitrary addresses to confirm the daemon's existence. Use `/capabilities` to verify your token is correct end-to-end (it always requires auth):
 
-> **Hardened loopback (`--require-auth`).** The default loopback no-token behavior is fine for a single-user laptop but unsafe on shared dev hosts, CI runners, or multi-tenant workstations where any local user can `curl 127.0.0.1:4170`. Pass `--require-auth` to make the bearer token mandatory on every route — including `/health` — even when bound to `127.0.0.1`. Boot fails without a token. Clients can detect the hardened mode via `caps.features.require_auth` and prompt the user for credentials up-front instead of speculatively trying requests:
+> **Hardened loopback (`--require-auth`).** The default loopback no-token behavior is fine for a single-user laptop but unsafe on shared dev hosts, CI runners, or multi-tenant workstations where any local user can `curl 127.0.0.1:4170`. Pass `--require-auth` to make the bearer token mandatory on every route — including `/health` and `/capabilities` — even when bound to `127.0.0.1`. Boot fails without a token. With the flag on, an **unauthenticated** client can't read `/capabilities` to discover that auth is required; the discovery surface is the 401 response body itself. Once authenticated, the `caps.features.require_auth` tag is a post-auth confirmation that the deployment is hardened (useful for audit / compliance UIs):
 >
 > ```bash
 > qwen serve --require-auth --token "$(openssl rand -hex 32)"
@@ -105,9 +105,8 @@ Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request. `
 > curl http://127.0.0.1:4170/health
 > # → 401
 > curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4170/capabilities | jq '.features | index("require_auth")'
-> # → 13   (or whatever index — non-null means the tag is present)
+> # → 13   (or whatever index — non-null after authenticating means the tag is present)
 > ```
-
 
 ```bash
 curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" http://your-host:4170/capabilities
