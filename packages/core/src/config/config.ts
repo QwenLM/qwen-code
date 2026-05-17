@@ -38,6 +38,7 @@ import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { FileHistoryService } from '../services/fileHistoryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
@@ -59,7 +60,7 @@ import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { LspClient } from '../lsp/types.js';
+import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -74,6 +75,7 @@ import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -488,6 +490,7 @@ export interface ConfigParameters {
     enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
+  fileCheckpointingEnabled?: boolean;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -593,6 +596,11 @@ export interface ConfigParameters {
    */
   disableAllHooks?: boolean;
   /**
+   * Maximum consecutive blocking Stop/SubagentStop hook decisions before the
+   * runtime overrides the hook loop and allows the turn to end.
+   */
+  stopHookBlockingCap?: number;
+  /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
    */
@@ -655,6 +663,11 @@ export interface ConfigInitializeOptions {
    * Required for SDK MCP server support in SDK mode.
    */
   sendSdkMcpMessage?: SendSdkMcpMessage;
+  /**
+   * Skip Gemini client chat initialization. Useful for bootstrap paths that
+   * need config services (hooks, tools, MCP) before a real session exists.
+   */
+  skipGeminiInitialization?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -719,6 +732,7 @@ export class Config {
   private mcpServers: Record<string, MCPServerConfig> | undefined;
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
+  private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
@@ -748,6 +762,8 @@ export class Config {
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
+  private readonly fileCheckpointingEnabled: boolean;
+  private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
@@ -813,6 +829,7 @@ export class Config {
   private readonly enableAutoSkill: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
   private readonly userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -904,6 +921,9 @@ export class Config {
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
     this.checkpointing = params.checkpointing ?? false;
+    this.fileCheckpointingEnabled =
+      params.fileCheckpointingEnabled ??
+      (!params.sdkMode && (params.interactive ?? false));
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
@@ -1015,6 +1035,9 @@ export class Config {
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    this.stopHookBlockingCap = resolveStopHookBlockingCap(
+      params.stopHookBlockingCap,
+    );
     // Store user and project hooks separately for proper source attribution
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
@@ -1266,8 +1289,12 @@ export class Config {
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
-    await this.geminiClient.initialize();
-    this.debugLogger.info('Gemini client initialized');
+    if (!options?.skipGeminiInitialization) {
+      await this.geminiClient.initialize();
+      this.debugLogger.info('Gemini client initialized');
+    } else {
+      this.debugLogger.info('Gemini client initialization skipped');
+    }
 
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
@@ -1718,6 +1745,7 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.fileHistoryService = undefined;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
@@ -2263,6 +2291,50 @@ export class Config {
     return this.lspClient;
   }
 
+  getLspStatusSnapshot(): LspStatusSnapshot {
+    if (!this.isLspEnabled()) {
+      return this.createLspStatusSnapshot(false);
+    }
+
+    const clientSnapshot = this.lspClient?.getStatusSnapshot?.();
+    if (clientSnapshot) {
+      return {
+        ...clientSnapshot,
+        enabled: true,
+        initializationError:
+          this.lspInitializationError ?? clientSnapshot.initializationError,
+      };
+    }
+
+    if (this.lspClient) {
+      return {
+        ...this.createLspStatusSnapshot(true),
+        statusUnavailable: true,
+      };
+    }
+
+    return this.createLspStatusSnapshot(
+      true,
+      this.lspInitializationError ?? 'LSP client is not initialized',
+    );
+  }
+
+  private createLspStatusSnapshot(
+    enabled: boolean,
+    initializationError?: string,
+  ): LspStatusSnapshot {
+    return {
+      enabled,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      ...(initializationError ? { initializationError } : {}),
+    };
+  }
+
   /**
    * Allows wiring an LSP client after Config construction but before initialize().
    */
@@ -2271,6 +2343,14 @@ export class Config {
       throw new Error('Cannot set LSP client after initialization');
     }
     this.lspClient = client;
+  }
+
+  setLspInitializationError(error: Error | string | undefined): void {
+    if (this.initialized) {
+      throw new Error('Cannot set LSP status after initialization');
+    }
+    this.lspInitializationError =
+      error instanceof Error ? error.message : error;
   }
 
   getSessionSubagents(): SubagentConfig[] {
@@ -2553,6 +2633,21 @@ export class Config {
     return this.checkpointing;
   }
 
+  getFileCheckpointingEnabled(): boolean {
+    return this.fileCheckpointingEnabled;
+  }
+
+  getFileHistoryService(): FileHistoryService {
+    if (!this.fileHistoryService) {
+      this.fileHistoryService = new FileHistoryService(
+        this.sessionId,
+        this.fileCheckpointingEnabled,
+        this.cwd,
+      );
+    }
+    return this.fileHistoryService;
+  }
+
   getProxy(): string | undefined {
     return normalizeProxyUrl(this.proxy);
   }
@@ -2611,8 +2706,13 @@ export class Config {
    * registered hooks for the given event name.  Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    return (
+      this.hookSystem?.hasHooksForEvent(
+        eventName,
+        sessionId ?? this.getSessionId(),
+      ) ?? false
+    );
   }
 
   /**
@@ -2620,6 +2720,10 @@ export class Config {
    */
   getDisableAllHooks(): boolean {
     return this.disableAllHooks || this.getBareMode();
+  }
+
+  getStopHookBlockingCap(): number {
+    return this.stopHookBlockingCap;
   }
 
   getManagedAutoMemoryEnabled(): boolean {
@@ -3017,9 +3121,7 @@ export class Config {
 
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
-  ): Promise<
-    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
-  > {
+  ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
     return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
       sessionId,
     );
@@ -3028,9 +3130,7 @@ export class Config {
   async resumeBackgroundAgent(
     agentId: string,
     initialMessage?: string,
-  ): Promise<
-    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
-  > {
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
       initialMessage,

@@ -25,6 +25,19 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
 import { ChatCompressionService } from '../services/chatCompressionService.js';
+import { SessionStartSource } from '../hooks/types.js';
+
+const { mockGetHeapStatistics } = vi.hoisted(() => ({
+  mockGetHeapStatistics: vi.fn(),
+}));
+
+vi.mock('node:v8', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:v8')>();
+  return {
+    ...actual,
+    getHeapStatistics: mockGetHeapStatistics,
+  };
+});
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -102,6 +115,10 @@ describe('GeminiChat', async () => {
 
     // Default mock implementation for tests that don't care about retry logic
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+    mockGetHeapStatistics.mockReturnValue({
+      used_heap_size: 0,
+      heap_size_limit: Number.MAX_SAFE_INTEGER,
+    });
     mockConfig = {
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
@@ -185,6 +202,110 @@ describe('GeminiChat', async () => {
     await vi.advanceTimersByTimeAsync(advanceByMs);
     return collecting;
   }
+
+  describe('system instruction helpers', () => {
+    it('replaces prior session-start context instead of appending indefinitely', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction('Base instruction');
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
+      );
+    });
+
+    it('preserves existing system prompt suffixes when replacing session-start context', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule',
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
+      );
+    });
+
+    it('preserves non-string systemInstruction content when applying session-start context', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {
+          systemInstruction: {
+            role: 'system',
+            parts: [{ text: 'Base content instruction' }],
+          },
+        },
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+      isolatedChat.setSessionStartContext('Ctx2');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base content instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
+      );
+    });
+
+    it('applies session-start context synchronously via applySessionStartContext', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction('Base instruction');
+
+      isolatedChat.applySessionStartContext(
+        '  Sync ctx  ',
+        SessionStartSource.Startup,
+      );
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
+        'Base instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nSync ctx\n</qwen:session-start-context>',
+      );
+    });
+
+    it('does not strip legitimate content that only resembles the old plain-text marker', () => {
+      const isolatedChat = new GeminiChat(
+        mockConfig,
+        {},
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      isolatedChat.setSystemInstruction(
+        'Base instruction\n\n---\n\nSessionStart additional context:\nLegitimate content',
+      );
+
+      isolatedChat.setSessionStartContext('Ctx1');
+
+      expect(isolatedChat['generationConfig'].systemInstruction).toContain(
+        'Legitimate content',
+      );
+      expect(isolatedChat['generationConfig'].systemInstruction).toContain(
+        '<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx1\n</qwen:session-start-context>',
+      );
+    });
+  });
 
   describe('sendMessageStream', () => {
     it('should succeed if a tool call is followed by an empty part', async () => {
@@ -1779,6 +1900,51 @@ describe('GeminiChat', async () => {
       chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
       chat.addHistory({ role: 'user', parts: [{ text: 'c' }] });
       expect(chat.getHistoryLength()).toBe(chat.getHistory().length);
+    });
+  });
+
+  describe('getHistoryTail', () => {
+    it('returns only the requested recent entries as a deep copy', () => {
+      const oldContent: Content = { role: 'user', parts: [{ text: 'old' }] };
+      const recentContent: Content = {
+        role: 'model',
+        parts: [{ text: 'recent' }],
+      };
+      chat.addHistory(oldContent);
+      chat.addHistory(recentContent);
+
+      const tail = chat.getHistoryTail(1);
+
+      expect(tail).toEqual([recentContent]);
+      expect(tail[0]).not.toBe(recentContent);
+      tail[0]!.parts![0]!.text = 'mutated';
+      expect(chat.getHistory()[1]!.parts![0]!.text).toBe('recent');
+    });
+
+    it('returns an empty tail for non-positive counts', () => {
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      expect(chat.getHistoryTail(0)).toEqual([]);
+      expect(chat.getHistoryTail(-1)).toEqual([]);
+    });
+  });
+
+  describe('getLastHistoryEntry', () => {
+    it('returns undefined for an empty history', () => {
+      expect(chat.getLastHistoryEntry()).toBeUndefined();
+    });
+
+    it('returns a defensive copy of only the last raw history entry', () => {
+      chat.addHistory({ role: 'user', parts: [{ text: 'a' }] });
+      chat.addHistory({ role: 'model', parts: [{ text: 'b' }] });
+
+      const last = chat.getLastHistoryEntry();
+      expect(last).toEqual({ role: 'model', parts: [{ text: 'b' }] });
+
+      last!.parts![0] = { text: 'mutated' };
+      expect(chat.getLastHistoryEntry()).toEqual({
+        role: 'model',
+        parts: [{ text: 'b' }],
+      });
     });
   });
 
@@ -3454,6 +3620,13 @@ describe('GeminiChat', async () => {
       return compressSpy;
     }
 
+    function mockHeapPressure(usedHeapSize: number, heapLimit = 1000) {
+      mockGetHeapStatistics.mockReturnValue({
+        used_heap_size: usedHeapSize,
+        heap_size_limit: heapLimit,
+      });
+    }
+
     it('replaces history and updates per-chat lastPromptTokenCount on COMPRESSED', async () => {
       mockCompressionService('compressed');
       chat.setHistory([userMsg('a'), modelMsg('b'), userMsg('c')]);
@@ -3517,9 +3690,136 @@ describe('GeminiChat', async () => {
 
     it('forwards force=true to the compression service', async () => {
       const compressSpy = mockCompressionService('compressed');
+      mockHeapPressure(900);
 
       await chat.tryCompress('p1', 'm1', true);
       expect(compressSpy.mock.calls[0][1].force).toBe(true);
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+      expect(mockGetHeapStatistics).not.toHaveBeenCalled();
+    });
+
+    it('uses heap pressure to bypass the token gate without manual force semantics', async () => {
+      const compressSpy = mockCompressionService('noop');
+      mockHeapPressure(750);
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        contextWindowSize: 1000,
+      });
+
+      await chat.tryCompress('p1', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(0);
+    });
+
+    it('does not bypass the token gate below the heap-pressure threshold', async () => {
+      const compressSpy = mockCompressionService('noop');
+      mockHeapPressure(650);
+
+      await chat.tryCompress('p1', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+    });
+
+    it('does not let a failed heap-pressure attempt latch off later auto-compaction', async () => {
+      const compressSpy = mockCompressionService('failed-inflated');
+      mockHeapPressure(701);
+
+      const first = await chat.tryCompress('p1', 'm1');
+      expect(first.compressionStatus).toBe(
+        CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+      );
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+
+      compressSpy.mockClear();
+      compressSpy.mockResolvedValue({
+        newHistory: null,
+        info: {
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.NOOP,
+        },
+      });
+      mockHeapPressure(0);
+
+      await chat.tryCompress('p2', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+      expect(compressSpy.mock.calls[0][1].hasFailedCompressionAttempt).toBe(
+        false,
+      );
+    });
+
+    it('backs off repeated heap-pressure bypasses after a heap-triggered failure', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-16T00:00:00Z'));
+      try {
+        const compressSpy = mockCompressionService('failed-inflated');
+        mockHeapPressure(800);
+
+        await chat.tryCompress('p1', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+
+        compressSpy.mockClear();
+        compressSpy.mockResolvedValue({
+          newHistory: null,
+          info: {
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+
+        await chat.tryCompress('p2', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+
+        vi.setSystemTime(new Date('2026-05-16T00:00:31Z'));
+        compressSpy.mockClear();
+
+        await chat.tryCompress('p3', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('backs off repeated heap-pressure bypasses after a heap-triggered NOOP', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date('2026-05-16T00:00:00Z'));
+      try {
+        const compressSpy = mockCompressionService('noop');
+        mockHeapPressure(800);
+
+        await chat.tryCompress('p1', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+
+        compressSpy.mockClear();
+
+        await chat.tryCompress('p2', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
+
+        vi.setSystemTime(new Date('2026-05-16T00:00:31Z'));
+        compressSpy.mockClear();
+
+        await chat.tryCompress('p3', 'm1');
+        expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('falls back to token-threshold behavior if heap statistics are unavailable', async () => {
+      const compressSpy = mockCompressionService('noop');
+      mockGetHeapStatistics.mockImplementation(() => {
+        throw new Error('heap stats unavailable');
+      });
+
+      await chat.tryCompress('p1', 'm1');
+
+      expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
     });
   });
 });

@@ -7,7 +7,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BundledSkillLoader } from './BundledSkillLoader.js';
 import { CommandKind } from '../ui/commands/types.js';
-import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
+import {
+  buildSkillLlmContent,
+  type Config,
+  type SkillConfig,
+} from '@qwen-code/qwen-code-core';
 
 function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
   return {
@@ -18,6 +22,10 @@ function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
     body: 'You are an expert code reviewer.',
     ...overrides,
   };
+}
+
+function makeSkillPrompt(body: string): string {
+  return buildSkillLlmContent('/bundled/review', body);
 }
 
 describe('BundledSkillLoader', () => {
@@ -108,7 +116,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'You are an expert code reviewer.' }],
+      content: [{ text: makeSkillPrompt('You are an expert code reviewer.') }],
     });
   });
 
@@ -125,7 +133,11 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'You are an expert code reviewer.\n\n/review 123' }],
+      content: [
+        {
+          text: `${makeSkillPrompt('You are an expert code reviewer.')}\n\n/review 123`,
+        },
+      ],
     });
   });
 
@@ -172,7 +184,9 @@ describe('BundledSkillLoader', () => {
       type: 'submit_prompt',
       content: [
         {
-          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder via Qwen Code',
+          text: makeSkillPrompt(
+            'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder via Qwen Code',
+          ),
         },
       ],
     });
@@ -194,7 +208,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by ' }],
+      content: [{ text: makeSkillPrompt('Review by ') }],
     });
   });
 
@@ -218,7 +232,7 @@ describe('BundledSkillLoader', () => {
       type: 'submit_prompt',
       content: [
         {
-          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder\n\n/review 123',
+          text: `${makeSkillPrompt('YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder')}\n\n/review 123`,
         },
       ],
     });
@@ -240,7 +254,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by ' }],
+      content: [{ text: makeSkillPrompt('Review by ') }],
     });
   });
 
@@ -257,7 +271,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'No template here' }],
+      content: [{ text: makeSkillPrompt('No template here') }],
     });
   });
 

@@ -71,6 +71,17 @@ beforeAll(async () => {
       TOKEN,
       '--hostname',
       '127.0.0.1',
+      // Per #3803 §02 (1 daemon = 1 workspace), pin the bound
+      // workspace so every `createOrAttachSession({ workspaceCwd:
+      // REPO_ROOT })` below matches. Without this the daemon inherits
+      // the test runner's cwd (CI / IDE-launcher / direct vitest
+      // invocations all differ) and every session create returns
+      // 400 workspace_mismatch — the SSE / permission / Last-Event-ID
+      // tests below would all silently 404 once `SKIP_LLM_TESTS` is
+      // unset. Same fix the sibling routes test received earlier in
+      // this PR — missed in this file in the original §02 pass.
+      '--workspace',
+      REPO_ROOT,
     ],
     { stdio: ['ignore', 'pipe', 'pipe'] },
   );

@@ -23,12 +23,14 @@ import {
 import type {
   CancelNotification,
   Client,
+  LoadSessionResponse,
   PromptRequest,
   PromptResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
+  ResumeSessionResponse,
   SessionNotification,
   SetSessionModelRequest,
   SetSessionModelResponse,
@@ -40,12 +42,18 @@ import type {
 /**
  * Stage 1 HTTP→ACP bridge.
  *
- * Per design §08 (Roadmap, Stage 1) and the issue body's Caveat:
- *   - One `qwen --acp` child PER WORKSPACE; multiple sessions on the same
- *     workspace multiplex onto that child via `connection.newSession()`
- *     (the agent's native `sessions: Map<string, Session>` — see
- *     `acp-integration/acpAgent.ts:194`). Sessions share the child's
- *     process / OAuth state / `FileReadCache` / hierarchy-memory parse.
+ * Per #3803 §02 (architectural revision) and design §08 (Roadmap, Stage 1):
+ *   - **1 daemon = 1 workspace**: every bridge instance is bound to a
+ *     single canonical workspace path at construction
+ *     (`BridgeOptions.boundWorkspace`). All `spawnOrAttach` calls must
+ *     target that workspace; cross-workspace requests throw
+ *     `WorkspaceMismatchError`. Multi-workspace deployments use multiple
+ *     daemon processes (one per workspace, supervised externally).
+ *   - One `qwen --acp` child total; multiple sessions multiplex onto it
+ *     via `connection.newSession()` (the agent's native
+ *     `sessions: Map<string, Session>` — see `acp-integration/acpAgent.ts:194`).
+ *     Sessions share the child's process / OAuth state / `FileReadCache` /
+ *     hierarchy-memory parse.
  *   - HTTP request bodies are forwarded as ACP NDJSON over the child's stdin.
  *   - Child stdout NDJSON notifications publish onto each session's
  *     `EventBus`; HTTP SSE subscribers (`GET /session/:id/events`) drain
@@ -54,10 +62,6 @@ import type {
  *     bridge (FIFO; honors ACP's "one active prompt per session" invariant).
  *     Different sessions on the same channel can prompt concurrently —
  *     the ACP layer demultiplexes by sessionId.
- *   - Cross-workspace channel sharing is intentionally NOT done. Different
- *     workspaces have different `loadSettings(cwd)` state; one child would
- *     step on the previous workspace's settings. One channel per workspace
- *     is the safe scope.
  *
  * Stage 2 replaces the spawn step with an in-process call into core's
  * ACP-equivalent API. The `HttpAcpBridge` interface stays the same so HTTP
@@ -69,6 +73,28 @@ export interface BridgeSpawnRequest {
   workspaceCwd: string;
   /** Optional explicit model service id; falls back to settings default. */
   modelServiceId?: string;
+  /**
+   * Optional echo of a daemon-issued client id from a previous attach to the
+   * same live session. Unknown ids are ignored on create/attach and replaced
+   * with a freshly stamped id.
+   */
+  clientId?: string;
+  /**
+   * Per-request override for `sessionScope`. When set, takes precedence
+   * over the bridge-wide default (`BridgeOptions.sessionScope`, which
+   * direct embeds may set at construction time; the production daemon
+   * has no CLI flag for it today and currently always uses `'single'`).
+   * When omitted, the bridge-wide default applies — preserving exact
+   * pre-#4175-PR-5 behavior for any caller that doesn't set the field.
+   *
+   * Resolves the FIXME at `BridgeOptions.sessionScope` (#3803 — VSCode
+   * needing per-window isolation against a daemon defaulting to
+   * `'single'`) and unblocks the baseline harness from honestly
+   * measuring per-session cost (the harness in
+   * `qwen-serve-baseline.test.ts` notes it cannot surface the P1 MCP
+   * N×M amplification under the shared default).
+   */
+  sessionScope?: 'single' | 'thread';
 }
 
 export interface BridgeSession {
@@ -76,6 +102,28 @@ export interface BridgeSession {
   workspaceCwd: string;
   /** True if this attach reused an existing session under `sessionScope: 'single'`. */
   attached: boolean;
+  /**
+   * Opaque daemon-issued id for the attaching HTTP client. Subsequent
+   * session-scoped requests may echo it so daemon events can identify the
+   * initiating client without trusting request bodies.
+   */
+  clientId?: string;
+}
+
+export interface BridgeRestoreSessionRequest {
+  /** Session id to restore through ACP `session/load` or `session/resume`. */
+  sessionId: string;
+  /** Absolute path to the workspace root the child inherits as cwd. */
+  workspaceCwd: string;
+  /** Optional echo of a daemon-issued client id for this session. */
+  clientId?: string;
+}
+
+export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
+
+export interface BridgeRestoredSession extends BridgeSession {
+  /** ACP state returned by `session/load` / `session/resume`. */
+  state: BridgeSessionState;
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -84,12 +132,33 @@ export interface BridgeSessionSummary {
   workspaceCwd: string;
 }
 
+export interface BridgeClientRequestContext {
+  /** Daemon-issued client id echoed through the HTTP transport header. */
+  clientId?: string;
+}
+
 export interface HttpAcpBridge {
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
    * existing session for the same workspace.
    */
   spawnOrAttach(req: BridgeSpawnRequest): Promise<BridgeSession>;
+
+  /**
+   * Load an existing persisted session and replay its history through
+   * session_update notifications. Returns `attached: true` when the requested
+   * session is already live in this daemon.
+   */
+  loadSession(req: BridgeRestoreSessionRequest): Promise<BridgeRestoredSession>;
+
+  /**
+   * Resume an existing persisted session without requesting history replay.
+   * Returns `attached: true` when the requested session is already live in
+   * this daemon.
+   */
+  resumeSession(
+    req: BridgeRestoreSessionRequest,
+  ): Promise<BridgeRestoredSession>;
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same
@@ -107,6 +176,7 @@ export interface HttpAcpBridge {
     sessionId: string,
     req: PromptRequest,
     signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
   ): Promise<PromptResponse>;
 
   /**
@@ -115,7 +185,11 @@ export interface HttpAcpBridge {
    * active `prompt()` with a `cancelled` stop reason. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
-  cancelSession(sessionId: string, req?: CancelNotification): Promise<void>;
+  cancelSession(
+    sessionId: string,
+    req?: CancelNotification,
+    context?: BridgeClientRequestContext,
+  ): Promise<void>;
 
   /**
    * Subscribe to the session's event stream. Returns an AsyncIterable that
@@ -136,6 +210,7 @@ export interface HttpAcpBridge {
   respondToPermission(
     requestId: string,
     response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
   ): boolean;
 
   /**
@@ -154,6 +229,7 @@ export interface HttpAcpBridge {
   setSessionModel(
     sessionId: string,
     req: SetSessionModelRequest,
+    context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
 
   /**
@@ -191,9 +267,12 @@ export interface HttpAcpBridge {
    * spawn-owner's disconnect-reaper would never run again — even if
    * the attacher themselves disconnected (tanzhenxin issue 2). This
    * is the symmetric "I bumped, but my socket died so the bump is
-   * fictitious" cleanup.
+   * fictitious" cleanup. When `clientId` is provided, the daemon-issued
+   * identity reference acquired by that failed attach is released too;
+   * echoed ids are ref-counted so a failed reconnect does not revoke an
+   * older live owner of the same id.
    */
-  detachClient(sessionId: string): Promise<void>;
+  detachClient(sessionId: string, clientId?: string): Promise<void>;
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
@@ -221,10 +300,53 @@ export interface HttpAcpBridge {
  */
 export class SessionNotFoundError extends Error {
   readonly sessionId: string;
-  constructor(sessionId: string) {
-    super(`No session with id "${sessionId}"`);
+  constructor(sessionId: string, extra?: string) {
+    super(`No session with id "${sessionId}"` + (extra ? `. ${extra}` : ''));
     this.name = 'SessionNotFoundError';
     this.sessionId = sessionId;
+  }
+}
+
+export class RestoreInProgressError extends Error {
+  readonly sessionId: string;
+  readonly activeAction: 'load' | 'resume';
+  readonly requestedAction: 'load' | 'resume';
+
+  constructor(
+    sessionId: string,
+    activeAction: 'load' | 'resume',
+    requestedAction: 'load' | 'resume',
+  ) {
+    super(
+      `Session "${sessionId}" is already being restored via session/${activeAction}; retry session/${requestedAction} after it completes`,
+    );
+    this.name = 'RestoreInProgressError';
+    this.sessionId = sessionId;
+    this.activeAction = activeAction;
+    this.requestedAction = requestedAction;
+  }
+}
+
+/**
+ * Thrown by `spawnOrAttach` when `req.sessionScope` is set to a value
+ * outside the `'single' | 'thread'` enum. The HTTP route validates the
+ * body field at the boundary first (so HTTP callers get a typed
+ * `400 invalid_session_scope` before ever reaching the bridge); this
+ * class exists for direct callers — tests, embeds, future entry points
+ * — and so the route's catch-block can translate it back to the same
+ * 400 shape rather than the generic 500 every other thrown `Error`
+ * collapses to. Distinct type so routes can branch without
+ * text-matching the message.
+ */
+export class InvalidSessionScopeError extends Error {
+  readonly sessionScope: unknown;
+  constructor(sessionScope: unknown) {
+    super(
+      `Invalid sessionScope: ${JSON.stringify(sessionScope)}. ` +
+        `Expected 'single' or 'thread'.`,
+    );
+    this.name = 'InvalidSessionScopeError';
+    this.sessionScope = sessionScope;
   }
 }
 
@@ -243,6 +365,76 @@ export class SessionLimitExceededError extends Error {
     this.limit = limit;
   }
 }
+
+/**
+ * Thrown by `spawnOrAttach` when the requested `workspaceCwd` doesn't
+ * canonicalize to the daemon's bound workspace. Per #3803 §02 every
+ * bridge instance is bound to exactly one workspace; cross-workspace
+ * requests are rejected at the daemon boundary. The server route
+ * translates this to a 400 response with `code: 'workspace_mismatch'`
+ * and both paths in the body so clients can fall through to spawning
+ * their own daemon / routing to a different one via an orchestrator.
+ */
+export class WorkspaceMismatchError extends Error {
+  readonly bound: string;
+  readonly requested: string;
+  constructor(bound: string, requested: string) {
+    // Truncate `requested` to PATH_MAX so a malicious or buggy client
+    // can't amplify a multi-MB `cwd` body through this error. The
+    // constructor interpolates `requested` into `.message` TWICE, the
+    // route's `sendBridgeError` echoes it in stderr (now JSON.stringify
+    // -wrapped per the log-injection fix), and `res.json` echoes it in
+    // the 400 body — without truncation a ~10 MB cwd (right under the
+    // `express.json({limit: '10mb'})` cap) becomes ~20 MB message +
+    // ~10 MB stderr + ~30 MB JSON response per request, ×
+    // `maxConnections` (default 256). The route also caps `cwd.length`
+    // at this same limit upstream (POST /session); this is
+    // defense-in-depth for non-HTTP callers (tests, embeds, future
+    // entry points that throw the error directly).
+    const safeRequested =
+      requested.length > MAX_WORKSPACE_PATH_LENGTH
+        ? `${requested.slice(0, MAX_WORKSPACE_PATH_LENGTH)}…[truncated]`
+        : requested;
+    super(
+      `Workspace mismatch: daemon is bound to "${bound}" but ` +
+        `request asked for "${safeRequested}". Each \`qwen serve\` ` +
+        `daemon binds to exactly one workspace; start a separate ` +
+        `daemon for "${safeRequested}" (or route the request to one ` +
+        `via an orchestrator).`,
+    );
+    this.name = 'WorkspaceMismatchError';
+    this.bound = bound;
+    this.requested = safeRequested;
+  }
+}
+
+/**
+ * Thrown when an HTTP caller echoes a client id that this daemon did not
+ * issue for the addressed live session. Create/attach calls may receive a
+ * fresh id instead; state-changing session routes reject unknown ids so
+ * originator metadata stays daemon-stamped rather than caller-asserted.
+ */
+export class InvalidClientIdError extends Error {
+  readonly sessionId: string;
+  readonly clientId: string;
+  constructor(sessionId: string, clientId: string) {
+    super(`Client id "${clientId}" is not registered for session ${sessionId}`);
+    this.name = 'InvalidClientIdError';
+    this.sessionId = sessionId;
+    this.clientId = clientId;
+  }
+}
+
+/**
+ * PATH_MAX on Linux is 4096; macOS / BSD is 1024. We use the Linux
+ * value as a generous ceiling — anything bigger is either a
+ * malformed client request (memory amplification attack against the
+ * 400 / stderr / error-message echo paths) or a synthetic test
+ * input. The route's POST /session pre-check rejects bodies past
+ * this; `WorkspaceMismatchError` truncates for any caller that
+ * skips the pre-check.
+ */
+export const MAX_WORKSPACE_PATH_LENGTH = 4096;
 
 /**
  * One ACP NDJSON channel to a single agent. Tests inject a fake by replacing
@@ -265,8 +457,8 @@ export interface AcpChannel {
    * Resolves when the channel has terminated for any reason — planned
    * (`kill()` called) OR unexpected (child process crashed, stream closed).
    * The bridge subscribes to this so a SessionEntry whose underlying
-   * channel dies between requests is removed from `byWorkspace`/`byId`
-   * instead of lingering as a stuck session.
+   * channel dies between requests is removed from `byId` /
+   * `defaultEntry` instead of lingering as a stuck session.
    *
    * Resolves to `{ exitCode, signalCode }` when the spawn factory can
    * capture them (the standard `child.on('exit', code, signal)` path),
@@ -310,12 +502,11 @@ export interface BridgeOptions {
    * clients (live-collaboration default); `thread` gives each `spawnOrAttach`
    * call its own session for strict isolation.
    *
-   * FIXME(stage-1.5, chiga0 must-have 1):
-   * Today this is a daemon-wide setting — clients can't override per
-   * request. A VSCode extension that wants a private session per
-   * window can't ask for it against a daemon configured for `single`.
-   * Stage 1.5 should accept `sessionScope` on the `POST /session`
-   * body, treating the daemon-wide value as a hint not a hard rule.
+   * Daemon-wide default. Per-request callers can override via
+   * `BridgeSpawnRequest.sessionScope` — the override wins and the
+   * daemon-wide value acts only as the fallback when the request
+   * omits the field. See the `session_scope_override` capability on
+   * `/capabilities.features` for negotiation.
    * Reference:
    * https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427875644
    */
@@ -348,40 +539,99 @@ export interface BridgeOptions {
    * cap.
    */
   maxPendingPermissionsPerSession?: number;
+  /**
+   * Absolute, **already-canonical** path this daemon is bound to (per
+   * #3803 §02: 1 daemon = 1 workspace). `spawnOrAttach` calls whose
+   * `workspaceCwd` doesn't canonicalize to this same value throw
+   * `WorkspaceMismatchError` (route → 400 with code `workspace_mismatch`).
+   *
+   * **Caller contract**: pass the result of
+   * `canonicalizeWorkspace(path)`. `runQwenServe` does this at boot
+   * and threads the same canonical value into the bridge AND
+   * `createServeApp` (via `deps.boundWorkspace`) so all three —
+   * `/capabilities.workspaceCwd`, the `POST /session` cwd fallback,
+   * and this bridge's mismatch check — share one canonical form. The
+   * constructor only checks `path.isAbsolute`; it does NOT
+   * re-canonicalize (a redundant `realpathSync.native` could
+   * theoretically diverge from the runQwenServe canonicalize on
+   * NFS-transient / mid-rename filesystems, landing the bridge with
+   * one canonical form while `/capabilities` advertises another).
+   * Direct embeds / tests calling `createHttpAcpBridge` themselves
+   * MUST canonicalize before passing.
+   */
+  boundWorkspace: string;
 }
 
 /**
- * One `qwen --acp` child + the ACP connection on top of it, shared by
- * all SessionEntries whose workspace maps to this channel. Stage 1.5
- * multi-session work (per LaZzyMan / tanzhenxin reviews) leverages
- * the agent's native `sessions: Map<string, Session>` (see
- * `acp-integration/acpAgent.ts:194`) so multiple `newSession()` calls
- * on one channel get separate session ids while sharing the child's
- * process / OAuth / file-cache / hierarchy-memory parse.
+ * The single `qwen --acp` child + the ACP connection on top of it,
+ * shared by every SessionEntry in this daemon. Per #3803 §02 the
+ * bridge is bound to one workspace at construction, so there is at
+ * most one channel alive at any moment. Multiple sessions multiplex
+ * onto it via the agent's native `sessions: Map<string, Session>`
+ * (see `acp-integration/acpAgent.ts:194`), each `newSession()` call
+ * returning a distinct id while sharing the child's process / OAuth /
+ * file-cache / hierarchy-memory parse.
  *
- * Lifetime: created on first `spawnOrAttach` for a workspace, kept
- * alive while `sessionIds.size > 0`, and killed by `killSession` when
- * the last entry leaves OR by `channel.exited` when the child dies.
- * Cross-workspace channel sharing is intentionally NOT done in this
- * bridge — `acpAgent.ts:601 (this.settings = loadSettings(cwd))`
- * replaces the cached settings on each newSession call, so different
- * workspaces in one child would step on each other's settings. One
- * channel per workspace is the safe scope for Stage 1.5.
+ * Lifetime: created on first `spawnOrAttach`, kept alive while
+ * `sessionIds.size > 0`, and killed by `killSession` when the last
+ * entry leaves OR by `channel.exited` when the child dies.
  */
 interface ChannelInfo {
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Shared BridgeClient — its methods route ACP params by sessionId. */
   client: BridgeClient;
-  workspaceCwd: string;
+  // Note: pre-§02 a `workspaceCwd: string` field lived here so the
+  // `byWorkspaceChannel.get(entry.workspaceCwd)` lookup could route
+  // multi-workspace requests. Under "1 daemon = 1 workspace" the
+  // module-scope `boundWorkspace` is the single source of truth and
+  // every channel inherits it. Per-channel storage would suggest
+  // variance the model doesn't allow; dropping it makes the
+  // single-workspace invariant visible at the type level.
   /**
    * Live session ids multiplexed on this channel. Updated when
    * `doSpawn` registers a new session and when `killSession` /
-   * `channel.exited` removes one. When the set drops to empty AND no
-   * session is mid-attach, the channel is killed and removed from
-   * `byWorkspaceChannel`.
+   * `channel.exited` removes one. When the set drops to empty under
+   * `killSession`, the channel is marked `isDying = true` and its
+   * `channel.kill()` is awaited; `channelInfo` itself is left
+   * pointing at the dying channel until `channel.exited` fires (see
+   * BkUyD invariant on `isDying` below).
    */
   sessionIds: Set<string>;
+  /**
+   * Restore calls currently executing on this channel but not yet registered
+   * in `sessionIds`. Used to avoid killing the shared channel when one pending
+   * restore fails while another is still healthy.
+   */
+  pendingRestoreIds: Set<string>;
+  /**
+   * MUST be set to `true` synchronously by any teardown path BEFORE
+   * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
+   * as absent and spawns a fresh one — without this flag a concurrent
+   * `spawnOrAttach` arriving during the SIGTERM grace window (up to
+   * 10s) would attach to a transport about to close, landing the
+   * caller with a sessionId that 404s on every follow-up request.
+   *
+   * **Set-sites (5)** — any new teardown path MUST call into one of
+   * these or replicate the pattern:
+   *
+   *   1. `ensureChannel`: `initialize`-failure catch.
+   *   2. `ensureChannel`: late-shutdown re-check (shuttingDown flipped
+   *      during handshake).
+   *   3. `doSpawn`: newSession-failure on an empty channel
+   *      (sessionIds.size === 0).
+   *   4. `killSession`: last session leaving (sessionIds.size === 0
+   *      after the delete).
+   *   5. `shutdown`: bulk-mark every entry in `aliveChannels`.
+   *
+   * **BkUyD invariant (why we don't clear `channelInfo` here)**:
+   * `killAllSync` must still find the channel during the SIGTERM
+   * grace window to fire SIGKILL on `process.exit(1)`. `aliveChannels`
+   * holds the dying entry until `channel.exited` fires (OS-level
+   * reap); `isDying` is the "available-for-new-spawns" half of the
+   * two-bit (alive, dying) state.
+   */
+  isDying: boolean;
 }
 
 interface SessionEntry {
@@ -423,6 +673,18 @@ interface SessionEntry {
    */
   pendingPermissionIds: Set<string>;
   /**
+   * Daemon-issued client ids currently known for this live session. HTTP
+   * clients may echo one through `X-Qwen-Client-Id`; the bridge only treats
+   * it as trusted originator metadata if it appears in this set.
+   */
+  clientIds: Map<string, number>;
+  /**
+   * Originator for the prompt currently running on this session. ACP enforces
+   * one active prompt per session, and this bridge FIFO-serializes prompts, so
+   * inline session updates / permission requests can safely inherit this id.
+   */
+  activePromptOriginatorClientId?: string;
+  /**
    * Count of times `spawnOrAttach` has returned `attached: true` for
    * this entry — i.e. a second-or-subsequent client claimed this
    * session under `sessionScope: 'single'`. Used by the disconnect-
@@ -449,6 +711,14 @@ interface SessionEntry {
    * session.
    */
   spawnOwnerWantedKill: boolean;
+  /**
+   * ACP state captured at `session/load` / `session/resume` time so
+   * late attachers (existing-byId early-return + coalesced restore
+   * waiters) get the same payload the original restore caller did.
+   * `undefined` for sessions created via `doSpawn` — those have never
+   * had an ACP load/resume response, so attaches return `state: {}`.
+   */
+  restoreState?: BridgeSessionState;
 }
 
 interface PendingPermission {
@@ -524,6 +794,9 @@ class BridgeClient implements Client {
     private readonly resolveEntry: (
       sessionId?: string,
     ) => SessionEntry | undefined,
+    private readonly resolvePendingRestoreEvents: (
+      sessionId?: string,
+    ) => EventBus | undefined,
     private readonly registerPending: (pending: PendingPermission) => void,
     /**
      * Roll back a `registerPending` call when the subsequent publish
@@ -626,6 +899,9 @@ class BridgeClient implements Client {
           toolCall: params.toolCall,
           options: params.options,
         },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
       });
       if (!published) {
         // Roll back the pending registration and resolve cancelled.
@@ -657,8 +933,16 @@ class BridgeClient implements Client {
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
     const entry = this.resolveEntry(params.sessionId);
-    if (!entry) return;
-    entry.events.publish({ type: 'session_update', data: params });
+    const events =
+      entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
+    if (!events) return;
+    events.publish({
+      type: 'session_update',
+      data: params,
+      ...(entry?.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    });
   }
 
   async writeTextFile(
@@ -879,8 +1163,8 @@ const DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000;
 // `BridgeOptions.maxPendingPermissionsPerSession`.
 const DEFAULT_MAX_PENDING_PER_SESSION = 64;
 
-export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
-  const sessionScope = opts.sessionScope ?? 'single';
+export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
+  const defaultSessionScope = opts.sessionScope ?? 'single';
   // `undefined` → default 20 (intentionally tight per #3803 N≈50 cliff).
   // `0` → explicitly unlimited (operator opt-out).
   // `Infinity` → unlimited (programmatic opt-out — accepted as a
@@ -908,9 +1192,9 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   } else {
     maxSessions = opts.maxSessions;
   }
-  if (sessionScope !== 'single' && sessionScope !== 'thread') {
+  if (defaultSessionScope !== 'single' && defaultSessionScope !== 'thread') {
     throw new TypeError(
-      `Invalid sessionScope: ${JSON.stringify(sessionScope)}. ` +
+      `Invalid sessionScope: ${JSON.stringify(defaultSessionScope)}. ` +
         `Expected 'single' or 'thread'.`,
     );
   }
@@ -936,38 +1220,73 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     maxPendingRaw > 0 && Number.isFinite(maxPendingRaw)
       ? maxPendingRaw
       : Infinity;
+  // #3803 §02: the bound path is the canonical form `spawnOrAttach`
+  // compares incoming `workspaceCwd` against. The caller MUST pass an
+  // already-canonical value (via `canonicalizeWorkspace`). `runQwenServe`
+  // does this at boot and threads the same value into both
+  // `createHttpAcpBridge` and `createServeApp` (via
+  // `deps.boundWorkspace`); direct embeds / tests that construct the
+  // bridge themselves must call `canonicalizeWorkspace` first.
+  //
+  // Pre-fix the bridge re-canonicalized defensively here. The fix
+  // (deepseek-v4-pro review) drops the redundant `realpathSync.native`:
+  // (a) on case-insensitive / symlinked filesystems two independent
+  // `realpathSync.native` calls could theoretically disagree if the FS
+  // mutates between them (NFS transient, operator rename), landing
+  // the bridge with one canonical form while `runQwenServe` advertises
+  // another and `/capabilities` clients see `workspace_mismatch` on
+  // every POST; (b) it's a syscall removed from the boot path. The
+  // `path.isAbsolute` guard stays — it's a structural input check, not
+  // a syscall.
+  if (!path.isAbsolute(opts.boundWorkspace)) {
+    throw new TypeError(
+      `Invalid boundWorkspace: "${opts.boundWorkspace}". Must be an ` +
+        `absolute path.`,
+    );
+  }
+  const boundWorkspace = opts.boundWorkspace;
 
-  // Single-scope reuse keyed by canonical workspace path. Tracks the
-  // SessionEntry that a same-workspace attach should re-use. With
-  // Stage 1.5 multi-session per channel, this points at the FIRST
-  // session created for the workspace under `single` scope; under
-  // `thread` scope additional sessions on the same workspace don't
-  // overwrite this entry.
-  const byWorkspace = new Map<string, SessionEntry>();
-  // Stage 1.5 multi-session: one channel per workspace, N sessions
-  // multiplex on it via `connection.newSession({cwd, mcpServers})`.
-  // `byWorkspaceChannel.get(workspaceKey)` returns the shared channel
-  // for spawn-vs-reuse decisions in `doSpawn`. Channel is kept alive
-  // while `sessionIds.size > 0`; the last `killSession` (or the
-  // `channel.exited` cleanup) drops the entry from this map.
-  const byWorkspaceChannel = new Map<string, ChannelInfo>();
-  // tanzhenxin BkUyD: source of truth for "channels with potentially-
-  // alive child processes" — independent of `byWorkspaceChannel`,
-  // which `shutdown()` clears BEFORE awaiting per-child SIGTERM-
-  // grace kills. `killAllSync()` (the double-Ctrl+C force-exit
-  // path) iterates THIS set so a mid-shutdown second signal still
-  // sees the children that haven't yet finished their SIGTERM grace.
-  // Only removed when `channel.exited` fires (the OS-level "really
-  // dead" signal). The earlier design iterated `byWorkspaceChannel`
-  // and silently no-op'd during the shutdown await window.
-  const liveChannels = new Set<ChannelInfo>();
-  // Coalesces concurrent channel-spawn requests for the same workspace
-  // (regardless of sessionScope). Without this, two parallel callers
-  // would both `channelFactory(workspaceKey)` and one of the
-  // spawned children would never make it into `byWorkspaceChannel`,
-  // becoming a permanent orphan. Cleared in the `finally` of the
-  // creator regardless of outcome.
-  const inFlightChannelSpawns = new Map<string, Promise<ChannelInfo>>();
+  // #3803 §02 single-workspace model: the bridge hosts AT MOST one
+  // ATTACH-AVAILABLE channel and one default attach-target entry.
+  // Multi-session multiplexing happens through `channelInfo.sessionIds`;
+  // the `defaultEntry` slot is the FIRST session created (the one a
+  // same-workspace attach under `single` scope reuses). Thread-scope
+  // sessions add to `byId` but don't displace `defaultEntry`.
+  let defaultEntry: SessionEntry | undefined;
+  // `channelInfo` is the SINGLE attach-available channel. Cleared
+  // ONLY by the `channel.exited` handler (see below) when the OS
+  // reaps the underlying child process. Teardown initiators
+  // (`killSession` last-session-leaving, `doSpawn`-newSession-failure
+  // on an empty channel, `ensureChannel` init-failure /
+  // late-shutdown, `shutdown`) set `isDying = true` but LEAVE
+  // `channelInfo` pointing at the dying channel until OS reap — that
+  // asymmetry IS the BkUyD invariant. It lets `killAllSync` reach a
+  // mid-SIGTERM-grace channel through `aliveChannels` while a
+  // concurrent `spawnOrAttach` can already start spawning a fresh
+  // replacement (which overwrites `channelInfo` when its
+  // handshake completes). Race-aware code paths (`ensureChannel`,
+  // `killAllSync`) gate on `isDying` rather than presence; see
+  // `ChannelInfo.isDying` for the per-set-site rationale.
+  let channelInfo: ChannelInfo | undefined;
+  // tanzhenxin BkUyD: superset of `channelInfo` covering channels
+  // that are dying but not yet OS-reaped. `killSession` /
+  // `doSpawn`-newSession-failure / `shutdown` mark a channel as
+  // `isDying` and start its async kill; meanwhile a concurrent
+  // `spawnOrAttach` can spawn a FRESH channel and reassign
+  // `channelInfo`. Without this set, the dying channel becomes
+  // unreachable — a double-Ctrl+C arriving mid-grace would call
+  // `killAllSync()`, find only the fresh channel in `channelInfo`,
+  // force-kill it, and `process.exit(1)` would orphan the dying one
+  // whose SIGTERM hadn't yet completed. The set is the OS-level
+  // "still alive" source of truth: entries are added when a channel
+  // is created and removed when its `channel.exited` resolves.
+  // `killAllSync` iterates THIS set to fire SIGKILL on every alive
+  // child regardless of whether it's still the attach target.
+  const aliveChannels = new Set<ChannelInfo>();
+  // Coalesces a concurrent second `ensureChannel()` call onto the
+  // first one's spawn so we never create two children for the same
+  // daemon. Cleared in the `finally` of the creator.
+  let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
   // across sessions are infeasible in practice.
@@ -981,12 +1300,86 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   // (b) `server.close` rejecting new connections, during which a
   // late-arriving `POST /session` slips a fresh child past cleanup.
   let shuttingDown = false;
-  // Coalesces concurrent `spawnOrAttach` calls for the same workspace under
-  // single-scope. Without this, two parallel callers would both pass the
-  // `byWorkspace.get` check, both spawn, and one entry would be orphaned
-  // (in `byId` but not in `byWorkspace`) — violating the
-  // "at most one session per workspace" invariant.
+  // Coalesces concurrent `spawnOrAttach` calls under single-scope and
+  // tracks in-progress thread-scope spawns for shutdown to await.
+  // Single-scope uses the workspaceKey as the dedup key (at most one
+  // entry; concurrent callers pass the `defaultEntry` check together
+  // and coalesce here). Thread-scope uses `workspaceKey#uuid` so
+  // simultaneous calls don't collide while still being awaitable from
+  // `shutdown()`.
   const inFlightSpawns = new Map<string, Promise<BridgeSession>>();
+
+  interface InFlightRestore {
+    action: 'load' | 'resume';
+    promise: Promise<BridgeRestoredSession>;
+    /**
+     * Synchronous reservation slot for callers that coalesce onto this
+     * restore. Coalescers do `count++` BEFORE awaiting `promise` so the
+     * spawn-owner's disconnect-reaper (`killSession({ requireZeroAttaches:
+     * true })`) sees a non-zero `attachCount` on the freshly registered
+     * entry and skips the kill. The IIFE folds this counter into
+     * `entry.attachCount` when it calls `createSessionEntry`. BQ9tV
+     * race-guard equivalent for coalesced restore waiters.
+     */
+    coalesceState: { count: number };
+  }
+
+  // Coalesces concurrent explicit restore calls for the same session id.
+  // `session/load` replays history through SSE and `session/resume` restores
+  // context; running either twice for the same id at the same time can
+  // duplicate history frames or race two entries into `byId`.
+  const inFlightRestores = new Map<string, InFlightRestore>();
+  // `session/load` emits history replay as session_update notifications before
+  // the ACP request returns. Keep a temporary bus so those replay frames land in
+  // the ring, then promote the same bus into the registered SessionEntry.
+  const pendingRestoreEvents = new Map<string, EventBus>();
+
+  const createClientId = (): string => `client_${randomUUID()}`;
+
+  const registerClient = (
+    entry: SessionEntry,
+    requestedClientId?: string,
+  ): string => {
+    if (requestedClientId && entry.clientIds.has(requestedClientId)) {
+      entry.clientIds.set(
+        requestedClientId,
+        (entry.clientIds.get(requestedClientId) ?? 0) + 1,
+      );
+      return requestedClientId;
+    }
+    const clientId = createClientId();
+    entry.clientIds.set(clientId, 1);
+    return clientId;
+  };
+
+  const unregisterClient = (entry: SessionEntry, clientId?: string): void => {
+    if (clientId === undefined) return;
+    const count = entry.clientIds.get(clientId);
+    if (count === undefined) return;
+    if (count <= 1) {
+      entry.clientIds.delete(clientId);
+    } else {
+      entry.clientIds.set(clientId, count - 1);
+    }
+  };
+
+  const resolveTrustedClientId = (
+    entry: SessionEntry,
+    clientId?: string,
+  ): string | undefined => {
+    if (clientId === undefined) return undefined;
+    if (!entry.clientIds.has(clientId)) {
+      throw new InvalidClientIdError(entry.sessionId, clientId);
+    }
+    return clientId;
+  };
+
+  const resolveAnyTrustedClientId = (clientId: string): string => {
+    for (const entry of byId.values()) {
+      if (entry.clientIds.has(clientId)) return clientId;
+    }
+    throw new InvalidClientIdError('unknown', clientId);
+  };
 
   const registerPending = (p: PendingPermission) => {
     const entry = byId.get(p.sessionId);
@@ -1009,6 +1402,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   const resolvePending = (
     requestId: string,
     response: RequestPermissionResponse,
+    originatorClientId?: string,
   ): boolean => {
     const pending = pendingPermissions.get(requestId);
     if (!pending) return false;
@@ -1023,6 +1417,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         entry.events.publish({
           type: 'permission_resolved',
           data: { requestId, outcome: response.outcome },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch {
         /* bus closed during shutdown */
@@ -1033,28 +1428,27 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
   };
 
   /**
-   * Get-or-create the shared `qwen --acp` channel for a workspace.
-   * Stage 1.5 multi-session: one channel hosts N sessions via
-   * `connection.newSession()`. Concurrent callers coalesce through
-   * `inFlightChannelSpawns` so we never spawn two children for one
-   * workspace. The returned `ChannelInfo` is shared — caller adds
-   * their session id to `sessionIds` and uses `info.connection.newSession()`.
+   * Get-or-create the daemon's single `qwen --acp` channel (#3803 §02).
+   * N sessions multiplex onto it via `connection.newSession()`.
+   * Concurrent callers coalesce through `inFlightChannelSpawn` so we
+   * never spawn two children. The returned `ChannelInfo` is shared —
+   * the caller adds their session id to `sessionIds` and uses
+   * `info.connection.newSession()`.
    *
    * Wires up the one-and-only `channel.exited` cleanup on first
-   * creation so the late-arriving event tears down ALL sessions on
-   * the channel (vs. the previous 1-session-per-channel design where
-   * each entry registered its own listener).
+   * creation so the late-arriving event tears down ALL multiplexed
+   * sessions.
    */
-  async function getOrCreateChannel(
-    workspaceKey: string,
-  ): Promise<ChannelInfo> {
-    const existing = byWorkspaceChannel.get(workspaceKey);
-    if (existing) return existing;
-    const inFlight = inFlightChannelSpawns.get(workspaceKey);
-    if (inFlight) return await inFlight;
+  async function ensureChannel(): Promise<ChannelInfo> {
+    // Skip a channel that's marked dying — its underlying transport is
+    // mid-SIGTERM-or-already-dead and `connection.newSession()` on it
+    // would either hang or land the caller with a sessionId that
+    // immediately 404s on every follow-up.
+    if (channelInfo && !channelInfo.isDying) return channelInfo;
+    if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
-      const channel = await channelFactory(workspaceKey);
+      const channel = await channelFactory(boundWorkspace);
       const client = new BridgeClient(
         // BfFut: ACP today carries a sessionId on every per-session
         // notification / request, so the no-sessionId branch is
@@ -1064,16 +1458,17 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         // instead of throwing. Surface that ambiguity loudly.
         (sessionId) => {
           if (sessionId) return byId.get(sessionId);
-          const info = byWorkspaceChannel.get(workspaceKey);
-          if (info && info.sessionIds.size > 1) {
+          if (channelInfo && channelInfo.sessionIds.size > 1) {
             throw new Error(
               'BridgeClient: ACP call without sessionId on a ' +
                 'multi-session channel cannot be routed — workspace=' +
-                workspaceKey,
+                boundWorkspace,
             );
           }
           return undefined;
         },
+        (sessionId) =>
+          sessionId ? pendingRestoreEvents.get(sessionId) : undefined,
         registerPending,
         (rid) =>
           // Roll back a register-then-publish-failed pending so the agent
@@ -1084,57 +1479,94 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
-      try {
-        await withTimeout(
-          connection.initialize({
-            protocolVersion: PROTOCOL_VERSION,
-            clientCapabilities: {
-              fs: { readTextFile: true, writeTextFile: true },
-            },
-            clientInfo: { name: 'qwen-serve-bridge', version: '0' },
-          }),
-          initTimeoutMs,
-          'initialize',
-        );
-      } catch (err) {
-        await channel.kill().catch(() => {});
-        throw err;
-      }
-
-      // Late-shutdown re-check: if shutdown flipped during `initialize`,
-      // tear this channel down rather than leak past `process.exit(0)`.
-      if (shuttingDown) {
-        await channel.kill().catch(() => {});
-        throw new Error('HttpAcpBridge is shutting down');
-      }
-
+      // Add to `aliveChannels` + register the `channel.exited` handler
+      // BEFORE the `initialize` handshake (tanzhenxin cold-spawn-window
+      // finding): the agent child exists from the moment
+      // `channelFactory(boundWorkspace)` returns, so a `killAllSync()`
+      // during the handshake window (up to `initTimeoutMs`, default
+      // 10s) must find it to avoid orphaning on `process.exit(1)`.
+      // Init-failure / child-crash / late-shutdown all converge on
+      // the same cleanup path via the handler below.
+      // `channelInfo` (the attach target) is assigned only AFTER
+      // initialize succeeds so callers don't attach to a still-
+      // handshaking channel.
       const info: ChannelInfo = {
         channel,
         connection,
         client,
-        workspaceCwd: workspaceKey,
         sessionIds: new Set(),
+        pendingRestoreIds: new Set(),
+        isDying: false,
       };
-      byWorkspaceChannel.set(workspaceKey, info);
-      liveChannels.add(info);
+      aliveChannels.add(info);
+      // Belt-and-suspenders leak detection. The set is intentionally
+      // multi-entry to cover the `killSession`-then-`spawnOrAttach`
+      // overlap window (size 2 is legitimate: one dying + one fresh
+      // attach-target). Anything higher implies a `channel.exited`
+      // handler never fired for some prior channel — a real leak we'd
+      // otherwise notice only as gradually-growing RSS over hours.
+      // The warning surfaces it the moment it happens. Threshold is
+      // 2 because that's the design ceiling; bumping it requires
+      // updating both this guard and the comments around
+      // `aliveChannels` declaration.
+      if (aliveChannels.size > 2) {
+        writeStderrLine(
+          `qwen serve: WARNING aliveChannels.size=${aliveChannels.size} ` +
+            `(expected 1, max 2 during killSession-then-spawnOrAttach ` +
+            `overlap) — possible channel leak; check that prior channels' ` +
+            `channel.exited fired and the handler ran cleanup.`,
+        );
+      }
 
       // One-time channel.exited cleanup. The child dying takes ALL
       // multiplexed sessions with it — iterate `sessionIds` (snapshot
       // first to be safe against concurrent killSession during
       // iteration), publish `session_died` on each session's bus,
-      // remove from byId / byWorkspace / pending tables.
+      // remove from byId / defaultEntry / pending tables.
+      //
+      // Registered BEFORE the `initialize` await (tanzhenxin
+      // cold-spawn-window fix above) so init-failure / child-crash /
+      // late-shutdown all converge here. During handshake
+      // `sessionIds` is empty — the loop below no-ops, the stderr
+      // line still fires to tell operators "agent process gone
+      // during init", and `aliveChannels.delete(info)` clears the
+      // entry through the normal exit path.
+      //
+      // tanzhenxin BkUyD: drop from `aliveChannels` ONLY when the OS
+      // process is actually gone. Async kill paths (`killSession`
+      // reap, `shutdown()` await, `doSpawn`'s newSession-failure
+      // tear-down) mark `isDying = true` but leave the entry in
+      // `aliveChannels` until this handler fires, so the double-Ctrl+C
+      // `killAllSync` force-kill path still has a reference to fire
+      // SIGKILL against during the SIGTERM grace window — even if a
+      // concurrent `spawnOrAttach` has already reassigned
+      // `channelInfo` to a fresh channel.
       void channel.exited.then((exitInfo) => {
-        // tanzhenxin BkUyD: drop from `liveChannels` ONLY when the
-        // OS process is actually gone. Async kill paths
-        // (`killSession` reap, `shutdown()` await) remove from
-        // `byWorkspaceChannel` early but the child's SIGTERM grace
-        // can still be in-flight; the force-kill path needs the
-        // entry until `channel.exited` fires here.
-        liveChannels.delete(info);
-        const stillOurs = byWorkspaceChannel.get(workspaceKey) === info;
-        if (stillOurs) byWorkspaceChannel.delete(workspaceKey);
+        aliveChannels.delete(info);
+        if (channelInfo === info) channelInfo = undefined;
         const sessions = Array.from(info.sessionIds);
         info.sessionIds.clear();
+        // Operator breadcrumb for UNEXPECTED channel exits. Without
+        // this an agent crash (OOM / segfault) is invisible from the
+        // daemon log: each affected SSE subscriber sees a
+        // `session_died` frame and disconnects, the daemon's
+        // child-stderr forwarder emits whatever the child wrote before
+        // dying (often nothing on a SIGKILL / segfault), and operators
+        // can't tell from `qwen serve`'s own output that the agent
+        // process is gone.
+        //
+        // Suppressed during `shuttingDown` because the operator
+        // already saw "received SIGINT, draining..." from
+        // `runQwenServe`'s signal handler. The standalone
+        // killSession case (last session leaves, channel torn down
+        // but daemon stays up) still logs — there's no upstream
+        // context line in that flow, and the message confirms the
+        // cleanup actually ran.
+        if (!shuttingDown) {
+          writeStderrLine(
+            `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, ${sessions.length} session(s) torn down)`,
+          );
+        }
         for (const sid of sessions) {
           const sessEntry = byId.get(sid);
           if (!sessEntry) continue;
@@ -1154,33 +1586,83 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
             /* bus already closed */
           }
           byId.delete(sid);
-          if (byWorkspace.get(sessEntry.workspaceCwd) === sessEntry) {
-            byWorkspace.delete(sessEntry.workspaceCwd);
-          }
+          if (defaultEntry === sessEntry) defaultEntry = undefined;
           sessEntry.events.close();
         }
       });
 
+      // Initialize handshake. The channel is already in
+      // `aliveChannels` and the `channel.exited` handler above is
+      // registered, so failure paths (init throw, timeout, late
+      // shutdown) only need to mark dying + kill — the handler does
+      // the alive-set cleanup when the OS reaps the child.
+      try {
+        await withTimeout(
+          connection.initialize({
+            protocolVersion: PROTOCOL_VERSION,
+            clientCapabilities: {
+              fs: { readTextFile: true, writeTextFile: true },
+            },
+            clientInfo: { name: 'qwen-serve-bridge', version: '0' },
+          }),
+          initTimeoutMs,
+          'initialize',
+        );
+      } catch (err) {
+        // Mark the half-initialized channel as dying/unavailable, then
+        // kill it. Coalesced callers (`inFlightChannelSpawn` branch in
+        // `ensureChannel`) observe the same rejection on this promise
+        // and propagate it to their callers; the `inFlightSpawns`
+        // tracker is cleared in `spawnOrAttach`'s finally so a follow-
+        // up call retries cleanly. The `channel.exited` handler
+        // registered earlier removes `info` from `aliveChannels` once
+        // the OS reaps the child. `isDying` here is the cross-path
+        // invariant marker (matches `killSession` / `doSpawn`-
+        // newSession-failure / `shutdown`): "any channel in
+        // `aliveChannels` with `isDying === true` is mid-teardown."
+        info.isDying = true;
+        await channel.kill().catch(() => {});
+        throw err;
+      }
+
+      // Late-shutdown re-check: if shutdown flipped during the
+      // handshake, tear this channel down rather than leak past
+      // `process.exit(0)`. Same cleanup pattern as the init-failure
+      // path: mark dying + kill, let the exited handler reap.
+      if (shuttingDown) {
+        info.isDying = true;
+        await channel.kill().catch(() => {});
+        throw new Error('HttpAcpBridge is shutting down');
+      }
+
+      // Handshake succeeded — now publish the channel as the
+      // attach-available slot. `channelInfo` is assigned LAST so
+      // `ensureChannel`'s fast-path (`if (channelInfo && !.isDying)`)
+      // never returns a still-handshaking channel to a concurrent
+      // caller.
+      channelInfo = info;
       return info;
     })();
 
-    inFlightChannelSpawns.set(workspaceKey, promise);
+    inFlightChannelSpawn = promise;
     try {
       return await promise;
     } finally {
-      inFlightChannelSpawns.delete(workspaceKey);
+      inFlightChannelSpawn = undefined;
     }
   }
 
   async function doSpawn(
-    workspaceKey: string,
-    modelServiceId?: string,
+    modelServiceId: string | undefined,
+    effectiveScope: 'single' | 'thread',
+    requestedClientId?: string,
   ): Promise<BridgeSession> {
-    // Stage 1.5 multi-session: get-or-create the channel for this
-    // workspace, then call `connection.newSession()` on it. Sessions
-    // share the child's process / OAuth / file-cache / hierarchy-
-    // memory parse via the agent's `sessions: Map<string, Session>`
-    // (see `acp-integration/acpAgent.ts:194`).
+    // #3803 §02: get-or-create the daemon's single channel, then call
+    // `connection.newSession()` on it. Sessions share the child's
+    // process / OAuth / file-cache / hierarchy-memory parse via the
+    // agent's `sessions: Map<string, Session>` (see
+    // `acp-integration/acpAgent.ts:194`).
+    //
     // newSession on an established channel can fail (auth, config,
     // etc.) without the channel dying. We DON'T kill the channel on
     // newSession failure when OTHER sessions are still using it —
@@ -1188,17 +1670,17 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     //
     // BkwQA: when the failed newSession was the channel's ONLY
     // attempt (sessionIds.size === 0), the empty channel must NOT
-    // linger — it would sit in `byWorkspaceChannel` invisible to
+    // linger — it would stay set as `channelInfo` invisible to
     // `sessionCount` / `maxSessions` (both backed by `byId`), and
     // repeated failing creates would still find this channel via
-    // `getOrCreateChannel`, never spawning a fresh one. Tear down
-    // the empty channel so the next attempt gets a clean spawn.
-    const channelInfo = await getOrCreateChannel(workspaceKey);
+    // `ensureChannel`, never spawning a fresh one. Tear down the
+    // empty channel so the next attempt gets a clean spawn.
+    const ci = await ensureChannel();
     let newSessionResp: { sessionId: string };
     try {
       newSessionResp = await withTimeout(
-        channelInfo.connection.newSession({
-          cwd: workspaceKey,
+        ci.connection.newSession({
+          cwd: boundWorkspace,
           mcpServers: [],
         }),
         initTimeoutMs,
@@ -1208,11 +1690,15 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // Only reap when this newSession was the channel's first/only
       // attempt — a populated channel keeps running for its other
       // live sessions.
-      if (channelInfo.sessionIds.size === 0) {
-        if (byWorkspaceChannel.get(workspaceKey) === channelInfo) {
-          byWorkspaceChannel.delete(workspaceKey);
-        }
-        await channelInfo.channel.kill().catch(() => {
+      if (ci.sessionIds.size === 0) {
+        // Mark dying SYNCHRONOUSLY so a concurrent `spawnOrAttach`
+        // calling `ensureChannel()` between this point and the
+        // `channel.exited` cleanup spawns a fresh channel instead of
+        // attaching to the one we're about to tear down. `channelInfo`
+        // stays set until OS reap so `killAllSync` mid-SIGTERM still
+        // finds a target (tanzhenxin BkUyD invariant).
+        ci.isDying = true;
+        await ci.channel.kill().catch(() => {
           /* best-effort — channel.exited handler still runs */
         });
       }
@@ -1226,26 +1712,20 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       throw new Error('HttpAcpBridge is shutting down');
     }
 
-    const entry: SessionEntry = {
-      sessionId: newSessionResp.sessionId,
-      workspaceCwd: workspaceKey,
-      channel: channelInfo.channel,
-      connection: channelInfo.connection,
-      events: new EventBus(),
-      promptQueue: Promise.resolve(),
-      modelChangeQueue: Promise.resolve(),
-      pendingPermissionIds: new Set(),
-      attachCount: 0,
-      spawnOwnerWantedKill: false,
-    };
-    channelInfo.sessionIds.add(entry.sessionId);
-    byId.set(entry.sessionId, entry);
-    // `byWorkspace` is the single-scope attach lookup — only the
-    // FIRST session for a workspace wins this slot. Subsequent
-    // thread-scope sessions don't overwrite it.
-    if (!byWorkspace.has(workspaceKey)) {
-      byWorkspace.set(workspaceKey, entry);
-    }
+    const entry = createSessionEntry(
+      ci,
+      newSessionResp.sessionId,
+      boundWorkspace,
+    );
+    const clientId = registerClient(entry, requestedClientId);
+    // `defaultEntry` is the single-scope attach target — only sessions
+    // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
+    // never become the attach target, otherwise a later omitted-scope
+    // (or daemon-default-`single`) caller would attach with
+    // `attached: true` to what its sender promised was an isolated
+    // session — see #4175 PR 5 (mixed-scope leak found in review).
+    // Subsequent same-scope spawns also don't overwrite (first wins).
+    if (effectiveScope === 'single' && !defaultEntry) defaultEntry = entry;
 
     // ACP `newSession` doesn't take a model id; honor the caller's
     // `modelServiceId` via `unstable_setSessionModel`. See
@@ -1253,12 +1733,15 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     // transportClosedReject, publish model_switched on success,
     // model_switch_failed on failure, don't tear down the session).
     if (modelServiceId) {
-      await applyModelServiceId(entry, modelServiceId, initTimeoutMs).catch(
-        () => {
-          // Already published `model_switch_failed`; session stays
-          // operational on the agent's default model.
-        },
-      );
+      await applyModelServiceId(
+        entry,
+        modelServiceId,
+        initTimeoutMs,
+        clientId,
+      ).catch(() => {
+        // Already published `model_switch_failed`; session stays
+        // operational on the agent's default model.
+      });
     }
 
     // Bd1zc: re-check that the entry is still live before returning.
@@ -1278,6 +1761,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       sessionId: entry.sessionId,
       workspaceCwd: entry.workspaceCwd,
       attached: false,
+      clientId,
     };
   }
 
@@ -1299,6 +1783,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     entry: SessionEntry,
     modelId: string,
     timeoutMs: number,
+    originatorClientId?: string,
   ): Promise<void> {
     const conn = entry.connection as unknown as {
       unstable_setSessionModel(p: {
@@ -1328,6 +1813,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         entry.events.publish({
           type: 'model_switched',
           data: { sessionId: entry.sessionId, modelId },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
@@ -1340,6 +1826,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
             requestedModelId: modelId,
             error: err instanceof Error ? err.message : String(err),
           },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
         throw err;
       }
@@ -1411,6 +1898,319 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     return entry.transportClosedReject;
   };
 
+  const resolveWorkspaceKey = (workspaceCwd: string): string => {
+    if (!path.isAbsolute(workspaceCwd)) {
+      throw new Error(
+        `workspaceCwd must be an absolute path; got "${workspaceCwd}"`,
+      );
+    }
+    const workspaceKey =
+      workspaceCwd === boundWorkspace
+        ? boundWorkspace
+        : canonicalizeWorkspace(workspaceCwd);
+    if (workspaceKey !== boundWorkspace) {
+      throw new WorkspaceMismatchError(boundWorkspace, workspaceKey);
+    }
+    return workspaceKey;
+  };
+
+  const createSessionEntry = (
+    ci: ChannelInfo,
+    sessionId: string,
+    workspaceCwd: string,
+    events = new EventBus(),
+  ): SessionEntry => {
+    const entry: SessionEntry = {
+      sessionId,
+      workspaceCwd,
+      channel: ci.channel,
+      connection: ci.connection,
+      events,
+      promptQueue: Promise.resolve(),
+      modelChangeQueue: Promise.resolve(),
+      pendingPermissionIds: new Set(),
+      clientIds: new Map(),
+      attachCount: 0,
+      spawnOwnerWantedKill: false,
+    };
+    ci.sessionIds.add(entry.sessionId);
+    byId.set(entry.sessionId, entry);
+    return entry;
+  };
+
+  const isAcpSessionResourceNotFound = (
+    err: unknown,
+    sessionId: string,
+  ): boolean => {
+    if (!err || typeof err !== 'object') return false;
+    const maybe = err as {
+      code?: unknown;
+      data?: unknown;
+      message?: unknown;
+    };
+    if (maybe.code !== -32002) return false;
+    const expectedUri = `session:${sessionId}`;
+    if (
+      maybe.data &&
+      typeof maybe.data === 'object' &&
+      (maybe.data as { uri?: unknown }).uri === expectedUri
+    ) {
+      return true;
+    }
+    // Fallback for ACP servers that omit `data.uri` and embed the
+    // URI in the human-readable message. Use exact equality on the
+    // canonical "Resource not found: <uri>" form rather than
+    // `includes(expectedUri)` — a substring match would cause a
+    // sessionId of `"a"` to falsely match a message containing
+    // `"session:abc"`.
+    return (
+      typeof maybe.message === 'string' &&
+      maybe.message === `Resource not found: ${expectedUri}`
+    );
+  };
+
+  async function restoreSession(
+    action: 'load' | 'resume',
+    req: BridgeRestoreSessionRequest,
+  ): Promise<BridgeRestoredSession> {
+    if (shuttingDown) {
+      throw new Error('HttpAcpBridge is shutting down');
+    }
+    const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+
+    const existing = byId.get(req.sessionId);
+    if (existing) {
+      existing.attachCount++;
+      const clientId = registerClient(existing, req.clientId);
+      return {
+        sessionId: existing.sessionId,
+        workspaceCwd: existing.workspaceCwd,
+        attached: true,
+        clientId,
+        // Late attachers get the same ACP state the original restore
+        // caller saw; spawn-only sessions don't carry a state payload.
+        state: existing.restoreState ?? {},
+      };
+    }
+
+    const inFlight = inFlightRestores.get(req.sessionId);
+    if (inFlight) {
+      // Cross-action races BOTH ways must reject. A `resume` arriving
+      // while a `load` is in flight cannot quietly coalesce: the load
+      // is replaying full history through SSE on a shared EventBus,
+      // and `DaemonSessionClient.resume()` seeds `lastEventId: 0`,
+      // which means the resume client would receive every replayed
+      // frame — directly violating resume's "no UI replay" contract.
+      // The mirror direction (`load` onto `resume`) is rejected for
+      // the same reason: a load caller expects history but resume
+      // didn't replay any. Same-action coalescing is unaffected.
+      if (action !== inFlight.action) {
+        throw new RestoreInProgressError(
+          req.sessionId,
+          inFlight.action,
+          action,
+        );
+      }
+      // Reserve the attach SYNCHRONOUSLY before awaiting so the spawn
+      // owner's `requireZeroAttaches` disconnect-reaper observes our
+      // intent. The IIFE folds this counter into `entry.attachCount`
+      // at `createSessionEntry` time.
+      inFlight.coalesceState.count++;
+      let restored: BridgeRestoredSession;
+      try {
+        restored = await inFlight.promise;
+      } catch (err) {
+        // Roll back our reservation so a subsequent retry isn't
+        // permanently skewed if the in-flight restore failed.
+        inFlight.coalesceState.count--;
+        throw err;
+      }
+      const entry = byId.get(restored.sessionId);
+      if (!entry) {
+        // Restore owner's session got reaped before our await
+        // resumed (channel died mid-microtask, etc). Roll back the
+        // reservation too — there's no entry for it to live on.
+        inFlight.coalesceState.count--;
+        throw new SessionNotFoundError(
+          restored.sessionId,
+          'the agent child likely crashed during session restore — retry to restore the session',
+        );
+      }
+      // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
+      // already initialized it from coalesceState.count synchronously
+      // when the IIFE registered the entry. Spread `restored` so the
+      // ACP state propagates to coalesced waiters (BQ9tV-equivalent
+      // for restore waiter consistency).
+      return {
+        ...restored,
+        attached: true,
+        clientId: registerClient(entry, req.clientId),
+      };
+    }
+
+    if (
+      byId.size + inFlightSpawns.size + inFlightRestores.size >=
+      maxSessions
+    ) {
+      throw new SessionLimitExceededError(maxSessions);
+    }
+
+    const restoreEvents = new EventBus();
+    let registeredEntry: SessionEntry | undefined;
+    let ci: ChannelInfo | undefined;
+    // Live counter shared with coalesced waiters (see InFlightRestore
+    // doc comment). Mutated synchronously by the coalesce branch above
+    // and read once by the IIFE when seeding `entry.attachCount`.
+    const coalesceState = { count: 0 };
+    const promise = (async (): Promise<BridgeRestoredSession> => {
+      pendingRestoreEvents.set(req.sessionId, restoreEvents);
+      ci = await ensureChannel();
+      ci.pendingRestoreIds.add(req.sessionId);
+      // Restore is a low-frequency one-shot path, so we register a
+      // fresh `channel.exited` listener per call instead of going
+      // through `getTransportClosedReject` (which exists to keep
+      // sendPrompt's per-session listener count at 1 over the
+      // session's lifetime). The listener is bound to this restore's
+      // race only — once the race settles, no new awaits attach to
+      // it, so there's no listener leak across restores.
+      const transportClosed = ci.channel.exited.then(() => {
+        throw new Error(`agent channel closed during session/${action}`);
+      });
+      // Suppress the dangling rejection if `withTimeout` wins the
+      // race below: `transportClosed` then stays pending, and a
+      // later `channel.exited` settle fires the inner `throw` with
+      // no observer attached. Node 22 logs `unhandledRejection`;
+      // under `--unhandled-rejections=throw` (common in container
+      // deployments) the daemon process crashes. The `Promise.race`
+      // path's own consumer below catches the rejection in the
+      // try/catch, so the suppressed rejection here is the
+      // race-loser case only.
+      transportClosed.catch(() => {});
+      let state: BridgeSessionState;
+      try {
+        if (action === 'load') {
+          state = await Promise.race([
+            withTimeout(
+              ci.connection.loadSession({
+                sessionId: req.sessionId,
+                cwd: workspaceKey,
+                // Restore path drops per-request `mcpServers` (matches
+                // `doSpawn`); daemon-wide MCP comes from settings on
+                // the agent side. The SDK's `RestoreSessionRequest`
+                // intentionally has no `mcpServers` field for the
+                // same reason.
+                mcpServers: [],
+              }),
+              initTimeoutMs,
+              'loadSession',
+            ),
+            transportClosed,
+          ]);
+        } else {
+          state = await Promise.race([
+            withTimeout(
+              ci.connection.unstable_resumeSession({
+                sessionId: req.sessionId,
+                cwd: workspaceKey,
+                mcpServers: [],
+              }),
+              initTimeoutMs,
+              'resumeSession',
+            ),
+            transportClosed,
+          ]);
+        }
+      } catch (err) {
+        restoreEvents.close();
+        if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+          throw new SessionNotFoundError(req.sessionId);
+        }
+        if (
+          ci.sessionIds.size === 0 &&
+          ci.pendingRestoreIds.size === 1 &&
+          ci.pendingRestoreIds.has(req.sessionId)
+        ) {
+          ci.isDying = true;
+          await ci.channel.kill().catch(() => {
+            /* best-effort — channel.exited handler still runs */
+          });
+        }
+        throw err;
+      }
+
+      if (shuttingDown) {
+        restoreEvents.close();
+        throw new Error('HttpAcpBridge is shutting down');
+      }
+      if (ci.isDying || !aliveChannels.has(ci)) {
+        restoreEvents.close();
+        throw new Error(
+          `Session ${req.sessionId} restored on a closed agent channel`,
+        );
+      }
+      const racedEntry = byId.get(req.sessionId);
+      if (racedEntry) {
+        restoreEvents.close();
+        // Self + any coalescers we accumulated while the restore was
+        // in flight. Coalescers must not bump attachCount themselves
+        // (they read it off the registered entry on the next tick).
+        racedEntry.attachCount += 1 + coalesceState.count;
+        const clientId = registerClient(racedEntry, req.clientId);
+        return {
+          sessionId: racedEntry.sessionId,
+          workspaceCwd: racedEntry.workspaceCwd,
+          attached: true,
+          clientId,
+          state: racedEntry.restoreState ?? {},
+        };
+      }
+
+      const entry = createSessionEntry(
+        ci,
+        req.sessionId,
+        workspaceKey,
+        restoreEvents,
+      );
+      entry.restoreState = state;
+      const clientId = registerClient(entry, req.clientId);
+      // Fold synchronous coalesce reservations into the new entry's
+      // `attachCount`. By this point all coalescers that beat us must
+      // have hit the inFlightRestores branch and bumped
+      // `coalesceState.count`; later coalescers will hit the byId
+      // early-return path instead and increment `entry.attachCount`
+      // directly.
+      entry.attachCount = coalesceState.count;
+      registeredEntry = entry;
+      // Explicit `session/load` / `session/resume` is "give me THIS
+      // id"; it must NOT become the implicit attach target for
+      // subsequent omitted-id `POST /session` callers under `single`
+      // scope. Those callers asked for "any default", and silently
+      // joining a restored live history would surprise them.
+      // `defaultEntry` is reserved for sessions created through
+      // `doSpawn` under `'single'` scope.
+      return {
+        sessionId: entry.sessionId,
+        workspaceCwd: entry.workspaceCwd,
+        attached: false,
+        clientId,
+        state,
+      };
+    })().finally(() => {
+      ci?.pendingRestoreIds.delete(req.sessionId);
+      pendingRestoreEvents.delete(req.sessionId);
+      if (!registeredEntry) {
+        restoreEvents.close();
+      }
+    });
+
+    inFlightRestores.set(req.sessionId, { action, promise, coalesceState });
+    try {
+      return await promise;
+    } finally {
+      inFlightRestores.delete(req.sessionId);
+    }
+  }
+
   return {
     get sessionCount() {
       return byId.size;
@@ -1418,6 +2218,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
 
     get pendingPermissionCount() {
       return pendingPermissions.size;
+    },
+
+    async loadSession(req) {
+      return restoreSession('load', req);
+    },
+
+    async resumeSession(req) {
+      return restoreSession('resume', req);
     },
 
     async spawnOrAttach(req) {
@@ -1429,15 +2237,34 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         // see — they'd otherwise leak past `process.exit(0)`.
         throw new Error('HttpAcpBridge is shutting down');
       }
-      if (!path.isAbsolute(req.workspaceCwd)) {
-        throw new Error(
-          `workspaceCwd must be an absolute path; got "${req.workspaceCwd}"`,
-        );
-      }
-      const workspaceKey = canonicalizeWorkspace(req.workspaceCwd);
+      // Fast-path the common §02 case: clients pre-flight `caps.workspaceCwd`
+      // and post back the exact same string, so the equality check
+      // saves a `realpathSync.native` syscall per spawnOrAttach. The
+      // omit-cwd path in `server.ts` also synthesizes `cwd =
+      // boundWorkspace` before calling here, so it hits this branch
+      // too. Falls through to the full canonicalize when the client
+      // sent a non-canonical alias (`/work/./bound`, mixed casing on
+      // case-insensitive FS, a symlinked aliased path, …) — that
+      // still needs the realpath to compare correctly.
+      const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
 
-      if (sessionScope === 'single') {
-        const existing = byWorkspace.get(workspaceKey);
+      // Resolve the effective scope for THIS call. A per-request
+      // `req.sessionScope` overrides the daemon-wide default; omitting
+      // it falls back to `defaultSessionScope` so every existing caller
+      // observes pre-#4175-PR-5 behavior bit-for-bit. The string-validation
+      // happens here (rather than at the route layer alone) so direct
+      // callers — tests, embeds, future entry points — can't bypass it.
+      if (
+        req.sessionScope !== undefined &&
+        req.sessionScope !== 'single' &&
+        req.sessionScope !== 'thread'
+      ) {
+        throw new InvalidSessionScopeError(req.sessionScope);
+      }
+      const effectiveScope = req.sessionScope ?? defaultSessionScope;
+
+      if (effectiveScope === 'single') {
+        const existing = defaultEntry;
         if (existing) {
           // BRSCi: bump attach counter BEFORE any await so the
           // spawn-owner's disconnect reaper (server.ts:
@@ -1458,6 +2285,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // race is "bump runs before any await inside this
           // microtask," which is what we get here.
           existing.attachCount++;
+          const clientId = registerClient(existing, req.clientId);
           // If the caller passed a modelServiceId on attach, the session
           // may currently be running a DIFFERENT model. Honor the request
           // by issuing setSessionModel — same call we'd use on
@@ -1477,12 +2305,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
               existing,
               req.modelServiceId,
               initTimeoutMs,
+              clientId,
             ).catch(() => {});
           }
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
             attached: true,
+            clientId,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -1511,13 +2341,16 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           // continuation running (e.g. channel.exited firing during
           // a crash spawn, or a direct bridge.killSession call from
           // outside the route handler). In those cases byId.get()
-          // returned undefined; we'd otherwise return
-          // `{ attached: true, sessionId: <zombie> }` and every
-          // subsequent prompt/cancel call would 404. Fail loud
-          // instead so the caller can retry into a fresh spawn.
+          // returned undefined. Fail loud with a descriptive error
+          // so the caller can distinguish "immediate agent death"
+          // from a stale sessionId and retry into a fresh spawn.
           if (!attachedEntry) {
-            throw new SessionNotFoundError(session.sessionId);
+            throw new SessionNotFoundError(
+              session.sessionId,
+              'the agent child likely crashed during initialization — retry to spawn a new session',
+            );
           }
+          const clientId = registerClient(attachedEntry, req.clientId);
           if (req.modelServiceId) {
             // Same swallow as above — we picked up an in-flight
             // spawn, the session is real, model-switch failure
@@ -1526,9 +2359,10 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
               attachedEntry,
               req.modelServiceId,
               initTimeoutMs,
+              clientId,
             ).catch(() => {});
           }
-          return { ...session, attached: true };
+          return { ...session, attached: true, clientId };
         }
       }
 
@@ -1536,11 +2370,14 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // (a fresh-spawn races that's about to register hasn't hit
       // `byId` yet but should still count toward the limit). Attaches
       // returned above bypass this — only NEW children are gated.
-      if (byId.size + inFlightSpawns.size >= maxSessions) {
+      if (
+        byId.size + inFlightSpawns.size + inFlightRestores.size >=
+        maxSessions
+      ) {
         throw new SessionLimitExceededError(maxSessions);
       }
 
-      const promise = doSpawn(workspaceKey, req.modelServiceId);
+      const promise = doSpawn(req.modelServiceId, effectiveScope, req.clientId);
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
       // `spawnOrAttach` finds the entry and waits for the same
@@ -1554,7 +2391,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // simultaneous thread-scope spawns don't collide on the
       // workspace key.
       const tracker =
-        sessionScope === 'single'
+        effectiveScope === 'single'
           ? workspaceKey
           : `${workspaceKey}#${randomUUID()}`;
       inFlightSpawns.set(tracker, promise);
@@ -1569,9 +2406,13 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       }
     },
 
-    async sendPrompt(sessionId, req, signal) {
+    async sendPrompt(sessionId, req, signal, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -1590,7 +2431,16 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         if (signal?.aborted) {
           throw new DOMException('Prompt aborted', 'AbortError');
         }
-        const promptPromise = entry.connection.prompt(normalized);
+        if (originatorClientId === undefined) {
+          delete entry.activePromptOriginatorClientId;
+        } else {
+          entry.activePromptOriginatorClientId = originatorClientId;
+        }
+        const promptPromise = entry.connection
+          .prompt(normalized)
+          .finally(() => {
+            delete entry.activePromptOriginatorClientId;
+          });
 
         // Race against channel termination: if the underlying transport
         // dies (child crashed, stream torn down) WHILE the prompt is in
@@ -1669,9 +2519,13 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       return result;
     },
 
-    async cancelSession(sessionId, req) {
+    async cancelSession(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      // Validation-only: cancellation resolves permissions as system
+      // cancellations, so those generated events intentionally omit an
+      // originator client id.
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
@@ -1703,7 +2557,19 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       return entry.events.subscribe(subOpts);
     },
 
-    respondToPermission(requestId, response) {
+    respondToPermission(requestId, response, context) {
+      const pending = pendingPermissions.get(requestId);
+      let originatorClientId: string | undefined;
+      if (context?.clientId !== undefined && !pending) {
+        resolveAnyTrustedClientId(context.clientId);
+      } else if (pending && context?.clientId !== undefined) {
+        const entry = byId.get(pending.sessionId);
+        if (entry) {
+          originatorClientId = resolveTrustedClientId(entry, context.clientId);
+        } else {
+          resolveAnyTrustedClientId(context.clientId);
+        }
+      }
       // BkwQI: validate the voter's optionId against the original
       // options the agent advertised. The route already enforces
       // "non-empty string" structurally; this layer enforces
@@ -1712,7 +2578,6 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // `ProceedAlways*` when the prompt's `hideAlwaysAllow`
       // policy intentionally suppressed them).
       if (response.outcome.outcome === 'selected') {
-        const pending = pendingPermissions.get(requestId);
         if (
           pending &&
           !pending.allowedOptionIds.has(response.outcome.optionId)
@@ -1723,12 +2588,21 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           );
         }
       }
-      return resolvePending(requestId, response);
+      return resolvePending(requestId, response, originatorClientId);
     },
 
     listWorkspaceSessions(workspaceCwd) {
       if (!path.isAbsolute(workspaceCwd)) return [];
-      const key = canonicalizeWorkspace(workspaceCwd);
+      // fast-path: under §02 single-workspace, string equality
+      // with boundWorkspace avoids a realpathSync syscall on
+      // every poll. If the literal doesn't match, canonicalize
+      // to handle symlink aliases; if that still doesn't match,
+      // this daemon doesn't own the workspace.
+      const key =
+        workspaceCwd === boundWorkspace
+          ? boundWorkspace
+          : canonicalizeWorkspace(workspaceCwd);
+      if (key !== boundWorkspace) return [];
       const out: BridgeSessionSummary[] = [];
       for (const entry of byId.values()) {
         if (entry.workspaceCwd === key) {
@@ -1741,9 +2615,13 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       return out;
     },
 
-    async setSessionModel(sessionId, req) {
+    async setSessionModel(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       const normalized: SetSessionModelRequest = { ...req, sessionId };
       // The ACP SDK marks setSessionModel as unstable (not in spec yet); the
       // method on AgentSideConnection is `unstable_setSessionModel`. Cast
@@ -1813,6 +2691,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
               requestedModelId: req.modelId,
               error: err instanceof Error ? err.message : String(err),
             },
+            ...(originatorClientId ? { originatorClientId } : {}),
           });
         } catch {
           /* bus closed */
@@ -1823,6 +2702,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         entry.events.publish({
           type: 'model_switched',
           data: { sessionId: entry.sessionId, modelId: req.modelId },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch {
         /* bus closed */
@@ -1850,18 +2730,16 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         entry.spawnOwnerWantedKill = true;
         return;
       }
-      // Remove from the maps eagerly so concurrent `spawnOrAttach`
+      // Remove from the state eagerly so concurrent `spawnOrAttach`
       // can't reattach to a session we're tearing down.
-      if (byWorkspace.get(entry.workspaceCwd) === entry) {
-        byWorkspace.delete(entry.workspaceCwd);
-      }
+      if (defaultEntry === entry) defaultEntry = undefined;
       byId.delete(sessionId);
-      // Stage 1.5 multi-session: detach from the channel. The channel
-      // dies only when its LAST session leaves — other sessions on
-      // the same channel keep running.
-      const channelInfo = byWorkspaceChannel.get(entry.workspaceCwd);
-      if (channelInfo && channelInfo.channel === entry.channel) {
-        channelInfo.sessionIds.delete(sessionId);
+      // Detach from the channel. The channel dies only when its LAST
+      // session leaves — other sessions on the same channel keep
+      // running.
+      const ci = channelInfo;
+      if (ci && ci.channel === entry.channel) {
+        ci.sessionIds.delete(sessionId);
       }
       // Resolve any still-pending permission as cancelled (matches the
       // shutdown path) so callers awaiting requestPermission unwind.
@@ -1882,23 +2760,39 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         /* bus already closed */
       }
       entry.events.close();
-      // Only kill the channel when no other sessions remain. ACP
-      // doesn't expose a per-session "close" call on the agent side,
-      // so the agent's `sessions: Map<string, Session>` grows by one
-      // until the channel dies — bounded by `maxSessions` (default
-      // 20) so memory is capped. FIXME(stage-1.5): if ACP grows a
-      // `closeSession` notification, send it here so the agent can
-      // drop the entry from its map immediately rather than at
-      // channel exit.
-      if (channelInfo && channelInfo.sessionIds.size === 0) {
-        byWorkspaceChannel.delete(entry.workspaceCwd);
-        await channelInfo.channel.kill().catch(() => {
+      // Only kill the channel when no other sessions remain AND no
+      // restore is in flight. ACP doesn't expose a per-session "close"
+      // call on the agent side, so the agent's `sessions: Map<string,
+      // Session>` grows by one until the channel dies — bounded by
+      // `maxSessions` (default 20) so memory is capped. FIXME(stage-
+      // 1.5): if ACP grows a `closeSession` notification, send it
+      // here so the agent can drop the entry from its map immediately
+      // rather than at channel exit. (`channelInfo` itself is cleared
+      // by the `channel.exited` handler once the OS reaps the child —
+      // tanzhenxin BkUyD invariant.)
+      //
+      // `pendingRestoreIds` covers in-flight `session/load` and
+      // `session/resume` calls that haven't yet registered into
+      // `sessionIds`. Killing the channel out from under them would
+      // SIGTERM the restore mid-flight and 500 the caller for a
+      // failure orthogonal to their request.
+      if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+        // Mark dying SYNCHRONOUSLY before the await so a concurrent
+        // `spawnOrAttach` arriving during the SIGTERM grace window
+        // doesn't attach to a transport we're tearing down — without
+        // this it would land the caller with a sessionId that 404s on
+        // every follow-up once `channel.exited` fires (the equivalent
+        // of the pre-PR eager `byWorkspaceChannel.delete()` from the
+        // Stage 1 routing era). `channelInfo` stays set until OS reap
+        // so `killAllSync` still finds a target (BkUyD).
+        ci.isDying = true;
+        await ci.channel.kill().catch(() => {
           // Best-effort kill — channel may already be dead.
         });
       }
     },
 
-    async detachClient(sessionId) {
+    async detachClient(sessionId, clientId) {
       // tanzhenxin issue 2: the BQ9tV `attachCount` race guard is
       // monotonic — once any attach bumps it, the spawn-owner's
       // disconnect-reaper becomes a permanent no-op even if the
@@ -1918,6 +2812,7 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       const entry = byId.get(sessionId);
       if (!entry) return;
       if (entry.attachCount > 0) entry.attachCount--;
+      unregisterClient(entry, clientId);
       if (
         entry.spawnOwnerWantedKill &&
         entry.attachCount === 0 &&
@@ -1933,22 +2828,22 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
     },
 
     killAllSync() {
-      // Bd1y6: synchronous best-effort SIGKILL on every live channel.
-      // Set `shuttingDown` so any racing async path fails fast.
-      // tanzhenxin BkUyD fix: iterate `liveChannels` (the OS-level
-      // source of truth) NOT `byWorkspaceChannel`. The latter is
-      // cleared by `shutdown()` BEFORE awaiting per-child SIGTERM
-      // grace; if the operator double-Ctrl+C's during that window,
-      // iterating `byWorkspaceChannel` would find nothing and
-      // `process.exit(1)` would orphan children still inside their
-      // SIGTERM grace. `liveChannels` only loses an entry when
-      // `channel.exited` fires (OS exit), so the force-kill path
-      // catches every still-alive child regardless of where the
-      // graceful drain is.
+      // Bd1y6: synchronous best-effort SIGKILL on EVERY alive channel
+      // (typically 1, but during a `killSession`-then-`spawnOrAttach`
+      // overlap there can be 2 — the dying one in `aliveChannels`
+      // plus a fresh attach-target in `channelInfo`). Set
+      // `shuttingDown` so any racing async path fails fast.
+      //
+      // tanzhenxin BkUyD: iterate `aliveChannels` (the OS-level "still
+      // alive" source of truth) — `channelInfo` only points at the
+      // CURRENT attach target, missing any dying channel whose
+      // `channel.exited` hasn't fired yet. Without this, a fresh
+      // spawn overwriting `channelInfo` during the prior channel's
+      // SIGTERM grace would leave the dying child without SIGKILL
+      // escalation when `process.exit(1)` fires.
       shuttingDown = true;
-      const channels = Array.from(liveChannels);
-      byWorkspaceChannel.clear();
-      byWorkspace.clear();
+      const channels = Array.from(aliveChannels);
+      defaultEntry = undefined;
       byId.clear();
       for (const info of channels) {
         try {
@@ -1966,11 +2861,20 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
       // spawning a child this teardown won't see.
       shuttingDown = true;
       const entries = Array.from(byId.values());
-      // Snapshot channels too — Stage 1.5 multi-session means N
-      // sessions may share one channel; we tear down channels
-      // (which transitively takes all their sessions), not entries
-      // one-by-one.
-      const channelInfos = Array.from(byWorkspaceChannel.values());
+      // Snapshot every alive channel (typically 1; up to 2 during a
+      // `killSession`-then-`spawnOrAttach` overlap) — entries are
+      // intentionally NOT removed from `aliveChannels` here; their
+      // `channel.exited` handlers clear them once the OS has reaped
+      // each child. That preserves the BkUyD invariant: a
+      // double-Ctrl+C arriving mid-SIGTERM-grace can still find every
+      // alive channel via `killAllSync`. Marking each `isDying` makes
+      // them invisible to any racing `ensureChannel` call — but
+      // `shuttingDown` already blocks new `spawnOrAttach` upstream,
+      // so this is mostly belt-and-suspenders (a direct internal
+      // `ensureChannel` past the gate would still see the dying
+      // state and not attach).
+      const channels = Array.from(aliveChannels);
+      for (const ci of channels) ci.isDying = true;
       // Resolve every still-pending permission as cancelled before clearing
       // the maps so callers awaiting `requestPermission` unwind cleanly.
       for (const e of entries) {
@@ -1979,9 +2883,8 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
           resolvePending(id, { outcome: { outcome: 'cancelled' } });
         }
       }
-      byWorkspace.clear();
+      defaultEntry = undefined;
       byId.clear();
-      byWorkspaceChannel.clear();
       pendingPermissions.clear();
       // Publish a terminal `session_died` BEFORE closing each bus so SSE
       // subscribers can distinguish "daemon shut down" from a transient
@@ -2001,16 +2904,15 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
         }
         e.events.close();
       }
-      // Wait for in-flight channel spawns + session spawns. The
-      // snapshots above only see what's already registered; a doSpawn
-      // past `newSession()` but pre-`byId.set` is missed, as is a
-      // `getOrCreateChannel` past `channelFactory()` but pre-
-      // `byWorkspaceChannel.set`. The late-shutdown re-checks at
-      // doSpawn/getOrCreateChannel catch both — but without these
-      // awaits, `bridge.shutdown()` would resolve before they
-      // finish, and the orphan stderr error from a half-built
-      // child would fire AFTER the daemon claimed graceful
-      // shutdown (log-confusing).
+      // Wait for in-flight channel + session spawns. The snapshot
+      // above only sees what's already registered; a doSpawn past
+      // `newSession()` but pre-`byId.set` is missed, as is an
+      // `ensureChannel` past `channelFactory()` but pre-`channelInfo
+      // = info`. The late-shutdown re-checks at doSpawn/ensureChannel
+      // catch both — but without these awaits, `bridge.shutdown()`
+      // would resolve before they finish, and the orphan stderr
+      // error from a half-built child would fire AFTER the daemon
+      // claimed graceful shutdown (log-confusing).
       const inFlightSessionAwaits = Array.from(inFlightSpawns.values()).map(
         (p): Promise<void> =>
           p.then(
@@ -2018,22 +2920,24 @@ export function createHttpAcpBridge(opts: BridgeOptions = {}): HttpAcpBridge {
             () => undefined,
           ),
       );
-      const inFlightChannelAwaits = Array.from(
-        inFlightChannelSpawns.values(),
-      ).map(
-        (p): Promise<void> =>
-          p.then(
+      const inFlightRestoreAwaits = Array.from(inFlightRestores.values()).map(
+        (restore): Promise<void> =>
+          restore.promise.then(
             () => undefined,
             () => undefined,
           ),
       );
+      const inFlightChannelAwait: Promise<void> = inFlightChannelSpawn
+        ? inFlightChannelSpawn.then(
+            () => undefined,
+            () => undefined,
+          )
+        : Promise.resolve();
       await Promise.all([
-        // Kill each unique channel once. With multi-session per
-        // channel, the same channel object can be referenced by
-        // multiple entries; `channelInfos` is the deduplicated set.
-        ...channelInfos.map((ci) => ci.channel.kill().catch(() => {})),
+        ...channels.map((ci) => ci.channel.kill().catch(() => {})),
         ...inFlightSessionAwaits,
-        ...inFlightChannelAwaits,
+        ...inFlightRestoreAwaits,
+        inFlightChannelAwait,
       ]);
     },
   };
@@ -2090,12 +2994,14 @@ function sliceLineRange(
 }
 
 /**
- * Canonicalize a workspace path so two callers referring to the same
- * directory get the same `byWorkspace` key. `path.resolve` alone collapses
- * `..` and `.` segments and absolutizes, but on case-insensitive filesystems
- * (macOS APFS, Windows NTFS) `/Work/A` and `/work/a` are the same directory
- * yet `resolve` returns them verbatim — two `byWorkspace` entries form for
- * one physical workspace and `sessionScope: 'single'` silently degrades to
+ * Canonicalize a workspace path so the boot-time bound path and every
+ * request's `workspaceCwd` collapse to the same key. `path.resolve`
+ * alone normalizes `..` and `.` segments and absolutizes, but on
+ * case-insensitive filesystems (macOS APFS, Windows NTFS) `/Work/A`
+ * and `/work/a` are the same directory yet `resolve` returns them
+ * verbatim — without normalization the `boundWorkspace` check would
+ * reject every request that spelled the path with different casing
+ * and `sessionScope: 'single'` re-attach would silently degrade to
  * "one per spelling".
  *
  * `realpathSync.native` (when the path exists) walks symlinks and returns
@@ -2108,17 +3014,17 @@ function sliceLineRange(
  *
  * NOTE: This is a **cross-module contract** (BX9_q) — `config.ts`,
  * `settings.ts`, `sandbox.ts`, and this file all need to canonicalize
- * the same way for `sessionScope: 'single'` re-attach to work
- * correctly across paths. The contract: use `realpathSync.native` on
- * the resolved absolute path; fall back to `path.resolve` only when
- * the path doesn't exist yet. If a future change breaks this
- * alignment (e.g. one module starts lowercasing on Windows but this
- * one doesn't), `byWorkspace.get()` lookup misses for the same
- * physical directory → duplicate sessions silently spawn, and
- * `sessionScope: 'single'` degrades to "one per spelling" with no
- * error. There's no test that pins the alignment; the integration
- * suite would catch a divergence only if it tested the specific
- * casing / symlink path the affected module changed.
+ * the same way for the bound-workspace check + `sessionScope:
+ * 'single'` re-attach to work correctly across paths. The contract:
+ * use `realpathSync.native` on the resolved absolute path; fall back
+ * to `path.resolve` only when the path doesn't exist yet. If a future
+ * change breaks this alignment (e.g. one module starts lowercasing on
+ * Windows but this one doesn't), the canonicalized request path
+ * won't match the canonicalized bound path → every request returns
+ * `workspace_mismatch` even though the human-readable paths look
+ * equivalent. There's no test that pins the alignment; the
+ * integration suite would catch a divergence only if it tested the
+ * specific casing / symlink path the affected module changed.
  *
  * Stage 2 in-process (#3803 §10) collapses the bridge into core,
  * removing the bridge-side path resolution entirely. Stage 1.5
@@ -2129,7 +3035,7 @@ function sliceLineRange(
  * call sites to converge. Until then, *any* change to how those
  * modules resolve workspace paths needs a matching change here.
  */
-function canonicalizeWorkspace(p: string): string {
+export function canonicalizeWorkspace(p: string): string {
   const resolved = path.resolve(p);
   try {
     // FIXME(stage-2): switch to `fs.promises.realpath` once the
@@ -2141,8 +3047,19 @@ function canonicalizeWorkspace(p: string): string {
     // entire bridge-side path resolution anyway, but if Stage 2
     // ever lands without that change, switch to the async version.
     return realpathSync.native(resolved);
-  } catch {
-    return resolved;
+  } catch (err) {
+    // Only fall back to path.resolve for ENOENT (path doesn't exist
+    // yet). Other filesystem errors (EACCES, EIO, ELOOP) should
+    // propagate — swallowing them would hide transient I/O failures
+    // behind misleading workspace_mismatch rejections.
+    if (
+      err &&
+      typeof err === 'object' &&
+      (err as { code?: unknown }).code === 'ENOENT'
+    ) {
+      return resolved;
+    }
+    throw err;
   }
 }
 

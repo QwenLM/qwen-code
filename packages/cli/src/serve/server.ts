@@ -11,16 +11,25 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
+  canonicalizeWorkspace,
   createHttpAcpBridge,
+  InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidSessionScopeError,
+  MAX_WORKSPACE_PATH_LENGTH,
+  RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import {
+  getAdvertisedServeFeatures,
+  getServeProtocolVersions,
+} from './capabilities.js';
 import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
-  STAGE1_FEATURES,
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from './types.js';
@@ -28,6 +37,19 @@ import {
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
+  /**
+   * Pre-canonicalized workspace path. When supplied, `createServeApp`
+   * skips its own `canonicalizeWorkspace` call (which would issue a
+   * redundant `realpathSync.native` syscall — idempotent, but a hot
+   * boot-time stat we can avoid). `runQwenServe` passes this after
+   * its own boot-time canonicalize so the value used by
+   * `/capabilities`, the `POST /session` cwd fallback, and the
+   * bridge are all the SAME canonical form. Callers that haven't
+   * canonicalized yet (tests, direct embeds) omit this and
+   * `createServeApp` falls back to canonicalizing `opts.workspace ??
+   * process.cwd()` itself.
+   */
+  boundWorkspace?: string;
 }
 
 /**
@@ -43,12 +65,30 @@ export interface ServeAppDeps {
  *   - `GET  /health`
  *   - `GET  /capabilities`
  *   - `POST /session`
+ *   - `POST /session/:id/load`
+ *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/model`
  *   - `GET  /session/:id/events` (SSE)
  *   - `POST /permission/:requestId`
+ *
+ * **Workspace validation contract.** `createServeApp` itself does NOT
+ * verify that `opts.workspace` exists or is a directory — it
+ * canonicalizes via `canonicalizeWorkspace`, which falls back to
+ * `path.resolve` on ENOENT so the app boots even against a missing
+ * path. `runQwenServe` is the production entry point and DOES
+ * perform the `fs.statSync` + `isDirectory()` boot-loud check before
+ * calling this function. Tests inject synthetic paths (`/work/bound`
+ * etc.) on purpose: they want to exercise the route layer's
+ * canonicalization and `workspace_mismatch` translation without
+ * needing a real directory on disk. If a future entry point binds
+ * `createServeApp` directly to user input, it MUST replicate the
+ * `runQwenServe` validation (or call into a shared helper if one is
+ * extracted) — otherwise a non-existent `--workspace` would boot
+ * a "healthy"-looking daemon whose every spawn fails with cryptic
+ * child-process ENOENT.
  */
 export function createServeApp(
   opts: ServeOptions,
@@ -61,8 +101,34 @@ export function createServeApp(
   // cap they configured via `ServeOptions`. Previously the default
   // bridge silently fell back to `DEFAULT_MAX_SESSIONS` (20) and
   // only the `runQwenServe` path piped the option through.
+  //
+  // Workspace binding mirrors `runQwenServe`: per #3803 §02 the
+  // daemon is bound to exactly one workspace (`opts.workspace` or
+  // `process.cwd()`). `POST /session` with a mismatched cwd is
+  // rejected with 400 `workspace_mismatch`.
+  //
+  // The value advertised on `/capabilities`, used for the `POST
+  // /session` cwd fallback, AND passed into the bridge must be the
+  // SAME canonical form — otherwise the bridge's
+  // `realpathSync.native` would diverge from what `/capabilities`
+  // shows on symlinks / case-insensitive filesystems, and clients
+  // echoing the advertised path back would see a response whose
+  // `workspaceCwd` differs from what they sent.
+  //
+  // `deps.boundWorkspace` is the pre-canonicalized fast-path —
+  // `runQwenServe` passes it after its own boot-time
+  // `canonicalizeWorkspace`, so we skip the redundant
+  // `realpathSync.native` here. When omitted (tests, direct embeds)
+  // we canonicalize ourselves.
+  const boundWorkspace =
+    deps.boundWorkspace ??
+    canonicalizeWorkspace(opts.workspace ?? process.cwd());
   const bridge =
-    deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
+    deps.bridge ??
+    createHttpAcpBridge({
+      maxSessions: opts.maxSessions,
+      boundWorkspace,
+    });
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -139,34 +205,107 @@ export function createServeApp(
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
+      protocolVersions: getServeProtocolVersions(),
       mode: opts.mode,
-      features: [...STAGE1_FEATURES],
+      features: getAdvertisedServeFeatures(),
       modelServices: [],
+      // #3803 §02: surface the bound workspace so clients can detect
+      // mismatch pre-flight and omit `cwd` on `POST /session`.
+      workspaceCwd: boundWorkspace,
     };
     res.status(200).json(envelope);
   });
 
   app.post('/session', async (req, res) => {
     const body = safeBody(req);
-    const cwd = typeof body['cwd'] === 'string' ? (body['cwd'] as string) : '';
-    if (!cwd || !path.isAbsolute(cwd)) {
+    // #3803 §02: 1 daemon = 1 workspace. Three input shapes:
+    //   - `cwd` ABSENT from body → fall back to the daemon's bound
+    //     workspace (the §02 documented shape — clients pre-flight
+    //     `caps.workspaceCwd` and may then omit `cwd`).
+    //   - `cwd` PRESENT but not a string → 400 malformed. A
+    //     client/orchestrator serialization bug (`cwd: null`,
+    //     `cwd: 123`, `cwd: {}`) must not silently bind a session
+    //     to the daemon's workspace; surface the bug instead.
+    //   - `cwd` PRESENT as a string → fall through to the
+    //     `path.isAbsolute` check (empty string and relative both
+    //     fail there with "must be an absolute path when provided").
+    //
+    // `safeBody` returns an `Object.create(null)` map, so
+    // `'cwd' in body` reflects exactly "did the client send the
+    // key?" without prototype-chain confusion. The presence-check
+    // is safe as long as `PROTOTYPE_POLLUTION_KEYS` doesn't grow to
+    // include `cwd` — see the cross-reference in the const's JSDoc
+    // for what to do if that invariant ever has to break.
+    const hasCwd = 'cwd' in body;
+    if (hasCwd && typeof body['cwd'] !== 'string') {
       res
         .status(400)
-        .json({ error: '`cwd` is required and must be an absolute path' });
+        .json({ error: '`cwd` must be a string absolute path when provided' });
+      return;
+    }
+    // Length cap BEFORE assignment so a multi-MB `cwd` body can't
+    // amplify through downstream interpolations
+    // (`WorkspaceMismatchError`'s `.message` echoes `requested` twice;
+    // `sendBridgeError` writes it to stderr; `res.json` echoes it
+    // again). On the loopback-default-no-token deployment shape this
+    // is pre-auth, so a 10 MB cwd body — right under
+    // `express.json({limit: '10mb'})` — would otherwise cost
+    // ~60 MB per request × `maxConnections` (default 256). The
+    // `MAX_WORKSPACE_PATH_LENGTH` constant matches Linux's PATH_MAX
+    // (4096); legitimate filesystem paths fit well under it. The
+    // `WorkspaceMismatchError` constructor also truncates as a
+    // belt-and-suspenders defense for non-route callers (tests,
+    // embeds, future entry points that throw the error directly).
+    if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
+      res.status(400).json({
+        error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+      });
+      return;
+    }
+    const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
+    if (!path.isAbsolute(cwd)) {
+      res
+        .status(400)
+        .json({ error: '`cwd` must be an absolute path when provided' });
       return;
     }
     const modelServiceId =
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
         : undefined;
+    // Per-request `sessionScope` override (#4175 PR 5). Validate at the
+    // route boundary so a 400 surfaces a clear `code: invalid_session_scope`
+    // before we touch the bridge — the bridge revalidates as a defense
+    // against direct callers, but a typed 4xx is the right shape for HTTP
+    // clients. The field is OPTIONAL: omitting it preserves pre-PR
+    // behavior bit-for-bit (the daemon-wide `BridgeOptions.sessionScope`
+    // takes effect). New clients can pre-flight `caps.features` for
+    // `session_scope_override` before sending — see
+    // `packages/cli/src/serve/capabilities.ts`.
+    const rawSessionScope = body['sessionScope'];
+    let sessionScope: 'single' | 'thread' | undefined;
+    if (rawSessionScope !== undefined) {
+      if (rawSessionScope !== 'single' && rawSessionScope !== 'thread') {
+        res.status(400).json({
+          error: '`sessionScope` must be "single" or "thread" when provided',
+          code: 'invalid_session_scope',
+        });
+        return;
+      }
+      sessionScope = rawSessionScope;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
       const session = await bridge.spawnOrAttach({
         workspaceCwd: cwd,
         modelServiceId,
+        ...(clientId !== undefined ? { clientId } : {}),
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
-      // orphaned (in `byId` / `byWorkspace` with no client knowing the
+      // orphaned (in `byId` / `defaultEntry` with no client knowing the
       // id), and under churn this leaks one child per aborted request.
       //
       // Detect "can we still write the response?" via `res.writable`,
@@ -209,7 +348,7 @@ export function createServeApp(
           // subscribers). Without this, both-coalesced-callers-
           // disconnect leaves an orphan agent child no client knows
           // the id of.
-          bridge.detachClient(session.sessionId).catch(() => {
+          bridge.detachClient(session.sessionId, session.clientId).catch(() => {
             // Best-effort cleanup; channel.exited will eventually reap.
           });
         }
@@ -220,6 +359,70 @@ export function createServeApp(
       sendBridgeError(res, err, { route: 'POST /session' });
     }
   });
+
+  const restoreSessionHandler =
+    (action: 'load' | 'resume') =>
+    async (req: express.Request, res: express.Response) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      const body = safeBody(req);
+      const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
+      if (cwd === undefined) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const session =
+          action === 'load'
+            ? await bridge.loadSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              })
+            : await bridge.resumeSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              });
+        // Mirror the `POST /session` disconnect-cleanup path (see the
+        // long comment above the matching `if (!res.writable)` there
+        // for the rationale around `res.writable` vs `req.aborted` /
+        // `req.destroyed`, plus the BQ9tV `requireZeroAttaches` race
+        // and the tanzhenxin attach-rollback case). Restore needs the
+        // same cleanup because a client that disconnects during a
+        // multi-second `session/load` would otherwise leave a freshly
+        // restored session in `byId` with no client holding its id.
+        if (!res.writable) {
+          if (!session.attached) {
+            bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
+          } else {
+            bridge
+              .detachClient(session.sessionId, session.clientId)
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
+          }
+          return;
+        }
+        res.status(200).json(session);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: `POST /session/:id/${action}`,
+          sessionId,
+        });
+      }
+    };
+
+  app.post('/session/:id/load', restoreSessionHandler('load'));
+  app.post('/session/:id/resume', restoreSessionHandler('resume'));
 
   app.post('/session/:id/prompt', async (req, res) => {
     const sessionId = req.params['id'];
@@ -266,6 +469,11 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      res.off('close', onResClose);
+      return;
+    }
     try {
       // SECURITY NOTE: this `...(body as object)` passthrough is
       // intentional — the bridge / ACP SDK ignores fields it
@@ -286,6 +494,7 @@ export function createServeApp(
           prompt,
         } as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
+        clientId !== undefined ? { clientId } : undefined,
       );
       res.status(200).json(result);
     } catch (err) {
@@ -324,11 +533,17 @@ export function createServeApp(
   app.post('/session/:id/cancel', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      await bridge.cancelSession(sessionId, {
-        ...(body as object),
+      await bridge.cancelSession(
         sessionId,
-      } as Parameters<HttpAcpBridge['cancelSession']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+        } as Parameters<HttpAcpBridge['cancelSession']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -349,6 +564,18 @@ export function createServeApp(
         .json({ error: '`:id` must decode to an absolute workspace path' });
       return;
     }
+    // #3803 §02: reject cross-workspace queries so orchestrators
+    // don't mistake "no sessions here" for "workspace is idle".
+    const key = canonicalizeWorkspace(workspaceCwd);
+    if (key !== boundWorkspace) {
+      res.status(400).json({
+        error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
+        code: 'workspace_mismatch',
+        boundWorkspace,
+        requestedWorkspace: key,
+      });
+      return;
+    }
     const sessions = bridge.listWorkspaceSessions(workspaceCwd);
     res.status(200).json({ sessions });
   });
@@ -363,12 +590,18 @@ export function createServeApp(
       });
       return;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      const response = await bridge.setSessionModel(sessionId, {
-        ...(body as object),
+      const response = await bridge.setSessionModel(
         sessionId,
-        modelId,
-      } as Parameters<HttpAcpBridge['setSessionModel']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+          modelId,
+        } as Parameters<HttpAcpBridge['setSessionModel']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(200).json(response);
     } catch (err) {
       sendBridgeError(res, err, {
@@ -389,12 +622,18 @@ export function createServeApp(
       });
       return;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(requestId, {
-        ...(body as object),
-        outcome,
-      } as Parameters<HttpAcpBridge['respondToPermission']>[1]);
+      accepted = bridge.respondToPermission(
+        requestId,
+        {
+          ...(body as object),
+          outcome,
+        } as Parameters<HttpAcpBridge['respondToPermission']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
     } catch (err) {
       // BkwQI: voter's `optionId` wasn't in the option set the agent
       // originally offered (e.g. forging `ProceedAlways*` when the
@@ -409,7 +648,8 @@ export function createServeApp(
         });
         return;
       }
-      throw err;
+      sendBridgeError(res, err, { route: 'POST /permission/:requestId' });
+      return;
     }
     if (!accepted) {
       // Either the requestId never existed or another client already won
@@ -681,18 +921,43 @@ export function createServeApp(
 }
 
 /**
+ * Keys stripped by `safeBody` to defend against prototype-pollution
+ * — see BZ9uv/va/vs/wD/Bd1zz. Routes downstream of `safeBody` spread
+ * the filtered result into objects passed to the bridge / ACP SDK;
+ * without this scrub a client could set
+ * `{"__proto__": {"polluted": true}}` and pollute
+ * `Object.prototype` via downstream spreads.
+ *
+ * **Cross-reference for route maintainers:** the POST `/session`
+ * route distinguishes "absent" from "present" via `'cwd' in body`
+ * against `safeBody`'s output. The semantics rely on this set NOT
+ * overlapping with user-payload keys. If you ever add a key here
+ * that a route's presence-check cares about (highly unlikely — this
+ * set is the JS prototype-attack triple, plus a route would have
+ * to deliberately name a property after one of these), the
+ * presence-check needs to move to the pre-`safeBody` `req.body`
+ * (with its own pollution guard) or `safeBody` needs to return a
+ * separate "raw-keys" set alongside the filtered object.
+ */
+const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
+
+const CLIENT_ID_HEADER = 'x-qwen-client-id';
+const MAX_CLIENT_ID_LENGTH = 128;
+const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
+
+/**
  * Coerce `req.body` into a safe `Record<string, unknown>` for route
  * handlers. Replaces the 5-site copy-pasted preamble
  * `typeof req.body === 'object' && req.body !== null ? ... : {}`
  * (Bd10m).
  *
- * Also strips prototype-pollution keys (`__proto__`, `constructor`,
- * `prototype`) before returning — see BZ9uv/va/vs/wD/Bd1zz. Routes
- * downstream of this helper spread the result into objects passed to
- * the bridge / ACP SDK; without this scrub, a client could set
- * `{"__proto__": {"polluted": true}}` and pollute `Object.prototype`.
- * Uses an `Object.create(null)` target so the returned object itself
- * has no prototype either, blocking second-order spread-into-default-
+ * Strips the `PROTOTYPE_POLLUTION_KEYS` set before returning. Uses an
+ * `Object.create(null)` target so the returned object itself has no
+ * prototype either, blocking second-order spread-into-default-
  * prototype attacks.
  */
 function safeBody(req: import('express').Request): Record<string, unknown> {
@@ -702,12 +967,55 @@ function safeBody(req: import('express').Request): Record<string, unknown> {
   }
   const out = Object.create(null) as Record<string, unknown>;
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
-      continue;
-    }
+    if (PROTOTYPE_POLLUTION_KEYS.has(key)) continue;
     out[key] = value;
   }
   return out;
+}
+
+function parseOptionalWorkspaceCwd(
+  body: Record<string, unknown>,
+  boundWorkspace: string,
+  res: import('express').Response,
+): string | undefined {
+  const hasCwd = 'cwd' in body;
+  if (hasCwd && typeof body['cwd'] !== 'string') {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be a string absolute path when provided' });
+    return undefined;
+  }
+  if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
+    res.status(400).json({
+      error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+    });
+    return undefined;
+  }
+  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
+  if (!path.isAbsolute(cwd)) {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be an absolute path when provided' });
+    return undefined;
+  }
+  return cwd;
+}
+
+function parseClientIdHeader(
+  req: import('express').Request,
+  res: import('express').Response,
+): string | undefined | null {
+  const raw = req.get(CLIENT_ID_HEADER);
+  if (raw === undefined || raw === '') return undefined;
+  if (raw.length > MAX_CLIENT_ID_LENGTH || !CLIENT_ID_RE.test(raw)) {
+    res.status(400).json({
+      error:
+        '`X-Qwen-Client-Id` must be a non-empty token of 128 characters or fewer',
+      code: 'invalid_client_id',
+    });
+    return null;
+  }
+  return raw;
 }
 
 function isValidOutcome(
@@ -801,6 +1109,70 @@ function sendBridgeError(
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
   }
+  if (err instanceof InvalidClientIdError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_client_id',
+      sessionId: err.sessionId,
+      clientId: err.clientId,
+    });
+    return;
+  }
+  if (err instanceof WorkspaceMismatchError) {
+    // #3803 §02 single-workspace mode: the daemon binds to one
+    // workspace at boot; cross-workspace POSTs are rejected here.
+    // 400 (not 404 — the daemon is "fine", the client just picked
+    // the wrong daemon for their workspace). Body includes both
+    // paths so orchestrator-aware clients can route to the right
+    // daemon / spawn a new one.
+    //
+    // Operator log line: unlike SessionNotFoundError (per-session
+    // 404 with rich URL context), workspace_mismatch indicates an
+    // orchestration / deployment drift (operator booted with the
+    // wrong workspace, or client is routing to the wrong daemon).
+    // Without a breadcrumb the daemon's log looks healthy while
+    // every client request silently 400s. Limited to authenticated
+    // requests by the upstream bearer-token gate, so probing-DoS
+    // log noise stays bounded.
+    // SECURITY: `err.requested` is derived from the request body
+    // (`req.workspaceCwd` → `canonicalizeWorkspace` → here). `path.resolve`
+    // + `realpathSync.native` both preserve control characters inside
+    // path segments — they only normalize separators / `..` / `.` and
+    // walk symlinks. A body like `{"cwd": "/legit/path\nqwen serve:
+    // FAKE LOG LINE"}` would otherwise emit two valid-looking daemon
+    // log lines, weaponizing line-based log shippers (Splunk / Loki /
+    // journald → SIEM). `JSON.stringify` escapes control chars and
+    // wraps in quotes so any injection attempt surfaces as
+    // visible-as-quoted-noise rather than forged-line. `err.bound` is
+    // safe (canonicalized at boot from operator-controlled
+    // `--workspace` / `process.cwd()`) but quoted symmetrically for
+    // readability.
+    writeStderrLine(
+      `qwen serve: workspace_mismatch (POST /session): ` +
+        `daemon bound to ${JSON.stringify(err.bound)}, ` +
+        `rejected ${JSON.stringify(err.requested)}`,
+    );
+    res.status(400).json({
+      error: err.message,
+      code: 'workspace_mismatch',
+      boundWorkspace: err.bound,
+      requestedWorkspace: err.requested,
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionScopeError) {
+    // Same wire shape as the route-layer 400 (`server.ts` validates
+    // body['sessionScope'] before calling the bridge). A direct embed
+    // / test caller bypassing the route would otherwise see a generic
+    // 500 — the typed translation keeps both layers in agreement so
+    // SDK clients can branch on `code` regardless of which layer
+    // surfaced the rejection.
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_session_scope',
+    });
+    return;
+  }
   if (err instanceof SessionLimitExceededError) {
     // 503 Service Unavailable + `Retry-After` is the canonical
     // "we'd serve you, but we're full right now" shape. The hint
@@ -812,6 +1184,21 @@ function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+    });
+    return;
+  }
+  if (err instanceof RestoreInProgressError) {
+    // Match `SessionLimitExceededError`'s 5s hint (above) — the
+    // underlying restore can take up to `initTimeoutMs` (default
+    // 10s) on the agent side, so a 1s retry hint pushed clients
+    // into tight loops that kept hitting the same 409.
+    res.set('Retry-After', '5');
+    res.status(409).json({
+      error: err.message,
+      code: 'restore_in_progress',
+      sessionId: err.sessionId,
+      activeAction: err.activeAction,
+      requestedAction: err.requestedAction,
     });
     return;
   }

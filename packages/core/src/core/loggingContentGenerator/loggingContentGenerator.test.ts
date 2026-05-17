@@ -32,6 +32,17 @@ const loggingSpanRecords = vi.hoisted(
     attributes: Record<string, string | number | boolean>;
     statuses: Array<{ code: number; message?: string }>;
     ended: boolean;
+    /**
+     * Metadata passed to endLLMRequestSpan — captured so tests can assert
+     * that token counts, durationMs, success, error are forwarded correctly.
+     */
+    endMetadata?: {
+      success?: boolean;
+      inputTokens?: number;
+      outputTokens?: number;
+      durationMs?: number;
+      error?: string;
+    };
   }> => [],
 );
 const loggingSpanNamesWithSetStatusFailure = vi.hoisted(
@@ -95,14 +106,21 @@ vi.mock('@opentelemetry/api', async (importOriginal) => {
   };
 });
 
-vi.mock('../../telemetry/tracer.js', () => {
+vi.mock('../../telemetry/tracer.js', () => ({
+  API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
+}));
+
+vi.mock('../../telemetry/index.js', () => {
   function createSpan(
     name: string,
     attributes: Record<string, string | number | boolean>,
   ) {
     const record = {
       name,
-      attributes,
+      attributes: { ...attributes } as Record<
+        string,
+        string | number | boolean
+      >,
       statuses: [] as Array<{ code: number; message?: string }>,
       ended: false,
     };
@@ -115,7 +133,12 @@ vi.mock('../../telemetry/tracer.js', () => {
         }
         record.statuses.push(status);
       },
-      setAttribute: vi.fn(),
+      setAttribute(key: string, value: string | number | boolean) {
+        record.attributes[key] = value;
+      },
+      setAttributes(attrs: Record<string, string | number | boolean>) {
+        Object.assign(record.attributes, attrs);
+      },
       end() {
         record.ended = true;
       },
@@ -127,79 +150,53 @@ vi.mock('../../telemetry/tracer.js', () => {
     };
   }
 
-  function runWithActive<T>(label: string, fn: () => T): T {
-    const previous = activeOtelContext.current;
-    activeOtelContext.current = label;
-    try {
-      const result = fn();
-      if (result instanceof Promise) {
-        return result.finally(() => {
-          activeOtelContext.current = previous;
-        }) as T;
-      }
-      activeOtelContext.current = previous;
-      return result;
-    } catch (error) {
-      activeOtelContext.current = previous;
-      throw error;
-    }
-  }
-
   return {
-    API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
-    safeSetStatus: (
-      span: { setStatus: (status: { code: number; message?: string }) => void },
-      status: { code: number; message?: string },
-    ) => {
-      try {
-        span.setStatus(status);
-      } catch {
-        // Match production best-effort telemetry behavior.
-      }
-    },
-    withSpan: vi.fn(
-      async (
-        name: string,
-        attributes: Record<string, string | number | boolean>,
-        fn: (span: ReturnType<typeof createSpan>) => Promise<unknown>,
+    startLLMRequestSpan: vi.fn((model: string, promptId: string) =>
+      createSpan('qwen-code.llm_request', {
+        model,
+        prompt_id: promptId,
+      }),
+    ),
+    endLLMRequestSpan: vi.fn(
+      (
+        span: ReturnType<typeof createSpan>,
+        metadata?: {
+          success: boolean;
+          inputTokens?: number;
+          outputTokens?: number;
+          durationMs?: number;
+          error?: string;
+        },
       ) => {
-        const span = createSpan(name, attributes);
-        let statusSet = false;
-        const wrappedSpan = {
-          ...span,
-          setStatus(status: { code: number; message?: string }) {
-            statusSet = true;
-            return span.setStatus(status);
-          },
-        };
+        // Capture metadata on the matching span record so tests can assert
+        // token counts, durationMs, success, error are forwarded correctly.
+        const record = loggingSpanRecords.find(
+          (r) => r.name === span.__spanName && r.endMetadata === undefined,
+        );
+        if (record) {
+          record.endMetadata = metadata;
+        }
         try {
-          const result = await fn(wrappedSpan);
-          if (!statusSet) {
-            span.setStatus({ code: 1 });
+          if (metadata) {
+            if (metadata.success) {
+              span.setStatus({ code: 1 }); // OK
+            } else {
+              span.setStatus({
+                code: 2,
+                message: metadata.error ?? 'unknown error',
+              }); // ERROR
+            }
           }
-          return result;
-        } catch (error) {
-          if (!statusSet) {
-            span.setStatus({
-              code: 2,
-              message: error instanceof Error ? error.message : String(error),
-            });
-          }
-          throw error;
-        } finally {
+          span.end();
+        } catch {
+          // Match production best-effort behavior.
           span.end();
         }
       },
     ),
-    startSpanWithContext: vi.fn(
-      (name: string, attributes: Record<string, string | number | boolean>) => {
-        const span = createSpan(name, attributes);
-        return {
-          span,
-          runInContext: <T>(fn: () => T): T => runWithActive(name, fn),
-        };
-      },
-    ),
+    addSystemPromptAttributes: vi.fn(),
+    addToolSchemaAttributes: vi.fn(),
+    addModelOutputAttributes: vi.fn(),
   };
 });
 
@@ -290,20 +287,20 @@ const createResponse = (
 
 const getStreamSpanRecord = () => {
   const spanRecord = loggingSpanRecords.find(
-    (record) => record.name === 'api.generateContentStream',
+    (record) => record.name === 'qwen-code.llm_request',
   );
   if (!spanRecord) {
-    throw new Error('api.generateContentStream span was not created');
+    throw new Error('qwen-code.llm_request span was not created');
   }
   return spanRecord;
 };
 
 const getGenerateContentSpanRecord = () => {
   const spanRecord = loggingSpanRecords.find(
-    (record) => record.name === 'api.generateContent',
+    (record) => record.name === 'qwen-code.llm_request',
   );
   if (!spanRecord) {
-    throw new Error('api.generateContent span was not created');
+    throw new Error('qwen-code.llm_request span was not created');
   }
   return spanRecord;
 };
@@ -462,12 +459,160 @@ describe('LoggingContentGenerator', () => {
     await generator.generateContent(request, 'prompt-span');
 
     const spanRecord = getGenerateContentSpanRecord();
-    expect(spanRecord.attributes).toEqual({
+    expect(spanRecord.attributes).toMatchObject({
       model: 'test-model',
       prompt_id: 'prompt-span',
+      'llm_request.stream': false,
     });
     expect(spanRecord.statuses).toEqual([{ code: SpanStatusCode.OK }]);
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('marks non-stream LLM span with llm_request.stream=false', async () => {
+    const wrapped = createWrappedGenerator(
+      vi
+        .fn()
+        .mockResolvedValue(
+          createResponse('resp', 'test-model', [{ text: 'ok' }]),
+        ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-stream-attr');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.attributes['llm_request.stream']).toBe(false);
+  });
+
+  it('marks streaming LLM span with llm_request.stream=true', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('resp-1', 'test-model', [{ text: 'ok' }]);
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(
+      request,
+      'prompt-stream-attr',
+    );
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.attributes['llm_request.stream']).toBe(true);
+  });
+
+  it('forwards token counts and duration to endLLMRequestSpan on non-stream success', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockResolvedValue(
+        createResponse('resp', 'test-model', [{ text: 'ok' }], {
+          promptTokenCount: 42,
+          candidatesTokenCount: 17,
+          totalTokenCount: 59,
+        }),
+      ),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await generator.generateContent(request, 'prompt-meta');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 42,
+      outputTokens: 17,
+    });
+    expect(spanRecord.endMetadata!.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('forwards error metadata to endLLMRequestSpan on non-stream failure', async () => {
+    const wrapped = createWrappedGenerator(
+      vi.fn().mockRejectedValue(new Error('upstream-down')),
+      vi.fn(),
+    );
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    await expect(
+      generator.generateContent(request, 'prompt-err'),
+    ).rejects.toThrow('upstream-down');
+
+    const spanRecord = getGenerateContentSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: false,
+      error: 'API call failed',
+    });
+  });
+
+  it('forwards final lastUsageMetadata to endLLMRequestSpan on stream success', async () => {
+    const streamFn = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield createResponse('r1', 'test-model', [{ text: 'a' }]);
+        yield createResponse('r2', 'test-model', [{ text: 'b' }], {
+          promptTokenCount: 100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 150,
+        });
+      })(),
+    );
+    const wrapped = createWrappedGenerator(vi.fn(), streamFn);
+    const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+      model: 'test-model',
+      authType: AuthType.USE_OPENAI,
+      enableOpenAILogging: false,
+    });
+    const request = {
+      model: 'test-model',
+      contents: 'Hello',
+    } as unknown as GenerateContentParameters;
+
+    const stream = await generator.generateContentStream(request, 'prompt-tok');
+    for await (const _ of stream) {
+      // consume
+    }
+
+    const spanRecord = getStreamSpanRecord();
+    expect(spanRecord.endMetadata).toMatchObject({
+      success: true,
+      inputTokens: 100,
+      outputTokens: 50,
+    });
   });
 
   it('preserves non-stream success when response and OpenAI logging fail', async () => {
@@ -791,7 +936,7 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('preserves stream success when the OK status update fails', async () => {
-    loggingSpanNamesWithSetStatusFailure.add('api.generateContentStream');
+    loggingSpanNamesWithSetStatusFailure.add('qwen-code.llm_request');
     const response = createResponse('resp-status', 'model-stream', [
       { text: 'ok' },
     ]);
@@ -859,7 +1004,7 @@ describe('LoggingContentGenerator', () => {
       // Consume stream to trigger cleanup.
     }
 
-    expect(activeContextDuringWrappedCall).toBe('api.generateContentStream');
+    expect(activeContextDuringWrappedCall).toBe('qwen-code.llm_request');
   });
 
   it('logs stream setup errors before leaving the stream span context', async () => {
@@ -890,7 +1035,7 @@ describe('LoggingContentGenerator', () => {
     ).rejects.toThrow('setup-fail');
 
     expect(logApiError).toHaveBeenCalledTimes(1);
-    expect(activeContextDuringApiError).toBe('api.generateContentStream');
+    expect(activeContextDuringApiError).toBe('qwen-code.llm_request');
     expect(spanEndedDuringApiError).toBe(false);
 
     const spanRecord = getStreamSpanRecord();
@@ -1003,7 +1148,7 @@ describe('LoggingContentGenerator', () => {
   });
 
   it('preserves stream errors when the error status update fails', async () => {
-    loggingSpanNamesWithSetStatusFailure.add('api.generateContentStream');
+    loggingSpanNamesWithSetStatusFailure.add('qwen-code.llm_request');
     const response1 = createResponse('resp-1', 'model-stream', [
       { text: 'partial' },
     ]);

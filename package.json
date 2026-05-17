@@ -79,7 +79,11 @@
       "wrap-ansi": "7.0.0"
     },
     "baseline-browser-mapping": "^2.9.19",
-    "normalize-package-data": "^7.0.1"
+    "normalize-package-data": "^7.0.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
   },
   "bin": {
     "qwen": "dist/cli.js"
@@ -130,7 +134,7 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "ink": "^6.2.3",
+    "ink": "^7.0.3",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {

@@ -42,6 +42,19 @@ with status `400`.
 
 with status `404`.
 
+`WorkspaceMismatchError` for a `POST /session` whose `cwd` doesn't canonicalize to the daemon's bound workspace (#3803 §02 — 1 daemon = 1 workspace) returns `400` with:
+
+```json
+{
+  "error": "Workspace mismatch: daemon is bound to \"…\" but request asked for \"…\". …",
+  "code": "workspace_mismatch",
+  "boundWorkspace": "/path/the/daemon/binds",
+  "requestedWorkspace": "/path/in/the/request"
+}
+```
+
+Use this to detect mismatch pre-flight: read `workspaceCwd` off `/capabilities` and omit `cwd` from `POST /session` (it falls back to the bound workspace), or route the request to a daemon bound to `requestedWorkspace`.
+
 `POST /session` past the daemon's `--max-sessions` cap returns `503` with a `Retry-After: 5` header and:
 
 ```json
@@ -54,15 +67,36 @@ with status `404`.
 
 Attaches to existing sessions are NOT counted toward the cap, so an idle daemon's reconnects keep working even when at-capacity.
 
+`RestoreInProgressError` — only emitted by `POST /session/:id/load` and `POST /session/:id/resume` — returns `409` with a `Retry-After: 5` header (matching `session_limit_exceeded`) and:
+
+```json
+{
+  "error": "Session \"<sid>\" is already being restored via session/<resume|load>; retry session/<load|resume> after it completes",
+  "code": "restore_in_progress",
+  "sessionId": "<sid>",
+  "activeAction": "load",
+  "requestedAction": "resume"
+}
+```
+
+Fired when a `session/load` is issued for an id that already has a `session/resume` in flight (or vice versa). Wait at least `Retry-After` seconds and retry — the underlying restore completes within `initTimeoutMs` (default 10s). Same-action races (`load` vs `load`, `resume` vs `resume`) coalesce instead of erroring.
+
 ## Capabilities
 
-Every Stage 1 daemon advertises 9 feature tags. Clients **must** gate UI off `features`, not off `mode` (per design §10).
+The daemon advertises its supported feature tags from the serve capability
+registry. Clients **must** gate UI off `features`, not off `mode` (per design
+§10).
 
 ```
-['health', 'capabilities', 'session_create', 'session_list',
- 'session_prompt', 'session_cancel', 'session_events',
+['health', 'capabilities', 'session_create', 'session_scope_override',
+ 'session_load', 'unstable_session_resume',
+ 'session_list', 'session_prompt', 'session_cancel', 'session_events',
  'session_set_model', 'permission_vote']
 ```
+
+`session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
+
+`session_load` and `unstable_session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. The `unstable_` prefix on `unstable_session_resume` mirrors the underlying ACP method (`connection.unstable_resumeSession`) — the daemon's wire shape is committed for v1, but the ACP method name itself may change before ACP marks resume stable.
 
 ## Routes
 
@@ -91,15 +125,24 @@ Pass `?deep=1` (also accepts `?deep=true` or bare `?deep`) for a probe that expo
 ```json
 {
   "v": 1,
+  "protocolVersions": {
+    "current": "v1",
+    "supported": ["v1"]
+  },
   "mode": "http-bridge",
   "features": ["health", "capabilities", "..."],
-  "modelServices": []
+  "modelServices": [],
+  "workspaceCwd": "/canonical/path/to/workspace"
 }
 ```
 
 Stable contract: when `v` increments the frame layout has changed in a backwards-incompatible way.
 
+> **`protocolVersions`** describes the serve protocol versions the daemon can speak. `current` is the daemon's preferred protocol version and `supported` is the compatible set. Clients that require a specific protocol should check `supported`; feature-specific UI should still gate on `features`. Additive to v=1: older v=1 daemons omit this field, so SDK clients that target older builds should treat it as optional.
+
 > **`modelServices` is always `[]` in Stage 1.** The agent uses its single default model service and doesn't enumerate it over the wire. Stage 2 will populate this from registered model adapters so SDK clients can build service-pickers; until then, do NOT rely on this field being non-empty.
+
+> **`workspaceCwd`** is the canonical absolute path this daemon binds to (#3803 §02 — 1 daemon = 1 workspace). Use it to (a) detect mismatch before posting `/session` and (b) omit `cwd` on `POST /session` (the route falls back to this path). Multi-workspace deployments expose multiple daemons on different ports, each with its own `workspaceCwd`. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
 
 ### `POST /session`
 
@@ -110,14 +153,16 @@ Request:
 ```json
 {
   "cwd": "/absolute/path/to/workspace",
-  "modelServiceId": "qwen-prod"
+  "modelServiceId": "qwen-prod",
+  "sessionScope": "thread"
 }
 ```
 
 | Field            | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `cwd`            | yes      | Absolute path. Relative paths return `400`. Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't fork sessions per spelling.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `cwd`            | no       | Absolute path matching the daemon's bound workspace. If omitted, the route falls back to `boundWorkspace` (read it off `/capabilities.workspaceCwd`). A mismatched non-empty `cwd` returns `400 workspace_mismatch` (#3803 §02 — 1 daemon = 1 workspace). Workspace paths are canonicalized via `realpathSync.native` (with a resolve-only fallback for non-existent paths) so case-insensitive filesystems don't reject sessions per spelling.                                                                                                                                                                          |
 | `modelServiceId` | no       | Selects which configured _model service_ the agent will route through (the back-end provider — Alibaba ModelStudio, OpenRouter, etc). If omitted the agent uses its default. If the workspace already has a session, this calls `setSessionModel` on the existing one and broadcasts `model_switched`. Distinct from `modelId` on `POST /session/:id/model`, which selects the model **within** an already-bound service. The `modelServices` array on `/capabilities` is reserved for advertising configured services; in Stage 1 it is always `[]` (the agent's default service is used and not enumerated over HTTP). |
+| `sessionScope`   | no       | Per-request override for session sharing. `'single'` (the daemon-wide default) makes a second same-workspace `POST /session` reuse the existing session (`attached: true`); `'thread'` forces a fresh distinct session every call. Omit to inherit the daemon-wide default. Values outside the enum return `400 { code: 'invalid_session_scope' }`. Old daemons (pre-#4175 PR 5) silently ignore the field — pre-flight `caps.features.session_scope_override` before sending. The daemon-wide default is hardcoded to `'single'` in production today; #4175 may add a `--sessionScope` CLI flag in a follow-up.         |
 
 Response:
 
@@ -145,6 +190,60 @@ Concurrent `POST /session` calls for the same workspace are **coalesced** to one
 /session/:id/events`** to replay from the ring's oldest available
 > event (covers the spawn-time `model_switch_failed` even if the
 > subscribe lands a few ms after the create response).
+
+### `POST /session/:id/load`
+
+Restore a persisted ACP session by id and replay its history through SSE. The path id is authoritative; any `sessionId` field in the body is ignored. Pre-flight `caps.features.session_load` — older daemons return `404` for this route.
+
+Request:
+
+```json
+{
+  "cwd": "/absolute/path/to/workspace"
+}
+```
+
+| Field | Required | Notes                                                                                                                                                                                                                                |
+| ----- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `cwd` | no       | Same canonicalization + `workspace_mismatch` rules as `POST /session`. Omit to inherit `/capabilities.workspaceCwd`. `mcpServers` is intentionally NOT accepted here — daemon-wide MCP is settings-driven (matches `POST /session`). |
+
+Response:
+
+```json
+{
+  "sessionId": "persisted-1",
+  "workspaceCwd": "/canonical/path",
+  "attached": false,
+  "state": {
+    "models": { ... },
+    "modes": { ... },
+    "configOptions": [ ... ]
+  }
+}
+```
+
+`state` mirrors ACP's `LoadSessionResponse` — `models` is a `SessionModelState`, `modes` a `SessionModeState`, `configOptions` an array of `SessionConfigOption`. Missing fields are agent-decided. Late attachers (the `attached: true` paths below) get the SAME `state` snapshot the original load caller saw — the daemon caches it on the entry; runtime mutations (e.g. `model_switched`) are delivered on the SSE stream, not on subsequent attach responses.
+
+`attached: true` means the session was already live (either from a prior `session/load`/`session/resume`, or because a coalesced concurrent caller raced just ahead).
+
+**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent emits `session_update` notifications for every persisted turn. The daemon buffers them onto the session's event-bus before the route response returns, so subscribers that immediately call `GET /session/:id/events` with `Last-Event-ID: 0` see the full replay. **The replay ring is bounded** (default 4000 frames per session). Long histories with many tool-call / thought-stream turns can exceed that — the oldest frames are dropped silently. Clients that need full history should subscribe immediately after `load` returns; alternatively they can persist the SSE event ids and use `Last-Event-ID` to resume from a later turn boundary.
+
+**Errors:**
+
+- `404` — persisted session id doesn't exist (`SessionNotFoundError`).
+- `400` — `workspace_mismatch` (same shape as `POST /session`).
+- `503` — `session_limit_exceeded` (counts against `--max-sessions`; in-flight restores are accounted for too).
+- `409` — `restore_in_progress` (a `session/resume` for the same id is already in flight). `Retry-After: 5`. Same-action races (two concurrent `session/load` for the same id) coalesce — exactly one returns `attached: false`, the rest return `attached: true` with the same `state`.
+
+### `POST /session/:id/resume`
+
+Restore a persisted ACP session by id WITHOUT replaying history through SSE. The model context is restored internally on the agent side (via `geminiClient.initialize` reading `config.getResumedSessionData`); the SSE stream stays clean for clients that already have history rendered. Pre-flight `caps.features.unstable_session_resume`.
+
+Same request shape as `/load`. Same response shape — `state` mirrors ACP's `ResumeSessionResponse`. Same error envelope, including `409 restore_in_progress` (which fires when a `session/load` is in flight; `session/resume` racing behind another `session/resume` coalesces).
+
+Use `/load` when the client has no history rendered (cold reconnect, picker → open). Use `/resume` when the client already has the turns on screen and only needs the daemon-side handle back.
+
+> ⚠️ **Why `unstable_` on the capability tag?** The route is wire-stable for the daemon's v1, but it's backed by ACP's `connection.unstable_resumeSession` which is still subject to ACP-side breaking changes. The daemon insulates the wire shape from those changes; the prefix is a courtesy signal so SDK consumers know the underlying agent contract is not yet locked.
 
 ### `GET /workspace/:id/sessions`
 
