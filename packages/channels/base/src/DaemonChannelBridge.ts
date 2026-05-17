@@ -63,6 +63,12 @@ export interface DaemonPermissionResolvedEvent {
   outcome?: unknown;
 }
 
+export interface DaemonPromptCompleteEvent {
+  sessionId: string;
+  text: string;
+  stopReason?: string;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -85,6 +91,10 @@ function getSessionUpdate(data: unknown): Record<string, unknown> | undefined {
   return data['update'];
 }
 
+async function drainDaemonEventLoop(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 export class DaemonChannelBridge extends EventEmitter {
   private readonly options: DaemonChannelBridgeOptions;
   private readonly sessions = new Map<string, DaemonChannelSessionClient>();
@@ -100,16 +110,30 @@ export class DaemonChannelBridge extends EventEmitter {
     AvailableCommand[]
   >();
   private connected = false;
-  private _availableCommands: AvailableCommand[] = [];
+  private latestAvailableCommandsSessionId: string | undefined;
+  private lastError: unknown;
 
   constructor(options: DaemonChannelBridgeOptions) {
     super();
     this.options = options;
-    this.on('error', () => {});
+    this.on('error', (error) => {
+      this.lastError = error;
+    });
   }
 
   get availableCommands(): AvailableCommand[] {
-    return this._availableCommands;
+    if (this.latestAvailableCommandsSessionId) {
+      return (
+        this.availableCommandsBySession.get(
+          this.latestAvailableCommandsSessionId,
+        ) ?? []
+      );
+    }
+    return Array.from(this.availableCommandsBySession.values()).at(-1) ?? [];
+  }
+
+  get lastDaemonError(): unknown {
+    return this.lastError;
   }
 
   getAvailableCommands(sessionId: string): AvailableCommand[] {
@@ -135,6 +159,11 @@ export class DaemonChannelBridge extends EventEmitter {
       modelServiceId: this.options.modelServiceId,
       sessionId,
     });
+    if (session.sessionId !== sessionId) {
+      throw new Error(
+        `Daemon returned session ${session.sessionId} while loading ${sessionId}`,
+      );
+    }
     this.attachSession(session);
     return session.sessionId;
   }
@@ -185,7 +214,15 @@ export class DaemonChannelBridge extends EventEmitter {
     prompt.push({ type: 'text', text });
 
     try {
-      await session.prompt({ prompt }, controller.signal);
+      const result = await session.prompt({ prompt }, controller.signal);
+      await drainDaemonEventLoop();
+      const textResult = chunks.join('');
+      this.emit('promptComplete', {
+        sessionId,
+        text: textResult,
+        stopReason: result.stopReason,
+      } satisfies DaemonPromptCompleteEvent);
+      return textResult;
     } finally {
       this.off('textChunk', onChunk);
       this.off('sessionDied', onSessionDied);
@@ -195,12 +232,12 @@ export class DaemonChannelBridge extends EventEmitter {
         this.activePromptControllers.delete(sessionId);
       }
     }
-
-    return chunks.join('');
   }
 
   async cancelSession(sessionId: string): Promise<void> {
-    await this.ensureSession(sessionId).cancel();
+    const session = this.ensureSession(sessionId);
+    this.abortActivePrompts(sessionId);
+    await session.cancel();
   }
 
   async setSessionModel(
@@ -227,8 +264,8 @@ export class DaemonChannelBridge extends EventEmitter {
   }
 
   stop(): void {
-    for (const controller of this.eventControllers.values()) {
-      controller.abort();
+    for (const sessionId of Array.from(this.sessions.keys())) {
+      this.dropSession(sessionId, 'bridge_stopped');
     }
     this.eventControllers.clear();
     this.sessions.clear();
@@ -241,7 +278,7 @@ export class DaemonChannelBridge extends EventEmitter {
     this.activePromptControllers.clear();
     this.activePrompts.clear();
     this.availableCommandsBySession.clear();
-    this._availableCommands = [];
+    this.latestAvailableCommandsSessionId = undefined;
     this.connected = false;
   }
 
@@ -250,8 +287,9 @@ export class DaemonChannelBridge extends EventEmitter {
   }
 
   private attachSession(session: DaemonChannelSessionClient): void {
-    const existing = this.eventControllers.get(session.sessionId);
-    existing?.abort();
+    if (this.sessions.has(session.sessionId)) {
+      this.dropSession(session.sessionId, 'session_replaced');
+    }
 
     this.sessions.set(session.sessionId, session);
     const controller = new AbortController();
@@ -305,7 +343,7 @@ export class DaemonChannelBridge extends EventEmitter {
         this.handlePermissionRequest(session.sessionId, event.data);
         break;
       case 'permission_resolved':
-        this.handlePermissionResolved(event.data);
+        this.handlePermissionResolved(session.sessionId, event.data);
         break;
       case 'model_switched':
         this.handleModelSwitched(session.sessionId, event.data);
@@ -336,6 +374,7 @@ export class DaemonChannelBridge extends EventEmitter {
   private handleSessionUpdate(sessionId: string, data: unknown): void {
     const update = getSessionUpdate(data);
     if (!update) {
+      this.emitProtocolError('Malformed daemon session_update event', data);
       return;
     }
 
@@ -374,7 +413,12 @@ export class DaemonChannelBridge extends EventEmitter {
         if (Array.isArray(update['availableCommands'])) {
           const commands = update['availableCommands'] as AvailableCommand[];
           this.availableCommandsBySession.set(sessionId, commands);
-          this._availableCommands = commands;
+          this.latestAvailableCommandsSessionId = sessionId;
+        } else {
+          this.emitProtocolError(
+            'Malformed daemon available_commands_update event',
+            data,
+          );
         }
         break;
       }
@@ -392,6 +436,7 @@ export class DaemonChannelBridge extends EventEmitter {
       !isRecord(data['toolCall']) ||
       !Array.isArray(data['options'])
     ) {
+      this.emitProtocolError('Malformed daemon permission_request event', data);
       return;
     }
     const requestId = data['requestId'];
@@ -403,11 +448,30 @@ export class DaemonChannelBridge extends EventEmitter {
     } satisfies DaemonPermissionRequestEvent);
   }
 
-  private handlePermissionResolved(data: unknown): void {
+  private handlePermissionResolved(sessionId: string, data: unknown): void {
     if (!isRecord(data) || typeof data['requestId'] !== 'string') {
+      this.emitProtocolError(
+        'Malformed daemon permission_resolved event',
+        data,
+      );
       return;
     }
     const requestId = data['requestId'];
+    const mappedSessionId = this.requestToSession.get(requestId);
+    if (!mappedSessionId) {
+      this.emitProtocolError(
+        `Ignoring daemon permission_resolved for unknown request ${requestId}`,
+        data,
+      );
+      return;
+    }
+    if (mappedSessionId !== sessionId) {
+      this.emitProtocolError(
+        `Ignoring daemon permission_resolved for request ${requestId} from non-owning session ${sessionId}`,
+        data,
+      );
+      return;
+    }
     this.requestToSession.delete(requestId);
     this.emit('permissionResolved', {
       requestId,
@@ -417,6 +481,7 @@ export class DaemonChannelBridge extends EventEmitter {
 
   private handleModelSwitched(sessionId: string, data: unknown): void {
     if (!isRecord(data) || typeof data['modelId'] !== 'string') {
+      this.emitProtocolError('Malformed daemon model_switched event', data);
       return;
     }
     this.emit('modelSwitched', {
@@ -427,6 +492,10 @@ export class DaemonChannelBridge extends EventEmitter {
 
   private handleModelSwitchFailed(sessionId: string, data: unknown): void {
     if (!isRecord(data)) {
+      this.emitProtocolError(
+        'Malformed daemon model_switch_failed event',
+        data,
+      );
       return;
     }
     this.emit('modelSwitchFailed', {
@@ -447,17 +516,14 @@ export class DaemonChannelBridge extends EventEmitter {
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
-    const promptControllers = this.activePromptControllers.get(sessionId);
-    if (promptControllers) {
-      for (const controller of promptControllers) {
-        controller.abort();
-      }
-      this.activePromptControllers.delete(sessionId);
-    }
+    this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
     this.availableCommandsBySession.delete(sessionId);
-    this._availableCommands =
-      Array.from(this.availableCommandsBySession.values()).at(-1) ?? [];
+    if (this.latestAvailableCommandsSessionId === sessionId) {
+      this.latestAvailableCommandsSessionId = Array.from(
+        this.availableCommandsBySession.keys(),
+      ).at(-1);
+    }
     for (const [requestId, mappedSessionId] of this.requestToSession) {
       if (mappedSessionId === sessionId) {
         this.requestToSession.delete(requestId);
@@ -476,5 +542,22 @@ export class DaemonChannelBridge extends EventEmitter {
     return isRecord(data) && typeof data['error'] === 'string'
       ? data['error']
       : fallback;
+  }
+
+  private abortActivePrompts(sessionId: string): void {
+    const promptControllers = this.activePromptControllers.get(sessionId);
+    if (!promptControllers) {
+      return;
+    }
+    for (const controller of promptControllers) {
+      controller.abort();
+    }
+    this.activePromptControllers.delete(sessionId);
+  }
+
+  private emitProtocolError(message: string, details: unknown): void {
+    const error = new Error(message) as Error & { details?: unknown };
+    error.details = details;
+    this.emit('error', error);
   }
 }

@@ -12,6 +12,7 @@ export type {
   DaemonChannelSessionClient,
   DaemonChannelSessionFactory,
   DaemonChannelSessionFactoryRequest,
+  DaemonPromptCompleteEvent,
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedEvent,
 } from './DaemonChannelBridge.js';

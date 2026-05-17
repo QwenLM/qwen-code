@@ -11,8 +11,10 @@ import {
 
 class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   private events: DaemonChannelEvent[] = [];
-  private waiters: Array<(value: IteratorResult<DaemonChannelEvent>) => void> =
-    [];
+  private waiters: Array<{
+    resolve: (value: IteratorResult<DaemonChannelEvent>) => void;
+    reject: (error: unknown) => void;
+  }> = [];
   private closed = false;
   private failure: unknown;
 
@@ -27,8 +29,8 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
     if (this.closed) {
       return { done: true, value: undefined };
     }
-    return await new Promise((resolve) => {
-      this.waiters.push(resolve);
+    return await new Promise((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
     });
   }
 
@@ -49,7 +51,7 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   push(event: DaemonChannelEvent): void {
     const waiter = this.waiters.shift();
     if (waiter) {
-      waiter({ done: false, value: event });
+      waiter.resolve({ done: false, value: event });
       return;
     }
     this.events.push(event);
@@ -58,12 +60,15 @@ class EventQueue implements AsyncGenerator<DaemonChannelEvent> {
   close(): void {
     this.closed = true;
     for (const waiter of this.waiters.splice(0)) {
-      waiter({ done: true, value: undefined });
+      waiter.resolve({ done: true, value: undefined });
     }
   }
 
   fail(error: unknown): void {
     this.failure = error;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.reject(error);
+    }
   }
 }
 
@@ -138,6 +143,8 @@ describe('DaemonChannelBridge', () => {
       cwd: '/repo',
       sessionFactory: factory,
     });
+    const promptComplete = vi.fn();
+    bridge.on('promptComplete', promptComplete);
 
     await bridge.start();
     const sessionId = await bridge.newSession('/repo');
@@ -146,6 +153,11 @@ describe('DaemonChannelBridge', () => {
     resolvePrompt();
 
     await expect(promptPromise).resolves.toBe('hello');
+    expect(promptComplete).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      text: 'hello',
+      stopReason: 'end_turn',
+    });
     expect(factory).toHaveBeenCalledWith({
       workspaceCwd: '/repo',
       modelServiceId: undefined,
@@ -155,6 +167,42 @@ describe('DaemonChannelBridge', () => {
         prompt: [{ type: 'text', text: 'summarize' }],
       },
       expect.any(AbortSignal),
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('drains daemon chunks queued with prompt completion', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(async () => {
+      setTimeout(() => {
+        events.push({
+          id: 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'late chunk' },
+            },
+          },
+        });
+      }, 0);
+      return { stopReason: 'end_turn' };
+    });
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
+      'late chunk',
     );
 
     events.close();
@@ -292,6 +340,82 @@ describe('DaemonChannelBridge', () => {
     events.close();
   });
 
+  it('keeps available commands scoped per daemon session', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents, 'session-1');
+    const secondSession = createFakeSession(secondEvents, 'session-2');
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.newSession('/repo');
+
+    firstEvents.push({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: '/one', description: 'First', input: null },
+          ],
+        },
+      },
+    });
+    secondEvents.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-2',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            { name: '/two', description: 'Second', input: null },
+          ],
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(bridge.getAvailableCommands('session-2')).toEqual([
+        { name: '/two', description: 'Second', input: null },
+      ]),
+    );
+    expect(bridge.getAvailableCommands('session-1')).toEqual([
+      { name: '/one', description: 'First', input: null },
+    ]);
+    expect(bridge.availableCommands).toEqual([
+      { name: '/two', description: 'Second', input: null },
+    ]);
+
+    secondEvents.push({
+      id: 3,
+      v: 1,
+      type: 'session_died',
+      data: { reason: 'gone' },
+    });
+    await waitFor(() =>
+      expect(bridge.getAvailableCommands('session-2')).toEqual([]),
+    );
+    expect(bridge.availableCommands).toEqual([
+      { name: '/one', description: 'First', input: null },
+    ]);
+
+    firstEvents.close();
+    secondEvents.close();
+    bridge.stop();
+  });
+
   it('routes permission responses back through the owning daemon session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -383,6 +507,141 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it('ignores permission resolution events from non-owning sessions', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents, 'session-1');
+    const secondSession = createFakeSession(secondEvents, 'session-2');
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+    });
+    const permissionResolved = vi.fn();
+    const permissionRequest = vi.fn();
+    const errors = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+    bridge.on('error', errors);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    await bridge.newSession('/repo');
+
+    firstEvents.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-1',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledOnce());
+    await expect(
+      bridge.respondToPermission('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      }),
+    ).resolves.toBe(true);
+
+    secondEvents.push({
+      id: 2,
+      v: 1,
+      type: 'permission_resolved',
+      data: { requestId: 'req-1', outcome: { outcome: 'selected' } },
+    });
+
+    await waitFor(() =>
+      expect(errors).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: expect.stringContaining('non-owning session session-2'),
+        }),
+      ),
+    );
+    expect(permissionResolved).not.toHaveBeenCalled();
+    expect(firstSession.respondToPermission).toHaveBeenCalledWith('req-1', {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    });
+    expect(secondSession.respondToPermission).not.toHaveBeenCalled();
+
+    firstEvents.close();
+    secondEvents.close();
+    bridge.stop();
+  });
+
+  it('replaces duplicate daemon sessions and clears stale ownership state', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents, 'session-1');
+    const secondSession = createFakeSession(secondEvents, 'session-1');
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+    });
+    const sessionDied = vi.fn();
+    const permissionRequest = vi.fn();
+    bridge.on('sessionDied', sessionDied);
+    bridge.on('permissionRequest', permissionRequest);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    firstEvents.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-1',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledOnce());
+    await expect(
+      bridge.respondToPermission('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      }),
+    ).resolves.toBe(true);
+
+    await expect(bridge.newSession('/repo')).resolves.toBe('session-1');
+
+    await waitFor(() =>
+      expect(sessionDied).toHaveBeenCalledWith({
+        sessionId: 'session-1',
+        reason: 'session_replaced',
+      }),
+    );
+    await expect(
+      bridge.respondToPermission('req-1', {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      }),
+    ).resolves.toBe(false);
+
+    firstEvents.close();
+    secondEvents.close();
+    bridge.stop();
+  });
+
   it('rejects unknown sessions and concurrent prompts for one session', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -397,6 +656,8 @@ describe('DaemonChannelBridge', () => {
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
     });
+    const promptComplete = vi.fn();
+    bridge.on('promptComplete', promptComplete);
 
     await bridge.start();
     await bridge.newSession('/repo');
@@ -418,6 +679,11 @@ describe('DaemonChannelBridge', () => {
     );
     resolvePrompt();
     await expect(firstPrompt).resolves.toBe('');
+    expect(promptComplete).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      text: '',
+      stopReason: 'end_turn',
+    });
 
     events.close();
     bridge.stop();
@@ -488,6 +754,8 @@ describe('DaemonChannelBridge', () => {
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
     });
+    const sessionDied = vi.fn();
+    bridge.on('sessionDied', sessionDied);
 
     await bridge.start();
     await bridge.newSession('/repo');
@@ -496,6 +764,42 @@ describe('DaemonChannelBridge', () => {
 
     bridge.stop();
     await expect(promptPromise).rejects.toThrow('aborted');
+    expect(sessionDied).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      reason: 'bridge_stopped',
+    });
+  });
+
+  it('aborts in-flight prompts when cancelling a session', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    session.prompt.mockImplementation(
+      (_req: unknown, signal?: AbortSignal) =>
+        new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('aborted', 'AbortError')),
+            { once: true },
+          );
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+    const promptPromise = bridge.prompt('session-1', 'hello');
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+
+    await bridge.cancelSession('session-1');
+
+    await expect(promptPromise).rejects.toThrow('aborted');
+    expect(session.cancel).toHaveBeenCalledOnce();
+
+    events.close();
+    bridge.stop();
   });
 
   it('treats terminal stream frames and completion as session death', async () => {
@@ -517,6 +821,9 @@ describe('DaemonChannelBridge', () => {
         reason: 'network down',
       }),
     );
+    expect(failedBridge.lastDaemonError).toMatchObject({
+      message: 'network down',
+    });
     await expect(failedBridge.prompt('session-1', 'hello')).rejects.toThrow(
       'No daemon session bound for session-1',
     );
@@ -616,6 +923,92 @@ describe('DaemonChannelBridge', () => {
     });
     expect(session.cancel).toHaveBeenCalledOnce();
     expect(session.setModel).toHaveBeenCalledWith('qwen3-coder-plus');
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('rejects mismatched daemon session ids while loading', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events, 'different-session');
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    await bridge.start();
+    await expect(
+      bridge.loadSession('existing-session', '/repo'),
+    ).rejects.toThrow(
+      'Daemon returned session different-session while loading existing-session',
+    );
+    await expect(bridge.prompt('different-session', 'hello')).rejects.toThrow(
+      'No daemon session bound for different-session',
+    );
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('surfaces malformed daemon events through the error channel', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const errors = vi.fn();
+    bridge.on('error', errors);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'permission_request',
+      data: { requestId: 'req-1' },
+    });
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: 'not-an-array',
+        },
+      },
+    });
+    events.push({
+      id: 3,
+      v: 1,
+      type: 'model_switched',
+      data: {},
+    });
+
+    await waitFor(() => expect(errors).toHaveBeenCalledTimes(3));
+    expect(errors).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        message: 'Malformed daemon permission_request event',
+      }),
+    );
+    expect(errors).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        message: 'Malformed daemon available_commands_update event',
+      }),
+    );
+    expect(errors).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        message: 'Malformed daemon model_switched event',
+      }),
+    );
+    expect(bridge.lastDaemonError).toMatchObject({
+      message: 'Malformed daemon model_switched event',
+    });
 
     events.close();
     bridge.stop();
