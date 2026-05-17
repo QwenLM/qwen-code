@@ -125,6 +125,64 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('0');
   });
 
+  it('loads an existing daemon session and seeds replay from the start', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          state: { configOptions: [] },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return sseResponse('');
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1', {
+      workspaceCwd: '/work/a',
+    });
+
+    expect(session.sessionId).toBe('s-1');
+    expect(session.state).toEqual({ configOptions: [] });
+    expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    expect(calls[1]?.headers['last-event-id']).toBe('0');
+  });
+
+  it('resumes an existing daemon session without forcing replay', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          state: { modes: null },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return sseResponse('');
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.resume(client, 's-1');
+
+    expect(session.attached).toBe(true);
+    expect(session.state).toEqual({ modes: null });
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    expect(calls[1]?.headers['last-event-id']).toBeUndefined();
+  });
+
   it('forwards session-scoped operations through DaemonClient', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/prompt')) {

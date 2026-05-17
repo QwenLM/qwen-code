@@ -334,6 +334,54 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('loadSession / resumeSession', () => {
+    it('POSTs /session/:id/load with optional cwd', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          state: { configOptions: [] },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const session = await client.loadSession('s-1', {
+        workspaceCwd: '/work/a',
+      });
+
+      expect(session.state).toEqual({ configOptions: [] });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/load');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+    });
+
+    it('POSTs /session/:id/resume and omits cwd when absent', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/bound',
+          attached: false,
+          state: {},
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.resumeSession('with/slash');
+
+      expect(calls[0]?.url).toBe('http://daemon/session/with%2Fslash/resume');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('throws DaemonHttpError on restore failures', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'missing' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.loadSession('missing')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
   describe('cancel', () => {
     it('POSTs /cancel and tolerates 204', async () => {
       const { fetch, calls } = recordingFetch(

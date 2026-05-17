@@ -8,10 +8,12 @@ import type { DaemonClient } from './DaemonClient.js';
 import {
   type CreateSessionRequest,
   type PromptRequest,
+  type RestoreSessionRequest,
   type SubscribeOptions,
 } from './DaemonClient.js';
 import type {
   DaemonEvent,
+  DaemonSessionState,
   DaemonSession,
   PermissionResponse,
   PromptResult,
@@ -21,6 +23,8 @@ import type {
 export interface DaemonSessionClientOptions {
   client: DaemonClient;
   session: DaemonSession;
+  /** ACP state returned by load/resume; empty for create/attach clients. */
+  state?: DaemonSessionState;
   /**
    * Seed replay state for callers that persisted the last seen SSE event id.
    * When omitted, the first event subscription starts live.
@@ -50,12 +54,14 @@ export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
 export class DaemonSessionClient {
   readonly client: DaemonClient;
   readonly session: DaemonSession;
+  readonly state: DaemonSessionState;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
 
   constructor(opts: DaemonSessionClientOptions) {
     this.client = opts.client;
     this.session = { ...opts.session };
+    this.state = { ...(opts.state ?? {}) };
     this.lastSeenEventId = opts.lastEventId;
   }
 
@@ -73,6 +79,37 @@ export class DaemonSessionClient {
     // `model_switch_failed` / `model_switched` events.
     const lastEventId = req.modelServiceId ? 0 : undefined;
     return new DaemonSessionClient({ client, session, lastEventId });
+  }
+
+  /**
+   * Loads an existing daemon session and seeds the first event subscription
+   * from the start of the daemon replay ring so history replay frames emitted
+   * during `session/load` are visible to this client.
+   */
+  static async load(
+    client: DaemonClient,
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonSessionClient> {
+    const { state, ...session } = await client.loadSession(sessionId, req);
+    return new DaemonSessionClient({
+      client,
+      session,
+      state,
+      lastEventId: 0,
+    });
+  }
+
+  /**
+   * Resumes an existing daemon session without requesting history replay.
+   */
+  static async resume(
+    client: DaemonClient,
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonSessionClient> {
+    const { state, ...session } = await client.resumeSession(sessionId, req);
+    return new DaemonSessionClient({ client, session, state });
   }
 
   get sessionId(): string {

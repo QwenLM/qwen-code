@@ -16,6 +16,7 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
+  RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -63,6 +64,8 @@ export interface ServeAppDeps {
  *   - `GET  /health`
  *   - `GET  /capabilities`
  *   - `POST /session`
+ *   - `POST /session/:id/load`
+ *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
@@ -352,6 +355,50 @@ export function createServeApp(
       sendBridgeError(res, err, { route: 'POST /session' });
     }
   });
+
+  const restoreSessionHandler =
+    (action: 'load' | 'resume') =>
+    async (req: express.Request, res: express.Response) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      const body = safeBody(req);
+      const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
+      if (cwd === undefined) return;
+      try {
+        const session =
+          action === 'load'
+            ? await bridge.loadSession({ sessionId, workspaceCwd: cwd })
+            : await bridge.resumeSession({ sessionId, workspaceCwd: cwd });
+        if (!res.writable) {
+          if (!session.attached) {
+            bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
+          } else {
+            bridge.detachClient(session.sessionId).catch(() => {
+              // Best-effort cleanup; channel.exited will eventually reap.
+            });
+          }
+          return;
+        }
+        res.status(200).json(session);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: `POST /session/:id/${action}`,
+          sessionId,
+        });
+      }
+    };
+
+  app.post('/session/:id/load', restoreSessionHandler('load'));
+  app.post('/session/:id/resume', restoreSessionHandler('resume'));
 
   app.post('/session/:id/prompt', async (req, res) => {
     const sessionId = req.params['id'];
@@ -873,6 +920,34 @@ function safeBody(req: import('express').Request): Record<string, unknown> {
   return out;
 }
 
+function parseOptionalWorkspaceCwd(
+  body: Record<string, unknown>,
+  boundWorkspace: string,
+  res: import('express').Response,
+): string | undefined {
+  const hasCwd = 'cwd' in body;
+  if (hasCwd && typeof body['cwd'] !== 'string') {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be a string absolute path when provided' });
+    return undefined;
+  }
+  if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
+    res.status(400).json({
+      error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+    });
+    return undefined;
+  }
+  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
+  if (!path.isAbsolute(cwd)) {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be an absolute path when provided' });
+    return undefined;
+  }
+  return cwd;
+}
+
 function isValidOutcome(
   raw: unknown,
 ): raw is { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } {
@@ -1030,6 +1105,17 @@ function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+    });
+    return;
+  }
+  if (err instanceof RestoreInProgressError) {
+    res.set('Retry-After', '1');
+    res.status(409).json({
+      error: err.message,
+      code: 'restore_in_progress',
+      sessionId: err.sessionId,
+      activeAction: err.activeAction,
+      requestedAction: err.requestedAction,
     });
     return;
   }

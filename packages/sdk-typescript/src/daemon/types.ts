@@ -117,6 +117,20 @@ export interface DaemonSession {
   attached: boolean;
 }
 
+/** ACP state returned by session load/resume routes. */
+export interface DaemonSessionState {
+  _meta?: Record<string, unknown> | null;
+  models?: unknown;
+  modes?: unknown;
+  configOptions?: unknown[] | null;
+  [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
+export interface DaemonRestoredSession extends DaemonSession {
+  state: DaemonSessionState;
+}
+
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
 export interface DaemonSessionSummary {
   sessionId: string;

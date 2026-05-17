@@ -32,6 +32,8 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
+  type BridgeRestoredSession,
+  type BridgeRestoreSessionRequest,
   type BridgeSession,
   type BridgeSessionSummary,
   type BridgeSpawnRequest,
@@ -60,6 +62,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'capabilities',
   'session_create',
   'session_scope_override',
+  'session_load',
+  'session_resume',
   'session_list',
   'session_prompt',
   'session_cancel',
@@ -70,6 +74,12 @@ const EXPECTED_STAGE1_FEATURES = [
 
 interface FakeBridgeOpts {
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
+  loadImpl?: (
+    req: BridgeRestoreSessionRequest,
+  ) => Promise<BridgeRestoredSession>;
+  resumeImpl?: (
+    req: BridgeRestoreSessionRequest,
+  ) => Promise<BridgeRestoredSession>;
   promptImpl?: (
     sessionId: string,
     req: PromptRequest,
@@ -93,6 +103,8 @@ interface FakeBridgeOpts {
 
 interface FakeBridge extends HttpAcpBridge {
   calls: BridgeSpawnRequest[];
+  loadCalls: BridgeRestoreSessionRequest[];
+  resumeCalls: BridgeRestoreSessionRequest[];
   promptCalls: Array<{
     sessionId: string;
     req: PromptRequest;
@@ -115,6 +127,8 @@ interface FakeBridge extends HttpAcpBridge {
 
 function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const calls: BridgeSpawnRequest[] = [];
+  const loadCalls: BridgeRestoreSessionRequest[] = [];
+  const resumeCalls: BridgeRestoreSessionRequest[] = [];
   const promptCalls: FakeBridge['promptCalls'] = [];
   const cancelCalls: FakeBridge['cancelCalls'] = [];
   const killCalls: Array<{
@@ -133,6 +147,22 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceCwd: req.workspaceCwd,
       attached: false,
     }));
+  const loadImpl =
+    opts.loadImpl ??
+    (async (req) => ({
+      sessionId: req.sessionId,
+      workspaceCwd: req.workspaceCwd,
+      attached: false,
+      state: {},
+    }));
+  const resumeImpl =
+    opts.resumeImpl ??
+    (async (req) => ({
+      sessionId: req.sessionId,
+      workspaceCwd: req.workspaceCwd,
+      attached: false,
+      state: {},
+    }));
   const promptImpl =
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
@@ -141,6 +171,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   return {
     calls,
+    loadCalls,
+    resumeCalls,
     promptCalls,
     cancelCalls,
     killCalls,
@@ -160,6 +192,16 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async spawnOrAttach(req) {
       const result = await spawnImpl(req);
       calls.push(req);
+      return result;
+    },
+    async loadSession(req) {
+      const result = await loadImpl(req);
+      loadCalls.push(req);
+      return result;
+    },
+    async resumeSession(req) {
+      const result = await resumeImpl(req);
+      resumeCalls.push(req);
       return result;
     },
     async sendPrompt(sessionId, req, signal) {
@@ -625,6 +667,88 @@ describe('createServeApp', () => {
       // undefined. (This is the core security property — if the
       // dangerous key landed via spread, this check would fail.)
       expect(({} as Record<string, unknown>)['polluted']).toBeUndefined();
+    });
+  });
+
+  describe('POST /session/:id/load and /resume', () => {
+    it('falls back to bound workspace and uses the route session id', async () => {
+      for (const action of ['load', 'resume'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post(`/session/persisted-1/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId: 'spoofed-body-id' });
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+          sessionId: 'persisted-1',
+          workspaceCwd: WS_BOUND,
+          attached: false,
+          state: {},
+        });
+        const calls = action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+        expect(calls).toEqual([
+          { sessionId: 'persisted-1', workspaceCwd: WS_BOUND },
+        ]);
+      }
+    });
+
+    it('passes explicit cwd through to the bridge', async () => {
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          state: { configOptions: [] },
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-2/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '/work/a' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.state).toEqual({ configOptions: [] });
+      expect(bridge.loadCalls).toEqual([
+        { sessionId: 'persisted-2', workspaceCwd: '/work/a' },
+      ]);
+    });
+
+    it('400s malformed cwd before touching the bridge', async () => {
+      for (const action of ['load', 'resume'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post(`/session/persisted-3/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: 'relative/path' });
+
+        expect(res.status).toBe(400);
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      }
+    });
+
+    it('404s when the bridge reports an unknown persisted session', async () => {
+      const bridge = fakeBridge({
+        resumeImpl: async (req) => {
+          throw new SessionNotFoundError(req.sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
     });
   });
 

@@ -27,6 +27,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
   session_scope_override: { since: 'v1' },
+  session_load: { since: 'v1' },
+  session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },

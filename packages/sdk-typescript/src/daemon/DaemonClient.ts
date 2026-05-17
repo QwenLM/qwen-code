@@ -8,6 +8,7 @@ import { parseSseStream } from './sse.js';
 import type {
   DaemonCapabilities,
   DaemonEvent,
+  DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
   PermissionResponse,
@@ -115,6 +116,14 @@ export interface CreateSessionRequest {
    * `caps.features.session_scope_override` before sending.
    */
   sessionScope?: 'single' | 'thread';
+}
+
+export interface RestoreSessionRequest {
+  /**
+   * Workspace path the daemon must be bound to. Omit to let the daemon use
+   * its advertised bound workspace, mirroring `createOrAttachSession`.
+   */
+  workspaceCwd?: string;
 }
 
 export interface PromptRequest {
@@ -331,6 +340,41 @@ export class DaemonClient {
           sessions: DaemonSessionSummary[];
         };
         return body.sessions;
+      },
+    );
+  }
+
+  async loadSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('load', sessionId, req);
+  }
+
+  async resumeSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('resume', sessionId, req);
+  }
+
+  private async restoreSession(
+    action: 'load' | 'resume',
+    sessionId: string,
+    req: RestoreSessionRequest,
+  ): Promise<DaemonRestoredSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/${action}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ cwd: req.workspaceCwd }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, `POST /session/:id/${action}`);
+        }
+        return (await res.json()) as DaemonRestoredSession;
       },
     );
   }

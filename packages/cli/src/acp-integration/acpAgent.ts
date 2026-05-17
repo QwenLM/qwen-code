@@ -48,6 +48,8 @@ import type {
   NewSessionResponse,
   PromptRequest,
   PromptResponse,
+  ResumeSessionRequest,
+  ResumeSessionResponse,
   SessionConfigOption,
   SessionInfo,
   SessionModeState,
@@ -337,18 +339,58 @@ class QwenAgent implements Agent {
         return sessionService.sessionExists(params.sessionId);
       },
     );
+    if (!exists) {
+      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
+    }
 
     const config = await this.newSessionConfig(
       params.cwd,
       params.mcpServers,
       params.sessionId,
-      exists,
+      true,
     );
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
     await this.createAndStoreSession(config, sessionData?.conversation);
+
+    const modesData = this.buildModesData(config);
+    const availableModels = this.buildAvailableModels(config);
+    const configOptions = this.buildConfigOptions(config);
+
+    return {
+      modes: modesData,
+      models: availableModels,
+      configOptions,
+    };
+  }
+
+  async unstable_resumeSession(
+    params: ResumeSessionRequest,
+  ): Promise<ResumeSessionResponse> {
+    const exists = await runWithAcpRuntimeOutputDir(
+      this.settings,
+      params.cwd,
+      async () => {
+        const sessionService = new SessionService(params.cwd);
+        return sessionService.sessionExists(params.sessionId);
+      },
+    );
+    if (!exists) {
+      throw RequestError.resourceNotFound(`session:${params.sessionId}`);
+    }
+
+    const config = await this.newSessionConfig(
+      params.cwd,
+      params.mcpServers ?? [],
+      params.sessionId,
+      true,
+    );
+    await this.ensureAuthenticated(config);
+    this.setupFileSystem(config);
+
+    await this.createAndStoreSession(config);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
