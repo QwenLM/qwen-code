@@ -21,6 +21,7 @@ import type {
   DaemonSessionSupportedCommandsStatus,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
 } from '../../src/daemon/types.js';
@@ -215,6 +216,38 @@ describe('DaemonClient', () => {
         ['GET', 'http://daemon/workspace/mcp'],
         ['GET', 'http://daemon/workspace/skills'],
         ['GET', 'http://daemon/workspace/providers'],
+      ]);
+    });
+
+    it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {
+      const preflight: DaemonWorkspacePreflightStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          {
+            kind: 'node_version',
+            status: 'ok',
+            locality: 'daemon',
+            detail: { version: '22.4.0', required: '>=22' },
+          },
+          {
+            kind: 'auth',
+            status: 'not_started',
+            locality: 'acp',
+            hint: 'spawn a session to populate',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, preflight),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspacePreflight()).resolves.toEqual(preflight);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/preflight'],
       ]);
     });
 

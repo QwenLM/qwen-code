@@ -54,6 +54,7 @@ import type {
   ServeSessionSupportedCommandsStatus,
   ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
+  ServeWorkspacePreflightStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
 } from './status.js';
@@ -96,6 +97,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_skills',
   'workspace_providers',
   'workspace_env',
+  'workspace_preflight',
   'session_context',
   'session_supported_commands',
   'session_close',
@@ -152,6 +154,7 @@ interface FakeBridgeOpts {
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
   workspaceEnvImpl?: () => Promise<ServeWorkspaceEnvStatus>;
+  workspacePreflightImpl?: () => Promise<ServeWorkspacePreflightStatus>;
   sessionContextImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionContextStatus>;
@@ -215,6 +218,7 @@ interface FakeBridge extends HttpAcpBridge {
   workspaceSkillsCalls: number;
   workspaceProvidersCalls: number;
   workspaceEnvCalls: number;
+  workspacePreflightCalls: number;
   sessionContextCalls: string[];
   sessionSupportedCommandsCalls: string[];
   setModelCalls: Array<{
@@ -257,6 +261,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceSkillsCalls = 0;
   let workspaceProvidersCalls = 0;
   let workspaceEnvCalls = 0;
+  let workspacePreflightCalls = 0;
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
@@ -324,6 +329,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     }));
   const workspaceEnvImpl =
     opts.workspaceEnvImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true as const,
+      acpChannelLive: false,
+      cells: [],
+    }));
+  const workspacePreflightImpl =
+    opts.workspacePreflightImpl ??
     (async () => ({
       v: 1 as const,
       workspaceCwd: WS_BOUND,
@@ -401,6 +415,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceEnvCalls() {
       return workspaceEnvCalls;
+    },
+    get workspacePreflightCalls() {
+      return workspacePreflightCalls;
     },
     get sessionCount() {
       return calls.length;
@@ -486,6 +503,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getWorkspaceEnvStatus() {
       workspaceEnvCalls += 1;
       return workspaceEnvImpl();
+    },
+    async getWorkspacePreflightStatus() {
+      workspacePreflightCalls += 1;
+      return workspacePreflightImpl();
     },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
@@ -852,6 +873,44 @@ describe('createServeApp', () => {
       );
       expect(envVarCell).toBeDefined();
       expect('value' in envVarCell!).toBe(false);
+    });
+
+    it('returns workspace preflight status from the bridge', async () => {
+      const preflight: ServeWorkspacePreflightStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          {
+            kind: 'node_version',
+            status: 'ok',
+            locality: 'daemon',
+            detail: { version: '22.4.0', required: '>=22' },
+          },
+          {
+            kind: 'auth',
+            status: 'not_started',
+            locality: 'acp',
+            hint: 'spawn a session to populate',
+          },
+        ],
+      };
+      const bridge = fakeBridge({
+        workspacePreflightImpl: async () => preflight,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/preflight')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(preflight);
+      expect(bridge.workspacePreflightCalls).toBe(1);
     });
 
     it('returns session context and supported commands from the bridge', async () => {

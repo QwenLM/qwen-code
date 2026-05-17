@@ -315,6 +315,35 @@ export interface DaemonWorkspaceEnvStatus {
   errors?: DaemonStatusCell[];
 }
 
+export type DaemonPreflightKind =
+  | 'node_version'
+  | 'cli_entry'
+  | 'workspace_dir'
+  | 'ripgrep'
+  | 'git'
+  | 'npm'
+  | 'auth'
+  | 'mcp_discovery'
+  | 'skills'
+  | 'providers'
+  | 'tool_registry'
+  | 'egress';
+
+export interface DaemonPreflightCell extends DaemonStatusCell {
+  kind: DaemonPreflightKind;
+  locality: 'daemon' | 'acp';
+  detail?: Record<string, unknown>;
+}
+
+export interface DaemonWorkspacePreflightStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  cells: DaemonPreflightCell[];
+  errors?: DaemonStatusCell[];
+}
+
 export interface DaemonSessionContextStatus {
   v: 1;
   sessionId: string;

@@ -47,6 +47,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceSkills: 'qwen/status/workspace/skills',
   workspaceProviders: 'qwen/status/workspace/providers',
+  workspacePreflight: 'qwen/status/workspace/preflight',
   sessionContext: 'qwen/status/session/context',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
 } as const;
@@ -240,6 +241,80 @@ export interface ServeWorkspaceEnvStatus {
   acpChannelLive: boolean;
   cells: ServeEnvCell[];
   errors?: ServeStatusCell[];
+}
+
+/**
+ * Discriminant for diagnostic cells emitted by `/workspace/preflight`. Cells
+ * with `locality: 'daemon'` are answered by the bridge process directly and
+ * are always populated. Cells with `locality: 'acp'` require a live ACP child
+ * — when the daemon is idle they are emitted with `status: 'not_started'`.
+ */
+export type ServePreflightKind =
+  | 'node_version'
+  | 'cli_entry'
+  | 'workspace_dir'
+  | 'ripgrep'
+  | 'git'
+  | 'npm'
+  | 'auth'
+  | 'mcp_discovery'
+  | 'skills'
+  | 'providers'
+  | 'tool_registry'
+  | 'egress';
+
+export interface ServePreflightCell extends ServeStatusCell {
+  kind: ServePreflightKind;
+  locality: 'daemon' | 'acp';
+  /** Free-form structured detail (versions, counts, etc.). Never carries secret values. */
+  detail?: Record<string, unknown>;
+}
+
+export interface ServeWorkspacePreflightStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  /** Always true — daemon-level cells are populated regardless of ACP state. */
+  initialized: true;
+  acpChannelLive: boolean;
+  cells: ServePreflightCell[];
+  errors?: ServeStatusCell[];
+}
+
+/**
+ * The six preflight kinds that require a live ACP child to populate. Shared
+ * between `createIdleAcpPreflightCells` (idle placeholder) and the
+ * ACP-side `buildAcpPreflightCells` builder so the two sides cannot drift
+ * — a future contributor adding a new ACP kind in one place sees the
+ * other surface immediately.
+ */
+export const ACP_PREFLIGHT_KINDS = [
+  'auth',
+  'mcp_discovery',
+  'skills',
+  'providers',
+  'tool_registry',
+  'egress',
+] as const satisfies readonly ServePreflightKind[];
+
+/**
+ * The narrow union of ACP-locality preflight kinds. Useful for callers
+ * that need to dispatch on every ACP kind exhaustively (e.g. the
+ * `Record<AcpPreflightKind, …>` builder map in `acpAgent.ts`).
+ */
+export type AcpPreflightKind = (typeof ACP_PREFLIGHT_KINDS)[number];
+
+/**
+ * Idle ACP cells: emitted when the daemon has no live ACP child. The bridge
+ * stitches these in alongside its daemon-level cells so `/workspace/preflight`
+ * always returns a complete cell set without spawning a child.
+ */
+export function createIdleAcpPreflightCells(): ServePreflightCell[] {
+  return ACP_PREFLIGHT_KINDS.map((kind) => ({
+    kind,
+    status: 'not_started' as const,
+    locality: 'acp' as const,
+    hint: 'spawn a session to populate',
+  }));
 }
 
 const SKILL_PARSE_CODES: ReadonlySet<string> = new Set([

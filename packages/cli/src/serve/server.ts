@@ -74,6 +74,7 @@ export interface ServeAppDeps {
  *   - `GET  /workspace/skills`
  *   - `GET  /workspace/providers`
  *   - `GET  /workspace/env`
+ *   - `GET  /workspace/preflight`
  *   - `POST /session`
  *   - `POST /session/:id/load`
  *   - `POST /session/:id/resume`
@@ -289,11 +290,28 @@ export function createServeApp(
     }
   });
 
+  // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
+  // `audit.diagnostic_read` event from these two routes so a security
+  // operator can correlate "who read what when". Read-only diagnostic
+  // surfaces are reconnaissance vectors (env: secret-var presence;
+  // preflight: workspace path + CLI entry + Node version) and the absence
+  // of audit emission here is a deliberate scope deferral, not an
+  // oversight — the audit topic does not yet exist; PR 24 lands the
+  // shared `bridge.emitAudit` infrastructure that this and PR 18's
+  // `fs.access` events will both use.
   app.get('/workspace/env', async (_req, res) => {
     try {
       res.status(200).json(await bridge.getWorkspaceEnvStatus());
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/env' });
+    }
+  });
+
+  app.get('/workspace/preflight', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspacePreflightStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
     }
   });
 

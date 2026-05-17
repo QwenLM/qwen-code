@@ -40,16 +40,36 @@ The `workspaceCwd` field surfaces the bound workspace so clients can pre-flight 
 
 The daemon also exposes read-only runtime snapshots for client UIs:
 `GET /workspace/mcp`, `GET /workspace/skills`, `GET /workspace/providers`,
-`GET /workspace/env`, `GET /session/:id/context`, and
-`GET /session/:id/supported-commands`. The workspace routes report the live
-daemon runtime and do not start the ACP child when idle; an idle daemon
-returns `initialized: false` with an empty snapshot.
+`GET /workspace/env`, `GET /workspace/preflight`,
+`GET /session/:id/context`, and `GET /session/:id/supported-commands`.
+
+`GET /workspace/mcp`, `GET /workspace/skills`, and `GET /workspace/providers`
+report the live ACP runtime and do not start the ACP child when idle; an
+idle daemon returns `initialized: false` with an empty snapshot. Once a
+session is alive they switch to `initialized: true` and surface the real
+state.
+
+`GET /workspace/env` and `GET /workspace/preflight` always answer with
+`initialized: true` regardless of ACP state. `env` never consults ACP
+(daemon-process info only); `preflight` answers daemon-level cells from
+`process.*` and emits `status: 'not_started'` placeholders for ACP-level
+cells when the child is idle.
 
 `GET /workspace/env` reports the daemon process's runtime, platform, sandbox,
 proxy, and the **presence** (never the value) of whitelisted secret env vars
 such as `OPENAI_API_KEY`. Proxy URLs are stripped of credentials and reduced
 to `host:port` before they hit the wire. The route always answers from the
 daemon process directly and never spawns an ACP child.
+
+`GET /workspace/preflight` returns a list of readiness checks. **Daemon-level
+cells** (Node version, CLI entry, workspace directory, ripgrep, git, npm)
+always render. **ACP-level cells** (auth, MCP discovery, skills, providers,
+tool registry, egress) require a live ACP child — when the daemon is idle
+they emit `status: 'not_started'` placeholders rather than spawning ACP just
+to populate them. Failures map to a closed `errorKind` enum (`missing_binary`,
+`auth_env_error`, `init_timeout`, `protocol_error`, `missing_file`,
+`parse_error`, `blocked_egress`) so client UIs can render structured
+remediation.
 
 ### 3. Open a session
 
