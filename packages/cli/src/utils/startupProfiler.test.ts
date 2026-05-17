@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import {
   initStartupProfiler,
   profileCheckpoint,
+  recordStartupEvent,
+  setInteractiveMode,
   finalizeStartupProfile,
   getStartupReport,
   resetStartupProfiler,
@@ -32,8 +34,15 @@ describe('startupProfiler', () => {
   beforeEach(() => {
     resetStartupProfiler();
     vi.restoreAllMocks();
-    saveEnv('QWEN_CODE_PROFILE_STARTUP', 'SANDBOX');
+    saveEnv(
+      'QWEN_CODE_PROFILE_STARTUP',
+      'QWEN_CODE_PROFILE_STARTUP_OUTER',
+      'QWEN_CODE_PROFILE_STARTUP_NO_HEAP',
+      'SANDBOX',
+    );
     delete process.env['QWEN_CODE_PROFILE_STARTUP'];
+    delete process.env['QWEN_CODE_PROFILE_STARTUP_OUTER'];
+    delete process.env['QWEN_CODE_PROFILE_STARTUP_NO_HEAP'];
     delete process.env['SANDBOX'];
   });
 
@@ -216,6 +225,154 @@ describe('startupProfiler', () => {
 
       resetStartupProfiler();
       expect(getStartupReport()).toBeNull();
+    });
+
+    it('records startup events as a separate list with attrs', () => {
+      initStartupProfiler();
+      profileCheckpoint('main_entry');
+      recordStartupEvent('mcp_server_ready:foo', { outcome: 'ready' });
+      recordStartupEvent('mcp_server_ready:bar', { outcome: 'failed' });
+
+      const report = getStartupReport()!;
+      expect(report.events.map((e) => e.name)).toEqual([
+        'mcp_server_ready:foo',
+        'mcp_server_ready:bar',
+      ]);
+      expect(report.events[0]!.tMs).toBeGreaterThanOrEqual(0);
+      expect(report.events[0]!.attrs).toEqual({ outcome: 'ready' });
+    });
+
+    it('drops events recorded after finalize to keep memory bounded', () => {
+      vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+      vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      initStartupProfiler();
+      profileCheckpoint('main_entry');
+      recordStartupEvent('first');
+      finalizeStartupProfile('s1');
+      // Post-finalize emissions (e.g. setTools refresh during a long
+      // interactive session) must NOT accumulate.
+      recordStartupEvent('after_finalize');
+      profileCheckpoint('after_finalize_cp');
+
+      const written = JSON.parse(
+        vi.mocked(fs.writeFileSync).mock.calls[0]![1] as string,
+      );
+      expect(written.events.map((e: { name: string }) => e.name)).toEqual([
+        'first',
+      ]);
+      expect(written.phases.map((p: { name: string }) => p.name)).toEqual([
+        'main_entry',
+      ]);
+    });
+
+    it('marks interactiveMode and computes derived phases', () => {
+      vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+      vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      initStartupProfiler();
+      setInteractiveMode(true);
+      profileCheckpoint('main_entry');
+      profileCheckpoint('after_load_settings');
+      profileCheckpoint('after_load_cli_config');
+      profileCheckpoint('after_initialize_app');
+      profileCheckpoint('before_render');
+      profileCheckpoint('first_paint');
+      profileCheckpoint('config_initialize_start');
+      profileCheckpoint('config_initialize_end');
+      profileCheckpoint('input_enabled');
+      recordStartupEvent('mcp_first_tool_registered');
+      recordStartupEvent('gemini_tools_updated');
+      recordStartupEvent('mcp_all_servers_settled');
+      finalizeStartupProfile('iaa');
+
+      const written = JSON.parse(
+        vi.mocked(fs.writeFileSync).mock.calls[0]![1] as string,
+      );
+      expect(written.interactiveMode).toBe(true);
+      expect(written.outerProcess).toBe(false);
+      // Every derived phase should appear when its checkpoint/event was recorded.
+      const dp = written.derivedPhases;
+      expect(dp).toHaveProperty('module_load');
+      expect(dp).toHaveProperty('settings_time');
+      expect(dp).toHaveProperty('config_time');
+      expect(dp).toHaveProperty('init_time');
+      expect(dp).toHaveProperty('pre_render');
+      expect(dp).toHaveProperty('to_first_paint');
+      expect(dp).toHaveProperty('to_input_enabled');
+      expect(dp).toHaveProperty('config_initialize_dur');
+      expect(dp).toHaveProperty('mcp_first_tool');
+      expect(dp).toHaveProperty('mcp_all_settled');
+      expect(dp).toHaveProperty('gemini_tools_lag');
+      // gemini_tools_lag is the gap between mcp_first_tool_registered and
+      // gemini_tools_updated; should be non-negative.
+      expect(dp.gemini_tools_lag).toBeGreaterThanOrEqual(0);
+    });
+
+    it('caps the events array at MAX_EVENTS and flags truncation', () => {
+      initStartupProfiler();
+      profileCheckpoint('main_entry');
+      // Force well past the cap.
+      for (let i = 0; i < 2000; i++) {
+        recordStartupEvent(`evt:${i}`);
+      }
+      const report = getStartupReport()!;
+      // Cap is 1024; report should reflect both the cap and the truncated flag.
+      expect(report.events.length).toBeLessThanOrEqual(1024);
+      expect(report.events.length).toBeGreaterThan(1000);
+      expect(report.eventsTruncated).toBe(true);
+    });
+
+    it('captures heap snapshots at each checkpoint by default', () => {
+      initStartupProfiler();
+      profileCheckpoint('phase_a');
+      const report = getStartupReport()!;
+      expect(report.phases[0]!.heapUsedMb).toBeGreaterThan(0);
+    });
+
+    it('omits heap snapshots when QWEN_CODE_PROFILE_STARTUP_NO_HEAP=1', () => {
+      process.env['QWEN_CODE_PROFILE_STARTUP_NO_HEAP'] = '1';
+      initStartupProfiler();
+      profileCheckpoint('phase_a');
+      const report = getStartupReport()!;
+      expect(report.phases[0]!.heapUsedMb).toBeUndefined();
+    });
+  });
+
+  describe('outer-process opt-in (QWEN_CODE_PROFILE_STARTUP_OUTER=1)', () => {
+    it('does NOT collect outside sandbox without OUTER opt-in', () => {
+      process.env['QWEN_CODE_PROFILE_STARTUP'] = '1';
+      delete process.env['SANDBOX'];
+
+      initStartupProfiler();
+      profileCheckpoint('test');
+      expect(getStartupReport()).toBeNull();
+    });
+
+    it('collects outside sandbox when OUTER=1 and writes outer-prefixed file', () => {
+      process.env['QWEN_CODE_PROFILE_STARTUP'] = '1';
+      process.env['QWEN_CODE_PROFILE_STARTUP_OUTER'] = '1';
+      delete process.env['SANDBOX'];
+
+      vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
+      vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+      initStartupProfiler();
+      profileCheckpoint('main_entry');
+      finalizeStartupProfile('outer-session');
+
+      const written = JSON.parse(
+        vi.mocked(fs.writeFileSync).mock.calls[0]![1] as string,
+      );
+      expect(written.outerProcess).toBe(true);
+
+      const writtenPath = vi.mocked(fs.writeFileSync).mock
+        .calls[0]![0] as string;
+      // outer-prefixed filename keeps it distinct from sandbox-child reports.
+      expect(writtenPath).toMatch(/[\\/]outer-/);
     });
   });
 });

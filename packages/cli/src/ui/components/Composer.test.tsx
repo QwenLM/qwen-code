@@ -115,6 +115,7 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     pendingGeminiHistoryItems: [],
+    terminalWidth: 80,
     ...overrides,
   }) as UIState;
 
@@ -200,6 +201,86 @@ describe('Composer', () => {
       const output = lastFrame();
       expect(output).toContain('LoadingIndicator');
       expect(output).not.toContain('Should not show');
+    });
+
+    // ─── Narrow-terminal suppression (suppressBottomLoadingIndicator) ───
+    // The indicator is hidden only when actively Responding on a terminal
+    // ≤ 30 cols wide. WaitingForConfirmation must NEVER be suppressed.
+
+    it('hides LoadingIndicator when Responding on a 30-col terminal', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 30,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('LoadingIndicator');
+    });
+
+    it('hides LoadingIndicator when Responding on a 25-col terminal', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).not.toContain('LoadingIndicator');
+    });
+
+    it('preserves "esc to cancel" fallback when LoadingIndicator is suppressed', () => {
+      // Even when the full LoadingIndicator is hidden on ultra-narrow
+      // terminals, the cancel affordance must remain so users can abort.
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame();
+      expect(output).not.toContain('LoadingIndicator');
+      expect(output).toContain('Esc to cancel');
+    });
+
+    it('does not render the esc fallback once the full indicator is visible', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 31,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      const output = lastFrame();
+      expect(output).toContain('LoadingIndicator');
+      // The minimal fallback string only appears when the full indicator is
+      // suppressed — when LoadingIndicator renders, it owns the cancel hint.
+      expect(output).not.toContain('Esc to cancel');
+    });
+
+    it('shows LoadingIndicator when Responding on a 31-col terminal', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 31,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('LoadingIndicator');
+    });
+
+    it('shows LoadingIndicator when WaitingForConfirmation even on a 25-col terminal', () => {
+      // Confirmation prompts must remain visible regardless of width — the
+      // user needs to see something is awaiting their input.
+      const uiState = createMockUIState({
+        streamingState: StreamingState.WaitingForConfirmation,
+        terminalWidth: 25,
+      });
+
+      const { lastFrame } = renderComposer(uiState);
+
+      expect(lastFrame()).toContain('LoadingIndicator');
     });
 
     it('suppresses thought when waiting for confirmation', () => {

@@ -317,4 +317,54 @@ describe('resumeHistoryUtils', () => {
       { id: 22, type: 'gemini', text: 'Follow-up' },
     ]);
   });
+
+  it('preserves local-only slash command metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/about',
+            sentToModel: false,
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 30);
+
+    expect(items).toEqual([
+      { id: 31, type: 'user', text: '/about', sentToModel: false },
+    ]);
+  });
+
+  it('omits sentToModel for legacy slash command records', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/legacy',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 40);
+
+    expect(items).toEqual([{ id: 41, type: 'user', text: '/legacy' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
+  });
 });

@@ -17,6 +17,7 @@ import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
+import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 
 /**
  * The OpenAI SDK adds an abort listener for every `chat.completions.create`
@@ -218,7 +219,7 @@ export class ContentGenerationPipeline {
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
-        throw error;
+        throw redactProxyError(error);
       }
 
       // Use shared error handling logic
@@ -532,7 +533,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     request: GenerateContentParameters,
   ): Promise<never> {
-    this.config.errorHandler.handle(error, context, request);
+    this.config.errorHandler.handle(redactProxyError(error), context, request);
   }
 
   /**

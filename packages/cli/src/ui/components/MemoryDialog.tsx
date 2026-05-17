@@ -21,6 +21,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { SettingScope } from '../../config/settings.js';
 import { useLaunchEditor } from '../hooks/useLaunchEditor.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { theme } from '../semantic-colors.js';
 import { formatRelativeTime } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
@@ -278,7 +279,8 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       }
 
       if (focusedSection === 'autoMemory') {
-        if (key.name === 'down') {
+        // No "up" target above autoMemory; only handle down → autoDream.
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
           setFocusedSection('autoDream');
           return;
         }
@@ -290,11 +292,11 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       }
 
       if (focusedSection === 'autoDream') {
-        if (key.name === 'up') {
+        if (keyMatchers[Command.SELECTION_UP](key)) {
           setFocusedSection('autoMemory');
           return;
         }
-        if (key.name === 'down') {
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
           setFocusedSection('list');
           setHighlightedIndex(0);
           return;
@@ -307,7 +309,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       }
 
       // focusedSection === 'list'
-      if (key.name === 'up') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         if (highlightedIndex === 0) {
           setFocusedSection('autoDream');
         } else {
@@ -316,7 +318,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         return;
       }
 
-      if (key.name === 'down') {
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setHighlightedIndex((current) => (current + 1) % items.length);
         return;
       }

@@ -19,6 +19,7 @@ import { deepseekProvider } from './providers/thirdParty/deepseek.js';
 import { minimaxProvider } from './providers/thirdParty/minimax.js';
 import { zaiProvider } from './providers/thirdParty/zai.js';
 import { idealabProvider } from './providers/thirdParty/idealab.js';
+import { modelscopeProvider } from './providers/thirdParty/modelscope.js';
 import { customProvider } from './providers/custom/customProvider.js';
 
 // Re-export all providers
@@ -31,6 +32,7 @@ export {
   minimaxProvider,
   zaiProvider,
   idealabProvider,
+  modelscopeProvider,
   customProvider,
 };
 export {
@@ -52,6 +54,7 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   minimaxProvider,
   zaiProvider,
   idealabProvider,
+  modelscopeProvider,
   customProvider,
 ];
 

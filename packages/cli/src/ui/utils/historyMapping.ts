@@ -17,9 +17,11 @@ import { isSlashCommand } from './commandUtils.js';
  */
 export function isRealUserTurn(item: HistoryItem): boolean {
   if (item.type !== 'user' || !item.text) return false;
-  // Legacy resumed sessions do not have sentToModel, so the fallback below is
-  // intentionally tied to the current slash-command lexical classifier.
   if (item.sentToModel !== undefined) return item.sentToModel;
+  // Legacy resumed sessions do not have sentToModel, so this fallback is
+  // intentionally coupled to isSlashCommand's current lexical classifier.
+  // Changes to slash-command classification must account for old sessions that
+  // still rely on this inference.
   return !isSlashCommand(item.text) && !item.text.startsWith('?');
 }
 
