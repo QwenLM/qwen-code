@@ -54,6 +54,8 @@ import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
+import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
+import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 interface HistoryItemDisplayProps {
@@ -198,6 +200,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'stats' && (
         <StatsDisplay duration={itemForDisplay.duration} width={boxWidth} />
       )}
+      {itemForDisplay.type === 'diff_stats' && (
+        <DiffStatsDisplay model={itemForDisplay.model} />
+      )}
       {itemForDisplay.type === 'model_stats' && (
         <ModelStatsDisplay width={boxWidth} />
       )}
@@ -338,6 +343,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'away_recap' && (
         <AwayRecapMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'goal_status' && (
+        <GoalStatusMessage
+          kind={itemForDisplay.kind}
+          condition={itemForDisplay.condition}
+          iterations={itemForDisplay.iterations}
+          durationMs={itemForDisplay.durationMs}
+          lastReason={itemForDisplay.lastReason}
+        />
       )}
     </Box>
   );

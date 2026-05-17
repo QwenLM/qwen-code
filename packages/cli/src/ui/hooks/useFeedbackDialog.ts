@@ -8,13 +8,10 @@ import {
   type UserFeedbackRating,
   isNodeError,
   AuthType,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import { StreamingState, MessageType, type HistoryItem } from '../types.js';
-import {
-  SettingScope,
-  type LoadedSettings,
-  USER_SETTINGS_PATH,
-} from '../../config/settings.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import { FEEDBACK_OPTIONS } from '../FeedbackDialog.js';
 import stripJsonComments from 'strip-json-comments';
@@ -38,8 +35,9 @@ const lastMessageIsAIResponse = (history: HistoryItem[]): boolean =>
  */
 const getFeedbackLastShownTimestampFromFile = (): number => {
   try {
-    if (fs.existsSync(USER_SETTINGS_PATH)) {
-      const content = fs.readFileSync(USER_SETTINGS_PATH, 'utf-8');
+    const userSettingsPath = Storage.getGlobalSettingsPath();
+    if (fs.existsSync(userSettingsPath)) {
+      const content = fs.readFileSync(userSettingsPath, 'utf-8');
       const settings = JSON.parse(stripJsonComments(content));
       return settings?.ui?.feedbackLastShownTimestamp ?? 0;
     }

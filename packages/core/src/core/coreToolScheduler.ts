@@ -49,7 +49,7 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
-import { escapeXml } from '../utils/xml.js';
+import { escapeSystemReminderTags, escapeXml } from '../utils/xml.js';
 import { unescapePath, PATH_ARG_KEYS } from '../utils/paths.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
@@ -75,6 +75,31 @@ import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
+import { safeSetStatus } from '../telemetry/tracer.js';
+import { SpanStatusCode, type Span } from '@opentelemetry/api';
+import {
+  startToolSpan,
+  endToolSpan,
+  runInToolSpanContext,
+  startToolExecutionSpan,
+  endToolExecutionSpan,
+  addToolInputAttributes,
+  addToolResultAttributes,
+} from '../telemetry/index.js';
+import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+
+const TOOL_FAILURE_KIND_ATTRIBUTE = 'tool.failure_kind';
+const TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED = 'pre_hook_blocked';
+const TOOL_FAILURE_KIND_POST_HOOK_STOPPED = 'post_hook_stopped';
+const TOOL_FAILURE_KIND_TOOL_ERROR = 'tool_error';
+const TOOL_FAILURE_KIND_TOOL_EXCEPTION = 'tool_exception';
+const TOOL_FAILURE_KIND_CANCELLED = 'cancelled';
+
+const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
+const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
+const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
+const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
+const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -94,6 +119,65 @@ const TRUNCATION_EDIT_REJECTION =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally. ' +
   'Do NOT retry with the same large content.';
+
+function setToolSpanFailure(
+  span: Span,
+  failureKind: string,
+  message: string,
+): void {
+  try {
+    span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, failureKind);
+    // Always write `success: false` so trace backends can filter tool
+    // failures with the same query they use for llm_request spans —
+    // mirrors the unconditional `success` attribute on llm_request.
+    span.setAttribute('success', false);
+  } catch {
+    // OTel errors must not block the failure status update.
+  }
+  safeSetStatus(span, {
+    code: SpanStatusCode.ERROR,
+    message,
+  });
+}
+
+function setToolSpanCancelled(span: Span): void {
+  try {
+    span.setAttribute(TOOL_FAILURE_KIND_ATTRIBUTE, TOOL_FAILURE_KIND_CANCELLED);
+    span.setAttribute('success', false);
+  } catch {
+    // OTel errors must not block the cancellation status update.
+  }
+  safeSetStatus(span, {
+    code: SpanStatusCode.UNSET,
+  });
+}
+
+async function safelyFirePostToolUseFailureHook(
+  messageBus: MessageBus | undefined,
+  toolUseId: string,
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  errorMessage: string,
+  isInterrupt: boolean,
+  permissionMode?: string,
+): ReturnType<typeof firePostToolUseFailureHook> {
+  try {
+    return await firePostToolUseFailureHook(
+      messageBus,
+      toolUseId,
+      toolName,
+      toolInput,
+      errorMessage,
+      isInterrupt,
+      permissionMode,
+    );
+  } catch (error) {
+    debugLogger.warn(
+      `PostToolUseFailure hook failed for ${toolName}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {};
+  }
+}
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -1783,6 +1867,26 @@ export class CoreToolScheduler {
 
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
+
+    const toolSpan = startToolSpan(toolName, {
+      tool_name: toolName,
+      call_id: callId,
+    });
+    try {
+      await runInToolSpanContext(toolSpan, () =>
+        this._executeToolCallBody(scheduledCall, signal, toolSpan),
+      );
+    } finally {
+      endToolSpan(toolSpan);
+    }
+  }
+
+  private async _executeToolCallBody(
+    scheduledCall: ScheduledToolCall,
+    signal: AbortSignal,
+    span: Span,
+  ): Promise<void> {
+    const { callId, name: toolName } = scheduledCall.request;
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
 
@@ -1792,6 +1896,18 @@ export class CoreToolScheduler {
       if (typeof toolInput[key] === 'string') {
         toolInput[key] = unescapePath(String(toolInput[key]).trim());
       }
+    }
+
+    // Guard the JSON serialization — addToolInputAttributes early-returns
+    // when sensitive attributes are off, but the argument is computed
+    // before the call.
+    if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
+      addToolInputAttributes(
+        this.config,
+        span,
+        toolName,
+        safeJsonStringify(toolInput) ?? '{}',
+      );
     }
 
     // Generate unique tool_use_id for hook tracking
@@ -1822,7 +1938,18 @@ export class CoreToolScheduler {
           new Error(blockMessage),
           ToolErrorType.EXECUTION_DENIED,
         );
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `BLOCKED: ${blockMessage}`,
+        );
         this.setStatusInternal(callId, 'error', errorResponse);
+        setToolSpanFailure(
+          span,
+          TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
+          TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+        );
         return;
       }
     }
@@ -1849,74 +1976,87 @@ export class CoreToolScheduler {
     // Introduce a generic callbacks object for the execute method to handle
     // things like `onPid` and `onLiveOutput`. This will make the scheduler
     // agnostic to the invocation type.
-    let promise: Promise<ToolResult>;
-    if (invocation instanceof ShellToolInvocation) {
-      const setPidCallback = (pid: number) => {
-        this.toolCalls = this.toolCalls.map((tc) =>
-          tc.request.callId === callId && tc.status === 'executing'
-            ? { ...tc, pid }
-            : tc,
-        );
-        this.notifyToolCallsUpdate();
-      };
-      // Stash the promote AbortController on the executing tool call so
-      // a UI surface (PR-3 Ctrl+B keybind) can find the foreground
-      // shell's promote trigger by callId. Calling `.abort({ kind:
-      // 'background', shellId })` on it tells `ShellExecutionService`
-      // to skip the kill, snapshot output, and return
-      // `result.promoted: true` — `shell.ts` then registers the
-      // `BackgroundShellEntry`.
-      const setPromoteAbortControllerCallback = (ac: AbortController) => {
-        this.toolCalls = this.toolCalls.map((tc) =>
-          tc.request.callId === callId && tc.status === 'executing'
-            ? { ...tc, promoteAbortController: ac }
-            : tc,
-        );
-        this.notifyToolCallsUpdate();
-      };
-      promise = invocation.execute(
-        signal,
-        liveOutputCallback,
-        shellExecutionConfig,
-        setPidCallback,
-        setPromoteAbortControllerCallback,
-      );
-    } else {
-      promise = invocation.execute(
-        signal,
-        liveOutputCallback,
-        shellExecutionConfig,
-      );
-    }
-
+    //
+    // Start the execution sub-span BEFORE invocation.execute() so its
+    // synchronous setup (shell command preprocessing, child_process.spawn,
+    // etc.) is bracketed by the span. We don't manually activate the span
+    // as OTel context here because the surrounding tool span is already
+    // active via runInToolSpanContext, and tool implementations don't
+    // currently emit nested OTel spans of their own — the span boundary
+    // is purely for timing/attribution.
+    const execSpan = startToolExecutionSpan();
+    // try wraps both invocation.execute() and the await so synchronous
+    // throws (e.g. shell setup failure) flow into the same catch as async
+    // rejections — otherwise execSpan leaks unended and failure hooks
+    // are skipped.
     try {
+      let promise: Promise<ToolResult>;
+      if (invocation instanceof ShellToolInvocation) {
+        const setPidCallback = (pid: number) => {
+          this.toolCalls = this.toolCalls.map((tc) =>
+            tc.request.callId === callId && tc.status === 'executing'
+              ? { ...tc, pid }
+              : tc,
+          );
+          this.notifyToolCallsUpdate();
+        };
+        // Stash the promote AbortController on the executing tool call so
+        // a UI surface (Ctrl+B keybind) can find the foreground shell's
+        // promote trigger by callId.
+        const setPromoteAbortControllerCallback = (ac: AbortController) => {
+          this.toolCalls = this.toolCalls.map((tc) =>
+            tc.request.callId === callId && tc.status === 'executing'
+              ? { ...tc, promoteAbortController: ac }
+              : tc,
+          );
+          this.notifyToolCallsUpdate();
+        };
+        promise = invocation.execute(
+          signal,
+          liveOutputCallback,
+          shellExecutionConfig,
+          setPidCallback,
+          setPromoteAbortControllerCallback,
+        );
+      } else {
+        promise = invocation.execute(
+          signal,
+          liveOutputCallback,
+          shellExecutionConfig,
+        );
+      }
+
       const toolResult: ToolResult = await promise;
+      endToolExecutionSpan(execSpan, {
+        success: toolResult.error === undefined,
+      });
       if (signal.aborted) {
         // PostToolUseFailure Hook
+        let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
+          const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
             toolName,
             toolInput,
-            'User cancelled tool execution.',
+            cancelMessage,
             true,
             this.config.getApprovalMode(),
           );
 
           // Append additional context from hook if provided
-          let cancelMessage = 'User cancelled tool execution.';
           if (failureHookResult.additionalContext) {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
-          this.setStatusInternal(callId, 'cancelled', cancelMessage);
-        } else {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            'User cancelled tool execution.',
-          );
         }
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `CANCELLED: ${cancelMessage}`,
+        );
+        this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        setToolSpanCancelled(span);
         return; // Both code paths should return here
       }
 
@@ -1958,7 +2098,18 @@ export class CoreToolScheduler {
               new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
             );
+            addToolResultAttributes(
+              this.config,
+              span,
+              toolName,
+              `STOPPED: ${stopMessage}`,
+            );
             this.setStatusInternal(callId, 'error', errorResponse);
+            setToolSpanFailure(
+              span,
+              TOOL_FAILURE_KIND_POST_HOOK_STOPPED,
+              TOOL_SPAN_STATUS_POST_HOOK_STOPPED,
+            );
             return;
           }
         }
@@ -2036,21 +2187,26 @@ export class CoreToolScheduler {
           }
 
           if (reminderBlocks.length > 0) {
-            // Final closing-tag scrub on the joined body — defense in
-            // depth against rules whose markdown body contains a
-            // literal `</system-reminder>` sequence (which would
-            // otherwise close our envelope mid-content). Full XML
-            // escaping would mangle code blocks in rule bodies; the
-            // targeted scrub is the minimum needed to keep the
-            // envelope intact.
-            const body = reminderBlocks
-              .join('\n\n')
-              .replace(/<\/system-reminder>/gi, '<\\/system-reminder>');
+            const body = escapeSystemReminderTags(reminderBlocks.join('\n\n'));
             content = appendAdditionalContext(
               content,
               `<system-reminder>\n${body}\n</system-reminder>`,
             );
           }
+        }
+
+        // Guard the JSON serialization for non-string content. Tool
+        // results can contain Part[] with large inlineData/media payloads
+        // that we don't want to serialize when telemetry is off.
+        if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
+          addToolResultAttributes(
+            this.config,
+            span,
+            toolName,
+            typeof content === 'string'
+              ? content
+              : (safeJsonStringify(content) ?? ''),
+          );
         }
 
         const response = convertToFunctionResponse(toolName, callId, content);
@@ -2068,12 +2224,21 @@ export class CoreToolScheduler {
             : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
+        safeSetStatus(span, { code: SpanStatusCode.OK });
+        // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span
+        // ends with an explicit `success` attribute so backends can filter
+        // failures the same way they filter llm_request failures.
+        try {
+          span.setAttribute('success', true);
+        } catch {
+          // OTel errors must not block API behavior.
+        }
       } else {
         // It is a failure
         // PostToolUseFailure Hook
         let errorMessage = toolResult.error.message;
         if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
+          const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
             toolName,
@@ -2089,6 +2254,13 @@ export class CoreToolScheduler {
           }
         }
 
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `ERROR: ${errorMessage}`,
+        );
+
         const error = new Error(errorMessage);
         const errorResponse = createErrorResponse(
           scheduledCall.request,
@@ -2096,45 +2268,61 @@ export class CoreToolScheduler {
           toolResult.error.type,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
+        setToolSpanFailure(
+          span,
+          TOOL_FAILURE_KIND_TOOL_ERROR,
+          TOOL_SPAN_STATUS_TOOL_ERROR,
+        );
       }
     } catch (executionError: unknown) {
       const errorMessage =
         executionError instanceof Error
           ? executionError.message
           : String(executionError);
+      // Distinguish user cancellation from real tool exceptions on the
+      // execution sub-span so trace backends filtering for errors do not
+      // see false positives. Both are still success: false; only the
+      // sanitized error message differs.
+      endToolExecutionSpan(execSpan, {
+        success: false,
+        error: signal.aborted
+          ? TOOL_SPAN_STATUS_TOOL_CANCELLED
+          : TOOL_SPAN_STATUS_TOOL_EXCEPTION,
+      });
 
       if (signal.aborted) {
         // PostToolUseFailure Hook (user interrupt)
+        let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
+          const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
             toolName,
             toolInput,
-            'User cancelled tool execution.',
+            cancelMessage,
             true,
             this.config.getApprovalMode(),
           );
 
           // Append additional context from hook if provided
-          let cancelMessage = 'User cancelled tool execution.';
           if (failureHookResult.additionalContext) {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
-          this.setStatusInternal(callId, 'cancelled', cancelMessage);
-        } else {
-          this.setStatusInternal(
-            callId,
-            'cancelled',
-            'User cancelled tool execution.',
-          );
         }
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `CANCELLED: ${cancelMessage}`,
+        );
+        this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        setToolSpanCancelled(span);
         return;
       } else {
         // PostToolUseFailure Hook
         let exceptionErrorMessage = errorMessage;
         if (hooksEnabled && messageBus) {
-          const failureHookResult = await firePostToolUseFailureHook(
+          const failureHookResult = await safelyFirePostToolUseFailureHook(
             messageBus,
             toolUseId,
             toolName,
@@ -2149,6 +2337,12 @@ export class CoreToolScheduler {
             exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
+        addToolResultAttributes(
+          this.config,
+          span,
+          toolName,
+          `EXCEPTION: ${exceptionErrorMessage}`,
+        );
         this.setStatusInternal(
           callId,
           'error',
@@ -2159,6 +2353,11 @@ export class CoreToolScheduler {
               : new Error(String(executionError)),
             ToolErrorType.UNHANDLED_EXCEPTION,
           ),
+        );
+        setToolSpanFailure(
+          span,
+          TOOL_FAILURE_KIND_TOOL_EXCEPTION,
+          TOOL_SPAN_STATUS_TOOL_EXCEPTION,
         );
       }
     }

@@ -19,6 +19,7 @@ import {
   useBackgroundTaskViewActions,
 } from '../../contexts/BackgroundTaskViewContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { theme } from '../../semantic-colors.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
@@ -26,8 +27,8 @@ import {
   buildBackgroundEntryLabel,
   ToolDisplayNames,
   ToolNames,
-  type BackgroundTaskEntry,
-  type MonitorEntry,
+  type AgentTask,
+  type MonitorTask,
 } from '@qwen-code/qwen-code-core';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import {
@@ -36,6 +37,7 @@ import {
   type DreamDialogEntry,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
+import { t } from '../../../i18n/index.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -57,13 +59,62 @@ function formatActivityLabel(name: string, description: string | undefined) {
   return singleLineDesc ? `${display}(${singleLineDesc})` : display;
 }
 
-const STATUS_VERBS: Record<EntryStatus, string> = {
-  running: 'Running',
-  paused: 'Paused',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Stopped',
-};
+function statusVerb(status: EntryStatus): string {
+  switch (status) {
+    case 'running':
+      return t('Running');
+    case 'paused':
+      return t('Paused');
+    case 'completed':
+      return t('Completed');
+    case 'failed':
+      return t('Failed');
+    case 'cancelled':
+      return t('Stopped');
+    default: {
+      const _exhaustive: never = status;
+      throw new Error(`statusVerb: unknown status: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+function formatSessionCount(count: number): string {
+  return count === 1
+    ? t('{{count}} session', { count: String(count) })
+    : t('{{count}} sessions', { count: String(count) });
+}
+
+function formatTopicCount(count: number): string {
+  return count === 1
+    ? t('{{count}} topic', { count: String(count) })
+    : t('{{count}} topics', { count: String(count) });
+}
+
+function formatToolUseCount(count: number): string {
+  return count === 1
+    ? t('{{count}} tool call', { count: String(count) })
+    : t('{{count}} tool calls', { count: String(count) });
+}
+
+function formatEventCount(count: number): string {
+  return count === 1
+    ? t('{{count}} event', { count: String(count) })
+    : t('{{count}} events', { count: String(count) });
+}
+
+function formatDreamRowLabel(entry: DreamDialogEntry): string {
+  if (entry.sessionCount === undefined) {
+    return t('[dream] memory consolidation');
+  }
+
+  return entry.sessionCount === 1
+    ? t('[dream] memory consolidation (reviewing {{count}} session)', {
+        count: String(entry.sessionCount),
+      })
+    : t('[dream] memory consolidation (reviewing {{count}} sessions)', {
+        count: String(entry.sessionCount),
+      });
+}
 
 interface StatusPresentation {
   icon: string;
@@ -117,9 +168,7 @@ function rowLabel(entry: DialogEntry): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      return entry.flavor === 'foreground'
-        ? `${FOREGROUND_ROW_PREFIX} ${label}`
-        : label;
+      return entry.isBackgrounded ? label : `${FOREGROUND_ROW_PREFIX} ${label}`;
     }
     case 'shell':
       // Shell / monitor prefixes mirror the dialog's "section" visual hint
@@ -132,13 +181,8 @@ function rowLabel(entry: DialogEntry): string {
       return `${SHELL_ROW_PREFIX} ${entry.command}`;
     case 'monitor':
       return `[monitor] ${entry.description}`;
-    case 'dream': {
-      const sessionsHint =
-        entry.sessionCount !== undefined
-          ? ` reviewing ${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`
-          : '';
-      return `[dream] memory consolidation${sessionsHint}`;
-    }
+    case 'dream':
+      return formatDreamRowLabel(entry);
     default: {
       const _exhaustive: never = entry;
       throw new Error(
@@ -195,11 +239,13 @@ const ListBody: React.FC<{
     return (
       <Box flexDirection="column">
         <Box paddingX={1}>
-          <Text bold>Background tasks</Text>
+          <Text bold>{t('Background tasks')}</Text>
           <Text color={theme.text.secondary}> (0)</Text>
         </Box>
         <Box paddingX={1}>
-          <Text color={theme.text.secondary}>No tasks currently running</Text>
+          <Text color={theme.text.secondary}>
+            {t('No tasks currently running')}
+          </Text>
         </Box>
       </Box>
     );
@@ -230,14 +276,14 @@ const ListBody: React.FC<{
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
-        <Text bold>Background tasks</Text>
+        <Text bold>{t('Background tasks')}</Text>
         <Text color={theme.text.secondary}> ({entries.length})</Text>
       </Box>
       <Box flexDirection="column">
         {hiddenAbove > 0 && (
           <Box paddingX={1}>
             <Text color={theme.text.secondary}>
-              {`  ^ ${hiddenAbove} more above`}
+              {`  ^ ${t('{{count}} more above', { count: String(hiddenAbove) })}`}
             </Text>
           </Box>
         )}
@@ -262,7 +308,7 @@ const ListBody: React.FC<{
         {hiddenBelow > 0 && (
           <Box paddingX={1}>
             <Text color={theme.text.secondary}>
-              {`  v ${hiddenBelow} more below`}
+              {`  v ${t('{{count}} more below', { count: String(hiddenBelow) })}`}
             </Text>
           </Box>
         )}
@@ -341,18 +387,14 @@ const DreamDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = 'Dream';
+  const title = t('Dream');
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.sessionCount !== undefined) {
-    dimSubtitleParts.push(
-      `${entry.sessionCount} session${entry.sessionCount === 1 ? '' : 's'}`,
-    );
+    dimSubtitleParts.push(formatSessionCount(entry.sessionCount));
   }
   if (entry.touchedTopics && entry.touchedTopics.length > 0) {
-    dimSubtitleParts.push(
-      `${entry.touchedTopics.length} topic${entry.touchedTopics.length === 1 ? '' : 's'}`,
-    );
+    dimSubtitleParts.push(formatTopicCount(entry.touchedTopics.length));
   }
 
   // Topic file lists can grow for an active session sweep; cap the
@@ -378,7 +420,7 @@ const DreamDetailBody: React.FC<{
       <Box>
         {terminal && (
           <Text color={terminal.color}>
-            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -389,7 +431,7 @@ const DreamDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold dimColor>
-              Sessions reviewing
+              {t('Sessions reviewing')}
             </Text>
           </Box>
           <Box>
@@ -403,7 +445,7 @@ const DreamDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold dimColor>
-              Progress
+              {t('Progress')}
             </Text>
           </Box>
           <Box>
@@ -417,7 +459,9 @@ const DreamDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold dimColor>
-              {`Topics touched (${topics.length})`}
+              {t('Topics touched ({{count}})', {
+                count: String(topics.length),
+              })}
             </Text>
           </Box>
           {visibleTopics.map((topic) => (
@@ -429,7 +473,7 @@ const DreamDetailBody: React.FC<{
             <Box>
               <Text
                 color={theme.text.secondary}
-              >{`  · +${hiddenTopicCount} more`}</Text>
+              >{`  · +${t('{{count}} more', { count: String(hiddenTopicCount) })}`}</Text>
             </Box>
           )}
         </Fragment>
@@ -440,7 +484,7 @@ const DreamDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -464,7 +508,7 @@ const DreamDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.warning}>
-              Lock release warning
+              {t('Lock release warning')}
             </Text>
           </Box>
           <Box>
@@ -474,7 +518,9 @@ const DreamDetailBody: React.FC<{
           </Box>
           <Box>
             <Text color={theme.text.secondary} wrap="wrap">
-              {`Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.`}
+              {t(
+                "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.",
+              )}
             </Text>
           </Box>
         </Fragment>
@@ -484,7 +530,7 @@ const DreamDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.warning}>
-              Metadata write warning
+              {t('Metadata write warning')}
             </Text>
           </Box>
           <Box>
@@ -494,7 +540,9 @@ const DreamDetailBody: React.FC<{
           </Box>
           <Box>
             <Text color={theme.text.secondary} wrap="wrap">
-              {`The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.`}
+              {t(
+                "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.",
+              )}
             </Text>
           </Box>
         </Fragment>
@@ -514,13 +562,13 @@ const AgentDetailBody: React.FC<{
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.stats?.totalTokens) {
     dimSubtitleParts.push(
-      `${formatTokenCount(entry.stats.totalTokens)} tokens`,
+      t('{{count}} tokens', {
+        count: formatTokenCount(entry.stats.totalTokens),
+      }),
     );
   }
   if (entry.stats?.toolUses !== undefined) {
-    dimSubtitleParts.push(
-      `${entry.stats.toolUses} tool${entry.stats.toolUses === 1 ? '' : 's'}`,
-    );
+    dimSubtitleParts.push(formatToolUseCount(entry.stats.toolUses));
   }
 
   // Registry stores activities newest-last; keep that order so the live
@@ -556,7 +604,7 @@ const AgentDetailBody: React.FC<{
       <Box>
         {terminal && (
           <Text color={terminal.color}>
-            {`${terminal.icon} ${STATUS_VERBS[entry.status]} \u00B7 `}
+            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -569,7 +617,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold dimColor>
-              Progress
+              {t('Progress')}
             </Text>
           </Box>
           {activities.map((a, i) => {
@@ -602,7 +650,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold dimColor>
-              Prompt
+              {t('Prompt')}
             </Text>
           </Box>
           {visiblePromptLines.map((line, i) => (
@@ -618,7 +666,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Resume blocked
+              {t('Resume blocked')}
             </Text>
           </Box>
           <Box>
@@ -634,7 +682,7 @@ const AgentDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -649,19 +697,21 @@ const AgentDetailBody: React.FC<{
 };
 
 const ShellDetailBody: React.FC<{
-  entry: import('@qwen-code/qwen-code-core').BackgroundShellEntry;
+  entry: import('@qwen-code/qwen-code-core').ShellTask;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = `Shell \u203A ${entry.command}`;
+  const title = `${t('Shell')} \u203A ${entry.command}`;
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
-    dimSubtitleParts.push(`pid ${entry.pid}`);
+    dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
   }
   if (entry.status === 'completed' && entry.exitCode !== undefined) {
-    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+    dimSubtitleParts.push(
+      t('exit {{exitCode}}', { exitCode: String(entry.exitCode) }),
+    );
   }
 
   const hasError = entry.status === 'failed' && Boolean(entry.error);
@@ -680,7 +730,7 @@ const ShellDetailBody: React.FC<{
       <Box>
         {terminal && (
           <Text color={terminal.color}>
-            {`${terminal.icon} ${STATUS_VERBS[entry.status]} \u00B7 `}
+            {`${terminal.icon} ${statusVerb(entry.status)} \u00B7 `}
           </Text>
         )}
         <Text color={theme.text.secondary}>
@@ -691,7 +741,7 @@ const ShellDetailBody: React.FC<{
       <Box />
       <Box>
         <Text bold dimColor>
-          Working dir
+          {t('Working dir')}
         </Text>
       </Box>
       <Box>
@@ -701,11 +751,11 @@ const ShellDetailBody: React.FC<{
       <Box />
       <Box>
         <Text bold dimColor>
-          Output file
+          {t('Output file')}
         </Text>
       </Box>
       <Box>
-        <Text wrap="truncate-end">{entry.outputPath}</Text>
+        <Text wrap="truncate-end">{entry.outputFile}</Text>
       </Box>
 
       {hasError && (
@@ -713,7 +763,7 @@ const ShellDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={theme.status.error}>
-              Error
+              {t('Error')}
             </Text>
           </Box>
           <Box>
@@ -728,25 +778,27 @@ const ShellDetailBody: React.FC<{
 };
 
 const MonitorDetailBody: React.FC<{
-  entry: MonitorEntry;
+  entry: MonitorTask;
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
-  const title = `Monitor › ${entry.description}`;
+  const title = `${t('Monitor')} › ${entry.description}`;
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
   if (entry.pid !== undefined) {
-    dimSubtitleParts.push(`pid ${entry.pid}`);
+    dimSubtitleParts.push(t('pid {{pid}}', { pid: String(entry.pid) }));
   }
-  dimSubtitleParts.push(
-    `${entry.eventCount} event${entry.eventCount === 1 ? '' : 's'}`,
-  );
+  dimSubtitleParts.push(formatEventCount(entry.eventCount));
   if (entry.droppedLines > 0) {
-    dimSubtitleParts.push(`${entry.droppedLines} dropped`);
+    dimSubtitleParts.push(
+      t('{{count}} dropped', { count: String(entry.droppedLines) }),
+    );
   }
   if (entry.exitCode !== undefined) {
-    dimSubtitleParts.push(`exit ${entry.exitCode}`);
+    dimSubtitleParts.push(
+      t('exit {{exitCode}}', { exitCode: String(entry.exitCode) }),
+    );
   }
 
   // `entry.error` is set on `failed` (spawn error) and on `completed`
@@ -770,7 +822,7 @@ const MonitorDetailBody: React.FC<{
       <Box>
         {terminal && (
           <Text color={terminal.color}>
-            {`${terminal.icon} ${STATUS_VERBS[entry.status]} · `}
+            {`${terminal.icon} ${statusVerb(entry.status)} · `}
           </Text>
         )}
         <Text color={theme.text.secondary}>{dimSubtitleParts.join(' · ')}</Text>
@@ -779,7 +831,7 @@ const MonitorDetailBody: React.FC<{
       <Box />
       <Box>
         <Text bold dimColor>
-          Command
+          {t('Command')}
         </Text>
       </Box>
       <Box>
@@ -791,7 +843,7 @@ const MonitorDetailBody: React.FC<{
           <Box />
           <Box>
             <Text bold color={errorColor}>
-              {errorIsFailure ? 'Error' : 'Stopped because'}
+              {errorIsFailure ? t('Error') : t('Stopped because')}
             </Text>
           </Box>
           <Box>
@@ -900,7 +952,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (!dialogOpen || dialogMode !== 'detail' || !selectedAgentIdForActivity)
       return;
     const registry = config.getBackgroundTaskRegistry();
-    const onActivity = (entry: BackgroundTaskEntry) => {
+    const onActivity = (entry: AgentTask) => {
       if (entry.agentId !== selectedAgentIdForActivity) return;
       setActivityTick((n) => n + 1);
     };
@@ -986,7 +1038,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
     if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
     const isForegroundAgent =
-      selectedEntry.kind === 'agent' && selectedEntry.flavor === 'foreground';
+      selectedEntry.kind === 'agent' && !selectedEntry.isBackgrounded;
     if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
       setPendingCancelEntryId(entryKey);
       return;
@@ -1000,12 +1052,12 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       if (!dialogOpen) return;
 
       if (dialogMode === 'list') {
-        if (key.name === 'up') {
+        if (keyMatchers[Command.SELECTION_UP](key)) {
           moveSelectionUp();
           setPendingCancelEntryId(null);
           return;
         }
-        if (key.name === 'down') {
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
           moveSelectionDown();
           setPendingCancelEntryId(null);
           return;
@@ -1121,7 +1173,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       {dialogMode === 'list' && (
         <Box paddingX={1}>
           <Text bold color={theme.text.accent}>
-            Background tasks
+            {t('Background tasks')}
           </Text>
         </Box>
       )}
@@ -1140,7 +1192,7 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
           />
         ) : (
           <Box paddingX={1}>
-            <Text color={theme.text.secondary}>No entry to show.</Text>
+            <Text color={theme.text.secondary}>{t('No entry to show.')}</Text>
           </Box>
         )}
       </Box>

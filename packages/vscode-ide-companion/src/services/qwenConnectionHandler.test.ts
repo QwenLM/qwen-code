@@ -139,7 +139,12 @@ describe('QwenConnectionHandler', () => {
       for (let i = 0; i < 5 && vi.getTimerCount() === 0; i++) {
         await Promise.resolve();
       }
-      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      if (vi.getTimerCount() === 0) {
+        throw new Error(
+          'runPendingRetryTimer: no pending retry timer found - ' +
+            'expected connect() to schedule a backoff setTimeout',
+        );
+      }
       await vi.runOnlyPendingTimersAsync();
     };
 

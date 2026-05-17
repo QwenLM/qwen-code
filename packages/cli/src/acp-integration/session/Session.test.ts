@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Session } from './Session.js';
+import type { Content } from '@google/genai';
 import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
@@ -72,6 +73,13 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
+  let mockChatRecordingService: {
+    recordUserMessage: ReturnType<typeof vi.fn>;
+    recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
+    recordToolResult: ReturnType<typeof vi.fn>;
+    recordSlashCommand: ReturnType<typeof vi.fn>;
+    rewindRecording: ReturnType<typeof vi.fn>;
+  };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
@@ -94,6 +102,9 @@ describe('Session', () => {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      setHistory: vi.fn(),
+      truncateHistory: vi.fn(),
+      stripThoughtsFromHistory: vi.fn(),
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
@@ -102,6 +113,14 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+    };
+
+    mockChatRecordingService = {
+      recordUserMessage: vi.fn(),
+      recordUiTelemetryEvent: vi.fn(),
+      recordToolResult: vi.fn(),
+      recordSlashCommand: vi.fn(),
+      rewindRecording: vi.fn(),
     };
 
     mockToolRegistry = {
@@ -126,12 +145,9 @@ describe('Session', () => {
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
-      getChatRecordingService: vi.fn().mockReturnValue({
-        recordUserMessage: vi.fn(),
-        recordUiTelemetryEvent: vi.fn(),
-        recordToolResult: vi.fn(),
-        recordSlashCommand: vi.fn(),
-      }),
+      getChatRecordingService: vi
+        .fn()
+        .mockReturnValue(mockChatRecordingService),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       // #buildInitialSystemReminders iterates listSubagents() on every
       // session.prompt(). Default to an empty list so tests that don't
@@ -147,6 +163,7 @@ describe('Session', () => {
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
     } as unknown as Config;
 
@@ -206,6 +223,134 @@ describe('Session', () => {
       });
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(expected);
+    });
+  });
+
+  describe('rewindToTurn', () => {
+    it('truncates model history before the requested user turn and records rewind', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const result = session.rewindToTurn(1);
+
+      expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(1, {
+        truncatedCount: 2,
+      });
+    });
+
+    it('preserves startup context when rewinding to the first user turn', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'startup context' }] },
+        { role: 'model', parts: [{ text: 'Got it. Thanks for the context!' }] },
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const result = session.rewindToTurn(0);
+
+      expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 2 });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+    });
+
+    it('rejects unreachable user turns', () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'first' }] },
+      ]);
+
+      expect(() => session.rewindToTurn(2)).toThrow(
+        'Cannot rewind to the requested turn',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a cron prompt is mutating history', () => {
+      (session as unknown as { cronProcessing: boolean }).cronProcessing = true;
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid target turn indexes', () => {
+      expect(() => session.rewindToTurn(-1)).toThrow(
+        'targetTurnIndex must be a non-negative integer',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a prompt is running', () => {
+      (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
+        new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects rewinds while a cron abort is active', () => {
+      (
+        session as unknown as { cronAbortController: AbortController }
+      ).cronAbortController = new AbortController();
+
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Cannot rewind while a prompt is running',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('restores a captured history snapshot', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+
+      const snapshot = session.captureHistorySnapshot();
+      session.restoreHistory(snapshot);
+
+      expect(snapshot).toEqual(history);
+      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+    });
+
+    it('rejects history restore while a prompt is running', () => {
+      (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
+        new AbortController();
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a cron prompt is mutating history', () => {
+      (session as unknown as { cronProcessing: boolean }).cronProcessing = true;
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+    });
+
+    it('rejects history restore while a cron abort is active', () => {
+      (
+        session as unknown as { cronAbortController: AbortController }
+      ).cronAbortController = new AbortController();
+
+      expect(() => session.restoreHistory([])).toThrow(
+        'Cannot restore history while a prompt is running',
+      );
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
     });
   });
 
@@ -327,6 +472,49 @@ describe('Session', () => {
                 sourceLabel: 'Built-in',
                 supportedModes: ['interactive', 'non_interactive', 'acp'],
                 subcommands: ['visible'],
+                modelInvocable: false,
+              },
+            },
+          ],
+        },
+      });
+    });
+
+    it('forwards command descriptions from getAvailableCommands()', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'review',
+          description: '审查代码变更',
+          kind: CommandKind.SKILL,
+          source: 'skill-dir-command',
+          sourceLabel: '用户',
+          sourceDetail: 'user',
+          supportedModes: ['acp'],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.any(AbortSignal),
+        'acp',
+      );
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [
+            {
+              name: 'review',
+              description: '审查代码变更',
+              input: { hint: '' },
+              _meta: {
+                argumentHint: undefined,
+                source: 'skill-dir-command',
+                sourceLabel: '用户',
+                supportedModes: ['acp'],
+                subcommands: [],
                 modelInvocable: false,
               },
             },
@@ -1854,7 +2042,9 @@ describe('Session', () => {
           };
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
           mockChat.getHistory = vi
             .fn()
             .mockReturnValue([
@@ -1887,6 +2077,99 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
+        });
+
+        it('ends Stop hook continuation when the blocking cap is reached', async () => {
+          const messageBus = {
+            request: vi.fn().mockImplementation(async (request) => ({
+              success: true,
+              output:
+                request.eventName === 'Stop'
+                  ? {
+                      decision: 'block',
+                      reason: 'Continue after Stop hook',
+                    }
+                  : {},
+            })),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(2);
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(result).toEqual({ stopReason: 'end_turn' });
+          expect(messageBus.request).toHaveBeenCalledTimes(2);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'Stop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+              },
+            },
+          });
+        });
+
+        it('emits the cap warning without retrying when the blocking cap is one', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi
+            .fn()
+            .mockImplementation((eventName: string) => eventName === 'Stop');
+          mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(1);
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+          mockChat.sendMessageStream = vi
+            .fn()
+            .mockResolvedValue(createEmptyStream());
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(result).toEqual({ stopReason: 'end_turn' });
+          expect(messageBus.request).toHaveBeenCalledTimes(1);
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+              },
+            },
+          });
         });
       });
 

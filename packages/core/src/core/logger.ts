@@ -75,6 +75,15 @@ export class Logger {
   private messageId = 0; // Instance-specific counter for the next messageId
   private initialized = false;
   private logs: LogEntry[] = []; // In-memory cache, ideally reflects the last known state of the file
+  private lastLoggedUserEntry: LogEntry | null = null; // Tracks the most recently persisted USER entry for cancel-undo (mirrors claude-code's lastAddedEntry).
+  // Per-instance write queue for the log-history file (logs.json).
+  // Only `logMessage` and `removeLastUserMessage` chain on this queue;
+  // their read → splice/append → writeFile cycle is otherwise non-atomic
+  // and a fast cancel + resubmit could make removeLast clobber the
+  // just-appended entry. Checkpoint ops (saveCheckpoint /
+  // deleteCheckpoint / loadCheckpoint) write to *separate* files and are
+  // intentionally not serialized on this queue.
+  private writeQueue: Promise<unknown> = Promise.resolve();
   private debugLogger: DebugLogger;
 
   constructor(
@@ -83,6 +92,27 @@ export class Logger {
   ) {
     this.sessionId = sessionId;
     this.debugLogger = createDebugLogger('LOGGER');
+  }
+
+  /**
+   * Serializes a log-history mutation against every previously enqueued
+   * op on this Logger. Errors propagate to the caller but do NOT poison
+   * the queue (the next op runs regardless). Scope: only `logMessage`
+   * and `removeLastUserMessage` go through here — checkpoint ops touch
+   * separate files and don't share this queue. Single-instance only:
+   * a separate Logger pointing at the same file would have its own
+   * queue, which is why callers should share one Logger per session.
+   */
+  private serialize<T>(op: () => Promise<T>): Promise<T> {
+    // The queue's tail is always sourced from `.catch(() => undefined)`
+    // below, so writeQueue never rejects — `.then(op)` is sufficient and
+    // the earlier `then(op, op)` would have wrongly implied "retry op on
+    // rejection". `op`'s return Promise is what propagates to the
+    // caller; the queue itself swallows errors so subsequent ops run
+    // regardless of any earlier failure.
+    const next = this.writeQueue.then(() => op());
+    this.writeQueue = next.catch(() => undefined);
+    return next;
   }
 
   private async _readLogFile(): Promise<LogEntry[]> {
@@ -272,15 +302,189 @@ export class Logger {
     };
 
     try {
-      const writtenEntry = await this._updateLogFile(newEntryObject);
+      const writtenEntry = await this.serialize(() =>
+        this._updateLogFile(newEntryObject),
+      );
       if (writtenEntry) {
         // If an entry was actually written (not a duplicate skip),
         // then this instance can increment its idea of the next messageId for this session.
         this.messageId = writtenEntry.messageId + 1;
+        if (writtenEntry.type === MessageSenderType.USER) {
+          this.lastLoggedUserEntry = writtenEntry;
+        }
+      } else if (type === MessageSenderType.USER) {
+        // Duplicate-skip path: another logger instance won the race and
+        // wrote an entry with the same (sessionId, messageId, timestamp,
+        // message). `_updateLogFile` mutated `newEntryObject.messageId`
+        // in-place to match disk, so the 5-tuple identifies the row that
+        // IS on disk — adopt it as the undo target. Leaving the tracker
+        // pointing at the previous USER would let cancel/auto-restore
+        // delete an older, unrelated row.
+        this.lastLoggedUserEntry = newEntryObject;
       }
     } catch (_error) {
+      // Persist failed. Only invalidate the undo tracker when the FAILED
+      // attempt was itself a USER write — that's the case where the
+      // tracker would otherwise lie about the most recent user entry
+      // (logMessage("A" USER) succeeds, logMessage("B" USER) throws,
+      // user cancels B → without this guard removeLastUserMessage would
+      // delete A's row). A failed non-USER write (e.g., MODEL_SWITCH
+      // disk error) doesn't change which row was the last user prompt,
+      // so leave the tracker alone — the prior USER undo target is
+      // still valid.
+      if (type === MessageSenderType.USER) {
+        this.lastLoggedUserEntry = null;
+      }
       // Error already logged by _updateLogFile or _readLogFile
     }
+  }
+
+  /**
+   * Undo the most recent {@link logMessage} call for a USER entry — used by
+   * the auto-restore-on-cancel flow when the user hits ESC right after submit
+   * and the model produced nothing meaningful. Without this, the cancelled
+   * prompt would still surface in cross-session ↑-history via
+   * {@link getPreviousUserMessages}.
+   *
+   * Mirrors claude-code's `removeLastFromHistory` (history.ts): one-shot,
+   * clears the tracked entry so a second call is a no-op. Identifies the
+   * entry by sessionId+messageId+timestamp+message so a stray race that
+   * appended a different entry between log and undo will not silently
+   * remove the wrong row.
+   *
+   * Two-phase semantics:
+   *   1. Synchronous in-memory removal of the entry from `this.logs` —
+   *      runs before this method even returns its Promise. Consumers
+   *      that read `getPreviousUserMessages()` on the same render
+   *      observe the removal immediately.
+   *   2. Async serialized disk reconciliation — read, splice, writeFile.
+   *      The returned Promise resolves to whether *the disk write*
+   *      succeeded (not whether the in-memory removal happened).
+   *
+   * Failure handling: when the disk read or write THROWS, the optimistic
+   * in-memory removal is ROLLED BACK so the cache stays consistent with
+   * what's on disk (which is still the pre-call state). The target entry
+   * is re-inserted at its original index (when still absent) and
+   * `lastLoggedUserEntry` is restored so a follow-up retry has a target.
+   *
+   * The other `false`-returning paths intentionally do NOT roll back:
+   *   - Initial guards (logger uninitialized / no tracked entry):
+   *     nothing was removed in the first place, so nothing to restore.
+   *   - Disk read succeeds but the tracked row is no longer on disk
+   *     (e.g. another logger instance rotated/cleared the file): the
+   *     in-memory cache is re-synced to the fresh disk snapshot, so
+   *     both sides agree the entry is gone. Returning `false` here is
+   *     truthful — we didn't perform a write — but the entry will NOT
+   *     be observable in-memory either.
+   *
+   * @returns true when the disk row was actually removed; false otherwise.
+   *   On `false`, the in-memory cache mirrors disk (entry restored if a
+   *   disk op threw; entry stays gone if disk no longer had it).
+   */
+  async removeLastUserMessage(): Promise<boolean> {
+    if (!this.initialized || !this.logFilePath) {
+      return false;
+    }
+    const target = this.lastLoggedUserEntry;
+    if (!target) return false;
+    this.lastLoggedUserEntry = null;
+    const matchesTarget = (e: LogEntry): boolean =>
+      e.sessionId === target.sessionId &&
+      e.messageId === target.messageId &&
+      e.timestamp === target.timestamp &&
+      e.message === target.message &&
+      e.type === target.type;
+    // Optimistic in-memory removal BEFORE the async serialize queue runs.
+    // AppContainer's userMessages effect reads `getPreviousUserMessages()`
+    // (which reads `this.logs`) on the same render that history truncation
+    // fires. Without this sync update, ↑-history in the current session
+    // would still surface the cancelled prompt until some unrelated
+    // future history change forced the effect to re-run.
+    //
+    // If the disk path fails (read or write), restore the removed entry
+    // from the snapshot so the in-memory state stays consistent with
+    // disk — without rollback the caller gets `false` but the in-memory
+    // logs show the entry already removed, contract-violating drift.
+    const optimisticIdx = this.logs.findIndex(matchesTarget);
+    if (optimisticIdx >= 0) {
+      this.logs = [
+        ...this.logs.slice(0, optimisticIdx),
+        ...this.logs.slice(optimisticIdx + 1),
+      ];
+    }
+    const restoreOptimistic = () => {
+      // Restore the removed entry back into `this.logs` if (a) we
+      // actually performed the optimistic removal AND (b) the entry
+      // is no longer present (i.e. concurrent code didn't re-add it
+      // by some other path). Re-insert at the original index when
+      // possible, otherwise append (insertion order isn't a
+      // load-bearing invariant downstream — `getPreviousUserMessages`
+      // sorts by timestamp / index).
+      if (optimisticIdx >= 0 && this.logs.findIndex(matchesTarget) === -1) {
+        const insertAt = Math.min(optimisticIdx, this.logs.length);
+        this.logs = [
+          ...this.logs.slice(0, insertAt),
+          target,
+          ...this.logs.slice(insertAt),
+        ];
+      }
+      // Always restore `lastLoggedUserEntry` so a follow-up retry has
+      // a target to find. (This survives reentrant retry but doesn't
+      // resurrect a target that another path legitimately replaced.)
+      if (this.lastLoggedUserEntry === null) {
+        this.lastLoggedUserEntry = target;
+      }
+    };
+    const logFilePath = this.logFilePath;
+    return this.serialize(async () => {
+      let currentLogsOnDisk: LogEntry[];
+      try {
+        currentLogsOnDisk = await this._readLogFile();
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to read log file while undoing last user entry:',
+          error,
+        );
+        restoreOptimistic();
+        return false;
+      }
+
+      const idx = currentLogsOnDisk.findIndex(matchesTarget);
+      if (idx === -1) {
+        // Entry already gone from disk (concurrent rotation/clear).
+        // Adopt disk state as truth so the in-memory cache doesn't
+        // diverge from a freshly-rotated file.
+        this.logs = currentLogsOnDisk;
+        return false;
+      }
+
+      currentLogsOnDisk.splice(idx, 1);
+
+      try {
+        await fs.writeFile(
+          logFilePath,
+          JSON.stringify(currentLogsOnDisk, null, 2),
+          'utf-8',
+        );
+        this.logs = currentLogsOnDisk;
+        // Roll back this instance's nextMessageId so a subsequent log doesn't
+        // skip the freed slot (matters for tests that assert sequential ids).
+        if (
+          target.sessionId === this.sessionId &&
+          this.messageId === target.messageId + 1
+        ) {
+          this.messageId = target.messageId;
+        }
+        return true;
+      } catch (error) {
+        this.debugLogger.debug(
+          'Failed to write log file while undoing last user entry:',
+          error,
+        );
+        restoreOptimistic();
+        return false;
+      }
+    });
   }
 
   private _checkpointPath(tag: string): string {
@@ -456,6 +660,8 @@ export class Logger {
     this.initialized = false;
     this.logFilePath = undefined;
     this.logs = [];
+    this.lastLoggedUserEntry = null;
+    this.writeQueue = Promise.resolve();
     this.sessionId = undefined;
     this.messageId = 0;
   }

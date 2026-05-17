@@ -539,14 +539,20 @@ export class ExtensionManager {
   async refreshCache(options?: { names?: string[] }): Promise<void> {
     this.extensionCache = new Map<string, Extension>();
     const requestedNames = options?.names?.filter(Boolean) ?? [];
-    const extensions =
-      requestedNames.length > 0
-        ? (
-            await Promise.all(
-              requestedNames.map((name) => this.loadExtensionByName(name)),
-            )
-          ).filter((extension): extension is Extension => extension !== null)
-        : await this.loadExtensionsFromDir(os.homedir());
+    let extensions: Extension[];
+    if (requestedNames.length > 0) {
+      extensions = (
+        await Promise.all(
+          requestedNames.map((name) => this.loadExtensionByName(name)),
+        )
+      ).filter((extension): extension is Extension => extension !== null);
+    } else {
+      // Default: load all extensions from QWEN_HOME-aware user extensions dir.
+      extensions = await this.loadExtensionsFromExtensionsDir(
+        ExtensionStorage.getUserExtensionsDir(),
+        this.workspaceDir,
+      );
+    }
     extensions.forEach((extension) => {
       this.extensionCache!.set(extension.name, extension);
     });
@@ -598,23 +604,29 @@ export class ExtensionManager {
 
   async loadExtensionsFromDir(dir: string): Promise<Extension[]> {
     const storage = new Storage(dir);
-    const extensionsDir = storage.getExtensionsDir();
+    return this.loadExtensionsFromExtensionsDir(
+      storage.getExtensionsDir(),
+      dir,
+    );
+  }
 
+  private async loadExtensionsFromExtensionsDir(
+    extensionsDir: string,
+    workspaceDir: string,
+  ): Promise<Extension[]> {
     let subdirs: string[];
     try {
       subdirs = fs.readdirSync(extensionsDir);
     } catch {
-      // Directory doesn't exist or is inaccessible
       return [];
     }
 
     const extensions: Extension[] = [];
     for (const subdir of subdirs) {
       const extensionDir = path.join(extensionsDir, subdir);
-
       const extension = await this.loadExtension({
         extensionDir,
-        workspaceDir: dir,
+        workspaceDir,
       });
       if (extension != null) {
         extensions.push(extension);

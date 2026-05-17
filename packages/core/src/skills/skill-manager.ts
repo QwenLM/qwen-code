@@ -8,8 +8,8 @@ import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { fileURLToPath } from 'url';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
+import { resolveBundleDir } from '../utils/bundlePaths.js';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import * as yaml from 'yaml';
 import type {
@@ -35,7 +35,11 @@ import {
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
-import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
+import {
+  QWEN_DIR,
+  SKILL_PROVIDER_CONFIG_DIRS,
+  Storage,
+} from '../config/storage.js';
 import {
   HookEventName,
   HookType,
@@ -45,8 +49,6 @@ import {
 } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
-
-const QWEN_CONFIG_DIR = '.qwen';
 const SKILLS_CONFIG_DIR = 'skills';
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
@@ -84,8 +86,13 @@ export class SkillManager {
   private activationRegistry: SkillActivationRegistry | null = null;
 
   constructor(private readonly config: Config) {
+    // Anchor the bundled skills directory at the on-disk sibling of
+    // `cli.js` (i.e. `dist/bundled/`, populated by `copy_bundle_assets.js`).
+    // See `resolveBundleDir` for the rationale behind stripping a trailing
+    // `chunks/` segment when this module is hoisted into a shared esbuild
+    // chunk.
     this.bundledSkillsDir = path.join(
-      path.dirname(fileURLToPath(import.meta.url)),
+      resolveBundleDir(import.meta.url),
       'bundled',
     );
   }
@@ -835,7 +842,9 @@ export class SkillManager {
         );
       case 'user':
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
-          path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
+          v === QWEN_DIR
+            ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
+            : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
         );
       case 'bundled':
         return [this.bundledSkillsDir];
@@ -1111,7 +1120,7 @@ export class SkillManager {
   }
 
   private async ensureUserSkillsDir(): Promise<void> {
-    const baseDir = path.join(os.homedir(), QWEN_CONFIG_DIR, SKILLS_CONFIG_DIR);
+    const baseDir = path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR);
     try {
       await fs.mkdir(baseDir, { recursive: true });
     } catch (error) {

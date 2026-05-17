@@ -1,0 +1,289 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { DaemonClient } from './DaemonClient.js';
+import {
+  type CreateSessionRequest,
+  type PromptRequest,
+  type RestoreSessionRequest,
+  type SubscribeOptions,
+} from './DaemonClient.js';
+import type {
+  DaemonEvent,
+  DaemonSessionState,
+  DaemonSession,
+  PermissionResponse,
+  PromptResult,
+  SetModelResult,
+} from './types.js';
+
+export interface DaemonSessionClientOptions {
+  client: DaemonClient;
+  session: DaemonSession;
+  /** ACP state returned by load/resume; empty for create/attach clients. */
+  state?: DaemonSessionState;
+  /**
+   * Seed replay state for callers that persisted the last seen SSE event id.
+   * When omitted, the first event subscription starts live. Values must be
+   * finite, non-negative integers because the daemon uses these ids as
+   * `Last-Event-ID` resume cursors.
+   */
+  lastEventId?: number;
+}
+
+export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
+  /**
+   * Reuse this client's last seen SSE event id when `lastEventId` is not
+   * supplied. Defaults to true so reconnecting client adapters get replay
+   * behavior without carrying the id through every call.
+   */
+  resume?: boolean;
+}
+
+/**
+ * Session-scoped wrapper around `DaemonClient`.
+ *
+ * `DaemonClient` mirrors the raw HTTP API and requires a `sessionId` on each
+ * method. `DaemonSessionClient` is the adapter-facing layer for TUI, channel,
+ * IDE, and web backends: it binds one daemon session, forwards the existing
+ * Stage 1 routes, and preserves SSE replay state. It intentionally does not
+ * interpret daemon event payloads; typed event reducers belong to the protocol
+ * schema layer.
+ */
+export class DaemonSessionClient {
+  readonly client: DaemonClient;
+  readonly session: DaemonSession;
+  readonly state: DaemonSessionState;
+  private lastSeenEventId: number | undefined;
+  private subscriptionActive = false;
+
+  constructor(opts: DaemonSessionClientOptions) {
+    this.client = opts.client;
+    this.session = { ...opts.session };
+    this.state = { ...(opts.state ?? {}) };
+    this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+  }
+
+  /**
+   * Creates a new daemon session or attaches to an existing matching session.
+   */
+  static async createOrAttach(
+    client: DaemonClient,
+    req: CreateSessionRequest = {},
+  ): Promise<DaemonSessionClient> {
+    const session = await client.createOrAttachSession(req);
+    // `modelServiceId` switch failures are reported on SSE, not the
+    // create/attach HTTP response. Seed the first subscription from the
+    // daemon replay ring so create-then-subscribe clients observe attach-time
+    // `model_switch_failed` / `model_switched` events. The daemon treats
+    // Last-Event-ID: 0 as "replay from the beginning of the bounded ring";
+    // if older events have already been evicted, clients receive the retained
+    // suffix and continue live from there.
+    const lastEventId = req.modelServiceId ? 0 : undefined;
+    return new DaemonSessionClient({ client, session, lastEventId });
+  }
+
+  /**
+   * Loads an existing daemon session and seeds the first event subscription
+   * from the start of the daemon replay ring so history replay frames emitted
+   * during `session/load` are visible to this client.
+   */
+  static async load(
+    client: DaemonClient,
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonSessionClient> {
+    const { state, ...session } = await client.loadSession(sessionId, req);
+    return new DaemonSessionClient({
+      client,
+      session,
+      state,
+      lastEventId: 0,
+    });
+  }
+
+  /**
+   * Resumes an existing daemon session without requesting history replay.
+   * Seeds the first event subscription from the start of the daemon
+   * replay ring (`lastEventId: 0`) symmetric with `load()` — the agent's
+   * `unstable_resumeSession` schedules an `available_commands_update`
+   * via `setTimeout(0)`, which can publish to the daemon bus between
+   * the HTTP response and the consumer's first `events()` call. Seeding
+   * ensures that frame is observed instead of dropped.
+   */
+  static async resume(
+    client: DaemonClient,
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonSessionClient> {
+    const { state, ...session } = await client.resumeSession(sessionId, req);
+    return new DaemonSessionClient({
+      client,
+      session,
+      state,
+      lastEventId: 0,
+    });
+  }
+
+  get sessionId(): string {
+    return this.session.sessionId;
+  }
+
+  get workspaceCwd(): string {
+    return this.session.workspaceCwd;
+  }
+
+  get attached(): boolean {
+    return this.session.attached;
+  }
+
+  get lastEventId(): number | undefined {
+    return this.lastSeenEventId;
+  }
+
+  setLastEventId(lastEventId: number | undefined): void {
+    this.lastSeenEventId = validateLastEventId(lastEventId);
+  }
+
+  async prompt(
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<PromptResult> {
+    return await this.client.prompt(this.sessionId, req, signal);
+  }
+
+  async cancel(): Promise<void> {
+    await this.client.cancel(this.sessionId);
+  }
+
+  async setModel(modelId: string): Promise<SetModelResult> {
+    return await this.client.setSessionModel(this.sessionId, modelId);
+  }
+
+  async respondToPermission(
+    requestId: string,
+    response: PermissionResponse,
+  ): Promise<boolean> {
+    return await this.client.respondToPermission(requestId, response);
+  }
+
+  events(
+    opts: DaemonSessionSubscribeOptions = {},
+  ): AsyncGenerator<DaemonEvent, void, unknown> {
+    return this.openEventSubscription(opts);
+  }
+
+  /**
+   * @deprecated Use {@link events} instead. Both methods are equivalent.
+   */
+  subscribeEvents(
+    opts: DaemonSessionSubscribeOptions = {},
+  ): AsyncGenerator<DaemonEvent, void, unknown> {
+    return this.openEventSubscription(opts);
+  }
+
+  private openEventSubscription(
+    opts: DaemonSessionSubscribeOptions,
+  ): AsyncGenerator<DaemonEvent, void, unknown> {
+    const requestedLastEventId = validateLastEventId(opts.lastEventId);
+    let started = false;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      this.subscriptionActive = false;
+    };
+    const acquire = () => {
+      if (started) return;
+      if (this.subscriptionActive) {
+        throw new Error(
+          'Another event subscription is already active on this session. ' +
+            'Reuse the existing AsyncGenerator or create a separate DaemonSessionClient.',
+        );
+      }
+      this.subscriptionActive = true;
+      started = true;
+    };
+    const iterator = this.iterateEvents(
+      { ...opts, lastEventId: requestedLastEventId },
+      release,
+    );
+
+    return {
+      next: async (value?: unknown) => {
+        if (!released) {
+          acquire();
+        }
+        return await iterator.next(value);
+      },
+      return: async () => {
+        try {
+          return await iterator.return(undefined);
+        } finally {
+          release();
+        }
+      },
+      throw: async (error?: unknown) => {
+        try {
+          return await iterator.throw(error);
+        } finally {
+          release();
+        }
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+  }
+
+  private async *iterateEvents(
+    opts: DaemonSessionSubscribeOptions,
+    release: () => void,
+  ): AsyncGenerator<DaemonEvent, void, unknown> {
+    try {
+      const { resume = true, ...subscribeOpts } = opts;
+      const lastEventId =
+        subscribeOpts.lastEventId ??
+        (resume ? this.lastSeenEventId : undefined);
+
+      for await (const event of this.client.subscribeEvents(this.sessionId, {
+        ...subscribeOpts,
+        lastEventId,
+      })) {
+        yield event;
+        // Cursor updates happen after the consumer resumes iteration. That
+        // avoids acknowledging an event before the adapter has processed it,
+        // but means `lastEventId` intentionally lags while the handler for the
+        // just-yielded event is still running.
+        // The cursor is a replay watermark, so it only moves forward even if a
+        // replayed or synthetic frame arrives with an older id.
+        if (event.id !== undefined) {
+          this.lastSeenEventId = Math.max(
+            this.lastSeenEventId ?? 0,
+            validateLastEventId(event.id),
+          );
+        }
+      }
+    } finally {
+      release();
+    }
+  }
+}
+
+function validateLastEventId(lastEventId: number): number;
+function validateLastEventId(lastEventId: undefined): undefined;
+function validateLastEventId(
+  lastEventId: number | undefined,
+): number | undefined;
+function validateLastEventId(
+  lastEventId: number | undefined,
+): number | undefined {
+  if (lastEventId === undefined) return undefined;
+  if (!Number.isInteger(lastEventId) || lastEventId < 0) {
+    throw new TypeError('lastEventId must be a finite non-negative integer');
+  }
+  return lastEventId;
+}

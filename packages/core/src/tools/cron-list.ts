@@ -66,6 +66,11 @@ export class CronListTool extends BaseDeclarativeTool<
         properties: {},
         additionalProperties: false,
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — low-frequency inspection tool
+      false, // alwaysLoad
+      'cron list scheduled jobs',
     );
   }
 
