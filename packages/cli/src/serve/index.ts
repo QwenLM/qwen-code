@@ -19,6 +19,7 @@ export {
   type Stage1Feature,
 } from './types.js';
 export {
+  CONDITIONAL_SERVE_FEATURES,
   SERVE_CAPABILITY_REGISTRY,
   SERVE_FEATURES,
   SERVE_PROTOCOL_VERSION,
@@ -27,11 +28,20 @@ export {
   getRegisteredServeFeatures,
   getServeFeatures,
   getServeProtocolVersions,
+  type AdvertiseFeatureToggles,
   type ServeCapabilityDescriptor,
   type ServeFeature,
   type ServeProtocolVersion,
   type ServeProtocolVersions,
 } from './capabilities.js';
+export {
+  bearerAuth,
+  createMutationGate,
+  denyBrowserOriginCors,
+  hostAllowlist,
+  type CreateMutationGateDeps,
+  type MutationGateOptions,
+} from './auth.js';
 export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,

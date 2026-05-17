@@ -83,6 +83,21 @@ export interface ServeOptions {
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
+  /**
+   * Issue #4175 PR 15. When true, refuses to boot without a bearer
+   * token — even on loopback. Loopback's no-token developer default
+   * is convenient for local prototyping but unsafe to ship inside
+   * shared dev environments / CI runners / multi-tenant workstations
+   * (any local user can hit `127.0.0.1:4170` and drive the agent).
+   * `--require-auth` opts the operator into "token mandatory"
+   * regardless of bind interface; the global `bearerAuth` middleware
+   * then gates every route, including `/health`.
+   *
+   * Default `false` so existing single-user loopback workflows keep
+   * working bit-for-bit. Non-loopback binds already require a token
+   * irrespective of this flag.
+   */
+  requireAuth?: boolean;
 }
 
 /**
