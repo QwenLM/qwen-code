@@ -177,11 +177,31 @@ export type DaemonStatus =
   | 'not_started'
   | 'unknown';
 
+/**
+ * Closed taxonomy of structured error categories surfaced on diagnostic
+ * status cells (workspace preflight, env, MCP guardrails). SDK consumers
+ * can switch on a known set rather than parsing free-form messages.
+ */
+export const DAEMON_ERROR_KINDS = [
+  'missing_binary',
+  'blocked_egress',
+  'auth_env_error',
+  'init_timeout',
+  'protocol_error',
+  'missing_file',
+  'parse_error',
+  // Issue #4175 PR 14: budget refusal under `--mcp-budget-mode=enforce`.
+  // Mirrors the serve-side `SERVE_ERROR_KINDS` addition.
+  'budget_exhausted',
+] as const;
+
+export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
+
 export interface DaemonStatusCell {
   kind: string;
   status: DaemonStatus;
   error?: string;
-  errorKind?: string;
+  errorKind?: DaemonErrorKind;
   hint?: string;
 }
 
@@ -324,6 +344,59 @@ export interface DaemonWorkspaceProvidersStatus {
   initialized: boolean;
   current?: DaemonWorkspaceProviderCurrent;
   providers: DaemonWorkspaceProviderStatus[];
+  errors?: DaemonStatusCell[];
+}
+
+export type DaemonEnvKind =
+  | 'runtime'
+  | 'platform'
+  | 'sandbox'
+  | 'proxy'
+  | 'env_var';
+
+export interface DaemonEnvCell extends DaemonStatusCell {
+  kind: DaemonEnvKind;
+  name: string;
+  present?: boolean;
+  /** Non-sensitive value; ALWAYS omitted for kind='env_var'. */
+  value?: string;
+}
+
+export interface DaemonWorkspaceEnvStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  cells: DaemonEnvCell[];
+  errors?: DaemonStatusCell[];
+}
+
+export type DaemonPreflightKind =
+  | 'node_version'
+  | 'cli_entry'
+  | 'workspace_dir'
+  | 'ripgrep'
+  | 'git'
+  | 'npm'
+  | 'auth'
+  | 'mcp_discovery'
+  | 'skills'
+  | 'providers'
+  | 'tool_registry'
+  | 'egress';
+
+export interface DaemonPreflightCell extends DaemonStatusCell {
+  kind: DaemonPreflightKind;
+  locality: 'daemon' | 'acp';
+  detail?: Record<string, unknown>;
+}
+
+export interface DaemonWorkspacePreflightStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  cells: DaemonPreflightCell[];
   errors?: DaemonStatusCell[];
 }
 

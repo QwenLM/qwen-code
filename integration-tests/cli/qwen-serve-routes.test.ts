@@ -180,13 +180,13 @@ describe('qwen serve — CORS browser-origin denial', () => {
 });
 
 describe('qwen serve — capabilities envelope', () => {
-  it('advertises all Stage 1 features', async () => {
+  it('advertises all baseline capabilities', async () => {
     const caps = await client.capabilities();
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
     // `packages/cli/src/serve/capabilities.ts` and the unit-level
-    // `EXPECTED_STAGE1_FEATURES` in `packages/cli/src/serve/server.test.ts`.
+    // baseline features in `packages/cli/src/serve/server.test.ts`.
     expect(caps.features).toEqual([
       'health',
       'capabilities',
@@ -198,12 +198,20 @@ describe('qwen serve — capabilities envelope', () => {
       'session_prompt',
       'session_cancel',
       'session_events',
+      'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
       'client_identity',
       'client_heartbeat',
       'session_permission_vote',
       'permission_vote',
+      'workspace_mcp',
+      'workspace_skills',
+      'workspace_providers',
+      'workspace_env',
+      'workspace_preflight',
+      'session_context',
+      'session_supported_commands',
       'session_close',
       'session_metadata',
     ]);

@@ -181,6 +181,8 @@ Capability tags:
 - `workspace_mcp` → `GET /workspace/mcp`
 - `workspace_skills` → `GET /workspace/skills`
 - `workspace_providers` → `GET /workspace/providers`
+- `workspace_env` → `GET /workspace/env`
+- `workspace_preflight` → `GET /workspace/preflight`
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 
@@ -195,18 +197,36 @@ type DaemonStatus =
   | 'not_started'
   | 'unknown';
 
+type DaemonErrorKind =
+  | 'missing_binary'
+  | 'blocked_egress'
+  | 'auth_env_error'
+  | 'init_timeout'
+  | 'protocol_error'
+  | 'missing_file'
+  | 'parse_error';
+
 interface DaemonStatusCell {
   kind: string;
   status: DaemonStatus;
   error?: string;
-  errorKind?: string;
+  errorKind?: DaemonErrorKind;
   hint?: string;
 }
 ```
 
+`errorKind` is a closed enum shared by `/workspace/preflight`,
+`/workspace/env`, and (eventually) MCP guardrails so SDK clients can render
+remediation per category instead of parsing free-form messages. PR 13
+(#4175) introduced the seven literals listed above; PR 14 will populate
+`blocked_egress` once the egress probe lands.
+
 Status payloads never expose MCP env values, headers, OAuth/service-account
 details, provider API keys, provider `baseUrl` / `envKey`, skill body, skill
-filesystem paths, or hook definitions.
+filesystem paths, hook definitions, or values of secret environment
+variables. `/workspace/env` reports the **presence** of whitelisted env
+vars only; proxy URLs are stripped of credentials and reduced to
+`host:port` before they hit the wire.
 
 ### `GET /workspace/mcp`
 
@@ -359,10 +379,231 @@ omitted when discovery succeeds.
 }
 ```
 
-Models are grouped by auth type. Provider connection diagnostics and environment
-preflight checks are intentionally out of scope here; deeper preflight/env
-checks belong to a later daemon status wave. `errors` is omitted when snapshot
-construction succeeds.
+Models are grouped by auth type. Provider connection diagnostics live on
+`/workspace/preflight`'s `providers` cell; environment preflight lives on
+`/workspace/preflight` and `/workspace/env` (below). `errors` is omitted
+when snapshot construction succeeds.
+
+### `GET /workspace/env`
+
+Reports the daemon process's runtime, platform, sandbox, proxy, and the
+**presence** of whitelisted secret environment variables. Always answers
+from `process.*` state — the daemon never spawns an ACP child to serve
+this route, and the response is identical whether ACP is up or idle. The
+`acpChannelLive` field is informational only.
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "acpChannelLive": false,
+  "cells": [
+    { "kind": "runtime", "name": "node", "status": "ok", "value": "22.4.0" },
+    { "kind": "platform", "name": "darwin", "status": "ok", "value": "arm64" },
+    {
+      "kind": "sandbox",
+      "name": "SANDBOX",
+      "status": "disabled",
+      "present": false
+    },
+    {
+      "kind": "proxy",
+      "name": "HTTPS_PROXY",
+      "status": "ok",
+      "present": true,
+      "value": "proxy.internal:1080"
+    },
+    {
+      "kind": "proxy",
+      "name": "NO_PROXY",
+      "status": "disabled",
+      "present": false
+    },
+    {
+      "kind": "env_var",
+      "name": "OPENAI_API_KEY",
+      "status": "ok",
+      "present": true
+    },
+    {
+      "kind": "env_var",
+      "name": "ANTHROPIC_BASE_URL",
+      "status": "disabled",
+      "present": false
+    }
+  ]
+}
+```
+
+Cell shape:
+
+```ts
+type DaemonEnvKind =
+  | 'runtime' // name: 'node' | 'bun' | 'unknown'; value: process.versions.node
+  | 'platform' // name: process.platform; value: process.arch
+  | 'sandbox' // name: 'SANDBOX' | 'SEATBELT_PROFILE'; value optional
+  | 'proxy' // name: HTTP_PROXY | HTTPS_PROXY | NO_PROXY | ALL_PROXY; value: redacted host
+  | 'env_var'; // presence-only; value field is ALWAYS omitted
+
+interface DaemonEnvCell extends DaemonStatusCell {
+  kind: DaemonEnvKind;
+  name: string;
+  present?: boolean;
+  value?: string;
+}
+```
+
+**Redaction policy.** `kind: 'env_var'` cells never include a `value`
+field; clients see `present: boolean` only. `kind: 'proxy'` cells run the
+raw env value through credential redaction (`redactProxyCredentials`) and
+then through `URL` parsing so the wire only carries `host:port`. `NO_PROXY`
+is passed through redaction verbatim because it is a host list rather than
+a URL. The whitelist of enumerated secret env vars currently includes
+`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+`DASHSCOPE_API_KEY`, `OPENROUTER_API_KEY`, and `QWEN_SERVER_TOKEN`. Other
+env vars are not enumerated, so accidentally-set secrets stay invisible.
+
+### `GET /workspace/preflight`
+
+Reports daemon readiness checks. **Daemon-level cells** (`node_version`,
+`cli_entry`, `workspace_dir`, `ripgrep`, `git`, `npm`) are always
+populated from `process.*` and `node:fs`. **ACP-level cells** (`auth`,
+`mcp_discovery`, `skills`, `providers`, `tool_registry`, `egress`)
+require a live ACP child — when the daemon is idle they emit
+`status: 'not_started'` placeholders. The route never spawns ACP solely
+to populate cells; the corresponding cells fall back to `not_started`.
+
+Idle response (no ACP child):
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "acpChannelLive": false,
+  "cells": [
+    {
+      "kind": "node_version",
+      "status": "ok",
+      "locality": "daemon",
+      "detail": { "version": "22.4.0", "required": ">=22" }
+    },
+    {
+      "kind": "cli_entry",
+      "status": "ok",
+      "locality": "daemon",
+      "detail": { "path": "/usr/local/bin/qwen", "source": "process.argv[1]" }
+    },
+    {
+      "kind": "workspace_dir",
+      "status": "ok",
+      "locality": "daemon",
+      "detail": { "path": "/canonical/path" }
+    },
+    { "kind": "ripgrep", "status": "ok", "locality": "daemon" },
+    {
+      "kind": "git",
+      "status": "ok",
+      "locality": "daemon",
+      "detail": { "version": "2.45.0" }
+    },
+    {
+      "kind": "npm",
+      "status": "ok",
+      "locality": "daemon",
+      "detail": { "version": "10.7.0" }
+    },
+    {
+      "kind": "auth",
+      "status": "not_started",
+      "locality": "acp",
+      "hint": "spawn a session to populate"
+    },
+    {
+      "kind": "mcp_discovery",
+      "status": "not_started",
+      "locality": "acp",
+      "hint": "spawn a session to populate"
+    },
+    {
+      "kind": "skills",
+      "status": "not_started",
+      "locality": "acp",
+      "hint": "spawn a session to populate"
+    },
+    {
+      "kind": "providers",
+      "status": "not_started",
+      "locality": "acp",
+      "hint": "spawn a session to populate"
+    },
+    {
+      "kind": "tool_registry",
+      "status": "not_started",
+      "locality": "acp",
+      "hint": "spawn a session to populate"
+    },
+    {
+      "kind": "egress",
+      "status": "not_started",
+      "locality": "acp",
+      "hint": "egress probing lands in PR 14 (#4175)"
+    }
+  ]
+}
+```
+
+Cell shape:
+
+```ts
+type DaemonPreflightKind =
+  | 'node_version'
+  | 'cli_entry'
+  | 'workspace_dir'
+  | 'ripgrep'
+  | 'git'
+  | 'npm'
+  | 'auth'
+  | 'mcp_discovery'
+  | 'skills'
+  | 'providers'
+  | 'tool_registry'
+  | 'egress';
+
+interface DaemonPreflightCell extends DaemonStatusCell {
+  kind: DaemonPreflightKind;
+  locality: 'daemon' | 'acp';
+  detail?: Record<string, unknown>;
+}
+```
+
+`errorKind` semantics:
+
+- `missing_binary` — Node version below required, missing `QWEN_CLI_ENTRY`,
+  ripgrep / git / npm not on PATH (warnings rather than errors for the
+  optional binaries).
+- `missing_file` — `boundWorkspace` does not exist or is not a directory;
+  skill parse error pointing at a missing or unreadable file.
+- `parse_error` — `SKILL.md` parse failure, malformed config JSON.
+- `auth_env_error` — `validateAuthMethod` returned a non-null failure
+  string, or a `ModelConfigError` subclass propagated from provider
+  resolution.
+- `init_timeout` — `withTimeout` reject in the bridge (an actual timeout
+  while waiting on an ACP roundtrip). Recognized via the
+  `BridgeTimeoutError` typed class. Note: a transient `mcp_discovery`
+  `warning` cell with `connecting > 0` does NOT carry this kind — that's
+  a normal handshake-in-progress state, distinct from a real timeout.
+- `protocol_error` — ACP `extMethod` rejected because the channel closed
+  mid-request, or because tool registry was unexpectedly absent.
+- `blocked_egress` — reserved for PR 14 (#4175). PR 13 leaves the
+  `egress` cell as `status: 'not_started'`.
+
+If the bridge fails to reach the ACP child while serving a preflight
+request (e.g. a mid-request channel close), the envelope's `errors` array
+carries a single `ServeStatusCell` describing the failure and the cells
+fall back to `not_started` ACP placeholders. Daemon-level cells are still
+returned.
 
 ### `GET /session/:id/context`
 
@@ -790,16 +1031,17 @@ The connection then closes.
 
 ## Source layout
 
-| Path                                                 | Purpose                                                            |
-| ---------------------------------------------------- | ------------------------------------------------------------------ |
-| `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                        |
-| `packages/cli/src/serve/runQwenServe.ts`             | listener lifecycle + signal handling                               |
-| `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                        |
-| `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                |
-| `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry           |
-| `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + ACP ext method names          |
-| `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                  |
-| `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                          |
-| `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                           |
-| `integration-tests/cli/qwen-serve-routes.test.ts`    | 18 cases, no LLM                                                   |
-| `integration-tests/cli/qwen-serve-streaming.test.ts` | 3 cases, real `qwen --acp` child (skipped when `SKIP_LLM_TESTS=1`) |
+| Path                                                 | Purpose                                                                                                    |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/commands/serve.ts`                 | yargs command + flag schema                                                                                |
+| `packages/cli/src/serve/runQwenServe.ts`             | listener lifecycle + signal handling                                                                       |
+| `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                                                                |
+| `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                                                        |
+| `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry                                                   |
+| `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + `ServeErrorKind` + `BridgeTimeoutError` + `mapDomainErrorToErrorKind` |
+| `packages/cli/src/serve/envSnapshot.ts`              | pure helper that builds `/workspace/env` payloads from `process.*` state, including credential redaction   |
+| `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                                                          |
+| `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                                                                  |
+| `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                                                                   |
+| `integration-tests/cli/qwen-serve-routes.test.ts`    | 18 cases, no LLM                                                                                           |
+| `integration-tests/cli/qwen-serve-streaming.test.ts` | 3 cases, real `qwen --acp` child (skipped when `SKIP_LLM_TESTS=1`)                                         |

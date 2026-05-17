@@ -115,6 +115,7 @@ export type FileReadCheckResult =
 
 export class FileReadCache {
   private readonly byInode = new Map<string, FileReadEntry>();
+  private static readonly MAX_ENTRIES = 4096;
 
   /** Build the canonical key for a file from its Stats. */
   static inodeKey(stats: Stats): string {
@@ -261,10 +262,21 @@ export class FileReadCache {
     const key = FileReadCache.inodeKey(stats);
     const existing = this.byInode.get(key);
     if (existing) {
+      // Bump: move existing entry to the end of the FIFO queue so that
+      // frequently-updated entries survive eviction.
+      this.byInode.delete(key);
       existing.realPath = absPath;
       existing.mtimeMs = stats.mtimeMs;
       existing.sizeBytes = stats.size;
+      this.byInode.set(key, existing);
       return existing;
+    }
+    // Evict oldest entry when cache exceeds MAX_ENTRIES (FIFO)
+    if (this.byInode.size >= FileReadCache.MAX_ENTRIES) {
+      const oldestKey = this.byInode.keys().next().value;
+      if (oldestKey) {
+        this.byInode.delete(oldestKey);
+      }
     }
     const entry: FileReadEntry = {
       inodeKey: key,

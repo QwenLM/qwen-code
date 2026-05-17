@@ -505,6 +505,193 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
+  it('answers /workspace/env from process state without consulting ACP, idle or live', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    // Idle path — daemon answers env from `process.*`; no ACP child spawn.
+    const idle = await bridge.getWorkspaceEnvStatus();
+    expect(idle).toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: true,
+      acpChannelLive: false,
+    });
+    expect(idle.cells.length).toBeGreaterThan(0);
+    expect(handles).toHaveLength(0);
+
+    // Live path — bridge still answers locally; the ACP child sees no
+    // ext-method invocation for env.
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const live = await bridge.getWorkspaceEnvStatus();
+    expect(live.acpChannelLive).toBe(true);
+    expect(handles).toHaveLength(1);
+    expect(
+      handles[0]?.agent.extMethodCalls.some((c) =>
+        c.method.includes('/workspace/env'),
+      ),
+    ).toBe(false);
+
+    await bridge.shutdown();
+  });
+
+  it('returns daemon preflight cells with not_started ACP cells when idle', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const status = await bridge.getWorkspacePreflightStatus();
+    expect(status).toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: true,
+      acpChannelLive: false,
+    });
+
+    // Daemon-level cells are always populated.
+    const daemonKinds = status.cells
+      .filter((c) => c.locality === 'daemon')
+      .map((c) => c.kind);
+    expect(daemonKinds).toEqual(
+      expect.arrayContaining([
+        'node_version',
+        'cli_entry',
+        'workspace_dir',
+        'ripgrep',
+        'git',
+        'npm',
+      ]),
+    );
+
+    // ACP cells fall back to `not_started` placeholders without spawning.
+    const acpCells = status.cells.filter((c) => c.locality === 'acp');
+    expect(acpCells.map((c) => c.kind)).toEqual([
+      'auth',
+      'mcp_discovery',
+      'skills',
+      'providers',
+      'tool_registry',
+      'egress',
+    ]);
+    for (const cell of acpCells) {
+      expect(cell.status).toBe('not_started');
+    }
+
+    expect(handles).toHaveLength(0);
+  });
+
+  it('merges daemon cells with live ACP-side preflight cells when a channel is up', async () => {
+    const handles: ChannelHandle[] = [];
+    const acpCells = [
+      { kind: 'auth', status: 'ok', locality: 'acp' },
+      { kind: 'mcp_discovery', status: 'ok', locality: 'acp' },
+      { kind: 'skills', status: 'ok', locality: 'acp' },
+      { kind: 'providers', status: 'ok', locality: 'acp' },
+      { kind: 'tool_registry', status: 'ok', locality: 'acp' },
+      { kind: 'egress', status: 'not_started', locality: 'acp' },
+    ];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/status/workspace/preflight') {
+              return { cells: acpCells };
+            }
+            return { cells: [] };
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const status = await bridge.getWorkspacePreflightStatus();
+    expect(status.acpChannelLive).toBe(true);
+    // Daemon cells precede ACP cells in the merged response.
+    const daemonKinds = status.cells
+      .filter((c) => c.locality === 'daemon')
+      .map((c) => c.kind);
+    expect(daemonKinds).toEqual(
+      expect.arrayContaining([
+        'node_version',
+        'cli_entry',
+        'workspace_dir',
+        'ripgrep',
+        'git',
+        'npm',
+      ]),
+    );
+    const liveAcpCells = status.cells.filter((c) => c.locality === 'acp');
+    expect(liveAcpCells.map((c) => [c.kind, c.status])).toEqual([
+      ['auth', 'ok'],
+      ['mcp_discovery', 'ok'],
+      ['skills', 'ok'],
+      ['providers', 'ok'],
+      ['tool_registry', 'ok'],
+      ['egress', 'not_started'],
+    ]);
+    expect(status.errors).toBeUndefined();
+
+    await bridge.shutdown();
+  });
+
+  it('falls back to idle ACP cells + envelope error when extMethod throws mid-preflight', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: () => {
+            throw new Error('agent channel closed mid-request');
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const status = await bridge.getWorkspacePreflightStatus();
+    // Daemon cells must still render — that's the route's resilience contract.
+    const daemonKinds = status.cells
+      .filter((c) => c.locality === 'daemon')
+      .map((c) => c.kind);
+    expect(daemonKinds.length).toBeGreaterThan(0);
+    // ACP cells fall back to `not_started` placeholders since the extMethod
+    // call rejected.
+    const acpCells = status.cells.filter((c) => c.locality === 'acp');
+    expect(acpCells.length).toBe(6);
+    for (const cell of acpCells) {
+      expect(cell.status).toBe('not_started');
+    }
+    // The envelope's `errors` array carries the bridge-side failure
+    // describing which surface failed without sinking the whole route.
+    // `errorKind` is best-effort via `mapDomainErrorToErrorKind`; here the
+    // ACP SDK wraps the inner throw as a generic JSON-RPC "Internal
+    // error" which doesn't match any of the helper's recognition rules
+    // (the typed `BridgeChannelClosedError` follow-up will close that
+    // gap), so we only assert the structural shape, not the tag.
+    expect(status.errors).toBeDefined();
+    expect(status.errors![0]).toMatchObject({
+      kind: 'preflight',
+      status: 'error',
+    });
+    expect(status.errors![0].error).toBeTruthy();
+
+    await bridge.shutdown();
+  });
+
   it('requests session status through the existing ACP channel', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({
