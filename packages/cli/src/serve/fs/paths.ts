@@ -202,32 +202,45 @@ async function findExistingAncestor(
   let current = absolute;
   const tailParts: string[] = [];
   for (let i = 0; i < MAX_ANCESTOR_HOPS; i++) {
+    let stat: Awaited<ReturnType<typeof fsp.stat>> | null = null;
     try {
-      await fsp.stat(current);
-      return { ancestor: current, tail: tailParts.join(path.sep) };
+      stat = await fsp.stat(current);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException)?.code;
-      if (code === 'ENOENT') {
-        // ancestor doesn't exist yet; keep walking up
-      } else if (code === 'ENOTDIR') {
-        // A regular file sits where we expected a directory (e.g.
-        // write target `${ws}/file.txt/child`). Walking up would
-        // happily realpath the file's parent and return a
-        // "canonical" the eventual write cannot use. Reject up-front
-        // so the orchestrator emits an `fs.denied` for the actual
-        // shape of the user error rather than silently passing
-        // boundary inspection and 500-ing later at write time.
+      if (code === 'ENOENT' || code === 'ENOTDIR') {
+        // POSIX returns `ENOTDIR` when a regular file occupies a
+        // path segment we tried to traverse through; Windows
+        // returns `ENOENT` for the same case (CI failure on
+        // commit a81ada43f flagged the divergence). Either errno
+        // means "the *current* path doesn't resolve" — keep
+        // walking up and let the post-walk dirent-kind check
+        // below decide whether to accept the ancestor.
+      } else {
+        throw err;
+      }
+    }
+    if (stat) {
+      // A regular file sits where the request expected a directory
+      // (e.g. write target `${ws}/file.txt/child`, where
+      // `file.txt` is a regular file). Without this check the
+      // walk would happily return the file's parent as the
+      // canonical ancestor and let the eventual write surface a
+      // confusing late failure. Reject up-front with
+      // `parse_error`. `fsp.stat` follows symlinks, so
+      // `stat.isDirectory()` reflects the symlink target's kind —
+      // exactly what we want. Cross-platform: works the same on
+      // POSIX and Windows because the kind check fires regardless
+      // of which errno surfaced during the walk-up.
+      if (tailParts.length > 0 && !stat.isDirectory()) {
         throw new FsError(
           'parse_error',
           `path component is not a directory: ${absolute}`,
           {
-            cause: err,
             hint: 'a non-directory file occupies a path segment',
           },
         );
-      } else {
-        throw err;
       }
+      return { ancestor: current, tail: tailParts.join(path.sep) };
     }
     const parent = path.dirname(current);
     if (parent === current) {
