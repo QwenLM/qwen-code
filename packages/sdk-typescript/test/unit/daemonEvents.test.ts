@@ -648,4 +648,92 @@ describe('daemon event schema', () => {
     ]);
     expect(cleared.displayName).toBeUndefined();
   });
+
+  it('recognizes slow_client_warning frames as known events', () => {
+    const warning = {
+      // No `id` on synthetic frames (matches the daemon's emit shape).
+      v: 1,
+      type: 'slow_client_warning',
+      data: { queueSize: 192, maxQueued: 256, lastEventId: 42 },
+    };
+    const known = asKnownDaemonEvent(warning);
+    expect(known?.type).toBe('slow_client_warning');
+
+    // Schema validation: required numeric fields. Missing or wrongly
+    // typed payloads must NOT be recognized as known events.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 'lots', maxQueued: 256, lastEventId: 42 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 192, lastEventId: 42 },
+      }),
+    ).toBeUndefined();
+
+    // NaN / Infinity pass a bare `typeof === 'number'` check but are
+    // schema garbage for a queue-size measurement — finite-number
+    // validation must reject them (sibling predicates do the same).
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: Number.NaN, maxQueued: 256, lastEventId: 42 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: Number.POSITIVE_INFINITY,
+          lastEventId: 42,
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces slow_client_warning into the view state without ending the stream', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-1', phase: 'prompting' },
+      },
+      // Warning #1.
+      {
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 200, maxQueued: 256, lastEventId: 1 },
+      },
+      // Warning #2 (e.g. after a drain + refill on the daemon side).
+      {
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 220, maxQueued: 256, lastEventId: 5 },
+      },
+    ]);
+
+    // Counter increments + most recent snapshot wins.
+    expect(state.slowClientWarningCount).toBe(2);
+    expect(state.lastSlowClientWarning).toEqual({
+      queueSize: 220,
+      maxQueued: 256,
+      lastEventId: 5,
+    });
+    // Warning is non-terminal — stream is still alive, no
+    // terminalEvent recorded.
+    expect(state.alive).toBe(true);
+    expect(state.terminalEvent).toBeUndefined();
+    // Warnings carry no `id`, so `lastEventId` stays at the highest
+    // id observed (the original session_update at id=1).
+    expect(state.lastEventId).toBe(1);
+  });
 });

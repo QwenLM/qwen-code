@@ -76,6 +76,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_prompt',
   'session_cancel',
   'session_events',
+  'slow_client_warning',
   'typed_event_schema',
   'session_set_model',
   'client_identity',
@@ -2575,6 +2576,112 @@ describe('GET /session/:id/events (SSE)', () => {
 
     expect(seen).toEqual([17]);
     expect(frames[0]?.id).toBe('42');
+  });
+
+  it('forwards ?maxQueued=N to the bridge when in [16, 2048]', async () => {
+    const seen: Array<number | undefined> = [];
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, opts) {
+        seen.push(opts?.maxQueued);
+        yield { id: 1, v: 1, type: 'session_update', data: 'x' };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/sess-A/events?maxQueued=512`,
+    );
+    await readSseFrames(res.body!, 1);
+    expect(seen).toEqual([512]);
+  });
+
+  it('omits maxQueued from the bridge call when the query param is absent', async () => {
+    const seen: Array<number | undefined> = [];
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, opts) {
+        seen.push(opts?.maxQueued);
+        yield { id: 1, v: 1, type: 'session_update', data: 'x' };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    await readSseFrames(res.body!, 1);
+    // Empty param ≡ missing — bridge sees `undefined` so the bus
+    // applies its default cap (256).
+    expect(seen).toEqual([undefined]);
+  });
+
+  it('400s a present-but-empty ?maxQueued= before opening the SSE stream', async () => {
+    // `?maxQueued=` (typed explicitly without a value) is malformed
+    // and must fail-CLOSED, not silently fall back to the default
+    // queue cap. Symmetric to non-decimal / out-of-range rejection.
+    const bridge = fakeBridge({
+      subscribeImpl: () => {
+        throw new Error('bridge must not be touched');
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/sess-A/events?maxQueued=`,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'invalid_max_queued' });
+  });
+
+  it('400s a non-decimal ?maxQueued before opening the SSE stream', async () => {
+    const bridge = fakeBridge({
+      subscribeImpl: () => {
+        throw new Error('bridge must not be touched');
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(
+      `http://127.0.0.1:${port}/session/sess-A/events?maxQueued=abc`,
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: 'invalid_max_queued' });
+  });
+
+  it('400s an out-of-range ?maxQueued before opening the SSE stream', async () => {
+    const bridge = fakeBridge({
+      subscribeImpl: () => {
+        throw new Error('bridge must not be touched');
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    for (const bad of ['0', '15', '2049', '9999']) {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/sess-A/events?maxQueued=${bad}`,
+      );
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: 'invalid_max_queued' });
+    }
   });
 
   it('returns 404 when the bridge reports unknown session', async () => {

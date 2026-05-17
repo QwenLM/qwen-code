@@ -36,6 +36,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
+  // Daemon emits `slow_client_warning` synthetic frames at 75% queue
+  // fill and honors `?maxQueued=N` (range [16, 2048]) on
+  // `GET /session/:id/events`. Old daemons silently lack both — SDK
+  // clients pre-flight this tag before opting in.
+  slow_client_warning: { since: 'v1' },
   // SDK consumers can detect `KnownDaemonEvent` schema support without
   // pinning against this SDK release — `narrowDaemonEvent` falls back
   // to `kind: 'unknown'` for daemons that don't advertise the tag,

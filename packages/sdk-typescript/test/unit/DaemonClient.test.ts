@@ -724,6 +724,47 @@ describe('DaemonClient', () => {
       const iter = client.subscribeEvents('missing');
       await expect(iter.next()).rejects.toMatchObject({ status: 404 });
     });
+
+    it('appends ?maxQueued=N when SubscribeOptions.maxQueued is set', async () => {
+      const { fetch, calls } = recordingFetch(() => sseResponse(''));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      for await (const _ of client.subscribeEvents('s-1', {
+        maxQueued: 512,
+      })) {
+        /* unreachable */
+      }
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s-1/events?maxQueued=512',
+      );
+    });
+
+    it('omits the query string when maxQueued is undefined', async () => {
+      const { fetch, calls } = recordingFetch(() => sseResponse(''));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      for await (const _ of client.subscribeEvents('s-1', {
+        lastEventId: 7,
+      })) {
+        /* unreachable */
+      }
+      // Bare events URL — no `?` introduced when the caller didn't ask.
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/events');
+      expect(calls[0]?.headers['last-event-id']).toBe('7');
+    });
+
+    it('propagates a server 400 invalid_max_queued unchanged', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: '`maxQueued` must be in [16, 2048]',
+          code: 'invalid_max_queued',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const iter = client.subscribeEvents('s-1', { maxQueued: 9999 });
+      await expect(iter.next()).rejects.toMatchObject({
+        status: 400,
+        body: { code: 'invalid_max_queued' },
+      });
+    });
   });
 
   describe('listWorkspaceSessions', () => {

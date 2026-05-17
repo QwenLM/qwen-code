@@ -52,6 +52,8 @@ export {
   type DaemonSessionUpdateData,
   type DaemonSessionUpdateEvent,
   type DaemonSessionViewState,
+  type DaemonSlowClientWarningData,
+  type DaemonSlowClientWarningEvent,
   type DaemonStreamErrorData,
   type DaemonStreamErrorEvent,
   type DaemonStreamLifecycleEvent,
