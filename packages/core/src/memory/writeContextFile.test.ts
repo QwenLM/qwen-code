@@ -149,29 +149,33 @@ describe('writeWorkspaceContextFile', () => {
   it('skips the write entirely when append content is whitespace only', async () => {
     const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
     await fs.writeFile(filePath, 'preserved\n', 'utf8');
-    const before = await fs.stat(filePath);
-    // Pause one tick beyond filesystem mtime resolution so a no-op
-    // write would be detectable. macOS HFS+ has 1s mtime resolution;
-    // ext4 / APFS / NTFS are sub-ms. 30ms is fine for sub-ms FS and
-    // the test still asserts equality on HFS+ where the original
-    // mtime is at the second boundary.
-    await new Promise((resolve) => setTimeout(resolve, 30));
 
-    const result = await writeWorkspaceContextFile({
-      scope: 'workspace',
-      mode: 'append',
-      content: '\n\n',
-      projectRoot: workspace,
-    });
+    // Spy on `fs.writeFile` rather than relying on filesystem mtime
+    // resolution. macOS HFS+ has 1-second mtime resolution; a quick
+    // re-write inside the same second would leave `mtimeMs` unchanged
+    // and let a regression slip through. The spy makes the
+    // "writeFile was never called" invariant explicit and platform-
+    // independent.
+    const writeFileSpy = vi.spyOn(fs, 'writeFile');
+    try {
+      const result = await writeWorkspaceContextFile({
+        scope: 'workspace',
+        mode: 'append',
+        content: '\n\n',
+        projectRoot: workspace,
+      });
 
-    const after = await fs.stat(filePath);
-    const written = await fs.readFile(filePath, 'utf8');
-    expect(written).toBe('preserved\n');
-    expect(result.bytesWritten).toBe(Buffer.byteLength('preserved\n', 'utf8'));
-    expect(result.changed).toBe(false);
-    // mtime must be unchanged — the helper short-circuited before
-    // calling fs.writeFile, so re-write didn't happen.
-    expect(after.mtimeMs).toBe(before.mtimeMs);
+      const written = await fs.readFile(filePath, 'utf8');
+      expect(written).toBe('preserved\n');
+      expect(result.bytesWritten).toBe(
+        Buffer.byteLength('preserved\n', 'utf8'),
+      );
+      expect(result.changed).toBe(false);
+      // The no-op short-circuit must not call writeFile at all.
+      expect(writeFileSpy).not.toHaveBeenCalled();
+    } finally {
+      writeFileSpy.mockRestore();
+    }
   });
 
   it('serializes concurrent appends so no entry is lost', async () => {

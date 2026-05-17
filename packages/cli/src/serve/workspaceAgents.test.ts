@@ -610,6 +610,50 @@ describe('workspace agents routes', () => {
     expect(res.body.code).toBe('invalid_config');
   });
 
+  it('stamps originatorClientId on agent_changed for known clients (create / update / delete)', async () => {
+    const bridge = buildBridgeStub({ knownIds: ['client_audit'] });
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+
+    // Create with a stamped client id.
+    const createRes = await request(app)
+      .post('/workspace/agents')
+      .set('X-Qwen-Client-Id', 'client_audit')
+      .send({
+        name: 'audited',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are an audited agent',
+        scope: 'workspace',
+      });
+    expect(createRes.status).toBe(201);
+
+    // Update with the same client id.
+    const updateRes = await request(app)
+      .post('/workspace/agents/audited')
+      .set('X-Qwen-Client-Id', 'client_audit')
+      .send({ description: 'a NEW description longer than ten chars' });
+    expect(updateRes.status).toBe(200);
+    expect(updateRes.body.changed).toBe(true);
+
+    // Delete with the same client id.
+    const deleteRes = await request(app)
+      .delete('/workspace/agents/audited')
+      .set('X-Qwen-Client-Id', 'client_audit');
+    expect(deleteRes.status).toBe(204);
+
+    const events = (bridge as unknown as { events: RecordedEvent[] }).events;
+    const agentEvents = events.filter((e) => e.type === 'agent_changed');
+    expect(agentEvents).toHaveLength(3);
+    // All three must be stamped with the originator id so audit /
+    // echo-suppression on the SDK side can attribute them.
+    for (const evt of agentEvents) {
+      expect(evt.originatorClientId).toBe('client_audit');
+    }
+    // Sequence: created → updated → deleted.
+    expect(
+      agentEvents.map((e) => (e.data as { change: string }).change),
+    ).toEqual(['created', 'updated', 'deleted']);
+  });
+
   it('short-circuits no-op updates with changed: false and no event', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });

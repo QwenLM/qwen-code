@@ -235,13 +235,14 @@ interface DiscoveredFile {
  * files reachable from the daemon's bound workspace plus the user's
  * `~/.qwen/` global directory.
  *
- * Walks the workspace tree upward from the bound path to its closest
- * git/qwen root, plus the global dir. This is the explicit-only
- * subset of `loadServerHierarchicalMemory`'s discovery — auto-memory
- * (the `MEMORY.md` index + per-type files) is intentionally NOT
- * included; that's PR 16.5's responsibility per scope decision in
- * issue #4175. Path-based rules (`.qwen/rules/`) are also out of
- * scope for v1.
+ * Discovers the bound-workspace-root file(s) (no parent-directory
+ * walk in this version) plus the global dir. `walkWorkspaceForMemory`
+ * keeps a guarded upward-walk loop body for a future hierarchical
+ * mode but breaks after iteration 1 today; callers should treat the
+ * surface as "workspace root + global". Auto-memory (the `MEMORY.md`
+ * index + per-type files) is intentionally NOT included; that's PR
+ * 16.5's responsibility per scope decision in issue #4175. Path-
+ * based rules (`.qwen/rules/`) are also out of scope for v1.
  */
 async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
@@ -315,9 +316,15 @@ async function walkWorkspaceForMemory(
   const out: DiscoveredFile[] = [];
   const seen = new Set<string>();
   let cursor = start;
-  // Walk up at most 32 levels — far beyond any realistic project
-  // depth and bounds the syscall budget for pathological mounts.
-  for (let i = 0; i < 32; i++) {
+  // Cap at 12 levels. Realistic project depth (mono-repo nesting +
+  // worktree + .qwen) sits well below 8; 12 leaves headroom without
+  // amplifying blast radius from symlink cycles or pathological
+  // mounts. Today the loop exits after the first iteration anyway
+  // (single-cursor workspace-root discovery — see the
+  // `if (cursor === start) break` below); the cap is the safety
+  // ceiling for the future hierarchical mode reserved at #4175 PR
+  // 16.5.
+  for (let i = 0; i < 12; i++) {
     if (seen.has(cursor)) break;
     seen.add(cursor);
 

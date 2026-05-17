@@ -1277,4 +1277,216 @@ describe('DaemonClient', () => {
       );
     });
   });
+
+  describe('workspace memory + agents helpers (issue #4175 PR 16)', () => {
+    it('GETs /workspace/memory and parses the snapshot', async () => {
+      const snapshot = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        files: [
+          {
+            kind: 'memory_file' as const,
+            path: '/work/a/QWEN.md',
+            scope: 'workspace' as const,
+            bytes: 42,
+          },
+        ],
+        totalBytes: 42,
+        fileCount: 1,
+        ruleCount: 0,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.workspaceMemory()).resolves.toEqual(snapshot);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory',
+      });
+    });
+
+    it('POSTs /workspace/memory and forwards X-Qwen-Client-Id', async () => {
+      const reply = {
+        ok: true,
+        filePath: '/work/QWEN.md',
+        bytesWritten: 17,
+        mode: 'append',
+        changed: true,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.writeWorkspaceMemory(
+        { scope: 'workspace', mode: 'append', content: '- entry' },
+        'client-7',
+      );
+      expect(result).toEqual(reply);
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      const body = JSON.parse(calls[0]!.body!);
+      expect(body).toEqual({
+        scope: 'workspace',
+        mode: 'append',
+        content: '- entry',
+      });
+    });
+
+    it('throws DaemonHttpError on non-2xx workspace memory writes', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(401, { error: 'token required', code: 'token_required' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.writeWorkspaceMemory({
+          scope: 'workspace',
+          mode: 'append',
+          content: 'x',
+        }),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+
+    it('GETs /workspace/agents (list) and /workspace/agents/:id (detail)', async () => {
+      const list = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        agents: [
+          {
+            kind: 'agent' as const,
+            name: 'reviewer',
+            description: 'reviews code',
+            level: 'project' as const,
+            isBuiltin: false,
+            hasTools: false,
+          },
+        ],
+      };
+      const detail = {
+        kind: 'agent' as const,
+        name: 'reviewer',
+        description: 'reviews code',
+        level: 'project' as const,
+        isBuiltin: false,
+        hasTools: false,
+        systemPrompt: 'you are a reviewer',
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/workspace/agents'))
+          return jsonResponse(200, list);
+        if (req.url.endsWith('/workspace/agents/reviewer')) {
+          return jsonResponse(200, detail);
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.listWorkspaceAgents()).resolves.toEqual(list);
+      await expect(client.getWorkspaceAgent('reviewer')).resolves.toEqual(
+        detail,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/agents'],
+        ['GET', 'http://daemon/workspace/agents/reviewer'],
+      ]);
+    });
+
+    it('encodes the agentType path segment', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(404, { error: 'not found', code: 'agent_not_found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.getWorkspaceAgent('with/slash'),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/agents/with%2Fslash');
+    });
+
+    it('createWorkspaceAgent POSTs the body with the client id', async () => {
+      const reply = {
+        ok: true,
+        agent: {
+          kind: 'agent' as const,
+          name: 'tester',
+          description: 'tests',
+          level: 'project' as const,
+          isBuiltin: false,
+          hasTools: false,
+          systemPrompt: 'run tests',
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(201, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const out = await client.createWorkspaceAgent(
+        {
+          name: 'tester',
+          description: 'tests',
+          systemPrompt: 'run tests',
+          scope: 'workspace',
+        },
+        'client-1',
+      );
+      expect(out).toEqual(reply);
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('updateWorkspaceAgent forwards the optional scope query', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          ok: true,
+          agent: {
+            kind: 'agent',
+            name: 'x',
+            description: 'd',
+            level: 'user',
+            isBuiltin: false,
+            hasTools: false,
+            systemPrompt: 'p',
+          },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.updateWorkspaceAgent(
+        'x',
+        { description: 'd' },
+        { scope: 'global' },
+      );
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/agents/x?scope=global',
+      );
+    });
+
+    it('deleteWorkspaceAgent treats 204 as success and only swallows structured 404', async () => {
+      // 204 → resolves silently
+      {
+        const { fetch } = recordingFetch(
+          () => new Response(null, { status: 204 }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(client.deleteWorkspaceAgent('x')).resolves.toBeUndefined();
+      }
+      // 404 with `code: agent_not_found` → idempotent success
+      {
+        const { fetch } = recordingFetch(() =>
+          jsonResponse(404, { error: 'not found', code: 'agent_not_found' }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(client.deleteWorkspaceAgent('x')).resolves.toBeUndefined();
+      }
+      // 404 WITHOUT structured code (proxy / older daemon / wrong route) → throws
+      {
+        const { fetch } = recordingFetch(
+          () =>
+            new Response('Not Found', {
+              status: 404,
+              headers: { 'content-type': 'text/plain' },
+            }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(client.deleteWorkspaceAgent('x')).rejects.toBeInstanceOf(
+          DaemonHttpError,
+        );
+      }
+    });
+  });
 });

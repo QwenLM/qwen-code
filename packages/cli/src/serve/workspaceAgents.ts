@@ -112,6 +112,23 @@ export function mountWorkspaceAgentsRoutes(
       const config = parseAgentConfig(body, level, res);
       if (!config) return;
 
+      // `manager.createSubagent` only checks whether the default
+      // `<name>.md` file path is occupied. If a different on-disk
+      // file at the same level shares the frontmatter `name`, the
+      // duplicate-name collision wouldn't surface as 409. Preflight
+      // through `loadSubagent(name, level)` so a same-name shadow at
+      // either level returns `agent_already_exists` deterministically.
+      const collision = await manager.loadSubagent(config.name, level);
+      if (collision) {
+        res.status(409).json({
+          error: `Subagent "${config.name}" already exists at ${level} level`,
+          code: 'agent_already_exists',
+          name: config.name,
+          level,
+        });
+        return;
+      }
+
       try {
         await manager.createSubagent(config, { level });
       } catch (err) {
@@ -464,22 +481,32 @@ export function mountWorkspaceAgentsRoutes(
         scopedLevel = scopeQuery === 'workspace' ? 'project' : 'user';
       }
 
-      // Pre-check the kind of agent so we can return 403 for read-only
-      // entries (built-in / extension) instead of letting deleteSubagent
-      // throw INVALID_CONFIG and conflating it with validation failures.
-      const existing = await manager.loadSubagent(agentType, scopedLevel);
-      if (existing) {
+      // Pre-check at every level we're going to try to delete. When
+      // `scopedLevel` is given we touch just that level; when omitted,
+      // `SubagentManager.deleteSubagent` iterates both `project` and
+      // `user`, so we need to look at both to (a) reject built-in /
+      // extension shadows and (b) emit one `agent_changed` event per
+      // file actually removed.
+      const levelsToCheck: SubagentLevel[] = scopedLevel
+        ? [scopedLevel]
+        : ['project', 'user'];
+      const existingAtLevels: SubagentConfig[] = [];
+      for (const lvl of levelsToCheck) {
+        const found = await manager.loadSubagent(agentType, lvl);
+        if (found) existingAtLevels.push(found);
+      }
+      for (const found of existingAtLevels) {
         if (
-          existing.isBuiltin ||
-          existing.level === 'builtin' ||
-          existing.level === 'extension' ||
-          existing.level === 'session'
+          found.isBuiltin ||
+          found.level === 'builtin' ||
+          found.level === 'extension' ||
+          found.level === 'session'
         ) {
           res.status(403).json({
-            error: `Cannot delete ${existing.level}-level subagent "${agentType}"`,
+            error: `Cannot delete ${found.level}-level subagent "${agentType}"`,
             code: 'agent_readonly',
-            name: existing.name,
-            level: existing.level,
+            name: found.name,
+            level: found.level,
           });
           return;
         }
@@ -517,17 +544,43 @@ export function mountWorkspaceAgentsRoutes(
         });
         return;
       }
-      const eventLevel: 'project' | 'user' =
-        existing && existing.level === 'project' ? 'project' : 'user';
-      deps.bridge.publishWorkspaceEvent({
-        type: 'agent_changed',
-        data: {
-          change: 'deleted',
-          name: existing?.name ?? agentType,
-          level: eventLevel,
-        },
-        ...(originatorClientId ? { originatorClientId } : {}),
-      });
+      // Emit one event per level that was deleted so subscribers using
+      // event metadata for toasts/audit/echo-suppression see the
+      // complete picture. Without this split, an unscoped DELETE that
+      // removed both project AND user shadows would publish only one
+      // event with one level — misleading the receiver about which
+      // file(s) actually went away.
+      if (existingAtLevels.length === 0) {
+        // `deleteSubagent` succeeded with no pre-checked level — could
+        // happen if a file landed between the loadSubagent check and
+        // the unlink. Emit a single best-effort event with the level
+        // hint we know.
+        const fallbackLevel: 'project' | 'user' =
+          scopedLevel === 'user' ? 'user' : 'project';
+        deps.bridge.publishWorkspaceEvent({
+          type: 'agent_changed',
+          data: {
+            change: 'deleted',
+            name: agentType,
+            level: fallbackLevel,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } else {
+        for (const found of existingAtLevels) {
+          const evtLevel: 'project' | 'user' =
+            found.level === 'project' ? 'project' : 'user';
+          deps.bridge.publishWorkspaceEvent({
+            type: 'agent_changed',
+            data: {
+              change: 'deleted',
+              name: found.name,
+              level: evtLevel,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+      }
       res.status(204).end();
     },
   );
@@ -988,6 +1041,25 @@ export function createDaemonSubagentManager(
         `qwen serve workspace agents: SubagentManager touched Config.` +
           `${String(prop)} which the daemon stub does not implement. ` +
           `Add it to createDaemonSubagentManager and audit safety.`,
+      );
+    },
+    // Mirror the `get` trap. Without a `has` trap, a SubagentManager
+    // path that does `if ('someMethod' in this.config)` would consult
+    // `Reflect.has(target, prop)` directly and silently return false
+    // for unimplemented methods — bypassing the throw the `get` trap
+    // is supposed to surface. With the trap, an `in` check on an
+    // unknown method throws the same way a property access would, so
+    // both code paths behave consistently.
+    has(target, prop) {
+      if (prop in target) return true;
+      // Allow `'then' in obj` so the runtime's thenable-detection
+      // continues to behave correctly.
+      if (prop === 'then') return false;
+      throw new Error(
+        `qwen serve workspace agents: SubagentManager probed Config.` +
+          `${String(prop)} via 'in' check; the daemon stub does not ` +
+          `implement it. Add it to createDaemonSubagentManager and ` +
+          `audit safety.`,
       );
     },
   }) as unknown as Config;
