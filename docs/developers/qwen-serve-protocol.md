@@ -295,6 +295,14 @@ filesystem paths, or hook definitions.
 
 Budget enforcement is **per-workspace**, not per-session — Mode B daemons are `1 daemon = 1 workspace × N sessions` post-#4113, so the MCP client set is shared across the workspace's sessions.
 
+**Detecting budget pressure in v1 (no push events yet).** PR 14 v1 is snapshot-only — typed SSE push events (`mcp_budget_warning` + `mcp_child_refused_batch`) ship in PR 14b. Until then, operator dashboards poll `GET /workspace/mcp` and inspect the workspace-scoped cell:
+
+- `budgets[0].status === 'warning'` ⇔ `liveCount >= 0.75 * clientBudget` (matches the hysteresis threshold PR 14b's push event will use).
+- `budgets[0].status === 'error'` ⇔ `refusedCount > 0` (one or more servers refused this discovery pass).
+- `budgets[0].status === 'ok'` ⇔ below the 75% threshold AND no refusals.
+
+Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost.
+
 ### `GET /workspace/skills`
 
 ```json
