@@ -274,6 +274,151 @@ export interface DaemonWorkspaceProvidersStatus {
   errors?: DaemonStatusCell[];
 }
 
+/**
+ * Issue #4175 PR 16: workspace memory snapshot returned from
+ * `GET /workspace/memory`. Mirrors the `kind / status / error?` cell
+ * pattern used by mcp/skills/providers — adapters can render any of
+ * the four with the same component.
+ */
+export type DaemonContextFileScope = 'workspace' | 'global';
+
+export interface DaemonWorkspaceMemoryFile {
+  kind: 'memory_file';
+  path: string;
+  scope: DaemonContextFileScope;
+  bytes: number;
+}
+
+export interface DaemonWorkspaceMemoryStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  files: DaemonWorkspaceMemoryFile[];
+  totalBytes: number;
+  fileCount: number;
+  ruleCount: number;
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * Body of `POST /workspace/memory`. `mode` defaults to `'append'`
+ * server-side when omitted; clients SHOULD send it explicitly so a
+ * future server-side default flip doesn't silently change semantics.
+ */
+export interface DaemonWriteMemoryRequest {
+  scope: DaemonContextFileScope;
+  content: string;
+  mode?: 'append' | 'replace';
+}
+
+export interface DaemonWriteMemoryResult {
+  ok: true;
+  filePath: string;
+  bytesWritten: number;
+  mode: 'append' | 'replace';
+}
+
+/**
+ * Issue #4175 PR 16: subagent CRUD types. `agentType` on the wire is
+ * the `name` field from the agent's frontmatter (case-insensitive);
+ * `level` distinguishes project-/user-/builtin-/extension-level
+ * registrations. Built-in / extension agents are read-only — POST and
+ * DELETE return 403 `agent_readonly`.
+ */
+/**
+ * Storage level for a subagent definition.
+ *
+ * `project` / `user` / `builtin` / `extension` are the levels the
+ * `qwen serve` daemon currently surfaces through `GET /workspace/agents`
+ * and the per-`agentType` detail route.
+ *
+ * `session` is reserved for forward-compat: the `SubagentManager` core
+ * tracks session-scoped agents in a separate cache populated only at
+ * runtime, and the daemon's CRUD routes do not return them today. SDK
+ * consumers writing exhaustive switches over `DaemonAgentLevel` should
+ * therefore include a `'session'` arm but treat it as unreachable on
+ * the current route surface — its presence on the type avoids a
+ * breaking SDK change when a future PR exposes session agents.
+ */
+export type DaemonAgentLevel =
+  | 'project'
+  | 'user'
+  | 'builtin'
+  | 'extension'
+  | 'session';
+
+export interface DaemonWorkspaceAgentSummary {
+  kind: 'agent';
+  name: string;
+  description: string;
+  level: DaemonAgentLevel;
+  isBuiltin: boolean;
+  hasTools: boolean;
+  model?: string;
+  color?: string;
+  background?: boolean;
+  approvalMode?: string;
+  extensionName?: string;
+  filePath?: string;
+}
+
+export interface DaemonWorkspaceAgentDetail
+  extends DaemonWorkspaceAgentSummary {
+  systemPrompt: string;
+  tools?: string[];
+  disallowedTools?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
+}
+
+export interface DaemonWorkspaceAgentsStatus {
+  v: 1;
+  workspaceCwd: string;
+  agents: DaemonWorkspaceAgentSummary[];
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * Body of `POST /workspace/agents`. The daemon translates `scope` into
+ * the corresponding `SubagentLevel` (`workspace`→`project`,
+ * `global`→`user`).
+ */
+export interface DaemonCreateAgentRequest {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  scope: 'workspace' | 'global';
+  tools?: string[];
+  disallowedTools?: string[];
+  model?: string;
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  color?: string;
+  approvalMode?: string;
+  background?: boolean;
+}
+
+/**
+ * Body of `POST /workspace/agents/:agentType`. `name` / `level` /
+ * `filePath` / `isBuiltin` are intentionally omitted — agent type
+ * comes from the URL, level is determined by the existing record, and
+ * the other two are server-managed.
+ */
+export interface DaemonUpdateAgentRequest {
+  description?: string;
+  systemPrompt?: string;
+  tools?: string[];
+  disallowedTools?: string[];
+  model?: string;
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  color?: string;
+  approvalMode?: string;
+  background?: boolean;
+}
+
+export interface DaemonAgentMutationResult {
+  ok: true;
+  agent: DaemonWorkspaceAgentDetail;
+}
+
 export interface DaemonSessionContextStatus {
   v: 1;
   sessionId: string;

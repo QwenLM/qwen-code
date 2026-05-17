@@ -12,6 +12,8 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceSkills: 'qwen/status/workspace/skills',
   workspaceProviders: 'qwen/status/workspace/providers',
+  workspaceMemory: 'qwen/status/workspace/memory',
+  workspaceAgents: 'qwen/status/workspace/agents',
   sessionContext: 'qwen/status/session/context',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
 } as const;
@@ -138,6 +140,108 @@ export interface ServeSessionSupportedCommandsStatus {
   sessionId: string;
   availableCommands: AvailableCommand[];
   availableSkills: string[];
+}
+
+/**
+ * Issue #4175 PR 16: workspace memory + agents read surfaces.
+ *
+ * Both shapes mirror the `kind / status / error? / errorKind? / hint?`
+ * cell pattern that PR 12's mcp/skills/providers status structures use,
+ * so the SDK reducer can render any of these with one pattern.
+ */
+
+export type ServeContextFileScope = 'workspace' | 'global';
+
+export interface ServeWorkspaceMemoryFile {
+  kind: 'memory_file';
+  /** Absolute path to the discovered memory file. */
+  path: string;
+  /**
+   * 'workspace' for files under the bound workspace tree, 'global' for
+   * `~/.qwen/QWEN.md` style entries. Helps adapters render scope chips.
+   */
+  scope: ServeContextFileScope;
+  /** Size in bytes of the file's serialized contents on disk. */
+  bytes: number;
+}
+
+export interface ServeWorkspaceMemoryStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  initialized: boolean;
+  files: ServeWorkspaceMemoryFile[];
+  /** Total bytes across all hierarchical files (sum of `files[].bytes`). */
+  totalBytes: number;
+  /**
+   * Number of merged QWEN.md / AGENTS.md files the loader pulled in.
+   * Mirrors `LoadServerHierarchicalMemoryResponse.fileCount`.
+   */
+  fileCount: number;
+  /** Baseline path-rule count from `.qwen/rules/`. */
+  ruleCount: number;
+  errors?: ServeStatusCell[];
+}
+
+export type ServeAgentLevel =
+  | 'project'
+  | 'user'
+  | 'builtin'
+  | 'extension'
+  | 'session';
+
+export interface ServeWorkspaceAgentSummary {
+  kind: 'agent';
+  name: string;
+  description: string;
+  level: ServeAgentLevel;
+  isBuiltin: boolean;
+  /** Whether this agent restricts the tool set via `tools:` frontmatter. */
+  hasTools: boolean;
+  model?: string;
+  color?: string;
+  background?: boolean;
+  approvalMode?: string;
+  extensionName?: string;
+  /** Absolute path to the file backing this agent (or sentinel for built-ins). */
+  filePath?: string;
+}
+
+export interface ServeWorkspaceAgentDetail extends ServeWorkspaceAgentSummary {
+  systemPrompt: string;
+  tools?: string[];
+  disallowedTools?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
+}
+
+export interface ServeWorkspaceAgentsStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  agents: ServeWorkspaceAgentSummary[];
+  errors?: ServeStatusCell[];
+}
+
+export function createIdleWorkspaceMemoryStatus(
+  workspaceCwd: string,
+): ServeWorkspaceMemoryStatus {
+  return {
+    v: STATUS_SCHEMA_VERSION,
+    workspaceCwd,
+    initialized: false,
+    files: [],
+    totalBytes: 0,
+    fileCount: 0,
+    ruleCount: 0,
+  };
+}
+
+export function createIdleWorkspaceAgentsStatus(
+  workspaceCwd: string,
+): ServeWorkspaceAgentsStatus {
+  return {
+    v: STATUS_SCHEMA_VERSION,
+    workspaceCwd,
+    agents: [],
+  };
 }
 
 export function createIdleWorkspaceMcpStatus(

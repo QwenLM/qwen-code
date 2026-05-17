@@ -19,6 +19,12 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'client_evicted',
   'slow_client_warning',
   'stream_error',
+  // Issue #4175 PR 16: workspace-level mutation signals fanned out
+  // through every active session's bus. Non-terminal — informational
+  // for adapters that want to render "memory just changed" / "agent X
+  // updated" toasts. Read-after-write remains the correctness contract.
+  'memory_changed',
+  'agent_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -125,6 +131,33 @@ export interface DaemonStreamErrorData {
   [key: string]: unknown;
 }
 
+/**
+ * Issue #4175 PR 16: a `POST /workspace/memory` write completed
+ * successfully. `scope` records which file was touched (workspace QWEN.md
+ * vs global ~/.qwen/QWEN.md), `mode` is the requested write mode, and
+ * `bytesWritten` is the size of the file post-write.
+ */
+export interface DaemonMemoryChangedData {
+  scope: 'workspace' | 'global';
+  filePath: string;
+  mode: 'append' | 'replace';
+  bytesWritten: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Issue #4175 PR 16: a workspace agent CRUD mutation completed
+ * successfully. `change` discriminates the operation; `level` records
+ * whether the project- or user-level definition was touched. Built-in
+ * and extension agents are read-only and never appear here.
+ */
+export interface DaemonAgentChangedData {
+  change: 'created' | 'updated' | 'deleted';
+  name: string;
+  level: 'project' | 'user';
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -173,6 +206,14 @@ export type DaemonStreamErrorEvent = DaemonEventEnvelope<
   'stream_error',
   DaemonStreamErrorData
 >;
+export type DaemonMemoryChangedEvent = DaemonEventEnvelope<
+  'memory_changed',
+  DaemonMemoryChangedData
+>;
+export type DaemonAgentChangedEvent = DaemonEventEnvelope<
+  'agent_changed',
+  DaemonAgentChangedData
+>;
 
 export type DaemonSessionEvent =
   | DaemonSessionUpdateEvent
@@ -192,10 +233,20 @@ export type DaemonStreamLifecycleEvent =
   | DaemonSlowClientWarningEvent
   | DaemonStreamErrorEvent;
 
+/**
+ * Issue #4175 PR 16: workspace-level mutation signals fanned out
+ * through every active session's bus. Non-terminal; clients use them
+ * to refresh cached views of workspace memory / agents.
+ */
+export type DaemonWorkspaceMutationEvent =
+  | DaemonMemoryChangedEvent
+  | DaemonAgentChangedEvent;
+
 export type KnownDaemonEvent =
   | DaemonSessionEvent
   | DaemonControlEvent
-  | DaemonStreamLifecycleEvent;
+  | DaemonStreamLifecycleEvent
+  | DaemonWorkspaceMutationEvent;
 
 export interface DaemonSessionViewState {
   lastEventId?: number;
@@ -231,6 +282,16 @@ export interface DaemonSessionViewState {
    */
   slowClientWarningCount: number;
   lastSlowClientWarning?: DaemonSlowClientWarningData;
+  /**
+   * Issue #4175 PR 16: most recent workspace mutation observed on this
+   * stream (memory or agent change). Non-terminal — adapters render a
+   * "memory just changed" / "agent X updated" toast and re-fetch the
+   * relevant workspace status route. Captures only the latest event;
+   * older events are not retained because the route's read-after-write
+   * contract makes the event a hint, not the source of truth.
+   */
+  lastWorkspaceMutation?: DaemonMemoryChangedData | DaemonAgentChangedData;
+  lastWorkspaceMutationType?: 'memory_changed' | 'agent_changed';
 }
 
 export function createDaemonSessionViewState(
@@ -257,6 +318,8 @@ export function createDaemonSessionViewState(
       seed.lastUnmatchedPermissionResolutionId,
     slowClientWarningCount: seed.slowClientWarningCount ?? 0,
     lastSlowClientWarning: seed.lastSlowClientWarning,
+    lastWorkspaceMutation: seed.lastWorkspaceMutation,
+    lastWorkspaceMutationType: seed.lastWorkspaceMutationType,
   };
 }
 
@@ -325,6 +388,14 @@ export function asKnownDaemonEvent(
     case 'stream_error':
       return isStreamErrorData(event.data)
         ? (event as DaemonStreamErrorEvent)
+        : undefined;
+    case 'memory_changed':
+      return isMemoryChangedData(event.data)
+        ? (event as DaemonMemoryChangedEvent)
+        : undefined;
+    case 'agent_changed':
+      return isAgentChangedData(event.data)
+        ? (event as DaemonAgentChangedEvent)
         : undefined;
     default:
       return undefined;
@@ -461,6 +532,24 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         streamError: event.data,
         pendingPermissions: {},
+      };
+    case 'memory_changed':
+      // Non-terminal: adapters render a "memory just changed" hint and
+      // re-fetch `GET /workspace/memory` to get the canonical state. We
+      // don't append to a list — the latest event is enough since the
+      // route's read-after-write contract is the source of truth.
+      return {
+        ...base,
+        lastWorkspaceMutation: event.data,
+        lastWorkspaceMutationType: 'memory_changed',
+      };
+    case 'agent_changed':
+      // Same shape as `memory_changed` — non-terminal hint that
+      // triggers a `GET /workspace/agents` re-fetch.
+      return {
+        ...base,
+        lastWorkspaceMutation: event.data,
+        lastWorkspaceMutationType: 'agent_changed',
       };
     default: {
       const _exhaustive: never = event;
@@ -617,6 +706,29 @@ function isSlowClientWarningData(
 
 function isStreamErrorData(value: unknown): value is DaemonStreamErrorData {
   return isRecord(value) && isNonEmptyString(value['error']);
+}
+
+function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {
+  if (!isRecord(value)) return false;
+  const scope = value['scope'];
+  const mode = value['mode'];
+  return (
+    (scope === 'workspace' || scope === 'global') &&
+    isNonEmptyString(value['filePath']) &&
+    (mode === 'append' || mode === 'replace') &&
+    isFiniteNumber(value['bytesWritten'])
+  );
+}
+
+function isAgentChangedData(value: unknown): value is DaemonAgentChangedData {
+  if (!isRecord(value)) return false;
+  const change = value['change'];
+  const level = value['level'];
+  return (
+    (change === 'created' || change === 'updated' || change === 'deleted') &&
+    isNonEmptyString(value['name']) &&
+    (level === 'project' || level === 'user')
+  );
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {

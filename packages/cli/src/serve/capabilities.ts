@@ -54,6 +54,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
+  // Issue #4175 PR 16: workspace memory CRUD (`GET/POST /workspace/memory`).
+  // Daemon exposes hierarchical QWEN.md state and accepts append/replace
+  // writes scoped to either the bound workspace or the global ~/.qwen
+  // directory. Mutation path is gated by the centralized mutation gate.
+  workspace_memory: { since: 'v1' },
+  // Issue #4175 PR 16: workspace agents CRUD (`GET/POST /workspace/agents`
+  // + `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
+  // `SubagentManager` over HTTP so remote clients can list / read /
+  // create / update / delete project- and user-level subagent
+  // definitions. Built-in / extension agents stay read-only.
+  workspace_agents: { since: 'v1' },
   session_context: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_close: { since: 'v1' },

@@ -39,6 +39,8 @@ import {
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from './types.js';
+import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
+import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
 
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
@@ -286,6 +288,28 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/providers' });
     }
+  });
+
+  // Issue #4175 PR 16: workspace memory + agents CRUD. Routes mounted
+  // through factories so server.ts stays the composition root while
+  // the feature modules own their own validation, error mapping, and
+  // event fan-out. Both factories receive the shared `mutate` gate
+  // and the request-helpers `parseClientIdHeader` / `safeBody` so
+  // strict mutation gating and pollution-key scrubbing match the
+  // existing routes bit-for-bit.
+  mountWorkspaceMemoryRoutes(app, {
+    bridge,
+    boundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceAgentsRoutes(app, {
+    bridge,
+    boundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
   });
 
   app.post('/session', mutate(), async (req, res) => {

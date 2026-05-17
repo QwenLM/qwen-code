@@ -6,16 +6,24 @@
 
 import { parseSseStream } from './sse.js';
 import type {
+  DaemonAgentMutationResult,
   DaemonCapabilities,
+  DaemonCreateAgentRequest,
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonUpdateAgentRequest,
+  DaemonWorkspaceAgentDetail,
+  DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMemoryStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWriteMemoryRequest,
+  DaemonWriteMemoryResult,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -336,6 +344,176 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/providers');
         }
         return (await res.json()) as DaemonWorkspaceProvidersStatus;
+      },
+    );
+  }
+
+  // -- Workspace memory (issue #4175 PR 16) ------------------------------
+
+  /**
+   * Fetch the daemon's hierarchical QWEN.md / AGENTS.md snapshot. Read-
+   * only; pre-flight `caps.features.workspace_memory` before calling
+   * against an unknown daemon. Returns `initialized: false` and an
+   * empty `files` array when no memory files exist anywhere in the
+   * workspace tree or `~/.qwen`.
+   */
+  async workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/memory`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/memory');
+        }
+        return (await res.json()) as DaemonWorkspaceMemoryStatus;
+      },
+    );
+  }
+
+  /**
+   * Append to or replace `QWEN.md` at workspace or global scope.
+   * Strict mutation gate (`token_required` on no-token loopback
+   * defaults). When the daemon advertises `workspace_memory`, expect
+   * 200 with `{ ok, filePath, bytesWritten, mode }`; older daemons
+   * without the capability return 404.
+   */
+  async writeWorkspaceMemory(
+    req: DaemonWriteMemoryRequest,
+    clientId?: string,
+  ): Promise<DaemonWriteMemoryResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/memory`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/memory');
+        }
+        return (await res.json()) as DaemonWriteMemoryResult;
+      },
+    );
+  }
+
+  // -- Workspace agents (issue #4175 PR 16) ------------------------------
+
+  async listWorkspaceAgents(): Promise<DaemonWorkspaceAgentsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/agents');
+        }
+        return (await res.json()) as DaemonWorkspaceAgentsStatus;
+      },
+    );
+  }
+
+  /**
+   * Create a project- or user-level subagent. 409 `agent_already_exists`
+   * when a same-name agent is already registered at the chosen level;
+   * 422 `invalid_config` for validation failures.
+   */
+  async createWorkspaceAgent(
+    req: DaemonCreateAgentRequest,
+    clientId?: string,
+  ): Promise<DaemonAgentMutationResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/agents');
+        }
+        return (await res.json()) as DaemonAgentMutationResult;
+      },
+    );
+  }
+
+  async getWorkspaceAgent(
+    agentType: string,
+  ): Promise<DaemonWorkspaceAgentDetail> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/agents/:agentType');
+        }
+        return (await res.json()) as DaemonWorkspaceAgentDetail;
+      },
+    );
+  }
+
+  /**
+   * Update a project- or user-level subagent definition. Built-in /
+   * extension / session-level agents are read-only and return 403
+   * `agent_readonly`; missing agents return 404 `agent_not_found`.
+   */
+  async updateWorkspaceAgent(
+    agentType: string,
+    req: DaemonUpdateAgentRequest,
+    clientId?: string,
+  ): Promise<DaemonAgentMutationResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/agents/:agentType',
+          );
+        }
+        return (await res.json()) as DaemonAgentMutationResult;
+      },
+    );
+  }
+
+  /**
+   * Delete a project- or user-level subagent definition. Optional
+   * `scope` query narrows deletion to one level when the same name
+   * exists at both. Idempotent for SDK callers — both 204 (deleted)
+   * and 404 (already gone) resolve successfully.
+   */
+  async deleteWorkspaceAgent(
+    agentType: string,
+    opts: { scope?: 'workspace' | 'global' } = {},
+    clientId?: string,
+  ): Promise<void> {
+    const url = opts.scope
+      ? `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}?scope=${encodeURIComponent(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${encodeURIComponent(agentType)}`;
+    return await this.fetchWithTimeout(
+      url,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(
+          res,
+          'DELETE /workspace/agents/:agentType',
+        );
       },
     );
   }
