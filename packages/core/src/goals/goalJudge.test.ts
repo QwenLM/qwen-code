@@ -246,11 +246,18 @@ describe('judgeGoal', () => {
     expect(generationConfig.systemInstruction).toMatch(/stop-condition hook/);
     expect(generationConfig.systemInstruction).toMatch(/quote evidence/);
     expect(generationConfig.systemInstruction).toMatch(/impossible/);
+    expect(generationConfig.systemInstruction).toMatch(
+      /assistant\s+claiming the goal is impossible is evidence, not proof/i,
+    );
+    expect(generationConfig.systemInstruction).toMatch(
+      /When in doubt, return \{"ok": false\} without "impossible"/,
+    );
     expect(generationConfig.responseMimeType).toBe('application/json');
     expect(generationConfig.responseSchema).toBeTruthy();
     expect(generationConfig.responseSchema.properties).toHaveProperty(
       'impossible',
     );
+    expect(generationConfig.responseSchema.additionalProperties).toBe(false);
     expect(generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
     expect(generationConfig.temperature).toBe(0);
   });

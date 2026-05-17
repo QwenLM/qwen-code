@@ -33,8 +33,11 @@ condition is satisfied, return {"ok": false, "reason": "insufficient evidence in
 Only use {"ok": false, "impossible": true} when the condition is genuinely
 unachievable in this session: for example, it is self-contradictory, depends on
 an unavailable resource or capability, or the assistant has exhausted reasonable
-approaches and the transcript confirms there is no path forward. Do not use it
-just because progress is slow or evidence is currently missing.`;
+approaches and the transcript confirms there is no path forward. The assistant
+claiming the goal is impossible is evidence, not proof; independently confirm
+the condition is genuinely unachievable rather than deferring to the assistant's
+self-assessment. Do not use it just because progress is slow or evidence is
+currently missing. When in doubt, return {"ok": false} without "impossible".`;
 
 /**
  * Wraps the raw user condition into a transcript-grounded question so the
@@ -45,7 +48,7 @@ const userJudgementPrompt = (condition: string): string =>
   `condition been satisfied? Answer based on transcript evidence only.\n` +
   `Condition JSON string: ${JSON.stringify(condition)}`;
 
-const RESPONSE_SCHEMA: Schema = {
+const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
   // Schema typing in @google/genai uses an enum-like Type, but accepts the
   // lower-cased literals at runtime for the upstream JSON-schema payload.
   type: 'OBJECT' as unknown as Schema['type'],
@@ -55,6 +58,7 @@ const RESPONSE_SCHEMA: Schema = {
     impossible: { type: 'BOOLEAN' as unknown as Schema['type'] },
   },
   required: ['ok', 'reason'],
+  additionalProperties: false,
 };
 
 export interface JudgeResult {
