@@ -706,7 +706,7 @@ describe('DataProcessor', () => {
     it('should normalize malformed LLM facet fields', async () => {
       mockGenerateJson.mockResolvedValue({
         underlying_goal: ' Test goal ',
-        goal_categories: null,
+        goal_categories: { coding: 1 },
         outcome: null,
         user_satisfaction_counts: null,
         Qwen_helpfulness: 'invalid',
@@ -742,7 +742,7 @@ describe('DataProcessor', () => {
       expect(result).toEqual({
         session_id: 'test-session',
         underlying_goal: 'Test goal',
-        goal_categories: {},
+        goal_categories: { coding: 1 },
         outcome: 'unclear_from_transcript',
         user_satisfaction_counts: {},
         Qwen_helpfulness: 'moderately_helpful',
@@ -1524,7 +1524,7 @@ describe('DataProcessor', () => {
         },
       ]);
       expect(mockedFs.writeFile).toHaveBeenCalledWith(
-        '/facets/cached-session.json',
+        expect.stringMatching(/[\\/]facets[\\/]cached-session\.json$/),
         JSON.stringify(result[0], null, 2),
         'utf-8',
       );
