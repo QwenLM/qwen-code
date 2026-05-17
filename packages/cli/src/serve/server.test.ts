@@ -28,6 +28,7 @@ import type {
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
 import {
+  InvalidClientIdError,
   InvalidPermissionOptionError,
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
@@ -35,6 +36,7 @@ import {
   SessionNotFoundError,
   WorkspaceMismatchError,
   type BridgeRestoredSession,
+  type BridgeClientRequestContext,
   type BridgeRestoreSessionRequest,
   type BridgeSession,
   type BridgeSessionSummary,
@@ -71,6 +73,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_cancel',
   'session_events',
   'session_set_model',
+  'client_identity',
+  'session_permission_vote',
   'permission_vote',
 ] as const;
 
@@ -86,8 +90,13 @@ interface FakeBridgeOpts {
     sessionId: string,
     req: PromptRequest,
     signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
   ) => Promise<PromptResponse>;
-  cancelImpl?: (sessionId: string, req?: CancelNotification) => Promise<void>;
+  cancelImpl?: (
+    sessionId: string,
+    req?: CancelNotification,
+    context?: BridgeClientRequestContext,
+  ) => Promise<void>;
   subscribeImpl?: (
     sessionId: string,
     opts?: SubscribeOptions,
@@ -95,11 +104,19 @@ interface FakeBridgeOpts {
   respondImpl?: (
     requestId: string,
     response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
+  ) => boolean;
+  sessionRespondImpl?: (
+    sessionId: string,
+    requestId: string,
+    response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
   ) => boolean;
   listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
   setModelImpl?: (
     sessionId: string,
     req: SetSessionModelRequest,
+    context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
 }
 
@@ -111,19 +128,35 @@ interface FakeBridge extends HttpAcpBridge {
     sessionId: string;
     req: PromptRequest;
     signal?: AbortSignal;
+    context?: BridgeClientRequestContext;
   }>;
-  cancelCalls: Array<{ sessionId: string; req?: CancelNotification }>;
+  cancelCalls: Array<{
+    sessionId: string;
+    req?: CancelNotification;
+    context?: BridgeClientRequestContext;
+  }>;
   killCalls: Array<{
     sessionId: string;
     opts?: { requireZeroAttaches?: boolean };
   }>;
-  detachCalls: string[];
+  detachCalls: Array<{ sessionId: string; clientId?: string }>;
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
+    context?: BridgeClientRequestContext;
+  }>;
+  sessionPermissionVotes: Array<{
+    sessionId: string;
+    requestId: string;
+    response: RequestPermissionResponse;
+    context?: BridgeClientRequestContext;
   }>;
   listCalls: string[];
-  setModelCalls: Array<{ sessionId: string; req: SetSessionModelRequest }>;
+  setModelCalls: Array<{
+    sessionId: string;
+    req: SetSessionModelRequest;
+    context?: BridgeClientRequestContext;
+  }>;
   shutdownCalls: number;
 }
 
@@ -137,8 +170,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionId: string;
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
-  const detachCalls: string[] = [];
+  const detachCalls: FakeBridge['detachCalls'] = [];
   const permissionVotes: FakeBridge['permissionVotes'] = [];
+  const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   let shutdownCalls = 0;
@@ -148,6 +182,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId: `fake-${calls.length}`,
       workspaceCwd: req.workspaceCwd,
       attached: false,
+      clientId: `client-${calls.length}`,
     }));
   const loadImpl =
     opts.loadImpl ??
@@ -155,6 +190,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId: req.sessionId,
       workspaceCwd: req.workspaceCwd,
       attached: false,
+      clientId: req.clientId ?? 'client-load',
       state: {},
     }));
   const resumeImpl =
@@ -163,12 +199,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       sessionId: req.sessionId,
       workspaceCwd: req.workspaceCwd,
       attached: false,
+      clientId: req.clientId ?? 'client-resume',
       state: {},
     }));
   const promptImpl =
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
+  const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
   const listImpl = opts.listImpl ?? (() => []);
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   return {
@@ -180,6 +218,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     killCalls,
     detachCalls,
     permissionVotes,
+    sessionPermissionVotes,
     listCalls,
     setModelCalls,
     get shutdownCalls() {
@@ -206,13 +245,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       resumeCalls.push(req);
       return result;
     },
-    async sendPrompt(sessionId, req, signal) {
-      promptCalls.push({ sessionId, req, signal });
-      return promptImpl(sessionId, req, signal);
+    async sendPrompt(sessionId, req, signal, context) {
+      promptCalls.push({
+        sessionId,
+        req,
+        signal,
+        ...(context ? { context } : {}),
+      });
+      return promptImpl(sessionId, req, signal, context);
     },
-    async cancelSession(sessionId, req) {
-      cancelCalls.push({ sessionId, req });
-      return cancelImpl(sessionId, req);
+    async cancelSession(sessionId, req, context) {
+      cancelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return cancelImpl(sessionId, req, context);
     },
     subscribeEvents(sessionId, subOpts) {
       if (opts.subscribeImpl) return opts.subscribeImpl(sessionId, subOpts);
@@ -221,24 +265,46 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         // empty
       })();
     },
-    respondToPermission(requestId, response) {
-      const accepted = respondImpl(requestId, response);
-      permissionVotes.push({ requestId, response });
+    respondToPermission(requestId, response, context) {
+      const accepted = respondImpl(requestId, response, context);
+      permissionVotes.push({
+        requestId,
+        response,
+        ...(context ? { context } : {}),
+      });
+      return accepted;
+    },
+    respondToSessionPermission(sessionId, requestId, response, context) {
+      const accepted = sessionRespondImpl(
+        sessionId,
+        requestId,
+        response,
+        context,
+      );
+      sessionPermissionVotes.push({
+        sessionId,
+        requestId,
+        response,
+        ...(context ? { context } : {}),
+      });
       return accepted;
     },
     listWorkspaceSessions(workspaceCwd) {
       listCalls.push(workspaceCwd);
       return listImpl(workspaceCwd);
     },
-    async setSessionModel(sessionId, req) {
-      setModelCalls.push({ sessionId, req });
-      return setModelImpl(sessionId, req);
+    async setSessionModel(sessionId, req, context) {
+      setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return setModelImpl(sessionId, req, context);
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
     },
-    async detachClient(sessionId) {
-      detachCalls.push(sessionId);
+    async detachClient(sessionId, clientId) {
+      detachCalls.push({
+        sessionId,
+        ...(clientId !== undefined ? { clientId } : {}),
+      });
     },
     async shutdown() {
       shutdownCalls += 1;
@@ -569,6 +635,7 @@ describe('createServeApp', () => {
         sessionId: 'fake-0',
         workspaceCwd: '/work/a',
         attached: false,
+        clientId: 'client-0',
       });
       expect(bridge.calls).toEqual([
         { workspaceCwd: '/work/a', modelServiceId: 'qwen-prod' },
@@ -592,6 +659,41 @@ describe('createServeApp', () => {
           { workspaceCwd: '/work/a', sessionScope: scope },
         ]);
       }
+    });
+
+    it('forwards X-Qwen-Client-Id to the bridge on create/attach', async () => {
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => ({
+          sessionId: 'fake-identity',
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: req.clientId ?? 'client-new',
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-existing')
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(200);
+      expect(res.body.clientId).toBe('client-existing');
+      expect(bridge.calls).toEqual([
+        { workspaceCwd: '/work/a', clientId: 'client-existing' },
+      ]);
+    });
+
+    it('400 invalid_client_id for malformed client id headers', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad client id')
+        .send({ cwd: '/work/a' });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'invalid_client_id' });
+      expect(bridge.calls).toHaveLength(0);
     });
 
     it('400 invalid_session_scope when `sessionScope` is not "single"/"thread"', async () => {
@@ -691,6 +793,7 @@ describe('createServeApp', () => {
           sessionId: 'persisted-1',
           workspaceCwd: WS_BOUND,
           attached: false,
+          clientId: action === 'load' ? 'client-load' : 'client-resume',
           state: {},
         });
         const calls = action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
@@ -706,6 +809,7 @@ describe('createServeApp', () => {
           sessionId: req.sessionId,
           workspaceCwd: req.workspaceCwd,
           attached: false,
+          clientId: 'client-load',
           state: { configOptions: [] },
         }),
       });
@@ -720,6 +824,27 @@ describe('createServeApp', () => {
       expect(bridge.loadCalls).toEqual([
         { sessionId: 'persisted-2', workspaceCwd: '/work/a' },
       ]);
+    });
+
+    it('passes client identity headers through to load/resume bridge calls', async () => {
+      for (const action of ['load', 'resume'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post(`/session/persisted-1/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({});
+        expect(res.status).toBe(200);
+        const calls = action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+        expect(calls).toEqual([
+          {
+            sessionId: 'persisted-1',
+            workspaceCwd: realpathSync.native(process.cwd()),
+            clientId: 'client-1',
+          },
+        ]);
+      }
     });
 
     it('400s malformed cwd before touching the bridge', async () => {
@@ -893,6 +1018,40 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
+    });
+
+    it('passes client identity context into bridge.sendPrompt', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(res.status).toBe(200);
+      expect(bridge.promptCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('400 invalid_client_id when the bridge rejects prompt originator', async () => {
+      const bridge = fakeBridge({
+        promptImpl: async (sessionId) => {
+          throw new InvalidClientIdError(sessionId, 'client-unknown');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-unknown')
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-unknown',
+      });
     });
 
     it('400 when prompt body is missing', async () => {
@@ -1108,6 +1267,20 @@ describe('createServeApp', () => {
       expect(bridge.setModelCalls[0]?.req.modelId).toBe('qwen3-coder');
     });
 
+    it('passes client identity context into bridge.setSessionModel', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/model')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ modelId: 'qwen3-coder' });
+      expect(res.status).toBe(200);
+      expect(bridge.setModelCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
     it('400 when modelId is missing', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -1146,6 +1319,125 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/permission/:requestId', () => {
+    it('200 when bridge accepts the scoped vote', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
+      expect(res.status).toBe(200);
+      expect(bridge.sessionPermissionVotes).toEqual([
+        {
+          sessionId: 'session-A',
+          requestId: 'req-1',
+          response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+        },
+      ]);
+    });
+
+    it('passes client identity context into scoped permission votes', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ outcome: { outcome: 'cancelled' } });
+      expect(res.status).toBe(200);
+      expect(bridge.sessionPermissionVotes[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('404 when bridge reports no pending scoped request', async () => {
+      const bridge = fakeBridge({ sessionRespondImpl: () => false });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/missing')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'cancelled' } });
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        sessionId: 'session-A',
+        requestId: 'missing',
+      });
+    });
+
+    it('400 on a malformed scoped selected outcome', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'selected' } });
+      expect(res.status).toBe(400);
+      expect(bridge.sessionPermissionVotes).toHaveLength(0);
+    });
+
+    it('400 when scoped outcome is missing entirely', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(bridge.sessionPermissionVotes).toHaveLength(0);
+    });
+
+    it('400 when scoped selected outcome has an empty-string optionId', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'selected', optionId: '' } });
+      expect(res.status).toBe(400);
+      expect(bridge.sessionPermissionVotes).toHaveLength(0);
+    });
+
+    it('400 with invalid_option_id when bridge rejects a scoped option', async () => {
+      const bridge = fakeBridge({
+        sessionRespondImpl: () => {
+          throw new InvalidPermissionOptionError(
+            'req-1',
+            'ProceedAlwaysProject',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          outcome: { outcome: 'selected', optionId: 'ProceedAlwaysProject' },
+        });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_option_id',
+        requestId: 'req-1',
+        optionId: 'ProceedAlwaysProject',
+      });
+    });
+
+    it('404 when bridge reports unknown session on scoped vote', async () => {
+      const bridge = fakeBridge({
+        sessionRespondImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'cancelled' } });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
   describe('POST /permission/:requestId', () => {
     it('200 when bridge accepts the vote', async () => {
       const bridge = fakeBridge();
@@ -1161,6 +1453,41 @@ describe('createServeApp', () => {
           response: { outcome: { outcome: 'selected', optionId: 'allow' } },
         },
       ]);
+    });
+
+    it('passes client identity context into permission votes', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
+      expect(res.status).toBe(200);
+      expect(bridge.permissionVotes[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('400 invalid_client_id when the bridge rejects permission voter', async () => {
+      const bridge = fakeBridge({
+        respondImpl: () => {
+          throw new InvalidClientIdError('session-A', 'client-unknown');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-unknown')
+        .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-unknown',
+      });
     });
 
     it('200 with cancelled outcome', async () => {
@@ -1266,6 +1593,19 @@ describe('createServeApp', () => {
       expect(bridge.cancelCalls).toHaveLength(1);
       expect(bridge.cancelCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.cancelCalls[0]?.req?.sessionId).toBe('session-A');
+    });
+
+    it('passes client identity context into bridge.cancelSession', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/cancel')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1');
+      expect(res.status).toBe(204);
+      expect(bridge.cancelCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
     });
 
     it('204 with empty body', async () => {

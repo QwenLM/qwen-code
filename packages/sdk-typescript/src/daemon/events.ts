@@ -10,6 +10,7 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
   'permission_request',
   'permission_resolved',
+  'permission_already_resolved',
   'model_switched',
   'model_switch_failed',
   'session_died',
@@ -49,6 +50,13 @@ export interface DaemonPermissionRequestData {
 
 export interface DaemonPermissionResolvedData {
   requestId: string;
+  outcome: PermissionOutcome;
+  [key: string]: unknown;
+}
+
+export interface DaemonPermissionAlreadyResolvedData {
+  requestId: string;
+  sessionId: string;
   outcome: PermissionOutcome;
   [key: string]: unknown;
 }
@@ -97,6 +105,10 @@ export type DaemonPermissionResolvedEvent = DaemonEventEnvelope<
   'permission_resolved',
   DaemonPermissionResolvedData
 >;
+export type DaemonPermissionAlreadyResolvedEvent = DaemonEventEnvelope<
+  'permission_already_resolved',
+  DaemonPermissionAlreadyResolvedData
+>;
 export type DaemonModelSwitchedEvent = DaemonEventEnvelope<
   'model_switched',
   DaemonModelSwitchedData
@@ -126,7 +138,8 @@ export type DaemonSessionEvent =
 
 export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
-  | DaemonPermissionResolvedEvent;
+  | DaemonPermissionResolvedEvent
+  | DaemonPermissionAlreadyResolvedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -217,6 +230,10 @@ export function asKnownDaemonEvent(
       return isPermissionResolvedData(event.data)
         ? (event as DaemonPermissionResolvedEvent)
         : undefined;
+    case 'permission_already_resolved':
+      return isPermissionAlreadyResolvedData(event.data)
+        ? (event as DaemonPermissionAlreadyResolvedEvent)
+        : undefined;
     case 'model_switched':
       return isModelSwitchedData(event.data)
         ? (event as DaemonModelSwitchedEvent)
@@ -288,6 +305,19 @@ export function reduceDaemonSessionEvent(
       };
     }
     case 'permission_resolved': {
+      if (!(event.data.requestId in base.pendingPermissions)) {
+        return {
+          ...base,
+          unmatchedPermissionResolutionCount:
+            base.unmatchedPermissionResolutionCount + 1,
+          lastUnmatchedPermissionResolutionId: event.data.requestId,
+        };
+      }
+      const pendingPermissions = { ...base.pendingPermissions };
+      delete pendingPermissions[event.data.requestId];
+      return { ...base, pendingPermissions };
+    }
+    case 'permission_already_resolved': {
       if (!(event.data.requestId in base.pendingPermissions)) {
         return {
           ...base,
@@ -397,6 +427,17 @@ function isPermissionResolvedData(
   return (
     isRecord(value) &&
     isNonEmptyString(value['requestId']) &&
+    isPermissionOutcome(value['outcome'])
+  );
+}
+
+function isPermissionAlreadyResolvedData(
+  value: unknown,
+): value is DaemonPermissionAlreadyResolvedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['requestId']) &&
+    isNonEmptyString(value['sessionId']) &&
     isPermissionOutcome(value['outcome'])
   );
 }

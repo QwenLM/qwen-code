@@ -74,6 +74,12 @@ export interface BridgeSpawnRequest {
   /** Optional explicit model service id; falls back to settings default. */
   modelServiceId?: string;
   /**
+   * Optional echo of a daemon-issued client id from a previous attach to the
+   * same live session. Unknown ids are ignored on create/attach and replaced
+   * with a freshly stamped id.
+   */
+  clientId?: string;
+  /**
    * Per-request override for `sessionScope`. When set, takes precedence
    * over the bridge-wide default (`BridgeOptions.sessionScope`, which
    * direct embeds may set at construction time; the production daemon
@@ -96,6 +102,12 @@ export interface BridgeSession {
   workspaceCwd: string;
   /** True if this attach reused an existing session under `sessionScope: 'single'`. */
   attached: boolean;
+  /**
+   * Opaque daemon-issued id for the attaching HTTP client. Subsequent
+   * session-scoped requests may echo it so daemon events can identify the
+   * initiating client without trusting request bodies.
+   */
+  clientId?: string;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -103,6 +115,8 @@ export interface BridgeRestoreSessionRequest {
   sessionId: string;
   /** Absolute path to the workspace root the child inherits as cwd. */
   workspaceCwd: string;
+  /** Optional echo of a daemon-issued client id for this session. */
+  clientId?: string;
 }
 
 export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
@@ -116,6 +130,11 @@ export interface BridgeRestoredSession extends BridgeSession {
 export interface BridgeSessionSummary {
   sessionId: string;
   workspaceCwd: string;
+}
+
+export interface BridgeClientRequestContext {
+  /** Daemon-issued client id echoed through the HTTP transport header. */
+  clientId?: string;
 }
 
 export interface HttpAcpBridge {
@@ -157,6 +176,7 @@ export interface HttpAcpBridge {
     sessionId: string,
     req: PromptRequest,
     signal?: AbortSignal,
+    context?: BridgeClientRequestContext,
   ): Promise<PromptResponse>;
 
   /**
@@ -165,7 +185,11 @@ export interface HttpAcpBridge {
    * active `prompt()` with a `cancelled` stop reason. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
-  cancelSession(sessionId: string, req?: CancelNotification): Promise<void>;
+  cancelSession(
+    sessionId: string,
+    req?: CancelNotification,
+    context?: BridgeClientRequestContext,
+  ): Promise<void>;
 
   /**
    * Subscribe to the session's event stream. Returns an AsyncIterable that
@@ -186,6 +210,19 @@ export interface HttpAcpBridge {
   respondToPermission(
     requestId: string,
     response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
+  ): boolean;
+
+  /**
+   * Cast a vote scoped to an explicit session route. This keeps the legacy
+   * first-responder behavior but lets clients avoid accidentally voting on a
+   * request id that belongs to another live session.
+   */
+  respondToSessionPermission(
+    sessionId: string,
+    requestId: string,
+    response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
   ): boolean;
 
   /**
@@ -204,6 +241,7 @@ export interface HttpAcpBridge {
   setSessionModel(
     sessionId: string,
     req: SetSessionModelRequest,
+    context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
 
   /**
@@ -241,9 +279,12 @@ export interface HttpAcpBridge {
    * spawn-owner's disconnect-reaper would never run again — even if
    * the attacher themselves disconnected (tanzhenxin issue 2). This
    * is the symmetric "I bumped, but my socket died so the bump is
-   * fictitious" cleanup.
+   * fictitious" cleanup. When `clientId` is provided, the daemon-issued
+   * identity reference acquired by that failed attach is released too;
+   * echoed ids are ref-counted so a failed reconnect does not revoke an
+   * older live owner of the same id.
    */
-  detachClient(sessionId: string): Promise<void>;
+  detachClient(sessionId: string, clientId?: string): Promise<void>;
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
@@ -376,6 +417,23 @@ export class WorkspaceMismatchError extends Error {
     this.name = 'WorkspaceMismatchError';
     this.bound = bound;
     this.requested = safeRequested;
+  }
+}
+
+/**
+ * Thrown when an HTTP caller echoes a client id that this daemon did not
+ * issue for the addressed live session. Create/attach calls may receive a
+ * fresh id instead; state-changing session routes reject unknown ids so
+ * originator metadata stays daemon-stamped rather than caller-asserted.
+ */
+export class InvalidClientIdError extends Error {
+  readonly sessionId: string;
+  readonly clientId: string;
+  constructor(sessionId: string, clientId: string) {
+    super(`Client id "${clientId}" is not registered for session ${sessionId}`);
+    this.name = 'InvalidClientIdError';
+    this.sessionId = sessionId;
+    this.clientId = clientId;
   }
 }
 
@@ -627,6 +685,18 @@ interface SessionEntry {
    */
   pendingPermissionIds: Set<string>;
   /**
+   * Daemon-issued client ids currently known for this live session. HTTP
+   * clients may echo one through `X-Qwen-Client-Id`; the bridge only treats
+   * it as trusted originator metadata if it appears in this set.
+   */
+  clientIds: Map<string, number>;
+  /**
+   * Originator for the prompt currently running on this session. ACP enforces
+   * one active prompt per session, and this bridge FIFO-serializes prompts, so
+   * inline session updates / permission requests can safely inherit this id.
+   */
+  activePromptOriginatorClientId?: string;
+  /**
    * Count of times `spawnOrAttach` has returned `attached: true` for
    * this entry — i.e. a second-or-subsequent client claimed this
    * session under `sessionScope: 'single'`. Used by the disconnect-
@@ -677,6 +747,27 @@ interface PendingPermission {
    * Stored as a Set for O(1) membership check.
    */
   allowedOptionIds: ReadonlySet<string>;
+}
+
+interface PermissionResolutionRecord {
+  requestId: string;
+  sessionId: string;
+  outcome: RequestPermissionResponse['outcome'];
+}
+
+// Bounded duplicate-vote cache. Stores only requestId/sessionId/outcome, so
+// 512 records stays small while covering normal UI reconnect/race windows.
+const MAX_RESOLVED_PERMISSION_RECORDS = 512;
+
+function isServeDebugLoggingEnabled(): boolean {
+  const value = process.env['QWEN_SERVE_DEBUG'];
+  if (!value) return false;
+  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+}
+
+function writeServeDebugLine(message: string): void {
+  if (!isServeDebugLoggingEnabled()) return;
+  writeStderrLine(`qwen serve debug: ${message}`);
 }
 
 /**
@@ -841,6 +932,9 @@ class BridgeClient implements Client {
           toolCall: params.toolCall,
           options: params.options,
         },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
       });
       if (!published) {
         // Roll back the pending registration and resolve cancelled.
@@ -875,7 +969,13 @@ class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
-    events.publish({ type: 'session_update', data: params });
+    events.publish({
+      type: 'session_update',
+      data: params,
+      ...(entry?.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    });
   }
 
   async writeTextFile(
@@ -1224,6 +1324,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
   // across sessions are infeasible in practice.
   const pendingPermissions = new Map<string, PendingPermission>();
+  const resolvedPermissions = new Map<string, PermissionResolutionRecord>();
+  const resolvedPermissionOrder: string[] = [];
   // Set by `shutdown()` so any in-flight `spawnOrAttach` that was
   // dispatched on an existing connection AFTER the shutdown snapshot
   // taken in `shutdown()` fails fast instead of creating a child the
@@ -1267,6 +1369,53 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // the ring, then promote the same bus into the registered SessionEntry.
   const pendingRestoreEvents = new Map<string, EventBus>();
 
+  const createClientId = (): string => `client_${randomUUID()}`;
+
+  const registerClient = (
+    entry: SessionEntry,
+    requestedClientId?: string,
+  ): string => {
+    if (requestedClientId && entry.clientIds.has(requestedClientId)) {
+      entry.clientIds.set(
+        requestedClientId,
+        (entry.clientIds.get(requestedClientId) ?? 0) + 1,
+      );
+      return requestedClientId;
+    }
+    const clientId = createClientId();
+    entry.clientIds.set(clientId, 1);
+    return clientId;
+  };
+
+  const unregisterClient = (entry: SessionEntry, clientId?: string): void => {
+    if (clientId === undefined) return;
+    const count = entry.clientIds.get(clientId);
+    if (count === undefined) return;
+    if (count <= 1) {
+      entry.clientIds.delete(clientId);
+    } else {
+      entry.clientIds.set(clientId, count - 1);
+    }
+  };
+
+  const resolveTrustedClientId = (
+    entry: SessionEntry,
+    clientId?: string,
+  ): string | undefined => {
+    if (clientId === undefined) return undefined;
+    if (!entry.clientIds.has(clientId)) {
+      throw new InvalidClientIdError(entry.sessionId, clientId);
+    }
+    return clientId;
+  };
+
+  const resolveAnyTrustedClientId = (clientId: string): string => {
+    for (const entry of byId.values()) {
+      if (entry.clientIds.has(clientId)) return clientId;
+    }
+    throw new InvalidClientIdError('unknown', clientId);
+  };
+
   const registerPending = (p: PendingPermission) => {
     const entry = byId.get(p.sessionId);
     if (!entry) {
@@ -1284,10 +1433,49 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     entry.pendingPermissionIds.add(p.requestId);
   };
 
+  const rememberResolvedPermission = (record: PermissionResolutionRecord) => {
+    if (!resolvedPermissions.has(record.requestId)) {
+      resolvedPermissionOrder.push(record.requestId);
+    }
+    resolvedPermissions.set(record.requestId, record);
+    while (resolvedPermissionOrder.length > MAX_RESOLVED_PERMISSION_RECORDS) {
+      const oldest = resolvedPermissionOrder.shift();
+      if (oldest !== undefined) resolvedPermissions.delete(oldest);
+    }
+  };
+
+  const publishPermissionAlreadyResolved = (
+    record: PermissionResolutionRecord,
+  ) => {
+    const entry = byId.get(record.sessionId);
+    if (!entry) return;
+    try {
+      writeServeDebugLine(
+        `permission ${JSON.stringify(record.requestId)} ` +
+          `for session ${JSON.stringify(record.sessionId)} was already ` +
+          'resolved; publishing duplicate-vote notification.',
+      );
+      entry.events.publish({
+        type: 'permission_already_resolved',
+        data: {
+          requestId: record.requestId,
+          sessionId: record.sessionId,
+          outcome: record.outcome,
+        },
+      });
+    } catch {
+      writeServeDebugLine(
+        `skipped duplicate-vote notification for permission ` +
+          `${JSON.stringify(record.requestId)} during shutdown.`,
+      );
+    }
+  };
+
   /** Resolve a single pending request and clean up its bookkeeping. */
   const resolvePending = (
     requestId: string,
     response: RequestPermissionResponse,
+    originatorClientId?: string,
   ): boolean => {
     const pending = pendingPermissions.get(requestId);
     if (!pending) return false;
@@ -1302,11 +1490,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry.events.publish({
           type: 'permission_resolved',
           data: { requestId, outcome: response.outcome },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch {
         /* bus closed during shutdown */
       }
     }
+    rememberResolvedPermission({
+      requestId,
+      sessionId: pending.sessionId,
+      outcome: response.outcome,
+    });
     pending.resolve(response);
     return true;
   };
@@ -1539,6 +1733,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   async function doSpawn(
     modelServiceId: string | undefined,
     effectiveScope: 'single' | 'thread',
+    requestedClientId?: string,
   ): Promise<BridgeSession> {
     // #3803 §02: get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -1600,6 +1795,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       newSessionResp.sessionId,
       boundWorkspace,
     );
+    const clientId = registerClient(entry, requestedClientId);
     // `defaultEntry` is the single-scope attach target — only sessions
     // SPAWNED UNDER `'single'` may claim it. A thread-scope spawn must
     // never become the attach target, otherwise a later omitted-scope
@@ -1615,12 +1811,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // transportClosedReject, publish model_switched on success,
     // model_switch_failed on failure, don't tear down the session).
     if (modelServiceId) {
-      await applyModelServiceId(entry, modelServiceId, initTimeoutMs).catch(
-        () => {
-          // Already published `model_switch_failed`; session stays
-          // operational on the agent's default model.
-        },
-      );
+      await applyModelServiceId(
+        entry,
+        modelServiceId,
+        initTimeoutMs,
+        clientId,
+      ).catch(() => {
+        // Already published `model_switch_failed`; session stays
+        // operational on the agent's default model.
+      });
     }
 
     // Bd1zc: re-check that the entry is still live before returning.
@@ -1640,6 +1839,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       sessionId: entry.sessionId,
       workspaceCwd: entry.workspaceCwd,
       attached: false,
+      clientId,
     };
   }
 
@@ -1661,6 +1861,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     entry: SessionEntry,
     modelId: string,
     timeoutMs: number,
+    originatorClientId?: string,
   ): Promise<void> {
     const conn = entry.connection as unknown as {
       unstable_setSessionModel(p: {
@@ -1690,6 +1891,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry.events.publish({
           type: 'model_switched',
           data: { sessionId: entry.sessionId, modelId },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch (err) {
         // Surface the failure to ALL attached clients, not just the
@@ -1702,6 +1904,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             requestedModelId: modelId,
             error: err instanceof Error ? err.message : String(err),
           },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
         throw err;
       }
@@ -1804,6 +2007,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       promptQueue: Promise.resolve(),
       modelChangeQueue: Promise.resolve(),
       pendingPermissionIds: new Set(),
+      clientIds: new Map(),
       attachCount: 0,
       spawnOwnerWantedKill: false,
     };
@@ -1855,10 +2059,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     const existing = byId.get(req.sessionId);
     if (existing) {
       existing.attachCount++;
+      const clientId = registerClient(existing, req.clientId);
       return {
         sessionId: existing.sessionId,
         workspaceCwd: existing.workspaceCwd,
         attached: true,
+        clientId,
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
@@ -1913,7 +2119,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // when the IIFE registered the entry. Spread `restored` so the
       // ACP state propagates to coalesced waiters (BQ9tV-equivalent
       // for restore waiter consistency).
-      return { ...restored, attached: true };
+      return {
+        ...restored,
+        attached: true,
+        clientId: registerClient(entry, req.clientId),
+      };
     }
 
     if (
@@ -2023,10 +2233,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         // in flight. Coalescers must not bump attachCount themselves
         // (they read it off the registered entry on the next tick).
         racedEntry.attachCount += 1 + coalesceState.count;
+        const clientId = registerClient(racedEntry, req.clientId);
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
           attached: true,
+          clientId,
           state: racedEntry.restoreState ?? {},
         };
       }
@@ -2038,6 +2250,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         restoreEvents,
       );
       entry.restoreState = state;
+      const clientId = registerClient(entry, req.clientId);
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
       // have hit the inFlightRestores branch and bumped
@@ -2057,6 +2270,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         sessionId: entry.sessionId,
         workspaceCwd: entry.workspaceCwd,
         attached: false,
+        clientId,
         state,
       };
     })().finally(() => {
@@ -2149,6 +2363,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           // race is "bump runs before any await inside this
           // microtask," which is what we get here.
           existing.attachCount++;
+          const clientId = registerClient(existing, req.clientId);
           // If the caller passed a modelServiceId on attach, the session
           // may currently be running a DIFFERENT model. Honor the request
           // by issuing setSessionModel — same call we'd use on
@@ -2168,12 +2383,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               existing,
               req.modelServiceId,
               initTimeoutMs,
+              clientId,
             ).catch(() => {});
           }
           return {
             sessionId: existing.sessionId,
             workspaceCwd: existing.workspaceCwd,
             attached: true,
+            clientId,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -2211,6 +2428,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               'the agent child likely crashed during initialization — retry to spawn a new session',
             );
           }
+          const clientId = registerClient(attachedEntry, req.clientId);
           if (req.modelServiceId) {
             // Same swallow as above — we picked up an in-flight
             // spawn, the session is real, model-switch failure
@@ -2219,9 +2437,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               attachedEntry,
               req.modelServiceId,
               initTimeoutMs,
+              clientId,
             ).catch(() => {});
           }
-          return { ...session, attached: true };
+          return { ...session, attached: true, clientId };
         }
       }
 
@@ -2236,7 +2455,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         throw new SessionLimitExceededError(maxSessions);
       }
 
-      const promise = doSpawn(req.modelServiceId, effectiveScope);
+      const promise = doSpawn(req.modelServiceId, effectiveScope, req.clientId);
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
       // `spawnOrAttach` finds the entry and waits for the same
@@ -2265,9 +2484,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
     },
 
-    async sendPrompt(sessionId, req, signal) {
+    async sendPrompt(sessionId, req, signal, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -2286,7 +2509,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         if (signal?.aborted) {
           throw new DOMException('Prompt aborted', 'AbortError');
         }
-        const promptPromise = entry.connection.prompt(normalized);
+        if (originatorClientId === undefined) {
+          delete entry.activePromptOriginatorClientId;
+        } else {
+          entry.activePromptOriginatorClientId = originatorClientId;
+        }
+        const promptPromise = entry.connection
+          .prompt(normalized)
+          .finally(() => {
+            delete entry.activePromptOriginatorClientId;
+          });
 
         // Race against channel termination: if the underlying transport
         // dies (child crashed, stream torn down) WHILE the prompt is in
@@ -2365,9 +2597,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return result;
     },
 
-    async cancelSession(sessionId, req) {
+    async cancelSession(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      // Validation-only: cancellation resolves permissions as system
+      // cancellations, so those generated events intentionally omit an
+      // originator client id.
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
@@ -2399,7 +2635,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return entry.events.subscribe(subOpts);
     },
 
-    respondToPermission(requestId, response) {
+    respondToPermission(requestId, response, context) {
+      const pending = pendingPermissions.get(requestId);
+      let originatorClientId: string | undefined;
+      if (context?.clientId !== undefined && !pending) {
+        resolveAnyTrustedClientId(context.clientId);
+      } else if (pending && context?.clientId !== undefined) {
+        const entry = byId.get(pending.sessionId);
+        if (entry) {
+          originatorClientId = resolveTrustedClientId(entry, context.clientId);
+        } else {
+          resolveAnyTrustedClientId(context.clientId);
+        }
+      }
+      if (!pending) {
+        const record = resolvedPermissions.get(requestId);
+        if (record) {
+          publishPermissionAlreadyResolved(record);
+        }
+        return false;
+      }
       // BkwQI: validate the voter's optionId against the original
       // options the agent advertised. The route already enforces
       // "non-empty string" structurally; this layer enforces
@@ -2408,18 +2663,56 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `ProceedAlways*` when the prompt's `hideAlwaysAllow`
       // policy intentionally suppressed them).
       if (response.outcome.outcome === 'selected') {
-        const pending = pendingPermissions.get(requestId);
-        if (
-          pending &&
-          !pending.allowedOptionIds.has(response.outcome.optionId)
-        ) {
+        if (!pending.allowedOptionIds.has(response.outcome.optionId)) {
           throw new InvalidPermissionOptionError(
             requestId,
             response.outcome.optionId,
           );
         }
       }
-      return resolvePending(requestId, response);
+      return resolvePending(requestId, response, originatorClientId);
+    },
+
+    respondToSessionPermission(sessionId, requestId, response, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const pending = pendingPermissions.get(requestId);
+      if (!pending) {
+        const record = resolvedPermissions.get(requestId);
+        if (record?.sessionId === sessionId) {
+          resolveTrustedClientId(entry, context?.clientId);
+          publishPermissionAlreadyResolved(record);
+        } else if (record) {
+          writeServeDebugLine(
+            `rejected permission vote ${JSON.stringify(requestId)} ` +
+              `for session ${JSON.stringify(sessionId)}; request belongs to ` +
+              `session ${JSON.stringify(record.sessionId)}.`,
+          );
+        }
+        return false;
+      }
+      if (pending.sessionId !== sessionId) {
+        writeServeDebugLine(
+          `rejected permission vote ${JSON.stringify(requestId)} ` +
+            `for session ${JSON.stringify(sessionId)}; request belongs to ` +
+            `session ${JSON.stringify(pending.sessionId)}.`,
+        );
+        return false;
+      }
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      if (
+        response.outcome.outcome === 'selected' &&
+        !pending.allowedOptionIds.has(response.outcome.optionId)
+      ) {
+        throw new InvalidPermissionOptionError(
+          requestId,
+          response.outcome.optionId,
+        );
+      }
+      return resolvePending(requestId, response, originatorClientId);
     },
 
     listWorkspaceSessions(workspaceCwd) {
@@ -2446,9 +2739,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return out;
     },
 
-    async setSessionModel(sessionId, req) {
+    async setSessionModel(sessionId, req, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
       const normalized: SetSessionModelRequest = { ...req, sessionId };
       // The ACP SDK marks setSessionModel as unstable (not in spec yet); the
       // method on AgentSideConnection is `unstable_setSessionModel`. Cast
@@ -2518,6 +2815,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               requestedModelId: req.modelId,
               error: err instanceof Error ? err.message : String(err),
             },
+            ...(originatorClientId ? { originatorClientId } : {}),
           });
         } catch {
           /* bus closed */
@@ -2528,6 +2826,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry.events.publish({
           type: 'model_switched',
           data: { sessionId: entry.sessionId, modelId: req.modelId },
+          ...(originatorClientId ? { originatorClientId } : {}),
         });
       } catch {
         /* bus closed */
@@ -2617,7 +2916,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
     },
 
-    async detachClient(sessionId) {
+    async detachClient(sessionId, clientId) {
       // tanzhenxin issue 2: the BQ9tV `attachCount` race guard is
       // monotonic — once any attach bumps it, the spawn-owner's
       // disconnect-reaper becomes a permanent no-op even if the
@@ -2637,6 +2936,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const entry = byId.get(sessionId);
       if (!entry) return;
       if (entry.attachCount > 0) entry.attachCount--;
+      unregisterClient(entry, clientId);
       if (
         entry.spawnOwnerWantedKill &&
         entry.attachCount === 0 &&

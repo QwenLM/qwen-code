@@ -775,7 +775,7 @@ export class ShellExecutionService {
           // settle the registry entry on natural child exit. When
           // postPromote is undefined we fall back to the PR-2 detach-
           // everything contract: no listeners re-attach.
-          // PR-2.5 wave-4 (gpt-5.5 T5): preserve the detected encoding
+          // PR-2.5 wave-4: preserve the detected encoding
           // from the foreground decoders so a non-UTF-8 child (e.g.
           // GBK on a Chinese Windows shell) doesn't snapshot correctly
           // and then mojibake the post-promote tail. The foreground
@@ -798,7 +798,7 @@ export class ShellExecutionService {
           // child has fully closed so any trailing multibyte bytes
           // surface instead of being silently dropped.
           //
-          // PR-2.5 wave-4 (gpt-5.5 T3): allocate decoders whenever
+          // PR-2.5 wave-4: allocate decoders whenever
           // `onData` is set (not gated on close-handler installation),
           // because the close handler now ALWAYS installs when any
           // postPromote handler is present (T6 + T7) and needs to
@@ -821,38 +821,45 @@ export class ShellExecutionService {
           const postPromoteStderrDecoder = postPromote?.onData
             ? safeDecoder(detectedEncoding)
             : null;
+          let postPromoteStdoutHandler: ((chunk: Buffer) => void) | null = null;
+          let postPromoteStderrHandler: ((chunk: Buffer) => void) | null = null;
           if (postPromote?.onData) {
             const onPostData = postPromote.onData;
-            const safeData =
-              (decoder: TextDecoder) => (chunk: Buffer) => {
-                try {
-                  onPostData({
-                    type: 'data',
-                    chunk: decoder.decode(chunk, { stream: true }),
-                  });
-                } catch (cbErr) {
-                  debugLogger.warn(
-                    `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
-                  );
-                }
-              };
+            const safeData = (decoder: TextDecoder) => (chunk: Buffer) => {
+              try {
+                onPostData({
+                  type: 'data',
+                  chunk: decoder.decode(chunk, { stream: true }),
+                });
+              } catch (cbErr) {
+                debugLogger.warn(
+                  `postPromote.onData threw: ${cbErr instanceof Error ? cbErr.message : String(cbErr)}`,
+                );
+              }
+            };
             try {
-              if (postPromoteStdoutDecoder)
-                child.stdout?.on('data', safeData(postPromoteStdoutDecoder));
-              if (postPromoteStderrDecoder)
-                child.stderr?.on('data', safeData(postPromoteStderrDecoder));
+              if (postPromoteStdoutDecoder) {
+                postPromoteStdoutHandler = safeData(postPromoteStdoutDecoder);
+                child.stdout?.on('data', postPromoteStdoutHandler);
+              }
+              if (postPromoteStderrDecoder) {
+                postPromoteStderrHandler = safeData(postPromoteStderrDecoder);
+                child.stderr?.on('data', postPromoteStderrHandler);
+              }
             } catch (e) {
               debugLogger.warn(
                 `re-attaching post-promote data listeners threw: ${e instanceof Error ? e.message : String(e)}`,
               );
             }
           } else if (postPromote) {
-            // PR-2.5 wave-4 (gpt-5.5 T7): caller asked for `onSettle`
+            // PR-2.5 wave-4: caller asked for `onSettle`
             // (or any other future postPromote handler) without
             // `onData`. The foreground stdout/stderr listeners were
             // detached above; without ANY data listener the Readable
-            // streams stay paused, the OS pipe buffer fills (~64KB on
-            // Linux), and `child.stdout.write` in the child blocks —
+            // streams stay paused (on Windows they may already be
+            // flowing — `resume()` is a no-op in that case), the OS
+            // pipe buffer fills (~64KB on Linux), and
+            // `child.stdout.write` in the child blocks —
             // potentially forever. `'close'` then never fires and
             // `onSettle` is never called. `.resume()` puts the stream
             // back in flowing mode (data arrives + is dropped) so the
@@ -866,14 +873,14 @@ export class ShellExecutionService {
               );
             }
           }
-          // PR-2.5 wave-4 (gpt-5.5 T1): single-fire latch shared by
+          // PR-2.5 wave-4: single-fire latch shared by
           // 'close' and 'error' (both branches funnel through here).
           // Without it the child_process path could fire onSettle
           // twice — once from `error`, then again from the `close`
           // that immediately follows — violating the exactly-once
           // settle contract and racing the caller's `transitionRegistry`.
           //
-          // PR-2.5 wave-4 (gpt-5.5 T3): the helper also performs the
+          // PR-2.5 wave-4: the helper also performs the
           // decoder flush so any caller with `onData` set gets the
           // trailing multibyte bytes surfaced — independent of
           // whether `onSettle` is also set.
@@ -908,9 +915,15 @@ export class ShellExecutionService {
           const firePostSettle = (info: ShellPostPromoteSettleInfo): void => {
             if (postPromoteSettleFired) return;
             postPromoteSettleFired = true;
-            // Flush BEFORE the callback so any trailing multibyte
-            // characters land ahead of the settle's stream-close.
             flushPostPromoteDecoders();
+            if (postPromoteStdoutHandler) {
+              child.stdout?.off('data', postPromoteStdoutHandler);
+              postPromoteStdoutHandler = null;
+            }
+            if (postPromoteStderrHandler) {
+              child.stderr?.off('data', postPromoteStderrHandler);
+              postPromoteStderrHandler = null;
+            }
             if (!postPromote?.onSettle) return;
             try {
               postPromote.onSettle(info);
@@ -920,7 +933,7 @@ export class ShellExecutionService {
               );
             }
           };
-          // PR-2.5 wave-4 (gpt-5.5 T6 + T7): install 'close' and
+          // PR-2.5 wave-4: install 'close' and
           // 'error' listeners whenever ANY postPromote handler is
           // present, not just when `onSettle` is set. Two reasons:
           //
@@ -1515,7 +1528,7 @@ export class ShellExecutionService {
           // improvement; without this they'd be dropped on the way to
           // the snapshot anyway.
           //
-          // PR-2.5 wave-3 (deepseek-v4-pro T6): capture the IDisposable
+          // PR-2.5 wave-3: capture the IDisposable
           // returned by `onData` / `onExit` and the listener function
           // we register on `'error'`, then dispose them all when
           // settle fires. node-pty's `ptyProcess` outlives the
@@ -1578,6 +1591,12 @@ export class ShellExecutionService {
             // Dispose BEFORE invoking the caller — even if the caller
             // throws, the listeners are gone (and idempotent if we
             // come back through the error path).
+            // Known limitation: node-pty may have queued onData
+            // callbacks not yet delivered when onExit fires; disposing
+            // the data listener here means those trailing bytes (<4KB)
+            // are lost. Bounded and low severity — a setImmediate
+            // delay could recover them but would complicate the
+            // single-fire latch.
             disposePostPromoteListeners();
             if (!postPromote?.onSettle) return;
             try {
@@ -1608,7 +1627,7 @@ export class ShellExecutionService {
               );
             }
           }
-          if (postPromote?.onSettle) {
+          if (postPromote) {
             try {
               postPromoteExitDisposable = ptyProcess.onExit(
                 ({
@@ -1630,22 +1649,9 @@ export class ShellExecutionService {
                 `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
               );
             }
-            // PR-2.5 wave-2 (gpt-5.5 C2): the foreground `ptyErrorHandler`
-            // was removed above as part of the handoff. Without a
-            // replacement, a post-promote PTY error event has NO listener
-            // — Node treats an unhandled `error` from an EventEmitter
-            // as a fatal exception that takes the whole CLI down. The
-            // foreground handler `throw`s on unexpected errors (and
-            // ignores expected PTY-read-exit codes); for the post-promote
-            // path we want unexpected errors to FAIL the background task
-            // via `onSettle`, not crash the CLI.
             try {
               postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
                 if (isExpectedPtyReadExitError(err)) {
-                  // EIO / EAGAIN during the PTY read-exit race — same
-                  // as the foreground handler's filter. The onExit
-                  // listener above will fire shortly with the real
-                  // status; let it carry the settle.
                   return;
                 }
                 firePostSettle({

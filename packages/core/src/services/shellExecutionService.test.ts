@@ -956,6 +956,42 @@ describe('ShellExecutionService', () => {
       removeListenerSpy.mockRestore();
     });
 
+    it('PR-2.5: onData-only PTY caller has post-promote error + exit listeners (no crash, listeners disposed on exit)', async () => {
+      const dataChunks: ShellOutputEvent[] = [];
+      const { result } = await simulateExecution(
+        'tail -f /dev/null',
+        (pty, ac) => {
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_pty_ondata_only',
+          } satisfies ShellAbortReason);
+        },
+        shellExecutionConfig,
+        {
+          postPromote: {
+            onData: (event) => dataChunks.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+
+      // Error listener must be installed even without onSettle —
+      // emitting 'error' on an EventEmitter with no listener throws.
+      expect(() =>
+        mockPtyProcess.emit('error', new Error('post-promote pty err')),
+      ).not.toThrow();
+
+      // onExit must also be installed so disposePostPromoteListeners
+      // runs on natural exit (cleaning up data + error listeners).
+      const onExitRegistrations = mockPtyProcess.onExit.mock.calls;
+      expect(onExitRegistrations.length).toBeGreaterThanOrEqual(2);
+      const postPromoteExitHandler =
+        onExitRegistrations[onExitRegistrations.length - 1][0];
+
+      // Simulate natural exit — should dispose listeners without crash.
+      postPromoteExitHandler({ exitCode: 0 });
+    });
+
     it('PR-2.5 backwards compat: without postPromote, listeners stay fully detached (no regression on PR-2 contract)', async () => {
       // Pin that omitting `postPromote` preserves the PR-2 detach-
       // everything contract. The pre-existing post-promote test at

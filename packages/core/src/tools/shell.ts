@@ -47,6 +47,8 @@ import {
   getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
+  type ShellConfiguration,
+  type ShellType,
   splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
@@ -905,6 +907,9 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  */
 const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
+/** Maximum wait for the output stream flush before transitioning the registry. */
+const PROMOTE_FLUSH_TIMEOUT_MS = 10_000;
+
 /**
  * PR-2.5 slots shared between the foreground `execute()` postPromote
  * handlers and the post-resolve `handlePromotedForeground` finalizer.
@@ -945,7 +950,7 @@ interface PromoteArtifacts {
    * sustained child whose output file we can't open, OR strand
    * late-arriving post-settle bytes in an undrainable buffer.
    */
-  streamFailed: boolean;
+  streamClosed: boolean;
   /**
    * Settle handler installed by `handlePromotedForeground` once the
    * registry entry exists. Null until then; `onSettle` calls below
@@ -1684,7 +1689,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const promoteArtifacts: PromoteArtifacts = {
       buffer: [],
       stream: null,
-      streamFailed: false,
+      streamClosed: false,
       onSettleWired: null,
       settleQueued: null,
     };
@@ -1696,7 +1701,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // owned by the foreground stream, which by promote-time has
         // already terminated.
         //
-        // PR-2.5 wave-4 (gpt-5.5 T4): strip ANSI before writing so
+        // PR-2.5 wave-4: strip ANSI before writing so
         // the post-promote tail of `bg_xxx.output` matches the format
         // of the snapshot above (which is rendered terminal text, not
         // raw escape sequences) AND matches the regular
@@ -1721,7 +1726,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               `promote: postPromote stream.write failed: ${getErrorMessage(err)}`,
             );
           }
-        } else if (promoteArtifacts.streamFailed) {
+        } else if (promoteArtifacts.streamClosed) {
           // Stream-open already failed permanently — drop chunks
           // rather than buffer them. Without this guard the buffer
           // would grow without bound under a sustained child whose
@@ -2248,7 +2253,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let outputStream: fs.WriteStream | null = null;
     try {
       outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
-      // PR-2.5 wave-2 (gpt-5.5 C1): `createWriteStream` reports common
+      // PR-2.5 wave-2: `createWriteStream` reports common
       // failures (ENOENT / EACCES / ENOSPC during the async libuv
       // `open`) via an `'error'` event AFTER this synchronous call
       // returns — they do NOT throw. Without latching the failure
@@ -2258,20 +2263,31 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // releasing the buffer), and `onSettleWired` would attach a
       // `'finish'` listener that never fires → registry stuck on
       // `running` forever. Latch the failure: null the stream,
-      // mark `streamFailed` so `onData` drops chunks, and let
+      // mark `streamClosed` so `onData` drops chunks, and let
       // `onSettleWired` transition the registry immediately (its
       // existing `if (!stream)` branch handles that case).
       outputStream.on('error', (err) => {
         debugLogger.warn(
           `promote: output write stream error for ${outputPath}: ${getErrorMessage(err)}`,
         );
+        const droppedChunks = promoteArtifacts.buffer.length;
         promoteArtifacts.stream = null;
-        promoteArtifacts.streamFailed = true;
+        promoteArtifacts.streamClosed = true;
+        try {
+          fs.appendFileSync(
+            outputPath,
+            `\n[WARNING: post-promote output lost — stream error (${getErrorMessage(err)}). ${droppedChunks} buffered chunks dropped.]\n`,
+          );
+        } catch {
+          // Best-effort diagnostic — if the append itself fails
+          // (e.g. disk full), the debugLogger.warn above is the
+          // only trace left.
+        }
       });
       // Initial snapshot first, so it always precedes post-promote
       // bytes in the file (write ordering is FIFO on a single stream).
       outputStream.write(result.output);
-      // PR-2.5 wave-4 (gpt-5.5 T2): assign the stream BEFORE draining
+      // PR-2.5 wave-4: assign the stream BEFORE draining
       // the buffer, not after. The drain + assign block is synchronous
       // today (single-tick JS, so a service-side `onData` callback
       // cannot fire between drain-end and assign), but the assign-
@@ -2300,12 +2316,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // (their warns will accumulate in the log, which is enough
       // observability for a rare disk failure case).
       promoteArtifacts.stream = null;
-      // Latch streamFailed so the foreground postPromote.onData
+      // Latch streamClosed so the foreground postPromote.onData
       // handler stops buffering chunks that would never be drained
       // (the drain path only runs when `stream` becomes non-null,
       // which never happens after this branch).
-      promoteArtifacts.streamFailed = true;
-      // PR-2.5 wave-3 (deepseek-v4-pro T3): record how many pre-
+      promoteArtifacts.streamClosed = true;
+      // PR-2.5 wave-3: record how many pre-
       // finalizer post-promote chunks are being dropped. Without
       // this an oncall engineer reading a truncated `bg_xxx.output`
       // has no signal that the truncation is due to stream-open
@@ -2485,7 +2501,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //   the right terminal status even if the registry transition is
     //   still in flight.
     //
-    // PR-2.5 wave-2 (gpt-5.5 C3): originally the model-facing copy
+    // PR-2.5 wave-2: originally the model-facing copy
     // checked a `postPromoteAlreadySettled` flag that was only flipped
     // AFTER the registry transition fired (post-flush). A fast-exited
     // promoted command could therefore land "Status: running" +
@@ -2506,13 +2522,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (info.error) return { status: 'failed', failMsg: info.error.message };
       if (info.exitCode === 0) return { status: 'completed', failMsg: null };
       if (info.exitCode !== null)
-        return { status: 'failed', failMsg: `Exited with code ${info.exitCode}` };
+        return {
+          status: 'failed',
+          failMsg: `Exited with code ${info.exitCode}`,
+        };
       if (info.signal !== null)
         return {
           status: 'failed',
           failMsg: `Terminated by signal ${info.signal}`,
         };
-      // PR-2.5 wave-3 (deepseek-v4-pro T5): this branch is meant to
+      // PR-2.5 wave-3: this branch is meant to
       // be unreachable — the service always populates one of
       // `error` / `exitCode` / `signal`. Hitting it means the
       // service emitted a defective settle info object, which is a
@@ -2554,17 +2573,17 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // `completed`/`failed` and read the output file BEFORE the
       // trailing bytes are on disk, producing truncated logs.
       const stream = promoteArtifacts.stream;
-      // PR-2.5 wave-3 (deepseek-v4-pro T2): drain the pre-settle
+      // PR-2.5 wave-3: drain the pre-settle
       // buffer to the stream BEFORE nulling the shared slot. Service-
       // side `onData` callbacks that race the foreground finalizer
       // can land chunks in the buffer between when the wire fires
       // and when the buffer drain (during stream-open) sees them.
       // Without this drain those chunks are stranded. AND latch
-      // `streamFailed` together with the null so that any
+      // `streamClosed` together with the null so that any
       // chunk arriving AFTER `.end()` (during the flush window —
       // unlikely once the service has emitted settle, but kernel
       // buffers can deliver late on PTY) is DROPPED via the
-      // `else if (promoteArtifacts.streamFailed)` arm in `onData`
+      // `else if (promoteArtifacts.streamClosed)` arm in `onData`
       // instead of being pushed into the now-undrainable buffer.
       if (stream) {
         while (promoteArtifacts.buffer.length > 0) {
@@ -2574,7 +2593,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // Stream write failure during pre-end drain — log + drop,
             // same recovery posture as the foreground `onData` write
             // path. The error event will fire async if the stream is
-            // dead, latching `streamFailed` via the 'error' handler.
+            // dead, latching `streamClosed` via the 'error' handler.
             debugLogger.warn(
               `promote: pre-end buffer drain write failed: ${getErrorMessage(writeErr)}`,
             );
@@ -2582,7 +2601,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
       promoteArtifacts.stream = null;
-      promoteArtifacts.streamFailed = true;
+      promoteArtifacts.streamClosed = true;
       if (!stream) {
         // No stream (open failed or already ended) — transition right
         // away, no flush to wait on.
@@ -2600,10 +2619,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
           transitioned = true;
           transitionRegistry(info);
         };
-        stream.once('finish', finalize);
+        const flushTimer = setTimeout(() => {
+          debugLogger.warn(
+            `promote: output stream flush timed out for ${shellId} after ${PROMOTE_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
+          );
+          finalize();
+        }, PROMOTE_FLUSH_TIMEOUT_MS);
+        flushTimer.unref();
+        stream.once('finish', () => {
+          clearTimeout(flushTimer);
+          finalize();
+        });
         stream.once('error', () => {
-          // Stream already logged via its general 'error' listener at
-          // open time; just make sure we still transition the entry.
+          clearTimeout(flushTimer);
           finalize();
         });
         stream.end();
@@ -3941,16 +3969,126 @@ export class ShellToolInvocation extends BaseToolInvocation<
   }
 }
 
+function getExecutableBasename(executable: string): string {
+  return path.basename(path.win32.basename(executable));
+}
+
+function getShellDisplayName({
+  executable,
+  shell,
+}: ShellConfiguration): string {
+  switch (shell) {
+    case 'cmd':
+      return 'cmd.exe';
+    case 'powershell': {
+      const basename = getExecutableBasename(executable).toLowerCase();
+      return basename === 'pwsh.exe' ? 'pwsh.exe' : 'powershell.exe';
+    }
+    case 'bash':
+      return 'bash';
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
+function getShellExecutionWrapper(
+  shellConfiguration = getShellConfiguration(),
+): string {
+  const executable = getShellDisplayName(shellConfiguration);
+  return `${executable} ${shellConfiguration.argsPrefix.join(' ')} <command>`;
+}
+
+function getShellQuotingGuidance(shell: ShellType): string {
+  switch (shell) {
+    case 'bash':
+      return `- **Shell argument quoting and special characters**: The active shell is Bash. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent Bash from misinterpreting them as shell syntax:
+  - **Single quotes** \`'...'\` pass everything literally, but cannot contain a literal single quote.
+  - **ANSI-C quoting** \`$'...'\` supports escape sequences (e.g. \`\\n\` for newline, \`\\'\` for single quote) and is the safest approach for multi-line strings or strings with single quotes.
+  - **Heredoc** is the most robust approach for large, multi-line text with mixed quotes:
+    \`\`\`bash
+    gh pr create --title "My Title" --body "$(cat <<'HEREDOC'
+    Multi-line body with (parentheses), \`backticks\`, and 'single-quotes'.
+    HEREDOC
+    )"
+    \`\`\`
+  - NEVER use unescaped single quotes inside single-quoted strings (e.g. \`'it\\'s'\` is wrong; use \`$'it\\'s'\` or \`"it's"\` instead).
+  - If unsure, prefer double-quoting arguments and escape inner double-quotes as \`\\"\`.`;
+    case 'powershell':
+      return `- **Shell argument quoting and special characters**: The active shell is PowerShell. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent PowerShell from misinterpreting them as shell syntax:
+  - **Single quotes** \`'...'\` pass everything literally. To include a literal single quote, double it (e.g. \`'it''s'\`).
+  - **Double quotes** \`"..."\` expand variables and subexpressions; use them only when that expansion is intended.
+  - Escape PowerShell metacharacters with the backtick escape character when they must be literal.
+  - For large, multi-line text, prefer a single-quoted here-string (\`@' ... '@\`) so content is not interpolated.
+  - Do NOT use Bash-only forms such as ANSI-C quoting (\`$'...'\`) or Bash heredocs.`;
+    case 'cmd':
+      return `- **Shell argument quoting and special characters**: The active shell is cmd.exe. When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent cmd.exe from misinterpreting them as shell syntax:
+  - Use double quotes around arguments that contain spaces or metacharacters.
+  - Escape literal cmd.exe metacharacters such as \`&\`, \`|\`, \`<\`, \`>\`, and \`^\` with caret (\`^\`).
+  - Single quotes do not quote arguments in cmd.exe.
+  - Be careful with \`%VAR%\` environment-variable expansion; avoid literal \`%...%\` unless expansion is intended.
+  - Do NOT use Bash-only forms such as ANSI-C quoting (\`$'...'\`) or Bash heredocs.`;
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
+function getShellCommandSequencingGuidance({
+  executable,
+  shell,
+}: ShellConfiguration): string {
+  const independentGuidance =
+    '- If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.';
+
+  switch (shell) {
+    case 'bash':
+      return `- When issuing multiple commands:
+  ${independentGuidance}
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
+  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
+    case 'cmd':
+      return `- When issuing multiple commands:
+  ${independentGuidance}
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
+  - Use '&' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use ';' or newlines to separate commands in cmd.exe.`;
+    case 'powershell': {
+      const executableBasename =
+        getExecutableBasename(executable).toLowerCase();
+      if (executableBasename === 'pwsh.exe') {
+        return `- When issuing multiple commands:
+  ${independentGuidance}
+  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`).
+  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
+      }
+
+      return `- When issuing multiple commands:
+  ${independentGuidance}
+  - Windows PowerShell does not support '&&'. If commands must run sequentially and stop on failure, use explicit PowerShell control flow (for example, check \`$LASTEXITCODE\` before running the next external command) or run the next command only after seeing the previous run_shell_command result.
+  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail.
+  - DO NOT use newlines to separate commands (newlines are ok in quoted strings).`;
+    }
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
+  }
+}
+
 function getShellToolDescription(): string {
+  const shellConfiguration = getShellConfiguration();
+  const executionWrapper = getShellExecutionWrapper(shellConfiguration);
   const isWindows = os.platform() === 'win32';
-  const executionWrapper = isWindows
-    ? 'cmd.exe /c <command>'
-    : 'bash -c <command>';
   const processGroupNote = isWindows
     ? ''
     : '\n  - Command is executed as a subprocess that leads its own process group. Command process group can be terminated as `kill -- -PGID` or signaled as `kill -s SIGNAL -- -PGID`.';
 
-  return `Executes a given shell command (as \`${executionWrapper}\`) in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+  return `Executes a given shell command (as \`${executionWrapper}\`) in a subprocess with optional timeout, ensuring proper handling and security measures.
 
 IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
@@ -3966,23 +4104,8 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO N
   - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
   - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
   - Communication: Output text directly (NOT echo/printf)
-- **Shell argument quoting and special characters**: When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent the shell from misinterpreting them as shell syntax:
-  - **Single quotes** \`'...'\` pass everything literally, but cannot contain a literal single quote.
-  - **ANSI-C quoting** \`$'...'\` supports escape sequences (e.g. \`\\n\` for newline, \`\\'\` for single quote) and is the safest approach for multi-line strings or strings with single quotes.
-  - **Heredoc** is the most robust approach for large, multi-line text with mixed quotes:
-    \`\`\`bash
-    gh pr create --title "My Title" --body "$(cat <<'HEREDOC'
-    Multi-line body with (parentheses), \`backticks\`, and 'single-quotes'.
-    HEREDOC
-    )"
-    \`\`\`
-  - NEVER use unescaped single quotes inside single-quoted strings (e.g. \`'it\\'s'\` is wrong; use \`$'it\\'s'\` or \`"it's"\` instead).
-  - If unsure, prefer double-quoting arguments and escape inner double-quotes as \`\\"\`.
-- When issuing multiple commands:
-  - If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.
-  - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
-  - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-  - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+${getShellQuotingGuidance(shellConfiguration.shell)}
+${getShellCommandSequencingGuidance(shellConfiguration)}
 - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of \`cd\`. You may use \`cd\` if the User explicitly requests it.
   <good-example>
   pytest /foo/bar/tests
@@ -4010,10 +4133,19 @@ ${processGroupNote}
 }
 
 function getCommandDescription(): string {
-  if (os.platform() === 'win32') {
-    return 'Exact command to execute as `cmd.exe /c <command>`';
-  } else {
-    return 'Exact bash command to execute as `bash -c <command>`';
+  const shellConfiguration = getShellConfiguration();
+  const executionWrapper = getShellExecutionWrapper(shellConfiguration);
+  switch (shellConfiguration.shell) {
+    case 'cmd':
+      return `Exact cmd.exe command to execute as \`${executionWrapper}\``;
+    case 'powershell':
+      return `Exact PowerShell command to execute as \`${executionWrapper}\``;
+    case 'bash':
+      return `Exact bash command to execute as \`${executionWrapper}\``;
+    default: {
+      const _exhaustive: never = shellConfiguration.shell;
+      return _exhaustive;
+    }
   }
 }
 

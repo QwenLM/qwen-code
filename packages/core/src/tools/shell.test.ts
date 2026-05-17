@@ -40,6 +40,19 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
+interface ShellToolParameterJsonSchema {
+  properties: {
+    command: {
+      description: string;
+    };
+  };
+}
+
+function getCommandParameterDescription(shellTool: ShellTool): string {
+  return (shellTool.schema.parametersJsonSchema as ShellToolParameterJsonSchema)
+    .properties.command.description;
+}
+
 describe('ShellTool', () => {
   let shellTool: ShellTool;
   let mockConfig: Config;
@@ -95,13 +108,13 @@ describe('ShellTool', () => {
       on: vi.fn(),
     } as unknown as fs.WriteStream);
 
-    shellTool = new ShellTool(mockConfig);
-
     vi.mocked(os.platform).mockReturnValue('linux');
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
     (vi.mocked(crypto.randomBytes) as Mock).mockReturnValue(
       Buffer.from('abcdef', 'hex'),
     );
+
+    shellTool = new ShellTool(mockConfig);
 
     // Capture the output callback to simulate streaming events from the service
     mockShellExecutionService.mockImplementation((_cmd, _cwd, callback) => {
@@ -3538,7 +3551,7 @@ describe('ShellTool', () => {
         const promise = (invocation as ShellToolInvocation).execute(
           mockAbortSignal,
           undefined,
-          expect.objectContaining({}),
+          {},
           undefined,
           setPromoteAc,
         );
@@ -3833,7 +3846,7 @@ describe('ShellTool', () => {
         const promise = (invocation as ShellToolInvocation).execute(
           mockAbortSignal,
           undefined,
-          expect.objectContaining({}),
+          {},
           undefined,
           setPromoteAc,
         );
@@ -4186,6 +4199,76 @@ describe('ShellTool', () => {
         expect(result.llmContent).not.toContain('task_stop({');
       });
 
+      it('queued-settle race with non-zero exit code: llmContent reflects failed status', async () => {
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        let capturedPostPromote:
+          | {
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            capturedPostPromote?.onSettle?.({
+              exitCode: 1,
+              signal: null,
+              endTime: 1700000000456,
+            });
+            return {
+              pid: 88888,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'error output',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 88888,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'exit 1',
+          is_background: false,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Exited with code 1',
+          1700000000456,
+        );
+        expect(result.llmContent).toContain('Status: failed.');
+        expect(result.llmContent).not.toContain('Status: running.');
+        expect(result.llmContent).toContain('already exited');
+        expect(result.llmContent).not.toContain('task_stop({');
+      });
+
       it("wave-2 (C3): llmContent reflects 'completed' even when stream.once('finish') fires asynchronously after the queued-settle drain", async () => {
         // Regression for the C3 race: previously the model-facing
         // status flag was only flipped INSIDE `transitionRegistry`,
@@ -4288,7 +4371,7 @@ describe('ShellTool', () => {
         );
       });
 
-      it("wave-2 (C1): stream open async error transitions registry — does not hang waiting on `finish`", async () => {
+      it('wave-2 (C1): stream open async error transitions registry — does not hang waiting on `finish`', async () => {
         // Regression for C1: `fs.createWriteStream` reports common
         // open failures (ENOENT / EACCES / ENOSPC) via an async
         // 'error' event, NOT by throwing. Before the fix, the
@@ -4296,7 +4379,7 @@ describe('ShellTool', () => {
         // kept pointing at the already-broken stream, and
         // `onSettleWired` attached a `.once('finish', ...)` listener
         // that would never fire → registry stuck on `running` forever.
-        // Fix: the error listener latches `streamFailed`, nulls the
+        // Fix: the error listener latches `streamClosed`, nulls the
         // shared `stream` slot, and `onSettleWired`'s existing
         // `if (!stream)` branch transitions the registry immediately.
         const errorListeners: Array<(err: Error) => void> = [];
@@ -4371,17 +4454,119 @@ describe('ShellTool', () => {
         );
       });
 
-      it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamFailed so post-end chunks drop instead of leaking the buffer', async () => {
+      it('stream open async error writes diagnostic marker via appendFileSync', async () => {
+        const errorListeners: Array<(err: Error) => void> = [];
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn((event: string, handler: (err: Error) => void) => {
+            if (event === 'error') errorListeners.push(handler);
+          }),
+          once: vi.fn(),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 99998,
+        });
+        await promise;
+
+        errorListeners[0](
+          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
+        );
+
+        expect(fs.appendFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('bg_'),
+          expect.stringContaining('[WARNING: post-promote output lost'),
+        );
+      });
+
+      it('flush timeout transitions registry when stream.finish never fires', async () => {
+        vi.useFakeTimers();
+        try {
+          const writeStreamMock = {
+            write: vi.fn(),
+            end: vi.fn(),
+            on: vi.fn(),
+            once: vi.fn(),
+          };
+          vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+            writeStreamMock as unknown as fs.WriteStream,
+          );
+          const registry = mockConfig.getBackgroundShellRegistry();
+
+          const invocation = shellTool.build({
+            command: 'sleep 1',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 99997,
+          });
+          await promise;
+
+          const serviceCall = mockShellExecutionService.mock.calls[0];
+          const onSettle = (
+            serviceCall[6] as {
+              postPromote: {
+                onSettle: (info: {
+                  exitCode: number | null;
+                  signal: number | null;
+                  error?: Error;
+                  endTime: number;
+                }) => void;
+              };
+            }
+          ).postPromote.onSettle;
+
+          onSettle({ exitCode: 0, signal: null, endTime: 1700000222222 });
+
+          // stream.once('finish') was NOT fired — registry should
+          // NOT have transitioned yet.
+          expect(registry.complete).not.toHaveBeenCalled();
+
+          // Advance past the 10s flush timeout.
+          vi.advanceTimersByTime(10_001);
+
+          const entry = (registry.register as Mock).mock.calls[0][0];
+          expect(registry.complete).toHaveBeenCalledWith(
+            entry.shellId,
+            0,
+            1700000222222,
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamClosed so post-end chunks drop instead of leaking the buffer', async () => {
         // Regression for the buffer-drain race: previously
         // `onSettleWired` set `promoteArtifacts.stream = null` BEFORE
         // calling `stream.end()`. Any `onData` chunk that arrived
         // between the null assignment and the `'finish'` event saw
-        // `stream === null && streamFailed === false` and pushed
+        // `stream === null && streamClosed === false` and pushed
         // into `promoteArtifacts.buffer` — which has no further
         // drain path (the foreground finalizer has already
         // returned). Result: chunks stranded forever, no
         // observability. Fix drains the buffer to the stream BEFORE
-        // nulling AND latches `streamFailed=true` so any subsequent
+        // nulling AND latches `streamClosed=true` so any subsequent
         // chunks DROP via the third branch of `onData` instead.
         const writeStreamMock = {
           write: vi.fn(),
@@ -4409,7 +4594,9 @@ describe('ShellTool', () => {
           | undefined;
         mockShellExecutionService.mockImplementationOnce(
           (...args: unknown[]) => {
-            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
             capturedPostPromote = opts?.postPromote;
             return {
               pid: 55555,
@@ -4459,7 +4646,7 @@ describe('ShellTool', () => {
         expect(writeStreamMock.write).toHaveBeenCalledWith('mid1');
 
         // Fire settle. onSettleWired now drains any remaining buffer,
-        // nulls stream, latches streamFailed.
+        // nulls stream, latches streamClosed.
         capturedPostPromote?.onSettle?.({
           exitCode: 0,
           signal: null,
@@ -4473,7 +4660,7 @@ describe('ShellTool', () => {
         capturedPostPromote?.onData?.({ type: 'data', chunk: 'post2' });
 
         // Stream.write should NOT have been called for post-settle
-        // chunks (stream is null + streamFailed latched → onData's
+        // chunks (stream is null + streamClosed latched → onData's
         // third branch drops).
         const writeCalls = writeStreamMock.write.mock.calls.map(
           (c: unknown[]) => c[0],
@@ -4497,7 +4684,9 @@ describe('ShellTool', () => {
         // does not crash, (c) a post-buffer-drain settle still
         // transitions the registry.
         vi.mocked(fs.createWriteStream).mockImplementationOnce(() => {
-          throw Object.assign(new Error('ENOENT no tmpdir'), { code: 'ENOENT' });
+          throw Object.assign(new Error('ENOENT no tmpdir'), {
+            code: 'ENOENT',
+          });
         });
         // Spy on writeFileSync (the snapshot fallback) — passthrough
         // implementation since the default mock would be no-op.
@@ -4519,7 +4708,9 @@ describe('ShellTool', () => {
           | undefined;
         mockShellExecutionService.mockImplementationOnce(
           (...args: unknown[]) => {
-            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
             capturedPostPromote = opts?.postPromote;
             // Fire 3 pre-finalizer chunks → all queue in buffer.
             capturedPostPromote?.onData?.({ type: 'data', chunk: 'a' });
@@ -4556,7 +4747,7 @@ describe('ShellTool', () => {
         );
 
         // Post-settle chunks must not surface anywhere either —
-        // streamFailed was set by the catch path so subsequent
+        // streamClosed was set by the catch path so subsequent
         // onData chunks drop. Drive a settle, then a late chunk;
         // verify the registry still transitions normally and the
         // late chunk is dropped without crashing.
@@ -4609,7 +4800,9 @@ describe('ShellTool', () => {
           | undefined;
         mockShellExecutionService.mockImplementationOnce(
           (...args: unknown[]) => {
-            const opts = args[6] as { postPromote?: typeof capturedPostPromote };
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
             capturedPostPromote = opts?.postPromote;
             return {
               pid: 33333,
@@ -4778,16 +4971,104 @@ describe('ShellTool', () => {
   });
 
   describe('getDescription', () => {
+    const originalEnv = { ...process.env };
+
+    afterEach(() => {
+      process.env = { ...originalEnv };
+    });
+
     it('should return the windows description when on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('win32');
+      delete process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
+      expect(shellTool.description).toContain(
+        "Use '&' only when you need to run commands sequentially",
+      );
+      expect(shellTool.description).toContain(
+        "DO NOT use ';' or newlines to separate commands in cmd.exe.",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact cmd.exe command to execute as `cmd.exe /d /s /c <command>`',
+      );
     });
 
     it('should return the non-windows description when not on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('linux');
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact bash command to execute as `bash -c <command>`',
+      );
+    });
+
+    it('should describe PowerShell when ComSpec points to powershell.exe', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] =
+        'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain(
+        '`powershell.exe -NoProfile -Command <command>`',
+      );
+      expect(shellTool.description).toContain(
+        'The active shell is PowerShell.',
+      );
+      expect(shellTool.description).toContain(
+        'Do NOT use Bash-only forms such as ANSI-C quoting',
+      );
+      expect(shellTool.description).toContain(
+        "Windows PowerShell does not support '&&'.",
+      );
+      expect(shellTool.description).not.toContain(
+        "use a single run_shell_command call with '&&'",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact PowerShell command to execute as `powershell.exe -NoProfile -Command <command>`',
+      );
+    });
+
+    it('should describe pwsh when ComSpec points to pwsh.exe', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain(
+        '`pwsh.exe -NoProfile -Command <command>`',
+      );
+      expect(shellTool.description).toContain(
+        "use a single run_shell_command call with '&&'",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact PowerShell command to execute as `pwsh.exe -NoProfile -Command <command>`',
+      );
+    });
+
+    it('should describe bash when Windows is running in Git Bash', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] = 'C:\\WINDOWS\\System32\\cmd.exe';
+      process.env['MSYSTEM'] = 'MINGW64';
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain('`bash -c <command>`');
+      expect(shellTool.description).toContain('The active shell is Bash.');
+      expect(shellTool.description).toContain('ANSI-C quoting');
+      expect(shellTool.description).not.toContain(
+        'Command process group can be terminated',
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact bash command to execute as `bash -c <command>`',
+      );
     });
   });
 

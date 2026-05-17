@@ -180,7 +180,7 @@ describe('qwen serve — CORS browser-origin denial', () => {
 });
 
 describe('qwen serve — capabilities envelope', () => {
-  it('advertises all 10 Stage 1 features', async () => {
+  it('advertises all Stage 1 features', async () => {
     const caps = await client.capabilities();
     expect(caps.v).toBe(1);
     expect(caps.mode).toBe('http-bridge');
@@ -192,11 +192,15 @@ describe('qwen serve — capabilities envelope', () => {
       'capabilities',
       'session_create',
       'session_scope_override',
+      'session_load',
+      'unstable_session_resume',
       'session_list',
       'session_prompt',
       'session_cancel',
       'session_events',
       'session_set_model',
+      'client_identity',
+      'session_permission_vote',
       'permission_vote',
     ]);
   });

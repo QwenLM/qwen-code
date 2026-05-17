@@ -24,9 +24,13 @@
  * catastrophic-regression upper bounds (e.g. RSS at 1 session < 500 MB);
  * everything else is reported into the snapshot.
  *
- * POSIX only. The harness uses `ps` + `pgrep`; Windows is skipped via the
- * `describe.skip` gate at the bottom of this file (matches the existing
- * `qwen-serve-streaming.test.ts:53` precedent).
+ * POSIX only. The harness uses `ps` + `pgrep` against the host process
+ * table. Windows is skipped (no `ps`/`pgrep`); Docker/Podman sandbox is
+ * also skipped because the daemon's `qwen --acp` child and its MCP
+ * grandchildren run inside the sandbox container's PID namespace, which
+ * host-side `pgrep -P` cannot observe — the descendant walk would always
+ * see zero MCP grandchildren and time out. Same rationale and skip shape
+ * as `acp-integration.test.ts` / `cron-tools.test.ts`.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -55,8 +59,16 @@ interface BridgeEventLike {
   type: string;
 }
 
-// Skip immediately on Windows — the helpers shell out to `ps` / `pgrep`.
-const SKIP = process.platform === 'win32';
+// Skip on Windows (helpers shell out to `ps` / `pgrep`) and under
+// Docker/Podman sandbox (the daemon subtree runs in a separate PID
+// namespace the host `pgrep` can't observe — matches the existing
+// `acp-integration.test.ts` / `cron-tools.test.ts` skip precedent).
+const SKIP =
+  process.platform === 'win32' ||
+  Boolean(
+    process.env['QWEN_SANDBOX'] &&
+      process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false',
+  );
 
 // Read iteration tunings from env (documented in #4175 PR 1 plan).
 const HEAVY = process.env['QWEN_BASELINE_HEAVY'] === '1';
