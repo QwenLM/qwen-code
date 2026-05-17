@@ -773,6 +773,60 @@ describe('createServeApp', () => {
         requestedAction: 'load',
       });
     });
+
+    it('400 workspace_mismatch when the bridge throws WorkspaceMismatchError', async () => {
+      const bridge = fakeBridge({
+        loadImpl: async () => {
+          throw new WorkspaceMismatchError(WS_BOUND, WS_DIFFERENT);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session/persisted-x/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_DIFFERENT });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_mismatch',
+        boundWorkspace: WS_BOUND,
+        requestedWorkspace: WS_DIFFERENT,
+      });
+    });
+
+    it('503 + Retry-After: 5 when the bridge throws SessionLimitExceededError', async () => {
+      const bridge = fakeBridge({
+        resumeImpl: async () => {
+          throw new SessionLimitExceededError(20);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-y/resume')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(503);
+      expect(res.headers['retry-after']).toBe('5');
+      expect(res.body).toMatchObject({
+        code: 'session_limit_exceeded',
+        limit: 20,
+      });
+    });
+
+    // The restore handler's `!res.writable` cleanup branch (kill on
+    // !attached, detach on attached) is line-for-line identical to
+    // the matching branch on `POST /session`; routing-side
+    // disconnect tests for that handler weren't added when the
+    // cleanup was originally introduced because the supertest +
+    // Node http close-event timing makes the assertion flaky in
+    // CI. The same constraint applies here. The cleanup behavior
+    // is exercised manually via the route handler closure shared
+    // between both routes in `restoreSessionHandler`.
   });
 
   describe('POST /session/:id/prompt', () => {
