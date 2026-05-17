@@ -138,6 +138,34 @@ export interface BridgeClientRequestContext {
   clientId?: string;
 }
 
+/**
+ * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
+ * `Date.now()` epoch (ms) the bridge stored for this session/client
+ * pair — the same value future diagnostics and revocation policy
+ * (Wave 5 PR 24) will read. `clientId` is echoed only when the caller
+ * provided a trusted one through `X-Qwen-Client-Id`; anonymous
+ * heartbeats omit it but still bump the per-session timestamp.
+ */
+export interface BridgeHeartbeatResult {
+  sessionId: string;
+  clientId?: string;
+  lastSeenAt: number;
+}
+
+/**
+ * Read-only snapshot of last-seen timestamps the bridge has recorded for
+ * a session. `sessionLastSeenAt` is the most recent heartbeat across any
+ * client (anonymous or identified). `clientLastSeenAt` maps each
+ * registered `clientId` to its own last heartbeat. Returned by
+ * `getHeartbeatState` for in-process diagnostics; the eventual read-only
+ * `GET /session/:id/heartbeat-state` route (Wave 3 PR 12) will surface
+ * the same shape over HTTP.
+ */
+export interface BridgeHeartbeatState {
+  sessionLastSeenAt?: number;
+  clientLastSeenAt: ReadonlyMap<string, number>;
+}
+
 export interface HttpAcpBridge {
   /**
    * Create a new session, or — under `sessionScope: 'single'` — attach to an
@@ -232,6 +260,33 @@ export interface HttpAcpBridge {
    * a session-picker UI shouldn't 404 just because the workspace is idle.
    */
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
+
+  /**
+   * Record a client heartbeat for the session. Bumps the per-session
+   * `sessionLastSeenAt` and, when a trusted `clientId` is supplied,
+   * the per-client entry in `clientLastSeenAt`. Throws
+   * `SessionNotFoundError` when the id is unknown and
+   * `InvalidClientIdError` when the supplied `clientId` is not
+   * registered for this session — the same shape `sendPrompt` /
+   * `setSessionModel` use, so HTTP routes can map it to `400
+   * invalid_client_id` consistently.
+   *
+   * The recorded timestamps are exposed via `getHeartbeatState`; this
+   * PR keeps them in-process only (future diagnostics route in PR 12,
+   * future revocation policy in PR 24).
+   */
+  recordHeartbeat(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): BridgeHeartbeatResult;
+
+  /**
+   * Read the bridge's recorded last-seen timestamps for a session.
+   * Returns `undefined` for unknown sessions. The map is a snapshot —
+   * callers must not mutate it. Stage 1 surfaces this only to in-
+   * process callers (tests, future read-only diagnostics routes).
+   */
+  getHeartbeatState(sessionId: string): BridgeHeartbeatState | undefined;
 
   /**
    * Switch the active model service for a session. Forwards through ACP's
@@ -748,6 +803,21 @@ interface SessionEntry {
    * had an ACP load/resume response, so attaches return `state: {}`.
    */
   restoreState?: BridgeSessionState;
+  /**
+   * Most recent heartbeat across any client on this session (Date.now()
+   * epoch ms). Set on every `recordHeartbeat` call regardless of whether
+   * the caller identified themselves; consumed by future diagnostics
+   * (PR 12) and revocation policy (PR 24). Undefined until the first
+   * heartbeat lands.
+   */
+  sessionLastSeenAt?: number;
+  /**
+   * Per-`clientId` last heartbeat (Date.now() epoch ms). Only populated
+   * when the heartbeat carried a trusted `X-Qwen-Client-Id`. Entries are
+   * dropped together with the parent session — there's no per-client
+   * eviction in this PR; revocation policy (PR 24) will own that.
+   */
+  clientLastSeenAt: Map<string, number>;
 }
 
 interface PendingPermission {
@@ -1439,6 +1509,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      // Drop the last-seen entry alongside the registration ref.
+      // Otherwise a long-lived daemon servicing a churn of disconnect/
+      // reconnect clients (each picking a fresh `clientId`) would
+      // accumulate stale heartbeat timestamps for clients that no
+      // longer exist — the very leak revocation policy (PR 24) is
+      // meant to plug.
+      entry.clientLastSeenAt.delete(clientId);
     } else {
       entry.clientIds.set(clientId, count - 1);
     }
@@ -2054,6 +2131,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       modelChangeQueue: Promise.resolve(),
       pendingPermissionIds: new Set(),
       clientIds: new Map(),
+      clientLastSeenAt: new Map(),
       attachCount: 0,
       spawnOwnerWantedKill: false,
     };
@@ -2783,6 +2861,42 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
       }
       return out;
+    },
+
+    recordHeartbeat(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Validate the optional client id BEFORE bumping any timestamp so
+      // an unknown client doesn't get to advance the per-session
+      // watermark — that would let an attacker with a valid bearer
+      // token mask client absence by spamming heartbeats with random
+      // ids. `resolveTrustedClientId` throws `InvalidClientIdError`,
+      // which the route layer maps to `400 invalid_client_id`.
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const lastSeenAt = Date.now();
+      entry.sessionLastSeenAt = lastSeenAt;
+      if (clientId !== undefined) {
+        entry.clientLastSeenAt.set(clientId, lastSeenAt);
+      }
+      return {
+        sessionId: entry.sessionId,
+        ...(clientId !== undefined ? { clientId } : {}),
+        lastSeenAt,
+      };
+    },
+
+    getHeartbeatState(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) return undefined;
+      // Snapshot the client map so callers can't mutate the live one;
+      // `sessionLastSeenAt` is undefined for sessions that have never
+      // received a heartbeat (the typical state right after spawn).
+      return {
+        ...(entry.sessionLastSeenAt !== undefined
+          ? { sessionLastSeenAt: entry.sessionLastSeenAt }
+          : {}),
+        clientLastSeenAt: new Map(entry.clientLastSeenAt),
+      };
     },
 
     async setSessionModel(sessionId, req, context) {

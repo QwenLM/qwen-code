@@ -464,6 +464,63 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('heartbeat', () => {
+    it('POSTs /heartbeat with an empty JSON body and returns the result', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          lastSeenAt: 1_700_000_000_000,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.heartbeat('s-1');
+      expect(result).toEqual({
+        sessionId: 's-1',
+        lastSeenAt: 1_700_000_000_000,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/heartbeat');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('sends the client identity header when provided', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          clientId: 'client-1',
+          lastSeenAt: 1_700_000_000_001,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.heartbeat('s-1', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(result.clientId).toBe('client-1');
+    });
+
+    it('throws DaemonHttpError on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.heartbeat('s-1')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+
+    it('throws DaemonHttpError on 400 invalid_client_id', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: 'unknown client',
+          code: 'invalid_client_id',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.heartbeat('s-1', 'forged')).rejects.toMatchObject({
+        status: 400,
+      });
+    });
+  });
+
   describe('respondToPermission', () => {
     it('returns true on 200', async () => {
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));

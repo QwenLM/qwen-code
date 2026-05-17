@@ -11,6 +11,7 @@ import type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
+  HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
@@ -460,6 +461,34 @@ export class DaemonClient {
     );
     if (!res.ok) throw await this.failOnError(res, 'POST /session/:id/prompt');
     return (await res.json()) as PromptResult;
+  }
+
+  /**
+   * Bump the daemon's last-seen bookkeeping for this session. The
+   * route is short-lived — drives diagnostics and future revocation
+   * policy (Wave 5 PR 24) — so it goes through the standard
+   * `fetchTimeoutMs`. Older daemons (pre-PR 9) return 404 for
+   * `/heartbeat`; clients should pre-flight
+   * `caps.features.client_heartbeat` before calling.
+   */
+  async heartbeat(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<HeartbeatResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/heartbeat`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/heartbeat');
+        }
+        return (await res.json()) as HeartbeatResult;
+      },
+    );
   }
 
   async cancel(sessionId: string, clientId?: string): Promise<void> {
