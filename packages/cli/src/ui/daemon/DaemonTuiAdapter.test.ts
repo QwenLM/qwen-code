@@ -20,7 +20,10 @@ import { ToolCallStatus } from '../types.js';
 
 class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
   private events: DaemonTuiEvent[] = [];
-  private waiters: Array<(value: IteratorResult<DaemonTuiEvent>) => void> = [];
+  private waiters: Array<{
+    resolve: (value: IteratorResult<DaemonTuiEvent>) => void;
+    reject: (error: unknown) => void;
+  }> = [];
   private closed = false;
   private failure: unknown;
 
@@ -35,8 +38,8 @@ class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
     if (this.closed) {
       return { done: true, value: undefined };
     }
-    return await new Promise((resolve) => {
-      this.waiters.push(resolve);
+    return await new Promise((resolve, reject) => {
+      this.waiters.push({ resolve, reject });
     });
   }
 
@@ -57,7 +60,7 @@ class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
   push(event: DaemonTuiEvent): void {
     const waiter = this.waiters.shift();
     if (waiter) {
-      waiter({ done: false, value: event });
+      waiter.resolve({ done: false, value: event });
       return;
     }
     this.events.push(event);
@@ -66,12 +69,15 @@ class EventQueue implements AsyncGenerator<DaemonTuiEvent> {
   close(): void {
     this.closed = true;
     for (const waiter of this.waiters.splice(0)) {
-      waiter({ done: true, value: undefined });
+      waiter.resolve({ done: true, value: undefined });
     }
   }
 
   fail(error: unknown): void {
     this.failure = error;
+    for (const waiter of this.waiters.splice(0)) {
+      waiter.reject(error);
+    }
   }
 }
 
@@ -141,7 +147,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
           sessionId: 'session-1',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'hello' },
+            content: { type: 'text', text: '\x1b]0;title\x07hello\x00' },
           },
         },
       }),
@@ -174,6 +180,32 @@ describe('reduceDaemonEventToTuiUpdates', () => {
       },
     ]);
 
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 20,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session-1',
+          update: {
+            sessionUpdate: 'plan',
+            entries: [
+              {
+                status: '\x1b]0;bad\x07pending',
+                content: '\x1b[31mfinish this\x1b[0m',
+              },
+            ],
+          },
+        },
+      }),
+    ).toEqual([
+      {
+        type: 'history',
+        item: { type: 'info', text: '1. [pending] finish this' },
+        daemonEventId: 20,
+      },
+    ]);
+
     const toolUpdates = reduceDaemonEventToTuiUpdates({
       id: 3,
       v: 1,
@@ -183,10 +215,10 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         update: {
           sessionUpdate: 'tool_call_update',
           toolCallId: 'tool-1',
-          kind: 'read_file',
-          title: 'Read file',
+          kind: '\x1b]0;bad\x07read_file',
+          title: '\x1b[31mRead file\x1b[0m',
           status: 'completed',
-          rawOutput: { lines: 3 },
+          rawOutput: '\x1b[31m3 lines\x1b[0m',
         },
       },
     });
@@ -201,7 +233,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
             name: 'read_file',
             description: 'Read file',
             status: ToolCallStatus.Success,
-            resultDisplay: '{"lines":3}',
+            resultDisplay: '3 lines',
           },
         ],
       },
@@ -213,7 +245,10 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         id: 4,
         v: 1,
         type: 'model_switched',
-        data: { sessionId: 'session-1', modelId: 'qwen3-coder-plus' },
+        data: {
+          sessionId: 'session-1',
+          modelId: '\x1b]0;bad\x07qwen3-coder-plus',
+        },
       }),
     ).toEqual([
       {
@@ -236,7 +271,10 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         id: 5,
         v: 1,
         type: 'session_died',
-        data: { sessionId: 'session-1', reason: '\x1b[31magent exited\x1b[0m' },
+        data: {
+          sessionId: 'session-1',
+          reason: '\x1b]0;bad title\x07\x1b[31magent exited\x1b[0m',
+        },
       }),
     ).toEqual([
       { type: 'disconnected', reason: 'agent exited', daemonEventId: 5 },
@@ -274,7 +312,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         id: 7,
         v: 1,
         type: 'stream_error',
-        data: { error: '\x1b[31mstream failed\x1b[0m' },
+        data: { error: '\x1bPignored\x1b\\\x1b[31mstream failed\x1b[0m' },
       }),
     ).toEqual([
       { type: 'disconnected', reason: 'stream failed', daemonEventId: 7 },
@@ -430,6 +468,29 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         },
       },
     ]);
+
+    for (let i = 0; i < 130; i += 1) {
+      reduceDaemonEventToTuiUpdates(
+        {
+          id: 100 + i,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: `evict-${i}`,
+              kind: 'shell',
+              status: 'completed',
+            },
+          },
+        },
+        state,
+      );
+    }
+    expect(state.toolCallsById.size).toBe(128);
+    expect(state.toolCallsById.has('tool-1')).toBe(false);
+    expect(state.toolCallsById.has('evict-129')).toBe(true);
   });
 
   it('maps permission lifecycle events without auto-voting', () => {
@@ -563,6 +624,18 @@ describe('DaemonTuiAdapter', () => {
         reason: 'boom',
       }),
     );
+
+    const throwingEvents = new EventQueue();
+    const throwingSession = createFakeSession(throwingEvents);
+    const throwingAdapter = new DaemonTuiAdapter({
+      session: throwingSession,
+      onUpdate: () => {
+        throw new Error('\x1b]0;bad\x07render failed');
+      },
+    });
+    throwingAdapter.start();
+    throwingEvents.close();
+    await expect(throwingAdapter.stop()).resolves.toBeUndefined();
   });
 
   it('forwards prompt, cancel, model switch, and permission votes', async () => {
@@ -617,6 +690,121 @@ describe('DaemonTuiAdapter', () => {
     expect(onUpdate).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'turn_complete' }),
     );
+
+    events.close();
+  });
+
+  it('restarts after start is requested while stop is draining the pump', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const onUpdate = vi.fn();
+    const adapter = new DaemonTuiAdapter({ session, onUpdate });
+
+    adapter.start();
+    const stopPromise = adapter.stop();
+    adapter.start();
+    await stopPromise;
+
+    await waitFor(() => expect(session.events).toHaveBeenCalledTimes(2));
+    await adapter.stop();
+  });
+
+  it('clears accumulated tool state before each prompt', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const onUpdate = vi.fn();
+    const adapter = new DaemonTuiAdapter({ session, onUpdate });
+
+    adapter.start();
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'old-tool',
+          kind: 'shell',
+          status: 'completed',
+        },
+      },
+    });
+    await waitFor(() =>
+      expect(onUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tool_group_update',
+          item: expect.objectContaining({
+            tools: [expect.objectContaining({ callId: 'old-tool' })],
+          }),
+        }),
+      ),
+    );
+
+    await adapter.sendPrompt('next turn');
+    events.push({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionId: 'session-1',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'new-tool',
+          kind: 'grep',
+          status: 'running',
+        },
+      },
+    });
+
+    await waitFor(() => {
+      const lastToolUpdate = onUpdate.mock.calls
+        .map(([update]) => update)
+        .filter((update) => update.type === 'tool_group_update')
+        .at(-1);
+      expect(lastToolUpdate).toMatchObject({
+        item: {
+          tools: [expect.objectContaining({ callId: 'new-tool' })],
+        },
+      });
+      expect(lastToolUpdate?.item.tools).toHaveLength(1);
+    });
+
+    await adapter.stop();
+  });
+
+  it('reports daemon control failures from cancel/model/permission calls', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const onUpdate = vi.fn();
+    const adapter = new DaemonTuiAdapter({ session, onUpdate });
+
+    session.cancel.mockRejectedValueOnce(
+      new Error('\x1b[31mcancel down\x1b[0m'),
+    );
+    await expect(adapter.cancel()).rejects.toThrow('cancel down');
+    expect(onUpdate).toHaveBeenCalledWith({
+      type: 'disconnected',
+      reason: 'cancel down',
+    });
+
+    session.setModel.mockRejectedValueOnce(new Error('model down'));
+    await expect(adapter.setModel('qwen3-coder-plus')).rejects.toThrow(
+      'model down',
+    );
+    expect(onUpdate).toHaveBeenCalledWith({
+      type: 'disconnected',
+      reason: 'model down',
+    });
+
+    session.respondToPermission.mockRejectedValueOnce(new Error('vote down'));
+    await expect(
+      adapter.approvePermission('req-1', 'proceed_once'),
+    ).rejects.toThrow('vote down');
+    expect(onUpdate).toHaveBeenCalledWith({
+      type: 'disconnected',
+      reason: 'vote down',
+    });
 
     events.close();
   });

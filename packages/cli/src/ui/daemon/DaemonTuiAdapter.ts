@@ -79,10 +79,6 @@ export type DaemonTuiUpdate =
       daemonEventId?: number;
     }
   | {
-      type: 'turn_complete';
-      stopReason?: string;
-    }
-  | {
       type: 'disconnected';
       reason: string;
       daemonEventId?: number;
@@ -95,11 +91,25 @@ export interface DaemonTuiAdapterOptions {
 
 export interface DaemonTuiReducerState {
   toolCallsById: Map<string, IndividualToolCallDisplay>;
+  toolCallOrder: string[];
 }
 
 export function createDaemonTuiReducerState(): DaemonTuiReducerState {
-  return { toolCallsById: new Map() };
+  return { toolCallsById: new Map(), toolCallOrder: [] };
 }
+
+function clearDaemonTuiReducerState(state: DaemonTuiReducerState): void {
+  state.toolCallsById.clear();
+  state.toolCallOrder.length = 0;
+}
+
+const MAX_TOOL_CALLS = 128;
+const MAX_DISPLAY_TEXT_LENGTH = 20_000;
+const ESC = String.fromCharCode(27);
+const OSC_RE = new RegExp(`${ESC}\\][\\s\\S]*?(?:\\x07|${ESC}\\\\)`, 'g');
+const DCS_RE = new RegExp(`${ESC}[P^_][\\s\\S]*?${ESC}\\\\`, 'g');
+const CSI_RE = new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]`, 'g');
+const C1_RE = new RegExp(`${ESC}[@-Z\\\\-_]`, 'g');
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -132,7 +142,7 @@ function formatPlan(entries: unknown): string | undefined {
     .map((entry, index) => {
       const content = getString(entry['content']) ?? '';
       const status = getString(entry['status']) ?? 'pending';
-      return `${index + 1}. [${status}] ${content}`;
+      return `${index + 1}. [${sanitizeDisplayText(status)}] ${sanitizeDisplayText(content)}`;
     })
     .filter((line) => line.trim().length > 0);
   return lines.length > 0 ? lines.join('\n') : undefined;
@@ -162,11 +172,7 @@ function mapToolStatus(status: unknown): ToolCallStatus {
 }
 
 function sanitizeReason(reason: string): string {
-  const esc = String.fromCharCode(27);
-  const withoutAnsi = reason.replace(
-    new RegExp(`${esc}\\[[0-9;?]*[ -/]*[@-~]`, 'g'),
-    '',
-  );
+  const withoutAnsi = stripControlSequences(reason);
   let sanitized = '';
   for (const char of withoutAnsi) {
     const code = char.charCodeAt(0);
@@ -181,6 +187,33 @@ function sanitizeReason(reason: string): string {
   return sanitized;
 }
 
+function sanitizeDisplayText(text: string): string {
+  const stripped = stripControlSequences(text);
+  let sanitized = '';
+  for (const char of stripped) {
+    const code = char.charCodeAt(0);
+    if (
+      (code < 32 && code !== 9 && code !== 10 && code !== 13) ||
+      code === 127
+    ) {
+      continue;
+    }
+    sanitized += char;
+    if (sanitized.length >= MAX_DISPLAY_TEXT_LENGTH) {
+      break;
+    }
+  }
+  return sanitized;
+}
+
+function stripControlSequences(value: string): string {
+  return value
+    .replace(OSC_RE, '')
+    .replace(DCS_RE, '')
+    .replace(CSI_RE, '')
+    .replace(C1_RE, '');
+}
+
 function formatToolResultDisplay(
   value: unknown,
 ): IndividualToolCallDisplay['resultDisplay'] {
@@ -188,7 +221,7 @@ function formatToolResultDisplay(
     return undefined;
   }
   if (typeof value === 'string') {
-    return value;
+    return sanitizeDisplayText(value);
   }
   if (
     isRecord(value) &&
@@ -202,9 +235,9 @@ function formatToolResultDisplay(
     return value as unknown as IndividualToolCallDisplay['resultDisplay'];
   }
   try {
-    return JSON.stringify(value);
+    return sanitizeDisplayText(JSON.stringify(value));
   } catch {
-    return String(value);
+    return sanitizeDisplayText(String(value));
   }
 }
 
@@ -219,9 +252,11 @@ function formatToolContentText(value: unknown): string | undefined {
       }
       const content = item['content'];
       if (isRecord(content)) {
-        return getString(content['text']);
+        const text = getString(content['text']);
+        return text === undefined ? undefined : sanitizeDisplayText(text);
       }
-      return getString(item['text']);
+      const text = getString(item['text']);
+      return text === undefined ? undefined : sanitizeDisplayText(text);
     })
     .filter((part): part is string => part !== undefined && part.length > 0);
   return parts.length > 0 ? parts.join('\n') : undefined;
@@ -260,13 +295,18 @@ function toolUpdateToHistoryItem(
 
   const title = getString(update['title']);
   const kind = getString(update['kind']);
+  const safeToolCallId = sanitizeDisplayText(toolCallId);
+  const safeTitle =
+    title === undefined ? undefined : sanitizeDisplayText(title);
+  const safeKind = kind === undefined ? undefined : sanitizeDisplayText(kind);
   const rawOutput = formatToolResultDisplay(update['rawOutput']);
   const contentOutput = formatToolContentText(update['content']);
   const previous = state?.toolCallsById.get(toolCallId);
   const tool: IndividualToolCallDisplay = {
-    callId: toolCallId,
-    name: kind ?? title ?? previous?.name ?? toolCallId,
-    description: title ?? kind ?? previous?.description ?? toolCallId,
+    callId: safeToolCallId,
+    name: safeKind ?? safeTitle ?? previous?.name ?? safeToolCallId,
+    description:
+      safeTitle ?? safeKind ?? previous?.description ?? safeToolCallId,
     resultDisplay: rawOutput ?? contentOutput ?? previous?.resultDisplay,
     status:
       update['status'] === undefined
@@ -278,7 +318,18 @@ function toolUpdateToHistoryItem(
     confirmationDetails: previous?.confirmationDetails,
   };
 
+  if (state && !state.toolCallsById.has(toolCallId)) {
+    state.toolCallOrder.push(toolCallId);
+  }
   state?.toolCallsById.set(toolCallId, tool);
+  if (state) {
+    while (state.toolCallOrder.length > MAX_TOOL_CALLS) {
+      const oldest = state.toolCallOrder.shift();
+      if (oldest !== undefined) {
+        state.toolCallsById.delete(oldest);
+      }
+    }
+  }
   return {
     type: 'tool_group',
     tools: Array.from(state?.toolCallsById.values() ?? [tool]),
@@ -314,7 +365,7 @@ export function reduceDaemonEventToTuiUpdates(
         return [
           {
             type: 'history',
-            item: { type: 'gemini_content', text },
+            item: { type: 'gemini_content', text: sanitizeDisplayText(text) },
             daemonEventId: event.id,
           },
         ];
@@ -324,7 +375,10 @@ export function reduceDaemonEventToTuiUpdates(
         return [
           {
             type: 'history',
-            item: { type: 'gemini_thought_content', text },
+            item: {
+              type: 'gemini_thought_content',
+              text: sanitizeDisplayText(text),
+            },
             daemonEventId: event.id,
           },
         ];
@@ -391,17 +445,18 @@ export function reduceDaemonEventToTuiUpdates(
       if (!isRecord(event.data) || typeof event.data['modelId'] !== 'string') {
         return [];
       }
+      const modelId = sanitizeDisplayText(event.data['modelId']);
       return [
         {
           type: 'model_switched',
-          modelId: event.data['modelId'],
+          modelId,
           daemonEventId: event.id,
         },
         {
           type: 'history',
           item: {
             type: 'info',
-            text: `Model switched to ${event.data['modelId']}`,
+            text: `Model switched to ${modelId}`,
           },
           daemonEventId: event.id,
         },
@@ -444,6 +499,8 @@ export class DaemonTuiAdapter {
   private eventController: AbortController | null = null;
   private eventPump: Promise<void> | null = null;
   private lastSeenEventId: number | undefined;
+  private lifecycle: 'idle' | 'running' | 'stopping' = 'idle';
+  private restartAfterStop = false;
 
   constructor(options: DaemonTuiAdapterOptions) {
     this.session = options.session;
@@ -452,14 +509,27 @@ export class DaemonTuiAdapter {
   }
 
   start(): void {
-    if (this.eventPump) {
+    if (this.lifecycle === 'running') {
       return;
     }
+    if (this.lifecycle === 'stopping') {
+      this.restartAfterStop = true;
+      return;
+    }
+    this.startPump();
+  }
+
+  private startPump(): void {
     this.eventController = new AbortController();
+    this.lifecycle = 'running';
     this.eventPump = this.pumpEvents(this.eventController.signal);
   }
 
   async stop(): Promise<void> {
+    if (this.lifecycle === 'idle') {
+      return;
+    }
+    this.lifecycle = 'stopping';
     this.eventController?.abort();
     if (this.eventPump) {
       try {
@@ -468,13 +538,12 @@ export class DaemonTuiAdapter {
         /* pump errors are converted into updates */
       }
     }
-    this.eventController = null;
-    this.eventPump = null;
   }
 
   async sendPrompt(
     prompt: string | ContentBlock[],
   ): Promise<DaemonTuiPromptResult> {
+    clearDaemonTuiReducerState(this.reducerState);
     const promptBlocks =
       typeof prompt === 'string'
         ? ([{ type: 'text', text: prompt }] as ContentBlock[])
@@ -482,37 +551,52 @@ export class DaemonTuiAdapter {
     try {
       return await this.session.prompt({ prompt: promptBlocks });
     } catch (error) {
-      this.onUpdate({
-        type: 'disconnected',
-        reason: sanitizeReason(
-          error instanceof Error ? error.message : String(error),
-        ),
-      });
+      this.reportDaemonFailure(error);
       throw error;
     }
   }
 
   async cancel(): Promise<void> {
-    await this.session.cancel();
+    try {
+      await this.session.cancel();
+    } catch (error) {
+      this.reportDaemonFailure(error);
+      throw error;
+    }
   }
 
   async setModel(modelId: string): Promise<Record<string, unknown>> {
-    return await this.session.setModel(modelId);
+    try {
+      return await this.session.setModel(modelId);
+    } catch (error) {
+      this.reportDaemonFailure(error);
+      throw error;
+    }
   }
 
   async approvePermission(
     requestId: string,
     optionId: string,
   ): Promise<boolean> {
-    return await this.session.respondToPermission(requestId, {
-      outcome: { outcome: 'selected', optionId },
-    });
+    try {
+      return await this.session.respondToPermission(requestId, {
+        outcome: { outcome: 'selected', optionId },
+      });
+    } catch (error) {
+      this.reportDaemonFailure(error);
+      throw error;
+    }
   }
 
   async rejectPermission(requestId: string): Promise<boolean> {
-    return await this.session.respondToPermission(requestId, {
-      outcome: { outcome: 'cancelled' },
-    });
+    try {
+      return await this.session.respondToPermission(requestId, {
+        outcome: { outcome: 'cancelled' },
+      });
+    } catch (error) {
+      this.reportDaemonFailure(error);
+      throw error;
+    }
   }
 
   get currentSessionId(): string {
@@ -535,18 +619,18 @@ export class DaemonTuiAdapter {
         lastEventId: resumeId,
         resume: true,
       })) {
+        if (event.id !== undefined) {
+          this.lastSeenEventId = event.id;
+        }
         for (const update of reduceDaemonEventToTuiUpdates(
           event,
           this.reducerState,
         )) {
-          this.onUpdate(update);
-        }
-        if (event.id !== undefined) {
-          this.lastSeenEventId = event.id;
+          this.emit(update);
         }
       }
       if (!signal.aborted) {
-        this.onUpdate({
+        this.emit({
           type: 'disconnected',
           reason: 'event stream ended',
         });
@@ -556,11 +640,36 @@ export class DaemonTuiAdapter {
         const message = sanitizeReason(
           error instanceof Error ? error.message : String(error),
         );
-        this.onUpdate({ type: 'disconnected', reason: message });
+        this.emit({ type: 'disconnected', reason: message });
       }
     } finally {
       this.eventController = null;
       this.eventPump = null;
+      const shouldRestart = this.restartAfterStop;
+      this.restartAfterStop = false;
+      this.lifecycle = 'idle';
+      if (shouldRestart) {
+        this.start();
+      }
+    }
+  }
+
+  private reportDaemonFailure(error: unknown): void {
+    if (this.lifecycle === 'running') {
+      this.lifecycle = 'stopping';
+      this.eventController?.abort();
+    }
+    const message = sanitizeReason(
+      error instanceof Error ? error.message : String(error),
+    );
+    this.emit({ type: 'disconnected', reason: message });
+  }
+
+  private emit(update: DaemonTuiUpdate): void {
+    try {
+      this.onUpdate(update);
+    } catch {
+      /* isolate renderer callback failures from the daemon event pump */
     }
   }
 }
