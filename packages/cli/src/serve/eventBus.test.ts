@@ -204,6 +204,68 @@ describe('EventBus', () => {
     abort.abort();
   });
 
+  it('warn-at-back forced frame does NOT skew the live cap for subsequent publishes (codex P2)', async () => {
+    // Regression for the `forcedInBuf` position-invariant bug Codex
+    // flagged: a mid-stream slow_client_warning force-pushed to the
+    // BACK of the queue, then drained past, would previously cause
+    // `next()` to decrement the forced counter on a LIVE shift,
+    // making subsequent `push()` cap checks under-count live items
+    // and warn/evict the client before they actually had `maxQueued`
+    // live items in queue.
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 8, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    // Episode 1: fill to 6 → warn at 75%. buf = [1..6, warning].
+    for (let i = 1; i <= 6; i++) bus.publish({ type: 'foo', data: i });
+
+    // Drain ALL 7 items (events 1..6 + warning frame). Live cap should
+    // now be 0 — the warning was a forced frame and must NOT have
+    // counted as a live drain.
+    const drained: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) drained.push((await it.next()).value);
+    expect(
+      drained.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    // Refill to EXACTLY maxQueued (8). Pre-fix: the post-drain live
+    // count was wrong, so somewhere between pushes 5 and 7 the 75%
+    // threshold (live=6) fired a second warning prematurely or the
+    // push at 7 was even rejected. Post-fix: live count is the truth,
+    // and the second warning fires exactly at push 8 (live=8, queue
+    // full → push 8 fills the cap and either succeeds at the cap line
+    // or trips the warn check first).
+    let rejected = 0;
+    for (let i = 7; i <= 14; i++) {
+      // Stop publishing once the queue refuses — the 8th live publish
+      // is the maxQueued ceiling.
+      const ok = bus.publish({ type: 'foo', data: i }) !== undefined;
+      if (!ok) rejected++;
+    }
+    void rejected; // EventBus.publish never returns false; rejection
+    // happens inside the bus when subscriber queues fill.
+
+    // Drain everything that's still alive in the iter. The exact frame
+    // shape varies (depending on whether the bus also force-pushed a
+    // second warning + evicted), but the ASSERTION we need is: the
+    // sub didn't get evicted on a phantom premature overflow — i.e.
+    // we received MORE THAN 1 live frame in this episode (pre-fix,
+    // the live count drift evicted after 0-1 frames).
+    const episode2: BridgeEvent[] = [];
+    for (let i = 0; i < 9; i++) {
+      const { value, done } = await it.next();
+      if (done) break;
+      episode2.push(value);
+    }
+    const live2 = episode2.filter((e) => e.id !== undefined && e.id >= 7);
+    // Pre-fix: live2 would be <8 because the queue evicted prematurely
+    // after the buggy live count drift. Post-fix: all 8 live frames
+    // (ids 7..14) get through cleanly.
+    expect(live2.length).toBeGreaterThanOrEqual(8);
+    abort.abort();
+  });
+
   it('default ring size is 8000 (#3803 §02 target)', async () => {
     const bus = new EventBus();
     for (let i = 1; i <= 8001; i++) bus.publish({ type: 'foo', data: i });

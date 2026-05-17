@@ -446,50 +446,53 @@ function emptyAsyncIterable<T>(): AsyncIterable<T> {
  * that signal to evict slow subscribers.
  *
  * The cap (`maxSize`) applies only to LIVE items pushed via `push()`. Items
- * inserted via `forcePush()` (the `Last-Event-ID` replay path on subscribe
- * and the terminal `client_evicted` frame) are tracked separately and don't
+ * inserted via `forcePush()` (the `Last-Event-ID` replay path on subscribe,
+ * the terminal `client_evicted` frame, and the mid-stream
+ * `slow_client_warning` frame) carry a `forced` tag per entry and never
  * count toward the cap. Without this split, a reconnect with a large
  * backlog would force-push ~ringSize entries into `buf`, push `buf.length`
  * past `maxSize`, and the very next live publish would evict the
  * just-resumed subscriber — defeating the resume contract.
+ *
+ * Previously this class tracked `forcedInBuf` as a count, which was
+ * correct only when forced frames stayed contiguous at the FRONT of the
+ * buffer (subscribe-time replay). The `slow_client_warning` path
+ * force-pushes mid-stream to the BACK of the queue, so the count-based
+ * approach drifted: a live shift would decrement `forcedInBuf`, then a
+ * later cap check on a live push would under-count the live backlog and
+ * warn/evict the client before there were actually `maxSize` live
+ * items. The per-entry `forced` tag below is the position-independent
+ * fix.
  */
+interface BoundedQueueEntry<T> {
+  value: T;
+  /** True for replay / eviction / slow_client_warning frames (don't count toward cap). */
+  forced: boolean;
+}
+
 class BoundedAsyncQueue<T> {
-  private readonly buf: T[] = [];
+  private readonly buf: Array<BoundedQueueEntry<T>> = [];
   private readonly resolvers: Array<(v: IteratorResult<T>) => void> = [];
   private closed = false;
   /**
-   * Number of force-pushed items still in `buf`. The cap check in
-   * `push()` only applies to LIVE items; this counter tells us how
-   * many slots in `buf` are replay-injected and shouldn't count.
-   *
-   * Position invariant: under the bus's two callers,
-   *   1. subscribe-time replay (`Last-Event-ID` resume) — forcePush
-   *      fires BEFORE any live `push()`, so replay items are at the
-   *      front of `buf`;
-   *   2. eviction terminal frame — forcePush fires AFTER `push()`
-   *      rejection, then `close()` is called immediately, so the
-   *      eviction frame is at the BACK of `buf`.
-   *
-   * `next()` decrements `forcedInBuf` whenever the counter is > 0 on
-   * shift, which is correct for case (1). For case (2) it slightly
-   * misaccounts (decrements on the first live shift), but that's
-   * harmless: the queue is closed so no `push()` runs the cap check
-   * again. The counter only matters for live cap enforcement.
+   * O(1) snapshot of how many LIVE (non-forced) entries are in `buf`.
+   * Maintained directly by `push()`/`next()`: any time a forced entry
+   * is added or removed `liveCount` is untouched; any time a live entry
+   * is added or removed `liveCount` moves with it. Replaces the
+   * position-dependent `forcedInBuf` heuristic — `liveCount` is correct
+   * no matter where in the queue the forced entries are.
    */
-  private forcedInBuf = 0;
+  private liveCount = 0;
 
   constructor(private readonly maxSize: number) {}
 
   /**
    * Number of LIVE (non-force-pushed) items currently waiting in the
-   * buffer. Mirrors the cap check in `push()`: replay/eviction frames
-   * inserted via `forcePush` don't count toward the backpressure
-   * threshold the bus uses to decide when to emit
-   * `slow_client_warning`. Returns 0 (not negative) if the buffer
-   * happens to be all-force-pushed.
+   * buffer. Backpressure decisions in `EventBus.publish()` (the
+   * `slow_client_warning` threshold) read this value.
    */
   get size(): number {
-    return Math.max(0, this.buf.length - this.forcedInBuf);
+    return this.liveCount;
   }
 
   /** Returns true if accepted, false if dropped due to overflow. */
@@ -501,12 +504,14 @@ class BoundedAsyncQueue<T> {
       return true;
     }
     // Cap is on the LIVE backlog only.
-    if (this.buf.length - this.forcedInBuf >= this.maxSize) return false;
-    this.buf.push(value);
+    if (this.liveCount >= this.maxSize) return false;
+    this.buf.push({ value, forced: false });
+    this.liveCount += 1;
     return true;
   }
 
-  /** Bypasses the size cap. Used for replay frames and terminal eviction. */
+  /** Bypasses the size cap. Used for replay frames, eviction terminal,
+   * and slow-client warnings. */
   forcePush(value: T): void {
     if (this.closed) return;
     const r = this.resolvers.shift();
@@ -514,8 +519,7 @@ class BoundedAsyncQueue<T> {
       r({ value, done: false });
       return;
     }
-    this.buf.push(value);
-    this.forcedInBuf += 1;
+    this.buf.push({ value, forced: true });
   }
 
   /**
@@ -539,7 +543,7 @@ class BoundedAsyncQueue<T> {
       // Truncate the buffer so subsequent `next()` calls see the
       // closed sentinel immediately.
       this.buf.length = 0;
-      this.forcedInBuf = 0;
+      this.liveCount = 0;
     }
     while (this.resolvers.length > 0) {
       this.resolvers.shift()!({
@@ -554,12 +558,9 @@ class BoundedAsyncQueue<T> {
     // queue whose element type legitimately includes `undefined`. The bus
     // never pushes undefined today, but the queue is generic.
     if (this.buf.length > 0) {
-      const value = this.buf.shift() as T;
-      // Force-pushed entries are FIFO at the front of `buf` (forcePush
-      // only happens at subscribe time, before any live push). So as long
-      // as `forcedInBuf > 0` the shifted item is a replay frame.
-      if (this.forcedInBuf > 0) this.forcedInBuf -= 1;
-      return Promise.resolve({ value, done: false });
+      const entry = this.buf.shift() as BoundedQueueEntry<T>;
+      if (!entry.forced) this.liveCount -= 1;
+      return Promise.resolve({ value: entry.value, done: false });
     }
     if (this.closed) {
       return Promise.resolve({
