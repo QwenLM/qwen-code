@@ -70,6 +70,23 @@ export function mountWorkspaceAgentsRoutes(
       // listSubagentsAtLevel`). Bringing the LIST route to parity is
       // sub-millisecond for the typical 0-50 agents and matches the
       // detail route's "filesystem is the source of truth" contract.
+      //
+      // No TTL cache or `fs.watch`-based invalidation here despite the
+      // 4-level walk per request. Reasoning:
+      //   - 4 levels × <50 agents on local SSD = sub-ms IO, well below
+      //     the per-request budget for any client UI.
+      //   - A short-TTL cache would re-introduce the exact stale-list
+      //     bug Codex P2 #2 fixed (a recently-edited file invisible
+      //     until the TTL elapses); invalidation logic adds state to
+      //     the route handler that PR 24 (audit / policy / mediator)
+      //     is the proper home for.
+      //   - `fs.watch` is platform-fragile (recursive watch broken on
+      //     some macOS Node versions, inotify limits on Linux) and the
+      //     daemon's per-request semantics make watchers harder to
+      //     reason about than a fresh disk read.
+      //   - Burst protection lives at `--max-connections` (256) +
+      //     bearer auth on non-loopback, not at the route layer.
+      // Revisit if profiling shows the LIST route is on the hot path.
       const agents = await manager.listSubagents({ force: true });
       const status: ServeWorkspaceAgentsStatus = {
         v: STATUS_SCHEMA_VERSION,
@@ -725,24 +742,35 @@ function parseAgentUpdates(
 ): Partial<SubagentConfig> | undefined {
   const updates: Partial<SubagentConfig> = {};
   if ('description' in body) {
-    if (typeof body['description'] !== 'string') {
+    const value = body['description'];
+    // Match the create-side rule: `description` is required and
+    // non-empty after trim. The previous update path silently
+    // accepted `"   "` and let `mergeConfigurations` write a blank
+    // description to the file — divergent from create which would
+    // 422 the same payload.
+    if (typeof value !== 'string' || value.trim().length === 0) {
       res.status(422).json({
-        error: '`description` must be a string when provided',
+        error:
+          '`description` must be a non-empty string (whitespace only is rejected) when provided',
         code: 'invalid_config',
       });
       return undefined;
     }
-    updates.description = body['description'];
+    updates.description = value;
   }
   if ('systemPrompt' in body) {
-    if (typeof body['systemPrompt'] !== 'string') {
+    const value = body['systemPrompt'];
+    if (typeof value !== 'string' || value.length === 0) {
+      // Mirror create's `systemPrompt.length === 0` check (create does
+      // NOT trim systemPrompt — leading whitespace can be meaningful in
+      // Markdown prose — but does require a non-empty string).
       res.status(422).json({
-        error: '`systemPrompt` must be a string when provided',
+        error: '`systemPrompt` must be a non-empty string when provided',
         code: 'invalid_config',
       });
       return undefined;
     }
-    updates.systemPrompt = body['systemPrompt'];
+    updates.systemPrompt = value;
   }
   if ('tools' in body) {
     const tools = parseStringArray(body['tools'], 'tools', res);
@@ -891,13 +919,21 @@ function isNoOpUpdate(
     return false;
   }
   if (updates.runConfig !== undefined) {
+    // `SubagentManager.mergeConfigurations` MERGES `updates.runConfig`
+    // with `existing.runConfig` (existing keys preserved when not in
+    // updates), so the no-op check must compare only the keys the
+    // caller actually intends to change. Comparing every known field
+    // against `existing` would treat any partial update as non-no-op
+    // because absent keys would be `undefined` while existing has a
+    // value — a false positive that would re-emit `agent_changed`
+    // for a request that didn't actually mutate anything.
     const e = existing.runConfig ?? {};
     const u = updates.runConfig;
-    if (
-      u['max_time_minutes'] !== e['max_time_minutes'] ||
-      u['max_turns'] !== e['max_turns']
-    ) {
-      return false;
+    if ('max_time_minutes' in u) {
+      if (u['max_time_minutes'] !== e['max_time_minutes']) return false;
+    }
+    if ('max_turns' in u) {
+      if (u['max_turns'] !== e['max_turns']) return false;
     }
   }
   return true;

@@ -179,8 +179,26 @@ async function composeAppendedContent(
     return `${existing}${sep}\n${MEMORY_SECTION_HEADER}\n${trimmed}\n`;
   }
 
-  const sep = existing.endsWith('\n') ? '' : '\n';
-  return `${existing}${sep}${trimmed}\n`;
+  // Section header found. Append the new entry INSIDE the section, not
+  // necessarily at the end of the file. Without this guard, a file
+  // whose `## Qwen Added Memories` block is followed by another
+  // `## ...` heading would land each new entry past the next heading
+  // — silently moving entries into the wrong section. Find the next
+  // top-level (`\n## `) heading after the memory header; if present,
+  // insert just before it. If absent (memory section is last in the
+  // file), keep the previous behavior of appending to EOF.
+  const afterHeaderIdx = sectionIdx + MEMORY_SECTION_HEADER.length;
+  const tail = existing.slice(afterHeaderIdx);
+  const nextHeaderRel = tail.indexOf('\n## ');
+  if (nextHeaderRel === -1) {
+    const sep = existing.endsWith('\n') ? '' : '\n';
+    return `${existing}${sep}${trimmed}\n`;
+  }
+  const insertAt = afterHeaderIdx + nextHeaderRel;
+  const before = existing.slice(0, insertAt);
+  const after = existing.slice(insertAt);
+  const sep = before.endsWith('\n') ? '' : '\n';
+  return `${before}${sep}${trimmed}\n${after}`;
 }
 
 function isEnoent(err: unknown): boolean {

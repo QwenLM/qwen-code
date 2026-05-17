@@ -222,6 +222,52 @@ describe('writeWorkspaceContextFile', () => {
     ).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('inserts new entries inside the MEMORY section, not past a later heading', async () => {
+    // File where the MEMORY section is followed by other prose.
+    // Without the section-boundary fix the new entry would be
+    // appended to EOF, landing it inside the `## post` section.
+    const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+    const initial = `# pre\n\n${MEMORY_SECTION_HEADER}\n- first\n\n## post\nstuff\n`;
+    await fs.writeFile(filePath, initial, 'utf8');
+
+    await writeWorkspaceContextFile({
+      scope: 'workspace',
+      mode: 'append',
+      content: '- second',
+      projectRoot: workspace,
+    });
+
+    const written = await fs.readFile(filePath, 'utf8');
+    expect(written).toBe(
+      `# pre\n\n${MEMORY_SECTION_HEADER}\n- first\n- second\n\n## post\nstuff\n`,
+    );
+    // `- second` must be inside the memory block, not after `stuff`.
+    const memorySection = written.indexOf(MEMORY_SECTION_HEADER);
+    const postSection = written.indexOf('## post');
+    const secondIdx = written.indexOf('- second');
+    expect(secondIdx).toBeGreaterThan(memorySection);
+    expect(secondIdx).toBeLessThan(postSection);
+  });
+
+  it('appends to EOF when the MEMORY section is the last block', async () => {
+    // Sanity: when no later heading follows, behavior is the
+    // pre-fix append-to-end path (still inside the section because
+    // the section IS the tail).
+    const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+    const initial = `# pre\n\n${MEMORY_SECTION_HEADER}\n- a\n`;
+    await fs.writeFile(filePath, initial, 'utf8');
+
+    await writeWorkspaceContextFile({
+      scope: 'workspace',
+      mode: 'append',
+      content: '- b',
+      projectRoot: workspace,
+    });
+
+    const written = await fs.readFile(filePath, 'utf8');
+    expect(written).toBe(`# pre\n\n${MEMORY_SECTION_HEADER}\n- a\n- b\n`);
+  });
+
   it('does not create the parent directory on a no-op append', async () => {
     // Whitespace-only append targeting a non-existent nested path
     // must NOT call fs.mkdir — the no-op detection short-circuits

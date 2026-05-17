@@ -654,6 +654,77 @@ describe('workspace agents routes', () => {
     ).toEqual(['created', 'updated', 'deleted']);
   });
 
+  it('rejects 422 when update body has whitespace-only description', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'whitespace-target',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a whitespace target agent',
+      scope: 'workspace',
+    });
+    // Update path used to silently accept "   " and overwrite the
+    // description with blank — divergent from create which 422s.
+    const res = await request(app)
+      .post('/workspace/agents/whitespace-target')
+      .send({ description: '   ' });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/non-empty/);
+  });
+
+  it('detects no-op partial runConfig update (preserves omitted keys)', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app)
+      .post('/workspace/agents')
+      .send({
+        name: 'runconfig-noop',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a runconfig-noop agent',
+        scope: 'workspace',
+        runConfig: { max_time_minutes: 30, max_turns: 10 },
+      });
+    const eventsBefore = (bridge as unknown as { events: RecordedEvent[] })
+      .events.length;
+
+    // Partial update with the SAME max_time_minutes value. Without the
+    // fix, isNoOpUpdate compared `undefined !== existing.max_turns` →
+    // true and re-wrote the file + emitted agent_changed.
+    const res = await request(app)
+      .post('/workspace/agents/runconfig-noop')
+      .send({ runConfig: { max_time_minutes: 30 } });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(false);
+
+    const events = (bridge as unknown as { events: RecordedEvent[] }).events;
+    expect(events.length).toBe(eventsBefore);
+  });
+
+  it('detects real partial runConfig change and writes', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app)
+      .post('/workspace/agents')
+      .send({
+        name: 'runconfig-real',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a runconfig-real agent',
+        scope: 'workspace',
+        runConfig: { max_time_minutes: 30, max_turns: 10 },
+      });
+    const res = await request(app)
+      .post('/workspace/agents/runconfig-real')
+      .send({ runConfig: { max_time_minutes: 45 } });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(true);
+    // Merged result preserves max_turns from existing.
+    expect(res.body.agent.runConfig).toEqual({
+      max_time_minutes: 45,
+      max_turns: 10,
+    });
+  });
+
   it('short-circuits no-op updates with changed: false and no event', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
