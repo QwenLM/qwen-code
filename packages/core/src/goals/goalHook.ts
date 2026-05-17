@@ -37,6 +37,11 @@ export const MAX_GOAL_ITERATIONS = 50;
 export const GOAL_JUDGE_TIMEOUT_MS = 25_000;
 export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
+/**
+ * Minimum /goal iteration count before accepting an `impossible` judge verdict.
+ * This gives the model at least one continuation turn after the first
+ * evaluation, reducing premature failure from a single bad-judgment turn.
+ */
 export const MIN_IMPOSSIBLE_GOAL_ITERATIONS = 2;
 
 const GOAL_ABORTED_REASON =
@@ -197,6 +202,11 @@ export function createGoalStopHookCallback(args: {
         lastReason: verdict.reason,
       });
       return { continue: true };
+    }
+    if (verdict.impossible) {
+      debugLogger.debug(
+        `Impossible goal verdict suppressed: iterations=${latest.iterations} < MIN_IMPOSSIBLE_GOAL_ITERATIONS=${MIN_IMPOSSIBLE_GOAL_ITERATIONS}; continuing.`,
+      );
     }
 
     // Give the latest assistant output one final evaluation before aborting.
