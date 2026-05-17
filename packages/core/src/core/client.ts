@@ -1521,7 +1521,15 @@ export class GeminiClient {
           // Auto-compaction summarized away the startup prelude. Rebuild it
           // before the next turn so env/tool/MCP context isn't lost for the
           // rest of the session (manual /compress gets this via startChat).
-          await this.restoreStartupContextAfterCompaction();
+          try {
+            await this.restoreStartupContextAfterCompaction();
+          } catch (error) {
+            this.config
+              .getDebugLogger()
+              .warn(
+                `Failed to restore startup context after compaction: ${error}`,
+              );
+          }
           void this.fireSessionStartHook(SessionStartSource.Compact)
             .then((compactAdditionalContext) => {
               if (!compactAdditionalContext || !this.chat) {

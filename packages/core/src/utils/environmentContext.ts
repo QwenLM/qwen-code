@@ -274,11 +274,25 @@ export function getStartupContextLength(history: Content[]): number {
   // would misclassify a user message that merely begins with the literal
   // text `<system-reminder>` (e.g. someone quoting/testing the tag) as
   // startup context, corrupting stripStartupContext and rewind indexing.
-  return typeof firstText === 'string' &&
+  if (
+    typeof firstText === 'string' &&
     firstText.startsWith(SYSTEM_REMINDER_OPEN) &&
     firstText.includes(SYSTEM_REMINDER_CLOSE)
-    ? 1
-    : 0;
+  ) {
+    return 1;
+  }
+  // Legacy format (sessions saved before startup context moved into system
+  // reminders): a `[user(env text), model("Got it. Thanks for the
+  // context!")]` pair. Detected via the exact model-ack sentinel so resumed
+  // pre-reminder sessions still strip correctly for subagents and index
+  // correctly for rewind. Safe to remove once old sessions have cycled out.
+  if (
+    history[1]?.role === 'model' &&
+    history[1]?.parts?.[0]?.text === 'Got it. Thanks for the context!'
+  ) {
+    return 2;
+  }
+  return 0;
 }
 
 /**
