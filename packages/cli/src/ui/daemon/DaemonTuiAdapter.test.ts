@@ -147,7 +147,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
           sessionId: 'session-1',
           update: {
             sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: '\x1b]0;title\x07hello\x00' },
+            content: { type: 'text', text: '\u202e\x9b31mhe\rllo\x00' },
           },
         },
       }),
@@ -330,6 +330,12 @@ describe('reduceDaemonEventToTuiUpdates', () => {
   it('accumulates tool updates and preserves structured result displays', () => {
     const state = createDaemonTuiReducerState();
     const fileDiff = {
+      fileDiff: '\x1b[31m--- a\n+++ b\x1b[0m',
+      fileName: '\u202ea.txt',
+      originalContent: 'a\r',
+      newContent: 'b\x9b31m',
+    };
+    const sanitizedFileDiff = {
       fileDiff: '--- a\n+++ b',
       fileName: 'a.txt',
       originalContent: 'a',
@@ -394,7 +400,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
               name: 'read_file',
               description: 'Read file',
               status: ToolCallStatus.Success,
-              resultDisplay: fileDiff,
+              resultDisplay: sanitizedFileDiff,
             },
           ],
         },
@@ -499,14 +505,25 @@ describe('reduceDaemonEventToTuiUpdates', () => {
       sessionId: 'session-1',
       toolCall: {
         toolCallId: 'tool-1',
-        title: 'Edit file',
+        title: '\x1b[31mEdit file\x1b[0m',
         kind: 'edit',
         rawInput: {},
       },
       options: [
-        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        {
+          optionId: 'proceed_once',
+          kind: 'allow_once',
+          name: '\x1b]0;bad\x07Allow',
+        },
       ],
     } as RequestPermissionRequest & { requestId: string };
+    const sanitizedRequest = {
+      ...request,
+      toolCall: { ...request.toolCall, title: 'Edit file' },
+      options: [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+      ],
+    };
 
     expect(
       reduceDaemonEventToTuiUpdates({
@@ -519,7 +536,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
       {
         type: 'permission_request',
         requestId: 'req-1',
-        request,
+        request: sanitizedRequest,
         daemonEventId: 6,
       },
     ]);
@@ -549,6 +566,25 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         v: 1,
         type: 'permission_request',
         data: { requestId: 'req-bad' },
+      }),
+    ).toEqual([]);
+  });
+
+  it('returns no UI updates for unknown daemon event types', () => {
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 99,
+        v: 1,
+        type: 'new_daemon_event',
+        data: {},
+      }),
+    ).toEqual([]);
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 100,
+        v: 1,
+        type: 'new_daemon_event',
+        data: {},
       }),
     ).toEqual([]);
   });
@@ -644,17 +680,24 @@ describe('DaemonTuiAdapter', () => {
     const onUpdate = vi.fn();
     const adapter = new DaemonTuiAdapter({ session, onUpdate });
 
+    adapter.start();
     await adapter.sendPrompt('hello daemon');
-    expect(session.prompt).toHaveBeenCalledWith({
-      prompt: [{ type: 'text', text: 'hello daemon' }],
-    });
+    expect(session.prompt).toHaveBeenCalledWith(
+      {
+        prompt: [{ type: 'text', text: 'hello daemon' }],
+      },
+      expect.any(AbortSignal),
+    );
     expect(onUpdate).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'turn_complete' }),
     );
 
     const blocks: ContentBlock[] = [{ type: 'text', text: 'structured' }];
     await adapter.sendPrompt(blocks);
-    expect(session.prompt).toHaveBeenLastCalledWith({ prompt: blocks });
+    expect(session.prompt).toHaveBeenLastCalledWith(
+      { prompt: blocks },
+      expect.any(AbortSignal),
+    );
 
     await adapter.cancel();
     await adapter.setModel('qwen3-coder-plus');
@@ -670,7 +713,7 @@ describe('DaemonTuiAdapter', () => {
       outcome: { outcome: 'cancelled' },
     });
 
-    events.close();
+    await adapter.stop();
   });
 
   it('reports prompt failures without fabricating turn completion', async () => {
@@ -680,6 +723,7 @@ describe('DaemonTuiAdapter', () => {
     const onUpdate = vi.fn();
     const adapter = new DaemonTuiAdapter({ session, onUpdate });
 
+    adapter.start();
     await expect(adapter.sendPrompt('hello daemon')).rejects.toThrow(
       'daemon down',
     );
@@ -689,6 +733,21 @@ describe('DaemonTuiAdapter', () => {
     });
     expect(onUpdate).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'turn_complete' }),
+    );
+
+    events.close();
+  });
+
+  it('requires a running event pump before sending control RPCs', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const adapter = new DaemonTuiAdapter({ session, onUpdate: vi.fn() });
+
+    await expect(adapter.sendPrompt('hello')).rejects.toThrow(
+      'Daemon TUI adapter is not running',
+    );
+    await expect(adapter.cancel()).rejects.toThrow(
+      'Daemon TUI adapter is not running',
     );
 
     events.close();
@@ -707,6 +766,34 @@ describe('DaemonTuiAdapter', () => {
 
     await waitFor(() => expect(session.events).toHaveBeenCalledTimes(2));
     await adapter.stop();
+  });
+
+  it('forces idle when the event pump ignores abort during stop', async () => {
+    vi.useFakeTimers();
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const hangingEvents: AsyncGenerator<DaemonTuiEvent> = {
+      next: vi.fn(() => new Promise<IteratorResult<DaemonTuiEvent>>(() => {})),
+      return: vi.fn(async () => ({ done: true as const, value: undefined })),
+      throw: vi.fn(async (error?: unknown) => {
+        throw error;
+      }),
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
+    session.events.mockReturnValue(hangingEvents);
+    const onUpdate = vi.fn();
+    const adapter = new DaemonTuiAdapter({ session, onUpdate });
+
+    adapter.start();
+    const stopPromise = adapter.stop();
+    adapter.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    await stopPromise;
+
+    expect(session.events).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 
   it('clears accumulated tool state before each prompt', async () => {
@@ -774,38 +861,61 @@ describe('DaemonTuiAdapter', () => {
   });
 
   it('reports daemon control failures from cancel/model/permission calls', async () => {
-    const events = new EventQueue();
-    const session = createFakeSession(events);
-    const onUpdate = vi.fn();
-    const adapter = new DaemonTuiAdapter({ session, onUpdate });
-
-    session.cancel.mockRejectedValueOnce(
+    const cancelEvents = new EventQueue();
+    const cancelSession = createFakeSession(cancelEvents);
+    const cancelUpdates = vi.fn();
+    const cancelAdapter = new DaemonTuiAdapter({
+      session: cancelSession,
+      onUpdate: cancelUpdates,
+    });
+    cancelAdapter.start();
+    cancelSession.cancel.mockRejectedValueOnce(
       new Error('\x1b[31mcancel down\x1b[0m'),
     );
-    await expect(adapter.cancel()).rejects.toThrow('cancel down');
-    expect(onUpdate).toHaveBeenCalledWith({
+    await expect(cancelAdapter.cancel()).rejects.toThrow('cancel down');
+    expect(cancelUpdates).toHaveBeenCalledWith({
       type: 'disconnected',
       reason: 'cancel down',
     });
 
-    session.setModel.mockRejectedValueOnce(new Error('model down'));
-    await expect(adapter.setModel('qwen3-coder-plus')).rejects.toThrow(
+    const modelEvents = new EventQueue();
+    const modelSession = createFakeSession(modelEvents);
+    const modelUpdates = vi.fn();
+    const modelAdapter = new DaemonTuiAdapter({
+      session: modelSession,
+      onUpdate: modelUpdates,
+    });
+    modelAdapter.start();
+    modelSession.setModel.mockRejectedValueOnce(new Error('model down'));
+    await expect(modelAdapter.setModel('qwen3-coder-plus')).rejects.toThrow(
       'model down',
     );
-    expect(onUpdate).toHaveBeenCalledWith({
+    expect(modelUpdates).toHaveBeenCalledWith({
       type: 'disconnected',
       reason: 'model down',
     });
 
-    session.respondToPermission.mockRejectedValueOnce(new Error('vote down'));
+    const voteEvents = new EventQueue();
+    const voteSession = createFakeSession(voteEvents);
+    const voteUpdates = vi.fn();
+    const voteAdapter = new DaemonTuiAdapter({
+      session: voteSession,
+      onUpdate: voteUpdates,
+    });
+    voteAdapter.start();
+    voteSession.respondToPermission.mockRejectedValueOnce(
+      new Error('vote down'),
+    );
     await expect(
-      adapter.approvePermission('req-1', 'proceed_once'),
+      voteAdapter.approvePermission('req-1', 'proceed_once'),
     ).rejects.toThrow('vote down');
-    expect(onUpdate).toHaveBeenCalledWith({
+    expect(voteUpdates).toHaveBeenCalledWith({
       type: 'disconnected',
       reason: 'vote down',
     });
 
-    events.close();
+    cancelEvents.close();
+    modelEvents.close();
+    voteEvents.close();
   });
 });
