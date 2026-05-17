@@ -98,4 +98,49 @@ describe('AuthMessageHandler', () => {
     );
     expect(sendToWebView).not.toHaveBeenCalledWith({ type: 'authCancelled' });
   });
+
+  it('sends authCancelled when Token Plan api key input is dismissed', async () => {
+    mockShowQuickPick.mockResolvedValueOnce({ value: 'token-plan' });
+    mockShowInputBox.mockResolvedValue(undefined);
+
+    const sendToWebView = vi.fn();
+    const authInteractiveHandler = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(sendToWebView).toHaveBeenCalledWith({ type: 'authCancelled' });
+    expect(authInteractiveHandler).not.toHaveBeenCalled();
+  });
+
+  it('reports an error when Token Plan auth has no interactive handler', async () => {
+    mockShowQuickPick.mockResolvedValueOnce({ value: 'token-plan' });
+    mockShowInputBox.mockResolvedValueOnce('token-plan-key');
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+    );
+
+    try {
+      await handler.handle({ type: 'auth' });
+    } finally {
+      errorSpy.mockRestore();
+    }
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'authError',
+      data: { message: 'Internal error: auth handler not initialized.' },
+    });
+  });
 });

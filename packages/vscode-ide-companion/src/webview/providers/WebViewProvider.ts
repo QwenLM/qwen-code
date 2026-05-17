@@ -1139,8 +1139,10 @@ export class WebViewProvider {
         updates.push(config.update('provider', qwenSettings.provider, target));
       }
       if (
+        qwenSettings.provider === 'coding-plan' &&
+        qwenSettings.codingPlanRegion &&
         config.get<'china' | 'global'>('codingPlanRegion', 'china') !==
-        qwenSettings.codingPlanRegion
+          qwenSettings.codingPlanRegion
       ) {
         updates.push(
           config.update(
@@ -1408,6 +1410,8 @@ export class WebViewProvider {
       // then apply it via the VSCode settings adapter.
       const plan = buildInstallPlan(providerConfig, inputs);
       await applyProviderInstallPlanToFile(plan);
+
+      await this.syncQwenConfigToVSCodeSettings();
 
       // Disconnect + reconnect
       if (this.agentInitialized) {

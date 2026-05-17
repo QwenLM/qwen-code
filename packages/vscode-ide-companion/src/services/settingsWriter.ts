@@ -21,10 +21,9 @@ import {
   type ModelProvidersConfig,
 } from '@qwen-code/qwen-code-core';
 import {
-  CODING_PLAN_ENV_KEY,
   CodingPlanRegion,
   SUBSCRIPTION_PLAN_OPTIONS,
-  TOKEN_PLAN_ENV_KEY,
+  type SubscriptionPlanConfig,
   findSubscriptionPlanByConfig,
   getSubscriptionPlanConfig,
   isSubscriptionPlanConfig,
@@ -60,13 +59,28 @@ export type VSCodeModelProviders = Record<string, string>;
 export interface QwenSettingsForVSCode {
   provider: 'coding-plan' | 'token-plan' | 'api-key';
   apiKey: string;
-  codingPlanRegion: 'china' | 'global';
+  codingPlanRegion?: 'china' | 'global';
 }
 
-const SUBSCRIPTION_PROVIDER_METADATA_KEYS = [
-  'coding-plan',
-  'token-plan',
-] as const;
+const SUBSCRIPTION_PROVIDER_METADATA_KEY_BY_PLAN_ID = {
+  coding: 'coding-plan',
+  token: 'token-plan',
+} as const satisfies Record<SubscriptionPlanConfig['id'], string>;
+
+type SubscriptionProviderMetadataKey =
+  (typeof SUBSCRIPTION_PROVIDER_METADATA_KEY_BY_PLAN_ID)[keyof typeof SUBSCRIPTION_PROVIDER_METADATA_KEY_BY_PLAN_ID];
+
+const SUBSCRIPTION_PROVIDER_METADATA_KEYS = Object.values(
+  SUBSCRIPTION_PROVIDER_METADATA_KEY_BY_PLAN_ID,
+) as SubscriptionProviderMetadataKey[];
+
+const API_KEY_ENV_KEY = 'OPENAI_API_KEY';
+
+function getSubscriptionProviderMetadataKey(
+  planId: SubscriptionPlanConfig['id'],
+): SubscriptionProviderMetadataKey {
+  return SUBSCRIPTION_PROVIDER_METADATA_KEY_BY_PLAN_ID[planId];
+}
 
 // ---------------------------------------------------------------------------
 // Low-level read/write helpers
@@ -296,7 +310,7 @@ function clearInactiveSubscriptionPlanState(
   active: {
     envKey: string;
     legacyMetadataKey: string;
-    providerMetadataKey: (typeof SUBSCRIPTION_PROVIDER_METADATA_KEYS)[number];
+    providerMetadataKey: SubscriptionProviderMetadataKey;
   },
 ): void {
   const env = settings.env as Record<string, unknown> | undefined;
@@ -306,6 +320,7 @@ function clearInactiveSubscriptionPlanState(
         delete env[plan.envKey];
       }
     }
+    delete env[API_KEY_ENV_KEY];
   }
 
   for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
@@ -326,6 +341,57 @@ function clearInactiveSubscriptionPlanState(
   }
 }
 
+function writeSubscriptionPlanConfig(params: {
+  apiKey: string;
+  planConfig: SubscriptionPlanConfig;
+  providerMetadataKey: SubscriptionProviderMetadataKey;
+  metadata?: Record<string, unknown>;
+}): void {
+  const { apiKey, planConfig, providerMetadataKey, metadata = {} } = params;
+  const settings = readSettings();
+
+  const auth = ensureNestedObject(settings, 'security', 'auth');
+  auth.selectedType = AuthType.USE_OPENAI;
+
+  const env = ensureNestedObject(settings, 'env');
+  env[planConfig.envKey] = apiKey;
+  clearInactiveSubscriptionPlanState(settings, {
+    envKey: planConfig.envKey,
+    legacyMetadataKey: planConfig.metadataKey,
+    providerMetadataKey,
+  });
+
+  const providers = ensureNestedObject(settings, 'modelProviders');
+  const existing = findOpenaiModels(
+    settings.modelProviders as Record<string, unknown>,
+  );
+  const nonSubscriptionPlan = existing.filter(
+    (entry) =>
+      !isSubscriptionPlanConfig(
+        entry.baseUrl as string,
+        entry.envKey as string,
+      ),
+  );
+  const planModels = planConfig.template.map((model) => ({
+    ...model,
+    envKey: planConfig.envKey,
+  }));
+  providers[AuthType.USE_OPENAI] = [...planModels, ...nonSubscriptionPlan];
+
+  const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
+  providerMetadata[providerMetadataKey] = {
+    baseUrl: planConfig.baseUrl,
+    version: planConfig.version,
+    ...metadata,
+  };
+  delete settings[planConfig.metadataKey];
+
+  const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
+  settings.model = { name: defaultModelId };
+
+  writeSettings(settings);
+}
+
 // ---------------------------------------------------------------------------
 // Write: VSCode Settings → ~/.qwen/settings.json
 // ---------------------------------------------------------------------------
@@ -334,125 +400,36 @@ function clearInactiveSubscriptionPlanState(
  * Write Coding Plan configuration to ~/.qwen/settings.json.
  * Auto-injects model providers from the regional template,
  * preserving any existing non-Coding-Plan entries.
- *
- * @returns The injected models as a VSCode key-value map (modelId → baseUrl)
  */
 export function writeCodingPlanConfig(
   region: 'china' | 'global',
   apiKey: string,
-): VSCodeModelProviders {
-  const settings = readSettings();
+): void {
   const codingRegion =
     region === 'global' ? CodingPlanRegion.GLOBAL : CodingPlanRegion.CHINA;
   const planConfig = getSubscriptionPlanConfig('coding', codingRegion);
 
-  // Auth
-  const auth = ensureNestedObject(settings, 'security', 'auth');
-  auth.selectedType = AuthType.USE_OPENAI;
-
-  // API key
-  const env = ensureNestedObject(settings, 'env');
-  env[CODING_PLAN_ENV_KEY] = apiKey;
-  clearInactiveSubscriptionPlanState(settings, {
-    envKey: CODING_PLAN_ENV_KEY,
-    legacyMetadataKey: planConfig.metadataKey,
-    providerMetadataKey: 'coding-plan',
+  writeSubscriptionPlanConfig({
+    apiKey,
+    planConfig,
+    providerMetadataKey: getSubscriptionProviderMetadataKey(planConfig.id),
+    metadata: { region: codingRegion },
   });
-
-  // Model providers — merge Coding Plan templates with existing non-CP entries
-  const providers = ensureNestedObject(settings, 'modelProviders');
-  const existing = findOpenaiModels(
-    settings.modelProviders as Record<string, unknown>,
-  );
-  const nonCodingPlan = existing.filter(
-    (e) => !isSubscriptionPlanConfig(e.baseUrl as string, e.envKey as string),
-  );
-  const planModels = planConfig.template.map((model) => ({
-    ...model,
-    envKey: planConfig.envKey,
-  }));
-  providers[AuthType.USE_OPENAI] = [...planModels, ...nonCodingPlan];
-
-  // Coding Plan metadata — write to the providerMetadata namespace that
-  // the CLI now reads from. Remove legacy top-level key if present.
-  const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
-  providerMetadata['coding-plan'] = {
-    region: codingRegion,
-    version: planConfig.version,
-  };
-  delete settings.codingPlan;
-
-  // Default model
-  const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
-  settings.model = { name: defaultModelId };
-
-  writeSettings(settings);
-
-  // Return key-value map for VSCode settings
-  const result: VSCodeModelProviders = {};
-  for (const m of planConfig.template) {
-    result[m.id] = m.baseUrl || '';
-  }
-  return result;
 }
 
 /**
  * Write Token Plan configuration to ~/.qwen/settings.json.
  * Auto-injects model providers from the token plan template,
  * preserving any existing non-Token-Plan entries.
- *
- * @returns The injected models as a VSCode key-value map (modelId → baseUrl)
  */
-export function writeTokenPlanConfig(apiKey: string): VSCodeModelProviders {
-  const settings = readSettings();
+export function writeTokenPlanConfig(apiKey: string): void {
   const planConfig = getSubscriptionPlanConfig('token');
 
-  // Auth
-  const auth = ensureNestedObject(settings, 'security', 'auth');
-  auth.selectedType = AuthType.USE_OPENAI;
-
-  // API key
-  const env = ensureNestedObject(settings, 'env');
-  env[TOKEN_PLAN_ENV_KEY] = apiKey;
-  clearInactiveSubscriptionPlanState(settings, {
-    envKey: TOKEN_PLAN_ENV_KEY,
-    legacyMetadataKey: planConfig.metadataKey,
-    providerMetadataKey: 'token-plan',
+  writeSubscriptionPlanConfig({
+    apiKey,
+    planConfig,
+    providerMetadataKey: getSubscriptionProviderMetadataKey(planConfig.id),
   });
-
-  // Model providers — merge Token Plan templates with existing non-TP entries
-  const providers = ensureNestedObject(settings, 'modelProviders');
-  const existing = findOpenaiModels(
-    settings.modelProviders as Record<string, unknown>,
-  );
-  const nonTokenPlan = existing.filter(
-    (e) => !isSubscriptionPlanConfig(e.baseUrl as string, e.envKey as string),
-  );
-  const planModels = planConfig.template.map((model) => ({
-    ...model,
-    envKey: planConfig.envKey,
-  }));
-  providers[AuthType.USE_OPENAI] = [...planModels, ...nonTokenPlan];
-
-  // Token Plan metadata
-  const providerMetadata = ensureNestedObject(settings, 'providerMetadata');
-  providerMetadata['token-plan'] = {
-    version: planConfig.version,
-  };
-  delete settings.tokenPlan;
-
-  // Default model
-  const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
-  settings.model = { name: defaultModelId };
-
-  writeSettings(settings);
-
-  // Return key-value map for VSCode settings
-  const result: VSCodeModelProviders = {};
-  for (const m of planConfig.template) {
-    result[m.id] = m.baseUrl || '';
-  }
-  return result;
 }
 
 /**
@@ -476,7 +453,7 @@ export function writeModelProvidersConfig(params: {
 
   // API key
   const env = ensureNestedObject(settings, 'env');
-  env['OPENAI_API_KEY'] = params.apiKey;
+  env[API_KEY_ENV_KEY] = params.apiKey;
   for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
     delete env[plan.envKey];
   }
@@ -490,13 +467,13 @@ export function writeModelProvidersConfig(params: {
       id,
       name: id,
       baseUrl: baseUrl || 'https://api.openai.com/v1',
-      envKey: 'OPENAI_API_KEY',
+      envKey: API_KEY_ENV_KEY,
     }),
   );
   const existing = findOpenaiModels(
     settings.modelProviders as Record<string, unknown>,
   );
-  const nonTarget = existing.filter((e) => e.envKey !== 'OPENAI_API_KEY');
+  const nonTarget = existing.filter((e) => e.envKey !== API_KEY_ENV_KEY);
   providers[AuthType.USE_OPENAI] = [...modelArray, ...nonTarget];
 
   // Active model
@@ -509,8 +486,9 @@ export function writeModelProvidersConfig(params: {
   }
   const pm = settings.providerMetadata as Record<string, unknown> | undefined;
   if (pm) {
-    delete pm['coding-plan'];
-    delete pm['token-plan'];
+    for (const key of SUBSCRIPTION_PROVIDER_METADATA_KEYS) {
+      delete pm[key];
+    }
   }
 
   writeSettings(settings);
@@ -732,12 +710,11 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
     return {
       provider: 'token-plan',
       apiKey: env[subscriptionPlan.plan.envKey] || '',
-      codingPlanRegion: 'china',
     };
   }
 
   // Non-subscription-plan — find API key from model providers
-  const firstEnvKey = (openaiModels[0]?.envKey as string) || 'OPENAI_API_KEY';
+  const firstEnvKey = (openaiModels[0]?.envKey as string) || API_KEY_ENV_KEY;
   const apiKey = env[firstEnvKey] || '';
 
   if (!apiKey) {
@@ -778,21 +755,7 @@ export function clearPersistedAuth(): void {
       for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
         delete env[plan.envKey];
       }
-      // Standard OpenAI bucket (legacy + the api-key flow's default).
-      delete env['OPENAI_API_KEY'];
-      // Every preset provider with a static string envKey.
-      for (const p of ALL_PROVIDERS) {
-        if (typeof p.envKey === 'string') {
-          delete env[p.envKey];
-        }
-      }
-      // Custom-provider env keys are derived dynamically by
-      // generateCustomEnvKey — match the prefix instead of enumerating.
-      for (const key of Object.keys(env)) {
-        if (key.startsWith(CUSTOM_API_KEY_ENV_PREFIX)) {
-          delete env[key];
-        }
-      }
+      delete env[API_KEY_ENV_KEY];
     }
 
     // Remove subscription plan metadata (legacy + new namespace)
@@ -801,19 +764,8 @@ export function clearPersistedAuth(): void {
     }
     const pm = settings.providerMetadata as Record<string, unknown> | undefined;
     if (pm) {
-      // Every preset with a static models[] writes providerMetadata.<id>.version
-      // via resolveProviderState — wipe them all on clear so stale entries
-      // don't cause phantom "update available" notifications for a provider
-      // the user just signed out of. resolveMetadataKey throws when a future
-      // provider has '.' in its id; wrap per-iteration so one bad entry
-      // can't abort the whole cleanup and leave secrets on disk.
-      for (const p of ALL_PROVIDERS) {
-        try {
-          const key = resolveMetadataKey(p);
-          if (key) delete pm[key];
-        } catch {
-          /* skip metadata cleanup for a misconfigured provider id */
-        }
+      for (const key of SUBSCRIPTION_PROVIDER_METADATA_KEYS) {
+        delete pm[key];
       }
     }
 
