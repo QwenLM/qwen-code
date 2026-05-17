@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test';
 import type { LabelConfig } from '@craft-agent/shared/labels';
-import { createLabelMenuItems, filterItems } from '../label-menu-utils';
+import { createLabelMenuItems, filterItems, filterSessionStatuses } from '../label-menu-utils';
 
 describe('createLabelMenuItems', () => {
   it('builds alphabetically ordered flat label menu items with parent breadcrumbs', () => {
@@ -44,5 +44,29 @@ describe('filterItems', () => {
     ];
 
     expect(filterItems(items, '').map(item => item.label)).toEqual(['Alpha', 'Bug', 'Priority']);
+  });
+});
+
+describe('filterSessionStatuses', () => {
+  function makeStatus(id: string, label: string) {
+    return {
+      id,
+      label,
+    };
+  }
+
+  it('can filter against localized status labels', () => {
+    const states = [
+      makeStatus('todo', 'Todo'),
+      makeStatus('done', 'Done'),
+    ];
+
+    const filtered = filterSessionStatuses(
+      states,
+      '待',
+      (state) => (state.id === 'todo' ? '待办' : state.label),
+    );
+
+    expect(filtered.map(state => state.id)).toEqual(['todo']);
   });
 });

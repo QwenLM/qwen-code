@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test'
 import {
+  getSessionStatusDisplayLabel,
   getStateIconStyle,
   getStatusIconStyle,
   type SessionStatus,
@@ -38,5 +39,22 @@ describe('session-status-config icon style helpers', () => {
     expect(getStateIconStyle('todo', states)).toBeUndefined()
     expect(getStateIconStyle('in-progress', states)).toEqual({ color: 'var(--success)' })
     expect(getStateIconStyle('missing', states)).toBeUndefined()
+  })
+})
+
+describe('getSessionStatusDisplayLabel', () => {
+  const t = (key: string, defaultValue: string) => {
+    const translations: Record<string, string> = {
+      'status.todo': '待办',
+    }
+    return translations[key] ?? defaultValue
+  }
+
+  it('localizes built-in status labels', () => {
+    expect(getSessionStatusDisplayLabel(makeStatus({ id: 'todo', label: 'Todo' }), t)).toBe('待办')
+  })
+
+  it('keeps custom status labels from workspace config', () => {
+    expect(getSessionStatusDisplayLabel(makeStatus({ id: 'blocked', label: 'Blocked' }), t)).toBe('Blocked')
   })
 })

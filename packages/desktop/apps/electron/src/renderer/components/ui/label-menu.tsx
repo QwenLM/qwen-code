@@ -1,12 +1,22 @@
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { Check, Plus } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { LabelIcon } from './label-icon'
 import type { LabelConfig } from '@craft-agent/shared/labels'
-import { createLabelMenuItems, filterItems, segmentScore, type LabelMenuItem } from './label-menu-utils'
-import { getStatusIconStyle, type SessionStatus } from '@/config/session-status-config'
+import {
+  createLabelMenuItems,
+  filterItems,
+  filterSessionStatuses,
+  type LabelMenuItem,
+} from './label-menu-utils'
+import {
+  getSessionStatusDisplayLabel,
+  getStatusIconStyle,
+  type SessionStatus,
+} from '@/config/session-status-config'
 
-export { createLabelMenuItems, filterItems, type LabelMenuItem } from './label-menu-utils'
+export { createLabelMenuItems, filterItems, filterSessionStatuses, type LabelMenuItem } from './label-menu-utils'
 
 // ============================================================================
 // Types
@@ -41,35 +51,6 @@ const MENU_ITEM_STYLE = 'flex cursor-pointer select-none items-center gap-2.5 ro
 const MENU_ITEM_SELECTED = 'bg-foreground/5'
 
 // ============================================================================
-// Filter utilities
-// ============================================================================
-
-/**
- * Filter states by a simple text match on the state label.
- * Uses the same segmentScore logic for consistency with label filtering.
- */
-export function filterSessionStatuses(states: SessionStatus[], filter: string): SessionStatus[] {
-  if (!filter) return states
-
-  const segments = filter.toLowerCase().split('/').map(s => s.trim()).filter(Boolean)
-  if (segments.length === 0) return states
-
-  // States are flat (no hierarchy), so just match the first segment against the label
-  const segment = segments[0]
-  const scored: { state: SessionStatus; score: number }[] = []
-
-  for (const state of states) {
-    const score = segmentScore(state.label, segment)
-    if (score > 0) {
-      scored.push({ state, score })
-    }
-  }
-
-  scored.sort((a, b) => b.score - a.score || a.state.label.localeCompare(b.state.label))
-  return scored.map(s => s.state)
-}
-
-// ============================================================================
 // InlineLabelMenu Component
 // ============================================================================
 
@@ -91,11 +72,16 @@ export function InlineLabelMenu({
   activeStateId,
   onSelectState,
 }: InlineLabelMenuProps) {
+  const { t } = useTranslation()
   const menuRef = React.useRef<HTMLDivElement>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
   const [selectedIndex, setSelectedIndex] = React.useState(0)
   const filteredItems = filterItems(items, filter)
-  const filteredStates_ = filterSessionStatuses(states, filter)
+  const getStateLabel = React.useCallback(
+    (state: SessionStatus) => getSessionStatusDisplayLabel(state, t),
+    [t],
+  )
+  const filteredStates_ = filterSessionStatuses(states, filter, getStateLabel)
 
   // Build a unified flat index for keyboard navigation:
   // [0..filteredStates_.length-1] = states, [filteredStates_.length..] = labels
@@ -213,7 +199,7 @@ export function InlineLabelMenu({
             <div className="shrink-0 text-muted-foreground">
               <Plus className="h-3.5 w-3.5" />
             </div>
-            <span className="text-[13px]">Add New Label</span>
+            <span className="text-[13px]">{t('sidebarMenu.addNewLabel')}</span>
           </div>
         ) : (
           <>
@@ -222,7 +208,7 @@ export function InlineLabelMenu({
               <>
                 {showSectionHeaders && (
                   <div className="px-3 pt-1.5 pb-1 text-[11px] font-medium text-muted-foreground/60 uppercase tracking-wider">
-                    States
+                    {t('sessionMenu.status')}
                   </div>
                 )}
                 {filteredStates_.map((state, index) => {
@@ -250,7 +236,7 @@ export function InlineLabelMenu({
                       >
                         {state.icon}
                       </span>
-                      <div className="flex-1 min-w-0 truncate">{state.label}</div>
+                      <div className="flex-1 min-w-0 truncate">{getStateLabel(state)}</div>
                       {/* Checkmark on active state */}
                       {isActive && (
                         <Check className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -271,7 +257,7 @@ export function InlineLabelMenu({
               <>
                 {showSectionHeaders && (
                   <div className="px-3 pt-1.5 pb-1 text-[11px] font-medium text-muted-foreground/60 uppercase tracking-wider">
-                    Labels
+                    {t('sessionMenu.labels')}
                   </div>
                 )}
                 {filteredItems.map((item, index) => {

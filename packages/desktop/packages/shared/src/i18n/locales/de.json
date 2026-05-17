@@ -1215,6 +1215,7 @@
   "status.done": "Erledigt",
   "status.filterStatuses": "Status filtern...",
   "status.needs-review": "Überprüfung erforderlich",
+  "status.noStatusFound": "Kein Status gefunden",
   "status.todo": "Aufgabe",
   "table.access": "Zugriff",
   "table.comment": "Kommentar",

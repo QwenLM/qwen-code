@@ -1215,6 +1215,7 @@
   "status.done": "Hecho",
   "status.filterStatuses": "Filtrar estados...",
   "status.needs-review": "Necesita revisión",
+  "status.noStatusFound": "No se encontró ningún estado",
   "status.todo": "Por hacer",
   "table.access": "Acceso",
   "table.comment": "Comentario",
