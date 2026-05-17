@@ -15,7 +15,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { HttpAcpBridge } from './httpAcpBridge.js';
-import { InvalidClientIdError } from './httpAcpBridge.js';
 import {
   createIdleWorkspaceMemoryStatus,
   STATUS_SCHEMA_VERSION,
@@ -39,6 +38,20 @@ import {
  * session's bus so adapters can refresh cached snapshots.
  *
  * Both routes are filesystem-only — neither spawns the ACP child.
+ *
+ * **Absolute filePath disclosure note**: success / 413 / GET-list
+ * responses include absolute on-disk paths (`/work/<x>/QWEN.md`,
+ * `/Users/<x>/.qwen/QWEN.md`). This is by design for a daemon
+ * contract: clients pre-flight `caps.workspaceCwd` to learn the
+ * bound workspace root and can compute relative paths if they
+ * prefer; the global scope (`~/.qwen/QWEN.md`) is NOT under the
+ * workspace root, so rewriting to a workspace-relative form would
+ * lose information. The bearer-token gate + the daemon's loopback-
+ * default binding already restrict who can see these paths. If a
+ * future deployment shape needs path redaction (e.g. multi-tenant
+ * over a shared host), it should land as a `--redact-paths`
+ * deployment toggle rather than a per-route default flip — tracked
+ * with PR 24's `--redact-errors` policy work, not in PR 16.
  */
 
 export interface WorkspaceMemoryRouteDeps {
@@ -144,19 +157,26 @@ export function mountWorkspaceMemoryRoutes(
       if (clientId === null) return;
       let originatorClientId: string | undefined;
       if (clientId !== undefined) {
-        try {
-          originatorClientId = resolveWorkspaceClientId(deps.bridge, clientId);
-        } catch (err) {
-          if (err instanceof InvalidClientIdError) {
-            res.status(400).json({
-              error: err.message,
-              code: 'invalid_client_id',
-              clientId: err.clientId,
-            });
-            return;
-          }
-          throw err;
+        // Mirror the workspaceAgents.ts `resolveOriginatorClientId`
+        // posture: validate against `bridge.knownClientIds()`, send
+        // 400 directly, return `null` so the caller short-circuits.
+        // Previously this branch threw `InvalidClientIdError` and
+        // caught it locally — wenshao round-6 flagged the
+        // throw-vs-direct-400 inconsistency between the two route
+        // files. Aligning the call sites now removes the surface
+        // divergence; the deeper DRY refactor (one shared helper
+        // module) still lands in the cross-Wave-4 sweep with PR
+        // 17/19/20/21.
+        const known = deps.bridge.knownClientIds();
+        if (!known.has(clientId)) {
+          res.status(400).json({
+            error: `Client id "${clientId}" is not registered for this workspace`,
+            code: 'invalid_client_id',
+            clientId,
+          });
+          return;
         }
+        originatorClientId = clientId;
       }
 
       try {
@@ -241,25 +261,6 @@ export function mountWorkspaceMemoryRoutes(
       }
     },
   );
-}
-
-/**
- * Validate an inbound `X-Qwen-Client-Id` against the union of every
- * live session's stamped client ids. Returns the validated id (so
- * callers can pass it through unchanged), or throws
- * `InvalidClientIdError` for unknown ids. Workspace mutations don't
- * have a session id of their own, so this fills in for the per-session
- * `resolveTrustedClientId` PR 7 added to the bridge.
- */
-function resolveWorkspaceClientId(
-  bridge: HttpAcpBridge,
-  clientId: string,
-): string {
-  const known = bridge.knownClientIds();
-  if (!known.has(clientId)) {
-    throw new InvalidClientIdError('workspace', clientId);
-  }
-  return clientId;
 }
 
 interface DiscoveredFile {

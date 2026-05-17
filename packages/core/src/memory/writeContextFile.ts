@@ -98,29 +98,32 @@ export async function writeWorkspaceContextFile(
   }
   const filePath = resolveContextFilePath(options.scope, options.projectRoot);
 
-  // Append-mode no-op detection BEFORE acquiring the lock or
-  // creating directories. Re-writing the same bytes would bump
-  // mtime + the parent dir mtime AND fan out a misleading
-  // `memory_changed` event; whitespace-only POSTs from a flaky
-  // pipeline shouldn't reach the filesystem at all.
-  if (options.mode === 'append' && isWhitespaceOnly(options.content)) {
-    let bytes = 0;
-    try {
-      const stat = await fs.stat(filePath);
-      bytes = stat.size;
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    return { filePath, bytesWritten: bytes, changed: false };
-  }
-
-  // Hold the per-file mutex for the entire read-compose-write sequence.
-  // Concurrent `POST /workspace/memory` appends from different SSE
-  // clients would otherwise interleave reads and lose entries on the
-  // later `fs.writeFile`. `replace` mode also acquires the lock so a
-  // concurrent `replace` + `append` against the same file produces a
-  // deterministic last-write rather than a partial composite.
+  // Hold the per-file mutex for the entire read-compose-write sequence
+  // INCLUDING the whitespace-only no-op detection. Two concurrent
+  // POSTs targeting the same file (one whitespace-only, one with real
+  // content) would otherwise let the no-op `fs.stat` see a stale size
+  // — the no-op's `changed: false` would still be correct but
+  // `bytesWritten` could lag the post-write reality. Holding the
+  // mutex makes the snapshot consistent. `replace` mode also acquires
+  // the lock so a concurrent `replace` + `append` against the same
+  // file produces a deterministic last-write rather than a partial
+  // composite.
   return await getFileLock(filePath).runExclusive(async () => {
+    if (options.mode === 'append' && isWhitespaceOnly(options.content)) {
+      // No-op short-circuit. Skip the mkdir + writeFile path entirely
+      // so the parent dir mtime isn't bumped on a request that
+      // changed nothing — the whitespace-only `\n\n` case from a
+      // flaky pipeline must not reach the filesystem at all.
+      let bytes = 0;
+      try {
+        const stat = await fs.stat(filePath);
+        bytes = stat.size;
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
+      return { filePath, bytesWritten: bytes, changed: false };
+    }
+
     await fs.mkdir(path.dirname(filePath), { recursive: true });
 
     if (options.mode === 'replace') {

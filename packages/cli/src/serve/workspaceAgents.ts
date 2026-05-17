@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { promises as fs } from 'node:fs';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   APPROVAL_MODES,
@@ -17,6 +18,27 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { InvalidClientIdError, type HttpAcpBridge } from './httpAcpBridge.js';
+
+/**
+ * Pattern for the route-layer `:agentType` URL parameter. Matches the
+ * `SubagentValidator.validateName` regex (`^[\p{L}\p{N}_-]+$`) so a
+ * malformed path component (containing slashes, dots, control chars,
+ * leading hyphen) is rejected at the boundary instead of trickling
+ * through `findSubagentByNameAtLevel`'s readdir scan. Defense in
+ * depth — `findSubagentByNameAtLevel` already prevents path traversal
+ * via filename matching, but failing fast at the route layer keeps
+ * surprising inputs out of downstream code paths.
+ */
+const AGENT_TYPE_PATTERN = /^[\p{L}\p{N}_-]+$/u;
+
+/**
+ * Cap on the route-layer name validator. SubagentValidator caps
+ * payload-side names at 50 chars; the route check uses 64 to leave a
+ * little headroom for legacy on-disk agents created with a longer
+ * name (resolved via case-insensitive cascade) that a client tries
+ * to GET / DELETE through the URL.
+ */
+const AGENT_TYPE_MAX_LENGTH = 64;
 import {
   STATUS_SCHEMA_VERSION,
   type ServeAgentLevel,
@@ -228,14 +250,8 @@ export function mountWorkspaceAgentsRoutes(
   );
 
   app.get('/workspace/agents/:agentType', async (req, res) => {
-    const agentType = req.params['agentType'];
-    if (!agentType) {
-      res.status(400).json({
-        error: '`agentType` path parameter is required',
-        code: 'invalid_agent_type',
-      });
-      return;
-    }
+    const agentType = validateAgentType(req, res);
+    if (agentType === null) return;
     try {
       const config = await manager.loadSubagent(agentType);
       if (!config) {
@@ -264,14 +280,8 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/:agentType',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const agentType = req.params['agentType'];
-      if (!agentType) {
-        res.status(400).json({
-          error: '`agentType` path parameter is required',
-          code: 'invalid_agent_type',
-        });
-        return;
-      }
+      const agentType = validateAgentType(req, res);
+      if (agentType === null) return;
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
       if (clientIdResult === null) return;
       const originatorClientId = clientIdResult;
@@ -280,38 +290,8 @@ export function mountWorkspaceAgentsRoutes(
       const updates = parseAgentUpdates(body, res);
       if (!updates) return;
 
-      // Fail-closed on `?scope=` malformations. `req.query['scope']`
-      // is `undefined` when absent, a `string` when supplied once, an
-      // array when repeated (`?scope=workspace&scope=global`), or a
-      // ParsedQs object on a nested form. We only accept a single
-      // string; anything else returns `invalid_scope` rather than
-      // silently treating "?scope=...&scope=..." as if no scope were
-      // provided. Matches the fail-closed posture of
-      // `parseMaxQueuedQuery` for the SSE route.
-      const rawScope = req.query['scope'];
-      let scopeQuery: string | undefined;
-      if (rawScope === undefined) {
-        scopeQuery = undefined;
-      } else if (typeof rawScope === 'string') {
-        scopeQuery = rawScope;
-      } else {
-        res.status(400).json({
-          error: '`scope` query must be a single "workspace" or "global" value',
-          code: 'invalid_scope',
-        });
-        return;
-      }
-      let preferredLevel: SubagentLevel | undefined;
-      if (scopeQuery !== undefined) {
-        if (scopeQuery !== 'workspace' && scopeQuery !== 'global') {
-          res.status(400).json({
-            error: '`scope` query must be "workspace" or "global"',
-            code: 'invalid_scope',
-          });
-          return;
-        }
-        preferredLevel = scopeQuery === 'workspace' ? 'project' : 'user';
-      }
+      const preferredLevel = parseScopeQuery(req, res);
+      if (preferredLevel === null) return;
 
       const existing = await manager.loadSubagent(agentType, preferredLevel);
       if (!existing) {
@@ -322,18 +302,7 @@ export function mountWorkspaceAgentsRoutes(
         });
         return;
       }
-      if (
-        existing.isBuiltin ||
-        existing.level === 'builtin' ||
-        existing.level === 'extension' ||
-        existing.level === 'session'
-      ) {
-        res.status(403).json({
-          error: `Cannot update ${existing.level}-level subagent "${agentType}"`,
-          code: 'agent_readonly',
-          name: existing.name,
-          level: existing.level,
-        });
+      if (assertMutableLevel(existing, agentType, res)) {
         return;
       }
 
@@ -453,50 +422,14 @@ export function mountWorkspaceAgentsRoutes(
     '/workspace/agents/:agentType',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const agentType = req.params['agentType'];
-      if (!agentType) {
-        res.status(400).json({
-          error: '`agentType` path parameter is required',
-          code: 'invalid_agent_type',
-        });
-        return;
-      }
+      const agentType = validateAgentType(req, res);
+      if (agentType === null) return;
       const clientIdResult = resolveOriginatorClientId(deps, req, res);
       if (clientIdResult === null) return;
       const originatorClientId = clientIdResult;
 
-      // Fail-closed on `?scope=` malformations. `req.query['scope']`
-      // is `undefined` when absent, a `string` when supplied once, an
-      // array when repeated (`?scope=workspace&scope=global`), or a
-      // ParsedQs object on a nested form. We only accept a single
-      // string; anything else returns `invalid_scope` rather than
-      // silently treating "?scope=...&scope=..." as if no scope were
-      // provided. Matches the fail-closed posture of
-      // `parseMaxQueuedQuery` for the SSE route.
-      const rawScope = req.query['scope'];
-      let scopeQuery: string | undefined;
-      if (rawScope === undefined) {
-        scopeQuery = undefined;
-      } else if (typeof rawScope === 'string') {
-        scopeQuery = rawScope;
-      } else {
-        res.status(400).json({
-          error: '`scope` query must be a single "workspace" or "global" value',
-          code: 'invalid_scope',
-        });
-        return;
-      }
-      let scopedLevel: SubagentLevel | undefined;
-      if (scopeQuery !== undefined) {
-        if (scopeQuery !== 'workspace' && scopeQuery !== 'global') {
-          res.status(400).json({
-            error: '`scope` query must be "workspace" or "global"',
-            code: 'invalid_scope',
-          });
-          return;
-        }
-        scopedLevel = scopeQuery === 'workspace' ? 'project' : 'user';
-      }
+      const scopedLevel = parseScopeQuery(req, res);
+      if (scopedLevel === null) return;
 
       // Pre-check at every level we're going to try to delete. When
       // `scopedLevel` is given we touch just that level; when omitted,
@@ -513,20 +446,7 @@ export function mountWorkspaceAgentsRoutes(
         if (found) existingAtLevels.push(found);
       }
       for (const found of existingAtLevels) {
-        if (
-          found.isBuiltin ||
-          found.level === 'builtin' ||
-          found.level === 'extension' ||
-          found.level === 'session'
-        ) {
-          res.status(403).json({
-            error: `Cannot delete ${found.level}-level subagent "${agentType}"`,
-            code: 'agent_readonly',
-            name: found.name,
-            level: found.level,
-          });
-          return;
-        }
+        if (assertMutableLevel(found, agentType, res)) return;
       }
 
       try {
@@ -561,6 +481,75 @@ export function mountWorkspaceAgentsRoutes(
         });
         return;
       }
+
+      // [Critical] gpt-5.5 round-6 finding:
+      // `SubagentManager.deleteSubagent` swallows per-level
+      // `fs.unlink()` failures (subagent-manager.ts:332-336) and
+      // returns success as long as ANY level was removed. Trusting
+      // that signal would let us publish `agent_changed`/`deleted`
+      // for a file still on disk (EACCES / EBUSY / EPERM) — the
+      // client UI would drop a still-active definition from cache.
+      // Verify each pre-checked level's file is actually gone via
+      // `fs.access`; only fan out the event for confirmed removals.
+      // If at least one level still has its file, return 500 with
+      // the residual list so callers can act.
+      const removed: SubagentConfig[] = [];
+      const remaining: SubagentConfig[] = [];
+      for (const found of existingAtLevels) {
+        if (!found.filePath) {
+          // Synthetic / no-file entries (impossible at project /
+          // user levels, defensive guard) treat as "no verification
+          // possible" → assume removed to match legacy behavior.
+          removed.push(found);
+          continue;
+        }
+        try {
+          await fs.access(found.filePath);
+          // Still present → unlink failed silently.
+          remaining.push(found);
+        } catch {
+          // Any access error (typically ENOENT) means the file is
+          // gone — count as successfully removed.
+          removed.push(found);
+        }
+      }
+
+      if (remaining.length > 0) {
+        writeStderrLine(
+          `qwen serve: DELETE /workspace/agents/${agentType} partial — ` +
+            `removed=${removed.map((r) => r.level).join(',') || 'none'} ` +
+            `remaining=${remaining
+              .map((r) => `${r.level}:${r.filePath}`)
+              .join(',')}`,
+        );
+        // Still publish events for files we DID remove so subscribers
+        // get partial-success signals — but emit them BEFORE the 500
+        // so a client reading the response can correlate.
+        for (const found of removed) {
+          const evtLevel: 'project' | 'user' =
+            found.level === 'project' ? 'project' : 'user';
+          deps.bridge.publishWorkspaceEvent({
+            type: 'agent_changed',
+            data: {
+              change: 'deleted',
+              name: found.name,
+              level: evtLevel,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
+          });
+        }
+        res.status(500).json({
+          error:
+            `Failed to delete every level of subagent "${agentType}" — ` +
+            `${remaining.length} level(s) still have their file on disk`,
+          code: 'agent_delete_partial',
+          name: agentType,
+          removedLevels: removed.map((r) => r.level),
+          remainingLevels: remaining.map((r) => r.level),
+        });
+        return;
+      }
+
       // Emit one event per level that was deleted so subscribers using
       // event metadata for toasts/audit/echo-suppression see the
       // complete picture. Without this split, an unscoped DELETE that
@@ -584,7 +573,7 @@ export function mountWorkspaceAgentsRoutes(
           ...(originatorClientId ? { originatorClientId } : {}),
         });
       } else {
-        for (const found of existingAtLevels) {
+        for (const found of removed) {
           const evtLevel: 'project' | 'user' =
             found.level === 'project' ? 'project' : 'user';
           deps.bridge.publishWorkspaceEvent({
@@ -601,6 +590,101 @@ export function mountWorkspaceAgentsRoutes(
       res.status(204).end();
     },
   );
+}
+
+/**
+ * Pull `:agentType` off the request and reject malformed values at
+ * the route boundary. Returns the validated string, or `null` AFTER
+ * sending its own 400 — caller must short-circuit on `null`.
+ */
+function validateAgentType(req: Request, res: Response): string | null {
+  const raw = req.params['agentType'];
+  if (!raw || raw.length === 0) {
+    res.status(400).json({
+      error: '`agentType` path parameter is required',
+      code: 'invalid_agent_type',
+    });
+    return null;
+  }
+  if (raw.length > AGENT_TYPE_MAX_LENGTH || !AGENT_TYPE_PATTERN.test(raw)) {
+    res.status(400).json({
+      error:
+        '`agentType` must contain only letters, numbers, hyphens, or underscores (max 64 chars)',
+      code: 'invalid_agent_type',
+      agentType: raw,
+    });
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * Read the `?scope=` query, fail-closed on repeated/non-string
+ * values, and translate `workspace`/`global` into the
+ * `SubagentLevel` the manager expects. Returns:
+ *   - `undefined` when `scope` is absent (caller falls back to default
+ *     resolution / both levels);
+ *   - the resolved `SubagentLevel` when valid;
+ *   - `null` when the query was malformed AND the response was
+ *     already sent — caller must short-circuit.
+ *
+ * Centralizes the duplicated parser block from the POST update +
+ * DELETE handlers so a future scope addition (e.g. `extension`)
+ * stays in one place.
+ */
+function parseScopeQuery(
+  req: Request,
+  res: Response,
+): SubagentLevel | undefined | null {
+  const raw = req.query['scope'];
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') {
+    res.status(400).json({
+      error: '`scope` query must be a single "workspace" or "global" value',
+      code: 'invalid_scope',
+    });
+    return null;
+  }
+  if (raw !== 'workspace' && raw !== 'global') {
+    res.status(400).json({
+      error: '`scope` query must be "workspace" or "global"',
+      code: 'invalid_scope',
+    });
+    return null;
+  }
+  return raw === 'workspace' ? 'project' : 'user';
+}
+
+/**
+ * Reject mutation attempts targeting a read-only agent
+ * (built-in / extension / session). Returns `true` after sending
+ * the 403 — caller must short-circuit on `true`. Returns `false`
+ * when the entry is mutable (`project` / `user`).
+ *
+ * Centralizes the duplicated guard from the POST update + DELETE
+ * handlers; a future PR adding a new mutation route just calls this
+ * helper instead of re-implementing the predicate.
+ */
+function assertMutableLevel(
+  found: SubagentConfig,
+  agentType: string,
+  res: Response,
+): boolean {
+  if (
+    found.isBuiltin ||
+    found.level === 'builtin' ||
+    found.level === 'extension' ||
+    found.level === 'session'
+  ) {
+    res.status(403).json({
+      error: `Cannot modify ${found.level}-level subagent "${agentType}"`,
+      code: 'agent_readonly',
+      name: found.name,
+      level: found.level,
+    });
+    return true;
+  }
+  return false;
 }
 
 function resolveOriginatorClientId(
