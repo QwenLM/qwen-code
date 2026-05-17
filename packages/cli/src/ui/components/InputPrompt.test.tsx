@@ -330,6 +330,10 @@ describe('InputPrompt', () => {
     };
   });
 
+  // Two microtask yields are intentional: Ink 7 + React 19 split a render
+  // pass across two ticks (one to flush state updates into the reconciler,
+  // a second for the resulting effects to settle). A single Promise.resolve
+  // drains only the first tick and produces flaky assertions on slow CI.
   const flush = async () => {
     await act(async () => {
       await Promise.resolve();
@@ -3467,9 +3471,8 @@ describe('InputPrompt', () => {
         expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
       } finally {
         vi.useRealTimers();
+        unmount();
       }
-
-      unmount();
     });
 
     it('should reuse placeholder ID after deletion', async () => {
