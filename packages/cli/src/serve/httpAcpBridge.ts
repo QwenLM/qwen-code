@@ -653,6 +653,14 @@ interface SessionEntry {
    * session.
    */
   spawnOwnerWantedKill: boolean;
+  /**
+   * ACP state captured at `session/load` / `session/resume` time so
+   * late attachers (existing-byId early-return + coalesced restore
+   * waiters) get the same payload the original restore caller did.
+   * `undefined` for sessions created via `doSpawn` — those have never
+   * had an ACP load/resume response, so attaches return `state: {}`.
+   */
+  restoreState?: BridgeSessionState;
 }
 
 interface PendingPermission {
@@ -1237,6 +1245,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   interface InFlightRestore {
     action: 'load' | 'resume';
     promise: Promise<BridgeRestoredSession>;
+    /**
+     * Synchronous reservation slot for callers that coalesce onto this
+     * restore. Coalescers do `count++` BEFORE awaiting `promise` so the
+     * spawn-owner's disconnect-reaper (`killSession({ requireZeroAttaches:
+     * true })`) sees a non-zero `attachCount` on the freshly registered
+     * entry and skips the kill. The IIFE folds this counter into
+     * `entry.attachCount` when it calls `createSessionEntry`. BQ9tV
+     * race-guard equivalent for coalesced restore waiters.
+     */
+    coalesceState: { count: number };
   }
 
   // Coalesces concurrent explicit restore calls for the same session id.
@@ -1834,7 +1852,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         sessionId: existing.sessionId,
         workspaceCwd: existing.workspaceCwd,
         attached: true,
-        state: {},
+        // Late attachers get the same ACP state the original restore
+        // caller saw; spawn-only sessions don't carry a state payload.
+        state: existing.restoreState ?? {},
       };
     }
 
@@ -1847,16 +1867,37 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           action,
         );
       }
-      const restored = await inFlight.promise;
+      // Reserve the attach SYNCHRONOUSLY before awaiting so the spawn
+      // owner's `requireZeroAttaches` disconnect-reaper observes our
+      // intent. The IIFE folds this counter into `entry.attachCount`
+      // at `createSessionEntry` time.
+      inFlight.coalesceState.count++;
+      let restored: BridgeRestoredSession;
+      try {
+        restored = await inFlight.promise;
+      } catch (err) {
+        // Roll back our reservation so a subsequent retry isn't
+        // permanently skewed if the in-flight restore failed.
+        inFlight.coalesceState.count--;
+        throw err;
+      }
       const entry = byId.get(restored.sessionId);
       if (!entry) {
+        // Restore owner's session got reaped before our await
+        // resumed (channel died mid-microtask, etc). Roll back the
+        // reservation too — there's no entry for it to live on.
+        inFlight.coalesceState.count--;
         throw new SessionNotFoundError(
           restored.sessionId,
           'the agent child likely crashed during session restore — retry to restore the session',
         );
       }
-      entry.attachCount++;
-      return { ...restored, attached: true, state: {} };
+      // NOTE: do NOT bump entry.attachCount here — `createSessionEntry`
+      // already initialized it from coalesceState.count synchronously
+      // when the IIFE registered the entry. Spread `restored` so the
+      // ACP state propagates to coalesced waiters (BQ9tV-equivalent
+      // for restore waiter consistency).
+      return { ...restored, attached: true };
     }
 
     if (
@@ -1869,10 +1910,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     const restoreEvents = new EventBus();
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
+    // Live counter shared with coalesced waiters (see InFlightRestore
+    // doc comment). Mutated synchronously by the coalesce branch above
+    // and read once by the IIFE when seeding `entry.attachCount`.
+    const coalesceState = { count: 0 };
     const promise = (async (): Promise<BridgeRestoredSession> => {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       ci = await ensureChannel();
       ci.pendingRestoreIds.add(req.sessionId);
+      // Restore is a low-frequency one-shot path, so we register a
+      // fresh `channel.exited` listener per call instead of going
+      // through `getTransportClosedReject` (which exists to keep
+      // sendPrompt's per-session listener count at 1 over the
+      // session's lifetime). The listener is bound to this restore's
+      // race only — once the race settles, no new awaits attach to
+      // it, so there's no listener leak across restores.
       const transportClosed = ci.channel.exited.then(() => {
         throw new Error(`agent channel closed during session/${action}`);
       });
@@ -1884,6 +1936,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               ci.connection.loadSession({
                 sessionId: req.sessionId,
                 cwd: workspaceKey,
+                // Restore path drops per-request `mcpServers` (matches
+                // `doSpawn`); daemon-wide MCP comes from settings on
+                // the agent side. The SDK's `RestoreSessionRequest`
+                // intentionally has no `mcpServers` field for the
+                // same reason.
                 mcpServers: [],
               }),
               initTimeoutMs,
@@ -1936,12 +1993,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const racedEntry = byId.get(req.sessionId);
       if (racedEntry) {
         restoreEvents.close();
-        racedEntry.attachCount++;
+        // Self + any coalescers we accumulated while the restore was
+        // in flight. Coalescers must not bump attachCount themselves
+        // (they read it off the registered entry on the next tick).
+        racedEntry.attachCount += 1 + coalesceState.count;
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
           attached: true,
-          state: {},
+          state: racedEntry.restoreState ?? {},
         };
       }
 
@@ -1951,18 +2011,22 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         workspaceKey,
         restoreEvents,
       );
+      entry.restoreState = state;
+      // Fold synchronous coalesce reservations into the new entry's
+      // `attachCount`. By this point all coalescers that beat us must
+      // have hit the inFlightRestores branch and bumped
+      // `coalesceState.count`; later coalescers will hit the byId
+      // early-return path instead and increment `entry.attachCount`
+      // directly.
+      entry.attachCount = coalesceState.count;
       registeredEntry = entry;
-      // Mirror doSpawn (`effectiveScope === 'single' && !defaultEntry`):
-      // `defaultEntry` is the omitted-scope attach target, so it must
-      // never point at a session that wouldn't have claimed it via
-      // spawn. Restore can't read the persisted session's original
-      // scope, so the only safe gate is the daemon-wide default — when
-      // it's `'thread'`, omitted-scope `POST /session` callers go
-      // through the spawn path and `defaultEntry` should stay
-      // unclaimed.
-      if (defaultSessionScope === 'single' && !defaultEntry) {
-        defaultEntry = entry;
-      }
+      // Explicit `session/load` / `session/resume` is "give me THIS
+      // id"; it must NOT become the implicit attach target for
+      // subsequent omitted-id `POST /session` callers under `single`
+      // scope. Those callers asked for "any default", and silently
+      // joining a restored live history would surprise them.
+      // `defaultEntry` is reserved for sessions created through
+      // `doSpawn` under `'single'` scope.
       return {
         sessionId: entry.sessionId,
         workspaceCwd: entry.workspaceCwd,
@@ -1977,7 +2041,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
     });
 
-    inFlightRestores.set(req.sessionId, { action, promise });
+    inFlightRestores.set(req.sessionId, { action, promise, coalesceState });
     try {
       return await promise;
     } finally {
@@ -2495,17 +2559,23 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* bus already closed */
       }
       entry.events.close();
-      // Only kill the channel when no other sessions remain. ACP
-      // doesn't expose a per-session "close" call on the agent side,
-      // so the agent's `sessions: Map<string, Session>` grows by one
-      // until the channel dies — bounded by `maxSessions` (default
-      // 20) so memory is capped. FIXME(stage-1.5): if ACP grows a
-      // `closeSession` notification, send it here so the agent can
-      // drop the entry from its map immediately rather than at
-      // channel exit. (`channelInfo` itself is cleared by the
-      // `channel.exited` handler once the OS reaps the child —
+      // Only kill the channel when no other sessions remain AND no
+      // restore is in flight. ACP doesn't expose a per-session "close"
+      // call on the agent side, so the agent's `sessions: Map<string,
+      // Session>` grows by one until the channel dies — bounded by
+      // `maxSessions` (default 20) so memory is capped. FIXME(stage-
+      // 1.5): if ACP grows a `closeSession` notification, send it
+      // here so the agent can drop the entry from its map immediately
+      // rather than at channel exit. (`channelInfo` itself is cleared
+      // by the `channel.exited` handler once the OS reaps the child —
       // tanzhenxin BkUyD invariant.)
-      if (ci && ci.sessionIds.size === 0) {
+      //
+      // `pendingRestoreIds` covers in-flight `session/load` and
+      // `session/resume` calls that haven't yet registered into
+      // `sessionIds`. Killing the channel out from under them would
+      // SIGTERM the restore mid-flight and 500 the caller for a
+      // failure orthogonal to their request.
+      if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
         // Mark dying SYNCHRONOUSLY before the await so a concurrent
         // `spawnOrAttach` arriving during the SIGTERM grace window
         // doesn't attach to a transport we're tearing down — without

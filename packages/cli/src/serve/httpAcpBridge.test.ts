@@ -438,10 +438,14 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
-  it('attaches to an already live session instead of loading it twice', async () => {
+  it('attaches to an already live session and returns the cached restore state', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
-      const h = makeChannel();
+      const h = makeChannel({
+        loadSessionImpl: () => ({
+          configOptions: [{ id: 'foo', name: 'Foo', value: false }],
+        }),
+      });
       handles.push(h);
       return h.channel;
     };
@@ -457,14 +461,176 @@ describe('createHttpAcpBridge', () => {
     });
 
     expect(loaded.attached).toBe(false);
+    expect(loaded.state).toEqual({
+      configOptions: [{ id: 'foo', name: 'Foo', value: false }],
+    });
+    // Late attachers must observe the SAME restore state the original
+    // caller saw — `entry.restoreState` is cached at load time.
     expect(attached).toEqual({
       sessionId: 'persisted-3',
       workspaceCwd: WS_A,
       attached: true,
-      state: {},
+      state: { configOptions: [{ id: 'foo', name: 'Foo', value: false }] },
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(1);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
+  it('propagates the original ACP state to coalesced restore waiters', async () => {
+    let releaseLoad: ((value: LoadSessionResponse) => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = resolve;
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-state',
+      workspaceCwd: WS_A,
+    });
+    // Wait for the first call to register inFlight before issuing
+    // the second.
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-state',
+      workspaceCwd: WS_A,
+    });
+
+    releaseLoad!({ configOptions: [{ id: 'baz', name: 'Baz', value: true }] });
+    const [r1, r2] = await Promise.all([first, second]);
+
+    expect(r1.attached).toBe(false);
+    expect(r1.state).toEqual({
+      configOptions: [{ id: 'baz', name: 'Baz', value: true }],
+    });
+    expect(r2.attached).toBe(true);
+    // Coalesced waiter sees the same state, not `{}`.
+    expect(r2.state).toEqual({
+      configOptions: [{ id: 'baz', name: 'Baz', value: true }],
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('survives spawn-owner disconnect kill while a coalesced restore is mid-flight', async () => {
+    let releaseLoad: ((value: LoadSessionResponse) => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = resolve;
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const first = bridge.loadSession({
+      sessionId: 'race-target',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    // Second caller coalesces synchronously and reserves the attach.
+    const second = bridge.loadSession({
+      sessionId: 'race-target',
+      workspaceCwd: WS_A,
+    });
+
+    releaseLoad!({});
+    const r1 = await first;
+    expect(r1.attached).toBe(false);
+
+    // First caller "disconnected" — simulate by issuing the same
+    // disconnect-cleanup the route handler would. The
+    // `requireZeroAttaches` guard MUST see B's reserved attach and
+    // skip the kill, otherwise B observes a 404'd sessionId on its
+    // next call.
+    await bridge.killSession(r1.sessionId, { requireZeroAttaches: true });
+
+    // The session must still be alive for B.
+    expect(bridge.sessionCount).toBe(1);
+    const r2 = await second;
+    expect(r2.attached).toBe(true);
+    expect(r2.sessionId).toBe('race-target');
+
+    await bridge.shutdown();
+  });
+
+  it('does not kill the channel when the last live session leaves while a restore is pending', async () => {
+    let releaseLoad: ((value: LoadSessionResponse) => void) | undefined;
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = resolve;
+          }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    // Spawn a regular session first, then kick off a slow restore on
+    // the same channel.
+    const spawned = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const restore = bridge.loadSession({
+      sessionId: 'pending-restore',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    // Kill the only registered session; the channel must NOT die
+    // because pendingRestoreIds is non-empty.
+    await bridge.killSession(spawned.sessionId);
+    expect(handles[0]?.killed).toBe(false);
+
+    // Let the restore finish — it joins the channel as the new
+    // sole session.
+    releaseLoad!({});
+    const restored = await restore;
+    expect(restored.sessionId).toBe('pending-restore');
+    expect(bridge.sessionCount).toBe(1);
+    expect(handles[0]?.killed).toBe(false);
+
+    await bridge.shutdown();
+  });
+
+  it('does not promote a restored session into the omitted-id attach default', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: () => ({}),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    await bridge.loadSession({
+      sessionId: 'persisted-explicit',
+      workspaceCwd: WS_A,
+    });
+    // A subsequent omitted-id `POST /session` (single scope) MUST
+    // create a fresh session rather than silently attaching to the
+    // explicitly restored one.
+    const spawned = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(spawned.sessionId).not.toBe('persisted-explicit');
+    expect(spawned.attached).toBe(false);
+    expect(bridge.sessionCount).toBe(2);
 
     await bridge.shutdown();
   });

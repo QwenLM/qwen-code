@@ -765,7 +765,7 @@ describe('createServeApp', () => {
         .send({});
 
       expect(res.status).toBe(409);
-      expect(res.headers['retry-after']).toBe('1');
+      expect(res.headers['retry-after']).toBe('5');
       expect(res.body).toMatchObject({
         code: 'restore_in_progress',
         sessionId: 'persisted-race',
