@@ -55,6 +55,7 @@ export {
   type DaemonStreamErrorData,
   type DaemonStreamErrorEvent,
   type DaemonStreamLifecycleEvent,
+  type HeartbeatResult,
   type KnownDaemonEvent,
   type PermissionOutcome,
   type PermissionOutcomeCancelled,
