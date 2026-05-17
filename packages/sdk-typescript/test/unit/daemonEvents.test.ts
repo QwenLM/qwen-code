@@ -518,4 +518,134 @@ describe('daemon event schema', () => {
     expect(upgradedToDeath.terminalEvent?.type).toBe('session_died');
     expect(upgradedToDeath.lastEventId).toBe(3);
   });
+
+  it('validates session_closed events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_close' },
+      }),
+    ).toBeDefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1' },
+      }),
+    ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'session_closed',
+        data: { reason: 'client_close' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('validates session_metadata_updated events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', displayName: 'My Session' },
+      }),
+    ).toBeDefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1' },
+      }),
+    ).toBeDefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {},
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces session_closed as terminal and clears pending permissions', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'req-1',
+          sessionId: 's-1',
+          toolCall: { toolCallId: 'tc-1', title: 'test' },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_close' },
+      },
+    ]);
+    expect(state.alive).toBe(false);
+    expect(state.terminalEvent?.type).toBe('session_closed');
+    expect(Object.keys(state.pendingPermissions)).toHaveLength(0);
+  });
+
+  it('session_closed upgrades stream terminal events like session_died', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'stream_error',
+        data: { error: 'subscriber limit reached' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_close' },
+      },
+    ]);
+    expect(state.terminalEvent?.type).toBe('session_closed');
+  });
+
+  it('reduces session_metadata_updated to set displayName', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', displayName: 'My Session' },
+      },
+    ]);
+    expect(state.displayName).toBe('My Session');
+    expect(state.alive).toBe(true);
+
+    const cleared = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', displayName: 'My Session' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1' },
+      },
+    ]);
+    expect(cleared.displayName).toBeUndefined();
+  });
 });

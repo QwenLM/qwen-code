@@ -602,12 +602,6 @@ export class DaemonClient {
     );
   }
 
-  /**
-   * Cast a permission vote against an explicit daemon session. New clients
-   * should prefer this once `capabilities.features` includes
-   * `session_permission_vote`; the legacy request-id-only route remains for
-   * older daemons.
-   */
   async respondToSessionPermission(
     sessionId: string,
     requestId: string,
@@ -642,6 +636,57 @@ export class DaemonClient {
           res,
           'POST /session/:id/permission/:requestId',
         );
+      },
+    );
+  }
+
+  // -- Session lifecycle ---------------------------------------------------
+
+  async closeSession(sessionId: string, clientId?: string): Promise<void> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'DELETE /session/:id');
+      },
+    );
+  }
+
+  // -- Session metadata ----------------------------------------------------
+
+  async updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+    clientId?: string,
+  ): Promise<void> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/metadata`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(metadata),
+      },
+      async (res) => {
+        if (res.status === 200) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },
     );
   }

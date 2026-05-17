@@ -14,6 +14,8 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'model_switched',
   'model_switch_failed',
   'session_died',
+  'session_closed',
+  'session_metadata_updated',
   'client_evicted',
   'stream_error',
 ] as const;
@@ -82,6 +84,19 @@ export interface DaemonSessionDiedData {
   [key: string]: unknown;
 }
 
+export interface DaemonSessionClosedData {
+  sessionId: string;
+  reason: string;
+  closedBy?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonSessionMetadataUpdatedData {
+  sessionId: string;
+  displayName?: string;
+  [key: string]: unknown;
+}
+
 export interface DaemonClientEvictedData {
   reason: string;
   droppedAfter?: number;
@@ -121,6 +136,14 @@ export type DaemonSessionDiedEvent = DaemonEventEnvelope<
   'session_died',
   DaemonSessionDiedData
 >;
+export type DaemonSessionClosedEvent = DaemonEventEnvelope<
+  'session_closed',
+  DaemonSessionClosedData
+>;
+export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
+  'session_metadata_updated',
+  DaemonSessionMetadataUpdatedData
+>;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
@@ -134,7 +157,9 @@ export type DaemonSessionEvent =
   | DaemonSessionUpdateEvent
   | DaemonModelSwitchedEvent
   | DaemonModelSwitchFailedEvent
-  | DaemonSessionDiedEvent;
+  | DaemonSessionDiedEvent
+  | DaemonSessionClosedEvent
+  | DaemonSessionMetadataUpdatedEvent;
 
 export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
@@ -160,11 +185,13 @@ export interface DaemonSessionViewState {
    */
   alive: boolean;
   currentModelId?: string;
+  displayName?: string;
   pendingPermissions: Record<string, DaemonPermissionRequestData>;
   lastSessionUpdate?: DaemonSessionUpdateData;
   lastModelSwitchFailure?: DaemonModelSwitchFailedData;
   terminalEvent?:
     | DaemonSessionDiedEvent
+    | DaemonSessionClosedEvent
     | DaemonClientEvictedEvent
     | DaemonStreamErrorEvent;
   streamError?: DaemonStreamErrorData;
@@ -245,6 +272,14 @@ export function asKnownDaemonEvent(
     case 'session_died':
       return isSessionDiedData(event.data)
         ? (event as DaemonSessionDiedEvent)
+        : undefined;
+    case 'session_closed':
+      return isSessionClosedData(event.data)
+        ? (event as DaemonSessionClosedEvent)
+        : undefined;
+    case 'session_metadata_updated':
+      return isSessionMetadataUpdatedData(event.data)
+        ? (event as DaemonSessionMetadataUpdatedEvent)
         : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
@@ -351,6 +386,20 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
       };
+    case 'session_closed':
+      return {
+        ...base,
+        sessionId: event.data.sessionId,
+        alive: false,
+        terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
+        pendingPermissions: {},
+      };
+    case 'session_metadata_updated':
+      return {
+        ...base,
+        sessionId: event.data.sessionId,
+        displayName: event.data.displayName,
+      };
     case 'client_evicted':
       return {
         ...base,
@@ -390,19 +439,25 @@ function isKnownDaemonEventTypeName(
 
 // Prefer the first stream-local terminal frame, but upgrade to session_died
 // once the daemon reports the underlying session actually ended.
+type TerminalEvent =
+  | DaemonSessionDiedEvent
+  | DaemonSessionClosedEvent
+  | DaemonClientEvictedEvent
+  | DaemonStreamErrorEvent;
+
+function isSessionTerminalType(type: string): boolean {
+  return type === 'session_died' || type === 'session_closed';
+}
+
 function chooseTerminalEvent(
-  current:
-    | DaemonSessionDiedEvent
-    | DaemonClientEvictedEvent
-    | DaemonStreamErrorEvent
-    | undefined,
-  next:
-    | DaemonSessionDiedEvent
-    | DaemonClientEvictedEvent
-    | DaemonStreamErrorEvent,
-): DaemonSessionDiedEvent | DaemonClientEvictedEvent | DaemonStreamErrorEvent {
+  current: TerminalEvent | undefined,
+  next: TerminalEvent,
+): TerminalEvent {
   if (!current) return next;
-  if (current.type !== 'session_died' && next.type === 'session_died') {
+  if (
+    !isSessionTerminalType(current.type) &&
+    isSessionTerminalType(next.type)
+  ) {
     return next;
   }
   return current;
@@ -469,6 +524,20 @@ function isSessionDiedData(value: unknown): value is DaemonSessionDiedData {
     isOptionalNumberOrNull(value['exitCode']) &&
     isOptionalStringOrNull(value['signalCode'])
   );
+}
+
+function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['reason'])
+  );
+}
+
+function isSessionMetadataUpdatedData(
+  value: unknown,
+): value is DaemonSessionMetadataUpdatedData {
+  return isRecord(value) && isNonEmptyString(value['sessionId']);
 }
 
 function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {

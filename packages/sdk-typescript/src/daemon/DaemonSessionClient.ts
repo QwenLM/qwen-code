@@ -205,6 +205,18 @@ export class DaemonSessionClient {
     );
   }
 
+  async close(): Promise<void> {
+    return await this.client.closeSession(this.sessionId, this.clientId);
+  }
+
+  async updateMetadata(metadata: { displayName?: string }): Promise<void> {
+    return await this.client.updateSessionMetadata(
+      this.sessionId,
+      metadata,
+      this.clientId,
+    );
+  }
+
   events(
     opts: DaemonSessionSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent, void, unknown> {

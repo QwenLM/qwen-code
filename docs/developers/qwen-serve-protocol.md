@@ -91,7 +91,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ['health', 'capabilities', 'session_create', 'session_scope_override',
  'session_load', 'unstable_session_resume',
  'session_list', 'session_prompt', 'session_cancel', 'session_events',
- 'session_set_model', 'permission_vote']
+ 'session_set_model', 'client_identity', 'permission_vote',
+ 'session_close', 'session_metadata']
 ```
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
@@ -99,12 +100,6 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `session_load` and `unstable_session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. The `unstable_` prefix on `unstable_session_resume` mirrors the underlying ACP method (`connection.unstable_resumeSession`) — the daemon's wire shape is committed for v1, but the ACP method name itself may change before ACP marks resume stable.
 
 ## Routes
-
-> **Stage 1 limitation — no `DELETE /session/:id`.** Sessions live until
-> the agent child crashes (`session_died`), the daemon process exits, or
-> a server-side `killSession` (used internally by orphan-cleanup) fires.
-> HTTP clients have no explicit "close one session" route in Stage 1.
-> An explicit `DELETE /session/:id` is on the Stage 2 polish list.
 
 ### `GET /health`
 
@@ -257,7 +252,16 @@ Response:
 
 ```json
 {
-  "sessions": [{ "sessionId": "<uuid>", "workspaceCwd": "/canonical/path" }]
+  "sessions": [
+    {
+      "sessionId": "<uuid>",
+      "workspaceCwd": "/canonical/path",
+      "createdAt": "2026-05-17T08:30:00.000Z",
+      "displayName": "My Session",
+      "clientCount": 2,
+      "hasActivePrompt": false
+    }
+  ]
 }
 ```
 
@@ -309,6 +313,41 @@ curl -X POST http://127.0.0.1:4170/session/$SID/cancel
 ```
 
 > **Multi-prompt contract:** cancel only affects the active prompt. Any prompts the same client previously POSTed and are still queued behind the active one will continue to execute. Multi-prompt queueing is a daemon-introduced behavior (not in ACP spec); the contract for queued prompts is "they keep running unless you cancel each, or kill the session via channel exit".
+
+### `DELETE /session/:id`
+
+Explicitly close a live session. Force-closes even when other clients are attached — cancels any active prompt, resolves pending permissions as cancelled, publishes `session_closed` event, closes the EventBus, and removes the session from daemon maps. On-disk persisted sessions are NOT deleted — they can be reloaded via `POST /session/:id/load`. Pre-flight `caps.features.session_close`.
+
+```bash
+curl -X DELETE http://127.0.0.1:4170/session/$SID
+# → 204 No Content
+```
+
+Idempotent: returns `404` for unknown sessions (same `SessionNotFoundError` shape as other routes).
+
+> **`session_closed` event.** SSE subscribers receive a terminal `session_closed` event with `{ sessionId, reason: 'client_close', closedBy?: '<clientId>' }` before the stream ends. SDK reducers treat this identically to `session_died` (sets `alive: false`, clears `pendingPermissions`).
+
+### `PATCH /session/:id/metadata`
+
+Update mutable session metadata. Currently supports `displayName` only. Pre-flight `caps.features.session_metadata`.
+
+Request:
+
+```json
+{ "displayName": "My Investigation Session" }
+```
+
+| Field         | Required | Notes                                                                          |
+| ------------- | -------- | ------------------------------------------------------------------------------ |
+| `displayName` | no       | String, max 256 characters. Empty string clears the name. Omit to leave as-is. |
+
+Response:
+
+```json
+{ "sessionId": "<uuid>", "displayName": "My Investigation Session" }
+```
+
+Publishes a `session_metadata_updated` event on the session's SSE stream with `{ sessionId, displayName }`.
 
 ### `POST /session/:id/model`
 

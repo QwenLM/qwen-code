@@ -419,6 +419,7 @@ describe('createHttpAcpBridge', () => {
       workspaceCwd: WS_A,
       attached: false,
       clientId: expect.stringMatching(/^client_/),
+      createdAt: expect.any(String),
       state: { configOptions: [] },
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
@@ -519,6 +520,7 @@ describe('createHttpAcpBridge', () => {
       workspaceCwd: WS_A,
       attached: false,
       clientId: expect.stringMatching(/^client_/),
+      createdAt: expect.any(String),
       state: { modes: null },
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
@@ -561,6 +563,7 @@ describe('createHttpAcpBridge', () => {
       workspaceCwd: WS_A,
       attached: true,
       clientId: expect.stringMatching(/^client_/),
+      createdAt: expect.any(String),
       state: { _meta: { tag: 'restored-foo' } },
     });
     expect(attached.clientId).not.toBe(loaded.clientId);
@@ -4205,6 +4208,175 @@ describe('createHttpAcpBridge', () => {
       expect(eventsByB[eventsByB.length - 1]?.type).toBe('session_died');
       expect(eventsByC[eventsByC.length - 1]?.type).toBe('session_died');
       expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
+  });
+
+  describe('closeSession', () => {
+    it('publishes session_closed and removes session from maps', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(bridge.sessionCount).toBe(1);
+
+      const events: BridgeEvent[] = [];
+      const drain = (async () => {
+        for await (const ev of bridge.subscribeEvents(session.sessionId))
+          events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+
+      expect(bridge.sessionCount).toBe(0);
+      const closedEvent = events.find((e) => e.type === 'session_closed');
+      expect(closedEvent).toBeDefined();
+      expect((closedEvent?.data as { reason: string }).reason).toBe(
+        'client_close',
+      );
+
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session', async () => {
+      const bridge = makeBridge();
+      await expect(bridge.closeSession('nonexistent')).rejects.toThrow(
+        SessionNotFoundError,
+      );
+      await bridge.shutdown();
+    });
+
+    it('resolves pending permissions as cancelled', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | {
+                exitCode: number | null;
+                signalCode: NodeJS.Signals | null;
+              }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const conn = capturedConn!;
+
+      const events: BridgeEvent[] = [];
+      const drain = (async () => {
+        for await (const ev of bridge.subscribeEvents(session.sessionId))
+          events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const respPromise = (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'rm -rf /' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+
+      await new Promise((r) => setImmediate(r));
+      expect(bridge.pendingPermissionCount).toBe(1);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+
+      const result = (await respPromise) as {
+        outcome: { outcome: string };
+      };
+      expect(result.outcome.outcome).toBe('cancelled');
+      expect(bridge.pendingPermissionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
+  });
+
+  describe('updateSessionMetadata', () => {
+    it('publishes session_metadata_updated event', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Test Session',
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) => e.type === 'session_metadata_updated',
+      );
+      expect(metaEvent).toBeDefined();
+      expect((metaEvent?.data as { displayName: string }).displayName).toBe(
+        'Test Session',
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError for unknown session', () => {
+      const bridge = makeBridge();
+      expect(() =>
+        bridge.updateSessionMetadata('nonexistent', {
+          displayName: 'test',
+        }),
+      ).toThrow(SessionNotFoundError);
+    });
+  });
+
+  describe('enriched listWorkspaceSessions', () => {
+    it('includes createdAt and metadata fields', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const sessions = bridge.listWorkspaceSessions(WS_A);
+      expect(sessions).toHaveLength(1);
+      const s = sessions[0]!;
+      expect(s.createdAt).toBeDefined();
+      expect(typeof s.createdAt).toBe('string');
+      expect(typeof s.clientCount).toBe('number');
+      expect(typeof s.hasActivePrompt).toBe('boolean');
+      expect(s.hasActivePrompt).toBe(false);
 
       await bridge.shutdown();
     });
