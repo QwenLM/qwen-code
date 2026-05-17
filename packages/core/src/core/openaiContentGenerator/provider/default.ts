@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { fetch as undiciFetch } from 'undici';
 import type { GenerateContentConfig } from '@google/genai';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
@@ -94,6 +95,11 @@ export class DefaultOpenAICompatibleProvider
       timeout,
       maxRetries,
       defaultHeaders,
+      // Pin fetch to undici's own implementation so it shares a version with
+      // the dispatcher built in `runtimeOptions`. Mixing Node's built-in
+      // fetch (newer undici) with a ProxyAgent from the bundled undici
+      // (e.g. v6) trips handler-interface checks like `invalid onError method`.
+      fetch: undiciFetch as unknown as typeof fetch,
       ...(runtimeOptions || {}),
     });
   }
