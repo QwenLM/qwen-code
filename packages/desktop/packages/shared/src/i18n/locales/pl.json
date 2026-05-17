@@ -251,6 +251,7 @@
   "chatInput.placeholder.typeMessage": "Napisz wiadomość...",
   "chatInput.placeholder.workOn": "Nad czym chcesz pracować?",
   "commands.searchCommands": "Szukaj poleceń...",
+  "commands.title": "Polecenia",
   "common.back": "Wstecz",
   "common.backToList": "Wróć do listy",
   "common.browse": "Przeglądaj",
