@@ -15,9 +15,19 @@
 
 export type DaemonMode = 'http-bridge' | 'native';
 
+export interface DaemonProtocolVersions {
+  current: string;
+  supported: string[];
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
+  /**
+   * Serve protocol versions supported by the daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  protocolVersions?: DaemonProtocolVersions;
   mode: DaemonMode;
   /**
    * Feature tags the client should gate UI off (e.g. `permission_vote`,
@@ -25,6 +35,78 @@ export interface DaemonCapabilities {
    */
   features: string[];
   modelServices: string[];
+  /**
+   * Absolute canonical workspace path this daemon is bound to
+   * (per #3803 §02: 1 daemon = 1 workspace). Clients use this to
+   * (a) detect mismatch before posting `/session` (vs. waiting for
+   * a 400 `workspace_mismatch` response), and (b) omit `cwd` on
+   * `POST /session` — the route falls back to this path when the
+   * body has no `cwd` field. Multi-workspace deployments expose
+   * multiple daemons on different ports, each advertising its own
+   * `workspaceCwd`.
+   *
+   * Optional at the type level because the field is an additive
+   * extension to v=1 envelopes (added by #3803 §02). Daemons
+   * predating §02 still announce `v: 1` but omit this field; the
+   * protocol's "bump v only on incompatible frame changes" stance
+   * (see `qwen-serve-protocol.md`) makes additive optionality the
+   * correct shape. All post-§02 daemons populate it.
+   *
+   * **SDK consumers**: if you need the value as a non-undefined
+   * `string` (e.g. to call `.startsWith()` or pass into a function
+   * typed `string`), use the `requireWorkspaceCwd` helper from this
+   * module — it throws `DaemonCapabilityMissingError` with an
+   * actionable "this daemon predates §02" message instead of
+   * letting the call site hit a cryptic
+   * "Cannot read properties of undefined".
+   */
+  workspaceCwd?: string;
+}
+
+/**
+ * Thrown by `requireWorkspaceCwd` (and any future
+ * `requireCapability` helpers) when the daemon's
+ * `/capabilities` envelope is missing a field the caller needs.
+ * Carries the field name so handlers can branch on it.
+ */
+export class DaemonCapabilityMissingError extends Error {
+  readonly capability: string;
+  constructor(capability: string, hint: string) {
+    super(
+      `DaemonCapabilities.${capability} is missing — ${hint}. The daemon ` +
+        `you are connected to likely predates the feature that added ` +
+        `this field; upgrade the daemon or fall back to a different ` +
+        `code path that doesn't require it.`,
+    );
+    this.name = 'DaemonCapabilityMissingError';
+    this.capability = capability;
+  }
+}
+
+/**
+ * Assert that `caps.workspaceCwd` is populated (i.e. the daemon was
+ * built post-§02) and return it as a non-undefined `string`. Throws
+ * `DaemonCapabilityMissingError` otherwise so the call site gets an
+ * actionable error rather than a downstream
+ * `Cannot read properties of undefined`.
+ *
+ * Use this when you need the value as a guaranteed `string` —
+ * e.g. to render in UI, log, compare with `.startsWith()`, or pass
+ * into a function typed `string`. If your code is fine with the
+ * value being absent (e.g. you fall back to `POST /session` without
+ * `workspaceCwd` and let the daemon choose), just read
+ * `caps.workspaceCwd` directly.
+ */
+export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
+  if (typeof caps.workspaceCwd !== 'string' || caps.workspaceCwd.length === 0) {
+    throw new DaemonCapabilityMissingError(
+      'workspaceCwd',
+      caps.workspaceCwd === ''
+        ? 'daemon returned an empty workspaceCwd (post-§02 daemon with a bug)'
+        : 'daemon predates #3803 §02 (1 daemon = 1 workspace); upgrade it',
+    );
+  }
+  return caps.workspaceCwd;
 }
 
 /** Returned from `POST /session`. */
@@ -33,6 +115,41 @@ export interface DaemonSession {
   workspaceCwd: string;
   /** True when an existing session was reused under sessionScope:single. */
   attached: boolean;
+  /**
+   * Opaque id stamped by the daemon for this attached HTTP client. Newer
+   * daemons return it from create/load/resume; older daemons omit it.
+   */
+  clientId?: string;
+}
+
+/**
+ * ACP state returned by session load/resume routes.
+ *
+ * Fields mirror the ACP `LoadSessionResponse` / `ResumeSessionResponse`
+ * shapes (see `@agentclientprotocol/sdk`):
+ * - `models`: the agent's `SessionModelState` — current model id +
+ *   available models the session can switch to.
+ * - `modes`: the agent's `SessionModeState` — current mode id +
+ *   available approval / interaction modes.
+ * - `configOptions`: array of `SessionConfigOption` describing
+ *   per-session toggles the client can flip via
+ *   `POST /session/:id/config-option`.
+ *
+ * They are typed as `unknown` here to avoid coupling the SDK to ACP's
+ * internal protocol types, which the SDK doesn't re-export. Callers
+ * that need richer typing should narrow to the ACP shapes themselves.
+ */
+export interface DaemonSessionState {
+  _meta?: Record<string, unknown> | null;
+  models?: unknown;
+  modes?: unknown;
+  configOptions?: unknown[] | null;
+  [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
+export interface DaemonRestoredSession extends DaemonSession {
+  state: DaemonSessionState;
 }
 
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
@@ -44,6 +161,20 @@ export interface DaemonSessionSummary {
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/**
+ * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
+ * server-side `Date.now()` epoch (ms) the daemon stored for this
+ * session. `clientId` is echoed back only when the caller supplied a
+ * trusted one through `X-Qwen-Client-Id`. Older daemons (pre-PR 9) do
+ * not expose this route — clients should pre-flight
+ * `caps.features.client_heartbeat` before sending.
+ */
+export interface HeartbeatResult {
+  sessionId: string;
+  clientId?: string;
+  lastSeenAt: number;
 }
 
 /** A frame in the SSE event stream. */

@@ -535,7 +535,40 @@ export async function main() {
         return finalArgs;
       };
 
-      const sandboxArgs = injectStdinIntoArgs(process.argv, stdinData);
+      const injectSandboxSessionIdIntoArgs = (
+        args: string[],
+        sessionId: string,
+      ): string[] => {
+        const separatorIndex = args.indexOf('--');
+        const cliArgs =
+          separatorIndex < 0 ? args : args.slice(0, separatorIndex);
+        const hasArg = (names: string[]) =>
+          cliArgs.some((arg) =>
+            names.some((name) => arg === name || arg.startsWith(`${name}=`)),
+          );
+        if (
+          hasArg(['--session-id', '--sandbox-session-id']) ||
+          hasArg(['--continue', '-c']) ||
+          hasArg(['--resume', '-r'])
+        ) {
+          return args;
+        }
+
+        const sessionArgs = ['--sandbox-session-id', sessionId];
+        if (separatorIndex < 0) {
+          return [...args, ...sessionArgs];
+        }
+
+        return [...cliArgs, ...sessionArgs, ...args.slice(separatorIndex)];
+      };
+
+      const sessionId = partialConfig.getSessionId();
+      const sandboxArgs = sessionId
+        ? injectSandboxSessionIdIntoArgs(
+            injectStdinIntoArgs(process.argv, stdinData),
+            sessionId,
+          )
+        : injectStdinIntoArgs(process.argv, stdinData);
 
       await relaunchOnExitCode(() =>
         start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),

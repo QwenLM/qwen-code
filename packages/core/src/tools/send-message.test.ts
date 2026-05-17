@@ -33,6 +33,8 @@ describe('SendMessageTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     const result = await tool.validateBuildAndExecute(
@@ -52,6 +54,8 @@ describe('SendMessageTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     await tool.validateBuildAndExecute(
@@ -86,6 +90,8 @@ describe('SendMessageTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.complete('agent-1', 'done');
 
@@ -109,6 +115,8 @@ describe('SendMessageTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     registry.cancel('agent-1');
 
@@ -128,6 +136,8 @@ describe('SendMessageTool', () => {
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
     resumeBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
 
@@ -151,6 +161,8 @@ describe('SendMessageTool', () => {
       status: 'running',
       startTime: Date.now(),
       abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
     });
 
     const result = await tool.validateBuildAndExecute(

@@ -424,6 +424,113 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  it('should expose LSP status from the configured client', () => {
+    const getStatusSnapshot = vi.fn().mockReturnValue({
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 1,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'clangd',
+          status: 'READY',
+          languages: ['cpp'],
+          transport: 'stdio',
+        },
+      ],
+    });
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        getStatusSnapshot,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    expect(config.getLspStatusSnapshot()).toEqual({
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 1,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'clangd',
+          status: 'READY',
+          languages: ['cpp'],
+          transport: 'stdio',
+        },
+      ],
+    });
+    expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('should report unavailable LSP status when client lacks a status snapshot API', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {} as unknown as ConfigParameters['lspClient'],
+    });
+
+    expect(config.getLspStatusSnapshot()).toEqual({
+      enabled: true,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      statusUnavailable: true,
+    });
+  });
+
+  it('should merge initialization errors into the client LSP status snapshot', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        getStatusSnapshot: vi.fn().mockReturnValue({
+          enabled: true,
+          configuredServers: 1,
+          readyServers: 0,
+          failedServers: 1,
+          inProgressServers: 0,
+          notStartedServers: 0,
+          servers: [],
+          initializationError: 'client failed',
+        }),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    config.setLspInitializationError('discovery failed');
+
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      enabled: true,
+      initializationError: 'discovery failed',
+    });
+  });
+
+  it('should report an initialization error when LSP is enabled without a client', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+    });
+
+    expect(config.getLspStatusSnapshot()).toEqual({
+      enabled: true,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      initializationError: 'LSP client is not initialized',
+    });
+  });
+
   describe('initialize', () => {
     it('should throw an error if checkpointing is enabled and GitService fails', async () => {
       const gitError = new Error('Git is not installed');
@@ -2826,7 +2933,10 @@ describe('Model Switching and Config Updates', () => {
       config['hookSystem'] = mockHookSystem;
 
       expect(config.hasHooksForEvent('UserPromptSubmit')).toBe(true);
-      expect(mockHasHooksForEvent).toHaveBeenCalledWith('UserPromptSubmit');
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptSubmit',
+        expect.any(String),
+      );
     });
 
     it('should return false when hookSystem has no hooks for the event', () => {
@@ -2839,7 +2949,10 @@ describe('Model Switching and Config Updates', () => {
       config['hookSystem'] = mockHookSystem;
 
       expect(config.hasHooksForEvent('Stop')).toBe(false);
-      expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith(
+        'Stop',
+        expect.any(String),
+      );
     });
   });
 

@@ -17,6 +17,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
+import { getHeapStatistics } from 'node:v8';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -53,8 +54,14 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
+import type { SessionStartSource } from '../hooks/types.js';
+import { getCustomSystemPrompt } from './prompts.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+// Leave roughly 30% V8 heap headroom for compression's transient allocations.
+const HEAP_PRESSURE_COMPRESSION_RATIO = 0.7;
+const HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS = 30_000;
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -383,6 +390,36 @@ export class InvalidStreamError extends Error {
  * @remarks
  * The session maintains all the turns between user and model.
  */
+const SESSION_START_CONTEXT_SENTINEL_START =
+  '<qwen:session-start-context hidden="true">';
+const SESSION_START_CONTEXT_SENTINEL_END = '</qwen:session-start-context>';
+const SESSION_START_CONTEXT_HEADER = 'SessionStart additional context';
+
+function buildSessionStartContextBlock(extraInstruction: string): string {
+  return `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n${extraInstruction}\n${SESSION_START_CONTEXT_SENTINEL_END}`;
+}
+
+function stripTrailingSessionStartContextBlock(
+  systemInstruction: string,
+): string {
+  const startIndex = systemInstruction.lastIndexOf(
+    `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n`,
+  );
+  if (startIndex === -1) {
+    return systemInstruction;
+  }
+
+  const endIndex = systemInstruction.indexOf(
+    `\n${SESSION_START_CONTEXT_SENTINEL_END}`,
+    startIndex,
+  );
+  if (endIndex === -1) {
+    return systemInstruction;
+  }
+
+  return systemInstruction.slice(0, startIndex);
+}
+
 export class GeminiChat {
   // A promise to represent the current state of the message being sent to the
   // model.
@@ -403,6 +440,14 @@ export class GeminiChat {
    * in a loop. Manual `/compress` still works (it passes `force=true`).
    */
   private hasFailedCompressionAttempt = false;
+
+  /**
+   * Heap-pressure compaction is process-wide pressure applied per chat. If one
+   * heap-triggered attempt cannot reduce history, briefly back off this chat
+   * so every subsequent send does not immediately pay for another compression
+   * side query while memory is already tight.
+   */
+  private heapPressureCompressionCooldownUntil = 0;
 
   /**
    * Creates a new GeminiChat instance.
@@ -464,6 +509,33 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    const heapPressureRatio = force ? null : this.getHeapPressureRatio();
+    const heapPressureCooldownActive =
+      !force && Date.now() < this.heapPressureCompressionCooldownUntil;
+    const bypassTokenThreshold =
+      heapPressureRatio !== null &&
+      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
+      !heapPressureCooldownActive;
+    if (bypassTokenThreshold) {
+      // Temporary safety net: token-based compaction can be too late for
+      // large-context sessions because JS heap pressure may hit first.
+      // Do not use force=true here because that carries manual /compress
+      // semantics in ChatCompressionService.
+      debugLogger.warn(
+        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
+          'attempting auto-compaction before token threshold.',
+      );
+    } else if (
+      heapPressureRatio !== null &&
+      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
+      heapPressureCooldownActive
+    ) {
+      debugLogger.debug(
+        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
+          'skipping heap-pressure auto-compaction during cooldown.',
+      );
+    }
+
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
@@ -473,6 +545,7 @@ export class GeminiChat {
       hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      bypassTokenThreshold,
       trigger: options?.trigger,
       signal,
     });
@@ -501,9 +574,18 @@ export class GeminiChat {
       // Re-enable auto-compaction so a forced /compress recovers a chat
       // that an earlier auto-attempt latched off.
       this.hasFailedCompressionAttempt = false;
+      this.heapPressureCompressionCooldownUntil = 0;
+    } else if (bypassTokenThreshold) {
+      // If heap-pressure compaction cannot reduce history (NOOP or failure),
+      // avoid repeatedly cloning history and/or paying side-query latency while
+      // the process-wide pressure remains high.
+      this.heapPressureCompressionCooldownUntil =
+        Date.now() + HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only mark as failed if not forced) so we
       // stop spending compression-API calls on a chat that can't shrink.
+      // Heap-pressure attempts are a safety net, not evidence that normal
+      // token-threshold compaction should be latched off for this chat.
       if (!force) {
         this.hasFailedCompressionAttempt = true;
       }
@@ -512,8 +594,56 @@ export class GeminiChat {
     return info;
   }
 
+  private getHeapPressureRatio(): number | null {
+    try {
+      const { used_heap_size: usedHeapSize, heap_size_limit: heapLimit } =
+        getHeapStatistics();
+      if (
+        !Number.isFinite(usedHeapSize) ||
+        usedHeapSize < 0 ||
+        !Number.isFinite(heapLimit) ||
+        heapLimit <= 0
+      ) {
+        return null;
+      }
+      return usedHeapSize / heapLimit;
+    } catch {
+      return null;
+    }
+  }
+
   setSystemInstruction(sysInstr: string) {
     this.generationConfig.systemInstruction = sysInstr;
+  }
+
+  setSessionStartContext(extraInstruction: string) {
+    const trimmed = extraInstruction.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const current = this.generationConfig.systemInstruction;
+    let baseInstruction = '';
+    if (typeof current === 'string') {
+      baseInstruction = stripTrailingSessionStartContextBlock(current);
+    } else if (current) {
+      baseInstruction = getCustomSystemPrompt(current);
+      baseInstruction = stripTrailingSessionStartContextBlock(baseInstruction);
+    }
+    const contextBlock = buildSessionStartContextBlock(trimmed);
+    this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
+  }
+
+  applySessionStartContext(
+    extraInstruction: string,
+    _source: SessionStartSource,
+  ): void {
+    const trimmed = extraInstruction.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    this.setSessionStartContext(trimmed);
   }
 
   /**
@@ -1093,6 +1223,27 @@ export class GeminiChat {
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
     return structuredClone(history);
+  }
+
+  /**
+   * Returns a deep-copied tail of the chat history. This avoids cloning the
+   * entire session when callers only need recent context.
+   */
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    if (count <= 0) return [];
+    const history = curated
+      ? extractCuratedHistory(this.history)
+      : this.history;
+    return structuredClone(history.slice(-count));
+  }
+
+  /**
+   * Returns a defensive copy of the last raw history entry without cloning the
+   * full conversation. This avoids O(history) cloning, though cloning the last
+   * entry is still proportional to that entry's own size.
+   */
+  getLastHistoryEntry(): Content | undefined {
+    return this.getHistoryTail(1)[0];
   }
 
   /**

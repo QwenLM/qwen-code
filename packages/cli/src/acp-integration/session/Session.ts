@@ -58,6 +58,8 @@ import {
   evaluatePermissionFlow,
   needsConfirmation,
   isPlanModeBlocked,
+  abortGoalForStopHookCap,
+  formatStopHookBlockingCapWarning,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -118,6 +120,72 @@ const debugLogger = createDebugLogger('SESSION');
 type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
+
+export function computeInitialTurnFromHistory(
+  records: ChatRecord[],
+  sessionId: string,
+): number {
+  let maxPromptTurn = 0;
+  let userMessageCount = 0;
+  const promptIdPrefix = `${sessionId}########`;
+
+  for (const record of records) {
+    if (record.sessionId === sessionId && isUserPromptRecord(record)) {
+      userMessageCount += 1;
+    }
+
+    for (const promptId of getRecordPromptIds(record)) {
+      if (!promptId.startsWith(promptIdPrefix)) {
+        continue;
+      }
+
+      const suffix = promptId.slice(promptIdPrefix.length);
+      if (!/^\d+$/.test(suffix)) {
+        continue;
+      }
+
+      maxPromptTurn = Math.max(maxPromptTurn, Number(suffix));
+    }
+  }
+
+  return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+}
+
+function getRecordPromptIds(record: ChatRecord): string[] {
+  const promptIds: string[] = [];
+  const recordPromptId = (record as { promptId?: unknown }).promptId;
+  if (typeof recordPromptId === 'string') {
+    promptIds.push(recordPromptId);
+  }
+  const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
+  if (telemetryPromptId) {
+    promptIds.push(telemetryPromptId);
+  }
+  return promptIds;
+}
+
+function readTelemetryPromptId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object' || !('uiEvent' in payload)) {
+    return undefined;
+  }
+  const uiEvent = (payload as { uiEvent?: unknown }).uiEvent;
+  if (!uiEvent || typeof uiEvent !== 'object' || !('prompt_id' in uiEvent)) {
+    return undefined;
+  }
+  const promptId = (uiEvent as { prompt_id?: unknown }).prompt_id;
+  return typeof promptId === 'string' ? promptId : undefined;
+}
+
+function isUserPromptRecord(record: ChatRecord): boolean {
+  if (record.type !== 'user') {
+    return false;
+  }
+  return (
+    record.message?.parts?.some(
+      (part) => typeof part.text === 'string' && part.text.trim().length > 0,
+    ) ?? false
+  );
+}
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -206,6 +274,10 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   async replayHistory(records: ChatRecord[]): Promise<void> {
+    this.turn = Math.max(
+      this.turn,
+      computeInitialTurnFromHistory(records, this.config.getSessionId()),
+    );
     await this.historyReplayer.replay(records);
   }
 
@@ -693,11 +765,11 @@ export class Session implements SessionContext {
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
-    const MAX_STOP_HOOK_ITERATIONS = 100;
+    const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
 
-    while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
+    while (stopHookIterationCount < stopHookBlockingCap) {
       if (
         !hooksEnabled ||
         !messageBus ||
@@ -761,7 +833,21 @@ export class Session implements SessionContext {
         stopHookIterationCount++;
         stopHookReasons = [...stopHookReasons, continueReason];
 
-        // Emit StopHookLoop event for iterations after the first one
+        if (stopHookIterationCount >= stopHookBlockingCap) {
+          const warning = formatStopHookBlockingCapWarning(
+            'Stop',
+            stopHookBlockingCap,
+          );
+          abortGoalForStopHookCap(
+            this.config,
+            this.config.getSessionId(),
+            warning,
+          );
+          await this.messageEmitter.emitAgentMessage(warning);
+          debugLogger.warn(warning);
+          return { stopReason: 'end_turn' };
+        }
+
         if (stopHookIterationCount > 1) {
           await this.messageEmitter.emitStopHookLoop(
             stopHookIterationCount,
@@ -902,13 +988,6 @@ export class Session implements SessionContext {
 
       // Stop hook allowed stopping, exit the loop
       break;
-    }
-
-    // If we exceeded max iterations, log a warning but still end gracefully
-    if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
-      debugLogger.warn(
-        `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
-      );
     }
 
     return { stopReason: 'end_turn' };
@@ -1362,7 +1441,6 @@ export class Session implements SessionContext {
         this.config,
         abortController.signal,
         'acp',
-        this.settings,
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.

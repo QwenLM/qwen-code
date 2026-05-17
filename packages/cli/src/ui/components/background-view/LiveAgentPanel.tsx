@@ -195,10 +195,12 @@ export const LiveAgentPanel: React.FC<LiveAgentPanelProps> = ({
   //   - live agents (running / paused) — always need elapsed updates.
   //   - terminal agents still inside the 8s visibility window — need
   //     ticks to drive their eviction.
-  // `BackgroundTaskRegistry.getAll()` retains terminal entries
-  // indefinitely, so a naive `entries.some(isAgentEntry)` gate would
-  // keep ticking forever after the last entry's window closed; the
-  // `dialogOpen` arm closes the corresponding gap on the dialog side.
+  // `BackgroundTaskRegistry.getAll()` retains terminal entries up to
+  // its cap (MAX_RETAINED_TERMINAL_AGENTS), so a naive
+  // `entries.some(isAgentEntry)` gate would keep ticking until those
+  // older entries finally evict — far longer than the panel actually
+  // needs to render them. The `dialogOpen` arm closes the
+  // corresponding gap on the dialog side.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (dialogOpen) return;
@@ -390,11 +392,17 @@ const LiveAgentPanelBody: React.FC<{
 
   if (visibleAgents.length === 0) return null;
 
-  // Window from the tail (newest launches) when the list outgrows the
-  // budget. Older live agents are still surfaced in the pill count and
-  // the dialog — the panel is a glance surface, not a full roster.
-  const overflow = Math.max(0, visibleAgents.length - maxRows);
-  const visible = overflow > 0 ? visibleAgents.slice(-maxRows) : visibleAgents;
+  // useBackgroundTaskView now hands entries back newest-first so the
+  // dialog opens with the cursor on the most recently launched task.
+  // The panel sits ABOVE the composer and reads top-to-bottom in
+  // launch order — newest at the bottom, right above the prompt
+  // input — so reverse here back to ASC for rendering. Doing the
+  // reverse before the slice means the tail-window math (drop the
+  // OLDEST when the list overflows) stays unchanged.
+  const visibleAgentsAsc = [...visibleAgents].reverse();
+  const overflow = Math.max(0, visibleAgentsAsc.length - maxRows);
+  const visible =
+    overflow > 0 ? visibleAgentsAsc.slice(-maxRows) : visibleAgentsAsc;
 
   // Include paused entries in the "active" tally — they appear in
   // the panel as active rows (same warning color, ⏸ glyph) and the

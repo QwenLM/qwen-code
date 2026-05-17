@@ -12,13 +12,15 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
-import { SpanStatusCode } from '@opentelemetry/api';
 
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
+import { getActiveGoal } from '../goals/activeGoalStore.js';
+import { abortGoalForStopHookCap } from '../goals/goalHook.js';
+import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -63,6 +65,8 @@ import {
   logNextSpeakerCheck,
   startInteractionSpan,
   endInteractionSpan,
+  getActiveInteractionSpan,
+  addUserPromptAttributes,
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
@@ -99,18 +103,12 @@ import {
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
 import { partToString } from '../utils/partUtils.js';
-import { createHookOutput } from '../hooks/types.js';
+import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import type { StopHookOutput } from '../hooks/types.js';
-import {
-  API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
-  API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-  safeSetStatus,
-  withSpan,
-} from '../telemetry/tracer.js';
+import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 
@@ -194,6 +192,7 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 export class GeminiClient {
   private chat?: GeminiChat;
+  private initializedSessionId: string | undefined;
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -204,6 +203,8 @@ export class GeminiClient {
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private pendingRecallAbortController: AbortController | undefined;
+  private lastSessionStartContext: string | undefined;
+  private lastSessionStartSource: SessionStartSource | undefined;
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -224,8 +225,13 @@ export class GeminiClient {
     this.loopDetector = new LoopDetectionService(config);
   }
 
-  async initialize() {
-    this.lastPromptId = this.config.getSessionId();
+  async initialize(sessionStartSource?: SessionStartSource) {
+    const sessionId = this.config.getSessionId();
+    this.lastPromptId = sessionId;
+
+    if (this.isInitialized() && this.initializedSessionId === sessionId) {
+      return;
+    }
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -236,7 +242,10 @@ export class GeminiClient {
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
-      await this.startChat(resumedHistory);
+      await this.startChat(
+        resumedHistory,
+        sessionStartSource ?? SessionStartSource.Resume,
+      );
       this.getChat().setLastPromptTokenCount(
         uiTelemetryService.getLastPromptTokenCount(),
       );
@@ -244,8 +253,14 @@ export class GeminiClient {
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
-      await this.startChat();
+      if (sessionStartSource !== undefined) {
+        await this.startChat(undefined, sessionStartSource);
+      } else {
+        await this.startChat();
+      }
     }
+
+    this.initializedSessionId = sessionId;
   }
 
   /**
@@ -295,6 +310,10 @@ export class GeminiClient {
 
   getHistory(curated: boolean = false): Content[] {
     return this.getChat().getHistory(curated);
+  }
+
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    return this.getChat().getHistoryTail(count, curated);
   }
 
   /**
@@ -376,15 +395,40 @@ export class GeminiClient {
 
     const toolRegistry = this.config.getToolRegistry();
     await toolRegistry.warmAll();
+    const deferredTools = this.resolveDeferredToolsForSystemPrompt();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
+    // Rebuild the system instruction so its "Deferred Tools" section
+    // matches the registry's current state. Without this refresh, MCP
+    // tools that land in the registry after startChat() (progressive
+    // discovery — see Config.startMcpDiscoveryInBackground) stay invisible
+    // to the model: they're filtered out of `toolDeclarations` by
+    // `shouldDefer`, and the prompt's deferred listing was frozen at the
+    // built-in-only snapshot taken inside startChat(). The model then has
+    // no signal that an MCP tool exists and never invokes ToolSearch to
+    // reveal it — silently regressing non-interactive `--prompt` runs.
+    this.getChat().setSystemInstruction(
+      this.getMainSessionSystemInstruction(deferredTools),
+    );
+    // setSystemInstruction overwrites the chat's systemInstruction wholesale,
+    // dropping any SessionStart additionalContext that startChat() (or a
+    // prior Compact) appended via applySessionStartContext. Re-apply it so
+    // a SessionStart hook's context survives the progressive-MCP refresh.
+    if (this.lastSessionStartContext && this.lastSessionStartSource) {
+      this.getChat().applySessionStartContext(
+        this.lastSessionStartContext,
+        this.lastSessionStartSource,
+      );
+    }
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
+      deferredCount: deferredTools?.length ?? 0,
     });
   }
 
   async resetChat(): Promise<void> {
+    this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastApiCompletionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
@@ -406,7 +450,8 @@ export class GeminiClient {
     // compression should keep previously-revealed tools so the model can
     // continue using them without re-running ToolSearch.
     this.config.getToolRegistry().clearRevealedDeferredTools();
-    await this.startChat();
+    await this.startChat(undefined, SessionStartSource.Clear);
+    this.initializedSessionId = this.config.getSessionId();
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -461,21 +506,105 @@ export class GeminiClient {
     if (!this.chat) {
       return;
     }
-    const toolRegistry = this.config.getToolRegistry();
-    await toolRegistry.warmAll();
-    const deferredSummary = toolRegistry.getDeferredToolSummary();
-    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
-    const deferredTools = toolSearchAvailable
-      ? deferredSummary.filter(
-          (t) => !toolRegistry.isDeferredToolRevealed(t.name),
-        )
-      : undefined;
+    await this.config.getToolRegistry().warmAll();
+    const deferredTools = this.resolveDeferredToolsForSystemPrompt();
     this.chat.setSystemInstruction(
       this.getMainSessionSystemInstruction(deferredTools),
     );
+    if (this.lastSessionStartContext && this.lastSessionStartSource) {
+      this.chat.applySessionStartContext(
+        this.lastSessionStartContext,
+        this.lastSessionStartSource,
+      );
+    }
   }
 
-  async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
+  /**
+   * Computes the deferred-tools list passed to the system prompt. Shared by
+   * {@link startChat}, {@link setTools}, and {@link refreshSystemInstruction}
+   * so all three render the same "Deferred Tools" section for a given
+   * registry state.
+   *
+   * Caller MUST `await toolRegistry.warmAll()` first — this method only
+   * inspects the registry's eager state and would otherwise miss factory-
+   * backed deferred tools.
+   *
+   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
+   * tool_search` or a deny rule), every deferred tool is eagerly revealed
+   * here so it lands in the declaration list. Skipping this would leave the
+   * tool both off the declarations AND off the deferred-summary list (since
+   * `undefined` is returned in that branch) — a silent disappearance that's
+   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   *
+   * Returns `undefined` when ToolSearch is unavailable: the prompt's
+   * deferred-tools section must not advertise tools the model has no way to
+   * load on demand.
+   */
+  private resolveDeferredToolsForSystemPrompt():
+    | Array<{ name: string; description: string }>
+    | undefined {
+    const toolRegistry = this.config.getToolRegistry();
+    const deferredSummary = toolRegistry.getDeferredToolSummary();
+    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+    if (!toolSearchAvailable) {
+      if (deferredSummary.length > 0) {
+        for (const t of deferredSummary) {
+          toolRegistry.revealDeferredTool(t.name);
+        }
+      }
+      return undefined;
+    }
+    return deferredSummary.filter(
+      (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+    );
+  }
+
+  private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
+    switch (approvalMode) {
+      case ApprovalMode.DEFAULT:
+        return PermissionMode.Default;
+      case ApprovalMode.PLAN:
+        return PermissionMode.Plan;
+      case ApprovalMode.AUTO_EDIT:
+        return PermissionMode.AutoEdit;
+      case ApprovalMode.YOLO:
+        return PermissionMode.Yolo;
+      default:
+        return PermissionMode.Default;
+    }
+  }
+
+  private async fireSessionStartHook(
+    source: SessionStartSource,
+  ): Promise<string | undefined> {
+    const hookSystem = this.config.getHookSystem();
+    if (
+      this.config.getDisableAllHooks() ||
+      !hookSystem ||
+      !this.config.hasHooksForEvent('SessionStart')
+    ) {
+      return undefined;
+    }
+
+    try {
+      const output = await hookSystem.fireSessionStartEvent(
+        source,
+        this.config.getModel() ?? '',
+        this.toPermissionMode(this.config.getApprovalMode()),
+      );
+      return output?.getAdditionalContext()?.trim() || undefined;
+    } catch (err) {
+      this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      return undefined;
+    }
+  }
+
+  async startChat(
+    extraHistory?: Content[],
+    sessionStartSource = extraHistory
+      ? SessionStartSource.Resume
+      : SessionStartSource.Startup,
+  ): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
@@ -493,51 +622,29 @@ export class GeminiClient {
       // calling us.
       const toolRegistry = this.config.getToolRegistry();
       await toolRegistry.warmAll();
-      const deferredSummary = toolRegistry.getDeferredToolSummary();
       // Resume support: when a transcript contains prior calls to a deferred
       // tool, re-reveal that tool so `setTools()` below sends its schema in
       // the declaration list. Without this, the model sees history like
       // "I called foo_tool, got result" but the API rejects a follow-up
-      // call to foo_tool because the schema is absent.
-      if (history.length > 0 && deferredSummary.length > 0) {
-        const deferredNames = new Set(deferredSummary.map((t) => t.name));
-        for (const entry of history) {
-          for (const part of entry.parts ?? []) {
-            const callName = part.functionCall?.name;
-            if (callName && deferredNames.has(callName)) {
-              toolRegistry.revealDeferredTool(callName);
+      // call to foo_tool because the schema is absent. This must happen
+      // BEFORE `resolveDeferredToolsForSystemPrompt()` runs so the resumed
+      // tools are correctly filtered out of the deferred-summary list.
+      if (history.length > 0) {
+        const deferredNames = new Set(
+          toolRegistry.getDeferredToolSummary().map((t) => t.name),
+        );
+        if (deferredNames.size > 0) {
+          for (const entry of history) {
+            for (const part of entry.parts ?? []) {
+              const callName = part.functionCall?.name;
+              if (callName && deferredNames.has(callName)) {
+                toolRegistry.revealDeferredTool(callName);
+              }
             }
           }
         }
       }
-      // ToolSearch availability gates two things:
-      //   (a) Whether the deferred-tools discovery section appears in the
-      //       prompt (otherwise we'd be telling the model to call a tool
-      //       that isn't registered).
-      //   (b) Whether deferral itself makes sense at all — if the model
-      //       has no way to reveal a deferred tool, the tool is effectively
-      //       hidden + uncallable. Silent disappearance is the worst
-      //       failure mode (user sees no error, just thinks the tool
-      //       doesn't exist), so when ToolSearch is filtered out (e.g. via
-      //       `--exclude-tools tool_search` or a deny rule), reveal every
-      //       deferred tool eagerly so they all land in the declaration
-      //       list. The token-saving rationale of deferral was predicated
-      //       on the discovery surface being available.
-      const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
-      if (!toolSearchAvailable && deferredSummary.length > 0) {
-        for (const t of deferredSummary) {
-          toolRegistry.revealDeferredTool(t.name);
-        }
-      }
-      // Exclude any tools revealed by the resume scan (or the no-ToolSearch
-      // eager-reveal above): their schemas are already in the declaration
-      // list, so advertising them as "reachable via ToolSearch" would
-      // invite redundant lookup calls.
-      const deferredTools = toolSearchAvailable
-        ? deferredSummary.filter(
-            (t) => !toolRegistry.isDeferredToolRevealed(t.name),
-          )
-        : undefined;
+      const deferredTools = this.resolveDeferredToolsForSystemPrompt();
       const systemInstruction =
         this.getMainSessionSystemInstruction(deferredTools);
 
@@ -550,6 +657,20 @@ export class GeminiClient {
         this.config.getChatRecordingService(),
         uiTelemetryService,
       );
+
+      const sessionStartAdditionalContext =
+        await this.fireSessionStartHook(sessionStartSource);
+      this.lastSessionStartContext = sessionStartAdditionalContext;
+      this.lastSessionStartSource = sessionStartAdditionalContext
+        ? sessionStartSource
+        : undefined;
+
+      if (sessionStartAdditionalContext) {
+        this.chat.applySessionStartContext(
+          sessionStartAdditionalContext,
+          sessionStartSource,
+        );
+      }
 
       await this.setTools();
 
@@ -998,6 +1119,19 @@ export class GeminiClient {
         model: options?.modelOverride ?? this.config.getModel(),
         messageType,
       });
+      const interactionSpan = getActiveInteractionSpan();
+      if (
+        interactionSpan &&
+        this.config.getTelemetryIncludeSensitiveSpanAttributes?.()
+      ) {
+        // Guard partToString — addUserPromptAttributes would early-return
+        // anyway, but the argument is evaluated unconditionally otherwise.
+        addUserPromptAttributes(
+          this.config,
+          interactionSpan,
+          partToString(request),
+        );
+      }
     }
 
     try {
@@ -1104,6 +1238,14 @@ export class GeminiClient {
           );
 
         this.sessionTurnCount++;
+
+        if (messageType === SendMessageType.UserQuery) {
+          try {
+            await this.config.getFileHistoryService().makeSnapshot(prompt_id);
+          } catch (e) {
+            debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+          }
+        }
 
         if (
           this.config.getMaxSessionTurns() > 0 &&
@@ -1314,6 +1456,23 @@ export class GeminiClient {
         // the previous merged IDE context.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
+          void this.fireSessionStartHook(SessionStartSource.Compact)
+            .then((compactAdditionalContext) => {
+              if (!compactAdditionalContext || !this.chat) {
+                return;
+              }
+              this.lastSessionStartContext = compactAdditionalContext;
+              this.lastSessionStartSource = SessionStartSource.Compact;
+              this.chat.applySessionStartContext(
+                compactAdditionalContext,
+                SessionStartSource.Compact,
+              );
+            })
+            .catch((error) => {
+              this.config
+                .getDebugLogger()
+                .warn(`SessionStart hook failed: ${error}`);
+            });
         }
 
         yield event;
@@ -1418,22 +1577,42 @@ export class GeminiClient {
             continueReason,
           ];
 
-          // Emit StopHookLoop event for iterations after the first one.
-          // The first iteration (currentIterationCount === 1) is the initial request,
-          // so there's no prior stop hook execution to report. We only emit this event
-          // when stop hooks have been executed multiple times (loop detected).
-          if (currentIterationCount > 1) {
+          // Emit StopHookLoop starting with the first blocking decision so
+          // /goal and configured Stop hooks both surface their reason before
+          // the follow-up turn is generated. The cap check stays before the
+          // yield because a cap of 1 means no follow-up turn should run.
+          const stopHookBlockingCap = this.config.getStopHookBlockingCap();
+          if (currentIterationCount >= stopHookBlockingCap) {
+            const warning = formatStopHookBlockingCapWarning(
+              'Stop',
+              stopHookBlockingCap,
+            );
+            abortGoalForStopHookCap(
+              this.config,
+              this.config.getSessionId(),
+              warning,
+            );
             yield {
-              type: GeminiEventType.StopHookLoop,
-              value: {
-                iterationCount: currentIterationCount,
-                reasons: currentReasons,
-                stopHookCount: response.stopHookCount ?? 1,
-              },
+              type: GeminiEventType.HookSystemMessage,
+              value: warning,
             };
+            debugLogger.warn(warning);
+            if (isTopLevelInteraction) endInteractionSpan('ok');
+            return turn;
           }
 
+          yield {
+            type: GeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: currentIterationCount,
+              reasons: currentReasons,
+              stopHookCount: response.stopHookCount ?? 1,
+            },
+          };
+
           const continueRequest = [{ text: continueReason }];
+          const activeGoal = getActiveGoal(this.config.getSessionId());
+          const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
           const hookTurn = yield* this.sendMessageStream(
             continueRequest,
             signal,
@@ -1446,7 +1625,7 @@ export class GeminiClient {
                 reasons: currentReasons,
               },
             },
-            boundedTurns - 1,
+            hookTurnBudget,
           );
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
@@ -1548,91 +1727,73 @@ export class GeminiClient {
     const promptId =
       promptIdOverride ?? promptIdContext.getStore() ?? this.lastPromptId!;
 
-    return withSpan(
-      'client.generateContent',
-      { model, prompt_id: promptId },
-      async (span) => {
-        let currentAttemptModel: string = model;
+    let currentAttemptModel: string = model;
 
-        try {
-          const userMemory = this.config.getUserMemory();
-          const finalSystemInstruction = generationConfig.systemInstruction
-            ? getCustomSystemPrompt(
-                generationConfig.systemInstruction,
-                userMemory,
-              )
-            : this.getMainSessionSystemInstruction();
+    try {
+      const userMemory = this.config.getUserMemory();
+      const finalSystemInstruction = generationConfig.systemInstruction
+        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+        : this.getMainSessionSystemInstruction();
 
-          const requestConfig: GenerateContentConfig = {
-            abortSignal,
-            ...generationConfig,
-            systemInstruction: finalSystemInstruction,
-          };
+      const requestConfig: GenerateContentConfig = {
+        abortSignal,
+        ...generationConfig,
+        systemInstruction: finalSystemInstruction,
+      };
 
-          // When the requested model differs from the main model (e.g. fast model
-          // side queries for session recap / title / summary), resolve the target
-          // model's own ContentGeneratorConfig so that per-model settings like
-          // extra_body, samplingParams, and reasoning are not inherited from the
-          // main model's config. The retry authType is resolved alongside so that
-          // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
-          // the target model's provider.
-          const {
-            contentGenerator,
-            retryAuthType,
+      // When the requested model differs from the main model (e.g. fast model
+      // side queries for session recap / title / summary), resolve the target
+      // model's own ContentGeneratorConfig so that per-model settings like
+      // extra_body, samplingParams, and reasoning are not inherited from the
+      // main model's config. The retry authType is resolved alongside so that
+      // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
+      // the target model's provider.
+      const {
+        contentGenerator,
+        retryAuthType,
+        model: requestModel,
+      } = await this.config.getBaseLlmClient().resolveForModel(model);
+
+      const apiCall = () => {
+        currentAttemptModel = requestModel;
+
+        return contentGenerator.generateContent(
+          {
             model: requestModel,
-          } = await this.config.getBaseLlmClient().resolveForModel(model);
-
-          const apiCall = () => {
-            currentAttemptModel = requestModel;
-
-            return contentGenerator.generateContent(
-              {
-                model: requestModel,
-                config: requestConfig,
-                contents,
-              },
-              promptId,
-            );
-          };
-          const result = await retryWithBackoff(apiCall, {
-            authType: retryAuthType,
-            persistentMode: isUnattendedMode(),
-            signal: abortSignal,
-            heartbeatFn: (info) => {
-              process.stderr.write(
-                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
-              );
-            },
-          });
-          return result;
-        } catch (error: unknown) {
-          if (abortSignal.aborted) {
-            safeSetStatus(span, {
-              code: SpanStatusCode.ERROR,
-              message: API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
-            });
-            throw error;
-          }
-
-          safeSetStatus(span, {
-            code: SpanStatusCode.ERROR,
-            message: API_CALL_FAILED_SPAN_STATUS_MESSAGE,
-          });
-          await reportError(
-            error,
-            `Error generating content via API with model ${currentAttemptModel}.`,
-            {
-              requestContents: contents,
-              requestConfig: generationConfig,
-            },
-            'generateContent-api',
+            config: requestConfig,
+            contents,
+          },
+          promptId,
+        );
+      };
+      const result = await retryWithBackoff(apiCall, {
+        authType: retryAuthType,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
+        heartbeatFn: (info) => {
+          process.stderr.write(
+            `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
           );
-          throw new Error(
-            `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
-          );
-        }
-      },
-    );
+        },
+      });
+      return result;
+    } catch (error: unknown) {
+      if (abortSignal.aborted) {
+        throw error;
+      }
+      await reportError(
+        error,
+        `Error generating content via API with model ${currentAttemptModel}.`,
+        {
+          requestContents: contents,
+          requestConfig: generationConfig,
+        },
+        'generateContent-api',
+      );
+      throw new Error(
+        `Failed to generate content with model ${currentAttemptModel}: ${getErrorMessage(error)}`,
+      );
+    }
   }
 
   /**
@@ -1645,6 +1806,8 @@ export class GeminiClient {
     force: boolean = false,
     signal?: AbortSignal,
   ): Promise<ChatCompressionInfo> {
+    const previousSessionStartContext = this.lastSessionStartContext;
+    const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
       this.config.getModel(),
@@ -1653,7 +1816,19 @@ export class GeminiClient {
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const compressedHistory = this.getChat().getHistory();
-      await this.startChat(compressedHistory);
+      await this.startChat(compressedHistory, SessionStartSource.Compact);
+      if (
+        !this.lastSessionStartContext &&
+        previousSessionStartContext &&
+        previousSessionStartSource
+      ) {
+        this.lastSessionStartContext = previousSessionStartContext;
+        this.lastSessionStartSource = previousSessionStartSource;
+        this.getChat().applySessionStartContext(
+          previousSessionStartContext,
+          previousSessionStartSource,
+        );
+      }
       // startChat() creates a new GeminiChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still
       // resolve to the file_unchanged placeholder. Clear so post-compaction

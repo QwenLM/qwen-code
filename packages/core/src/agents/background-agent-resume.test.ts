@@ -42,7 +42,7 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
-  function createService() {
+  function createService(options: { stopHookBlockingCap?: number } = {}) {
     const subagentManager = {
       loadSubagent: vi.fn(async (name: string) =>
         name === 'researcher'
@@ -82,6 +82,7 @@ describe('BackgroundAgentResumeService', () => {
       getMonitorRegistry: () => monitorRegistry,
       getSubagentManager: () => subagentManager,
       getHookSystem: () => hookSystem,
+      getStopHookBlockingCap: () => options.stopHookBlockingCap ?? 8,
       getApprovalMode: () => 'default',
       isTrustedFolder: () => true,
       getProjectRoot: () => tempDir,
@@ -399,6 +400,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume with hooks',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -487,6 +489,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume stop hook path',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -524,6 +527,85 @@ describe('BackgroundAgentResumeService', () => {
         expect.any(AbortSignal),
       );
     });
+  });
+
+  it('appends a warning when resumed SubagentStop hooks reach the blocking cap', async () => {
+    const sessionId = 'session-stop-hook-cap';
+    const agentId = 'agent-stop-hook-cap';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume cap path',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume cap path' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume cap path',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume cap path',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'final output',
+    };
+    const stopOutput = {
+      isBlockingDecision: vi.fn().mockReturnValue(true),
+      shouldStopExecution: vi.fn().mockReturnValue(false),
+      getEffectiveReason: vi.fn().mockReturnValue('Keep going'),
+    };
+
+    const { service, subagentManager, hookSystem } = createService({
+      stopHookBlockingCap: 2,
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue(subagent);
+    hookSystem.fireSubagentStopEvent.mockResolvedValue(stopOutput);
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(hookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
+    expect(subagent.execute).toHaveBeenCalledTimes(2);
+    expect(registry.get(agentId)?.result).toContain(
+      'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+    );
   });
 
   // Windows-24 GitHub Actions runners can take 10s+ on this fs-heavy
@@ -573,6 +655,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume after trust revoked',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const createAgentHeadless = vi.fn().mockResolvedValue({
@@ -642,6 +725,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume once',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     let releaseExecute: (() => void) | undefined;
@@ -719,6 +803,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume monitor owner',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -831,6 +916,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       description: 'Resume monitor setup failure',
       subagentType: 'researcher',
+      isBackgrounded: true,
       status: 'paused',
       startTime: Date.now(),
       abortController: new AbortController(),
@@ -965,6 +1051,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: launchPrompt,
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const execute = vi.fn(async (_context: unknown) => undefined);
@@ -1060,6 +1147,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Legacy fork task',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const createSpy = vi.spyOn(AgentHeadless, 'create');
@@ -1141,6 +1229,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Legacy fork task',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const createSpy = vi.spyOn(AgentHeadless, 'create');
@@ -1182,6 +1271,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Interrupted by shutdown',
       metaPath,
       outputFile: getAgentJsonlPath(tempDir, sessionId, agentId),
+      isBackgrounded: true,
     });
 
     registry.abortAll();
@@ -1229,6 +1319,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume then shutdown',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     let releaseExecute: (() => void) | undefined;
@@ -1303,6 +1394,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'Resume then cancel',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     let releaseExecute: (() => void) | undefined;
@@ -1395,6 +1487,7 @@ describe('BackgroundAgentResumeService', () => {
       prompt: 'original task',
       outputFile,
       metaPath,
+      isBackgrounded: true,
     });
 
     const execute = vi.fn(

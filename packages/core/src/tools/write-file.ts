@@ -368,6 +368,32 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       detectedEncoding = undefined;
     }
 
+    // Backup the pre-edit content BEFORE the final freshness check.
+    // Mirrors the upstream `claude-code/src/tools/FileEditTool` ordering,
+    // which has an explicit comment on the equivalent block:
+    //
+    //   "These awaits must stay OUTSIDE the critical section below — a
+    //    yield between the staleness check and writeTextContent lets
+    //    concurrent edits interleave."
+    //
+    // `trackEdit` does `stat` + `copyFile` and on large files can take
+    // hundreds of milliseconds. The previous ordering ran it AFTER
+    // `checkPriorRead` and before `writeTextFile`, which widened the
+    // already-acknowledged stat-then-write window from "two adjacent
+    // syscalls" to "freshness check → potentially-multi-second backup →
+    // write". An external mutation landing inside the backup window was
+    // therefore no longer detected before the write clobbered it.
+    //
+    // Backing up first is safe: backups are idempotent (deterministic
+    // `{hash}@v{version}` filename) and per-snapshot. If the freshness
+    // check below then rejects the write, we keep an unused-but-correct
+    // backup of the pre-overwrite state — not corrupt state.
+    try {
+      await this.config.getFileHistoryService().trackEdit(file_path);
+    } catch {
+      // File history is best-effort; never block core tool operations.
+    }
+
     // Final pre-write freshness check. The earlier post-read check
     // ran before encoding detection; we re-stat here so an external
     // mutation that lands in the gap between those operations and
