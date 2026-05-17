@@ -2342,7 +2342,17 @@ export const AppContainer = (props: AppContainerProps) => {
 
           geminiClient.truncateHistory(apiTruncateIndex);
 
-          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          // Strip suppressOnRestore flags so rewound items remain visible
+          const truncatedUi = originalHistory
+            .filter((h) => h.id < userItem.id)
+            .map((h) => {
+              if (!h.display?.suppressOnRestore) return h;
+              const { suppressOnRestore: _, ...rest } = h.display;
+              return {
+                ...h,
+                display: Object.keys(rest).length > 0 ? rest : undefined,
+              };
+            });
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();
