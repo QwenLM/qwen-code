@@ -17,8 +17,42 @@ export {
   type DaemonSessionClientOptions,
   type DaemonSessionSubscribeOptions,
 } from './DaemonSessionClient.js';
+export {
+  asKnownDaemonEvent,
+  createDaemonSessionViewState,
+  isDaemonEventType,
+  isKnownDaemonEvent,
+  reduceDaemonSessionEvent,
+  reduceDaemonSessionEvents,
+} from './events.js';
 export { parseSseStream, SseFramingError } from './sse.js';
 export { DaemonCapabilityMissingError, requireWorkspaceCwd } from './types.js';
+export type {
+  DaemonClientEvictedData,
+  DaemonClientEvictedEvent,
+  DaemonControlEvent,
+  DaemonEventEnvelope,
+  DaemonKnownEventType,
+  DaemonModelSwitchedData,
+  DaemonModelSwitchedEvent,
+  DaemonModelSwitchFailedData,
+  DaemonModelSwitchFailedEvent,
+  DaemonPermissionOption,
+  DaemonPermissionRequestData,
+  DaemonPermissionRequestEvent,
+  DaemonPermissionResolvedData,
+  DaemonPermissionResolvedEvent,
+  DaemonSessionDiedData,
+  DaemonSessionDiedEvent,
+  DaemonSessionEvent,
+  DaemonSessionUpdateData,
+  DaemonSessionUpdateEvent,
+  DaemonSessionViewState,
+  DaemonStreamErrorData,
+  DaemonStreamErrorEvent,
+  DaemonStreamLifecycleEvent,
+  KnownDaemonEvent,
+} from './events.js';
 export type {
   DaemonCapabilities,
   DaemonEvent,
