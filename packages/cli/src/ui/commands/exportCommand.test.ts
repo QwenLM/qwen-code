@@ -374,6 +374,27 @@ describe('exportCommand', () => {
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
+    it('should handle session normalization errors', async () => {
+      vi.mocked(normalizeSessionData).mockImplementation(() => {
+        throw new Error('Failed to normalize session data');
+      });
+
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+      const result = await mdCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          'Failed to export session: Failed to normalize session data (markdown)',
+      });
+      expect(toMarkdown).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should use project root when working dir is not available', async () => {
       const contextWithProjectRoot = createMockCommandContext({
         services: {
@@ -445,6 +466,34 @@ describe('exportCommand', () => {
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
 
+    it('should report default directory realpath validation failures', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      vi.mocked(fs.realpath).mockImplementation(async (p) => {
+        if (p.toString() === mockWorkingDir) {
+          const err = new Error('ENOENT: no such file or directory');
+          (err as NodeJS.ErrnoException).code = 'ENOENT';
+          throw err;
+        }
+        return p.toString();
+      });
+
+      const result = await mdCommand.action(mockContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          `Export target directory is not accessible (path does not exist; ` +
+          `target: "${mockWorkingDir}", cwd: "${mockWorkingDir}").`,
+      });
+      expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should reject symlinked output directories outside the working directory', async () => {
       const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
       if (!mdCommand?.action) {
@@ -500,6 +549,33 @@ describe('exportCommand', () => {
         content:
           `Export directory must be within the project working directory. ` +
           `(parent path resolves outside cwd via symlink; target: "${missingOutputDir}", cwd: "${mockWorkingDir}")`,
+      });
+      expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
+    it('should explain when no existing export ancestor can be resolved', async () => {
+      const mdCommand = exportCommand.subCommands?.find((c) => c.name === 'md');
+      if (!mdCommand?.action) {
+        throw new Error('md command not found');
+      }
+
+      vi.mocked(fs.realpath).mockImplementation(async () => {
+        const err = new Error('ENOENT: no such file or directory');
+        (err as NodeJS.ErrnoException).code = 'ENOENT';
+        throw err;
+      });
+
+      const result = await mdCommand.action(mockContext, './missing/nested');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          `Failed to export session: Cannot resolve any existing ancestor ` +
+          `within cwd: ${mockWorkingDir}. This usually means the project ` +
+          `working directory has been deleted or is on an unmounted filesystem. (markdown)`,
       });
       expect(mockSessionServiceMocks.loadSession).not.toHaveBeenCalled();
       expect(fs.mkdir).not.toHaveBeenCalled();

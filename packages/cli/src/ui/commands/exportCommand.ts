@@ -58,6 +58,14 @@ function formatExportTargetContext(target: ExportTargetContext): string {
   return `target: "${target.outputDir}", cwd: "${target.resolvedCwd}"`;
 }
 
+function formatMissingCwdError(resolvedCwd: string): string {
+  return (
+    `Cannot resolve any existing ancestor within cwd: ${resolvedCwd}. ` +
+    'This usually means the project working directory has been deleted ' +
+    'or is on an unmounted filesystem.'
+  );
+}
+
 function resolveExportTarget(
   cwd: string,
   args: string,
@@ -169,11 +177,7 @@ async function realpathNearestExisting(
     }
   }
 
-  throw new Error(
-    `Cannot resolve any existing ancestor within cwd: ${resolvedCwd}. ` +
-      'This usually means the project working directory has been deleted ' +
-      'or is on an unmounted filesystem.',
-  );
+  throw new Error(formatMissingCwdError(resolvedCwd));
 }
 
 async function validateExistingExportParentWithinCwd(
@@ -184,10 +188,20 @@ async function validateExistingExportParentWithinCwd(
     formatExportTargetContext(target),
   );
 
-  const [realCwd, realExistingParent] = await Promise.all([
-    fs.realpath(target.resolvedCwd),
-    realpathNearestExisting(target.outputDir, target.resolvedCwd),
-  ]);
+  let realCwd: string;
+  try {
+    realCwd = await fs.realpath(target.resolvedCwd);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(formatMissingCwdError(target.resolvedCwd));
+    }
+    throw error;
+  }
+
+  const realExistingParent = await realpathNearestExisting(
+    target.outputDir,
+    target.resolvedCwd,
+  );
 
   if (!isSubpath(realCwd, realExistingParent)) {
     debugLogger.debug('Existing export parent escaped cwd:', {
