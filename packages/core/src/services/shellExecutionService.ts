@@ -821,6 +821,8 @@ export class ShellExecutionService {
           const postPromoteStderrDecoder = postPromote?.onData
             ? safeDecoder(detectedEncoding)
             : null;
+          let postPromoteStdoutHandler: ((chunk: Buffer) => void) | null = null;
+          let postPromoteStderrHandler: ((chunk: Buffer) => void) | null = null;
           if (postPromote?.onData) {
             const onPostData = postPromote.onData;
             const safeData = (decoder: TextDecoder) => (chunk: Buffer) => {
@@ -836,10 +838,14 @@ export class ShellExecutionService {
               }
             };
             try {
-              if (postPromoteStdoutDecoder)
-                child.stdout?.on('data', safeData(postPromoteStdoutDecoder));
-              if (postPromoteStderrDecoder)
-                child.stderr?.on('data', safeData(postPromoteStderrDecoder));
+              if (postPromoteStdoutDecoder) {
+                postPromoteStdoutHandler = safeData(postPromoteStdoutDecoder);
+                child.stdout?.on('data', postPromoteStdoutHandler);
+              }
+              if (postPromoteStderrDecoder) {
+                postPromoteStderrHandler = safeData(postPromoteStderrDecoder);
+                child.stderr?.on('data', postPromoteStderrHandler);
+              }
             } catch (e) {
               debugLogger.warn(
                 `re-attaching post-promote data listeners threw: ${e instanceof Error ? e.message : String(e)}`,
@@ -850,8 +856,10 @@ export class ShellExecutionService {
             // (or any other future postPromote handler) without
             // `onData`. The foreground stdout/stderr listeners were
             // detached above; without ANY data listener the Readable
-            // streams stay paused, the OS pipe buffer fills (~64KB on
-            // Linux), and `child.stdout.write` in the child blocks —
+            // streams stay paused (on Windows they may already be
+            // flowing — `resume()` is a no-op in that case), the OS
+            // pipe buffer fills (~64KB on Linux), and
+            // `child.stdout.write` in the child blocks —
             // potentially forever. `'close'` then never fires and
             // `onSettle` is never called. `.resume()` puts the stream
             // back in flowing mode (data arrives + is dropped) so the
@@ -907,9 +915,15 @@ export class ShellExecutionService {
           const firePostSettle = (info: ShellPostPromoteSettleInfo): void => {
             if (postPromoteSettleFired) return;
             postPromoteSettleFired = true;
-            // Flush BEFORE the callback so any trailing multibyte
-            // characters land ahead of the settle's stream-close.
             flushPostPromoteDecoders();
+            if (postPromoteStdoutHandler) {
+              child.stdout?.off('data', postPromoteStdoutHandler);
+              postPromoteStdoutHandler = null;
+            }
+            if (postPromoteStderrHandler) {
+              child.stderr?.off('data', postPromoteStderrHandler);
+              postPromoteStderrHandler = null;
+            }
             if (!postPromote?.onSettle) return;
             try {
               postPromote.onSettle(info);
@@ -1577,6 +1591,12 @@ export class ShellExecutionService {
             // Dispose BEFORE invoking the caller — even if the caller
             // throws, the listeners are gone (and idempotent if we
             // come back through the error path).
+            // Known limitation: node-pty may have queued onData
+            // callbacks not yet delivered when onExit fires; disposing
+            // the data listener here means those trailing bytes (<4KB)
+            // are lost. Bounded and low severity — a setImmediate
+            // delay could recover them but would complicate the
+            // single-fire latch.
             disposePostPromoteListeners();
             if (!postPromote?.onSettle) return;
             try {

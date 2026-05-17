@@ -905,6 +905,9 @@ const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
  */
 const PROMOTE_CANCEL_SIGKILL_TIMEOUT_MS = 200;
 
+/** Maximum wait for the output stream flush before transitioning the registry. */
+const PROMOTE_FLUSH_TIMEOUT_MS = 10_000;
+
 /**
  * PR-2.5 slots shared between the foreground `execute()` postPromote
  * handlers and the post-resolve `handlePromotedForeground` finalizer.
@@ -945,7 +948,7 @@ interface PromoteArtifacts {
    * sustained child whose output file we can't open, OR strand
    * late-arriving post-settle bytes in an undrainable buffer.
    */
-  streamFailed: boolean;
+  streamClosed: boolean;
   /**
    * Settle handler installed by `handlePromotedForeground` once the
    * registry entry exists. Null until then; `onSettle` calls below
@@ -1684,7 +1687,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const promoteArtifacts: PromoteArtifacts = {
       buffer: [],
       stream: null,
-      streamFailed: false,
+      streamClosed: false,
       onSettleWired: null,
       settleQueued: null,
     };
@@ -1721,7 +1724,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
               `promote: postPromote stream.write failed: ${getErrorMessage(err)}`,
             );
           }
-        } else if (promoteArtifacts.streamFailed) {
+        } else if (promoteArtifacts.streamClosed) {
           // Stream-open already failed permanently — drop chunks
           // rather than buffer them. Without this guard the buffer
           // would grow without bound under a sustained child whose
@@ -2258,7 +2261,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // releasing the buffer), and `onSettleWired` would attach a
       // `'finish'` listener that never fires → registry stuck on
       // `running` forever. Latch the failure: null the stream,
-      // mark `streamFailed` so `onData` drops chunks, and let
+      // mark `streamClosed` so `onData` drops chunks, and let
       // `onSettleWired` transition the registry immediately (its
       // existing `if (!stream)` branch handles that case).
       outputStream.on('error', (err) => {
@@ -2267,7 +2270,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         );
         const droppedChunks = promoteArtifacts.buffer.length;
         promoteArtifacts.stream = null;
-        promoteArtifacts.streamFailed = true;
+        promoteArtifacts.streamClosed = true;
         try {
           fs.appendFileSync(
             outputPath,
@@ -2311,11 +2314,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // (their warns will accumulate in the log, which is enough
       // observability for a rare disk failure case).
       promoteArtifacts.stream = null;
-      // Latch streamFailed so the foreground postPromote.onData
+      // Latch streamClosed so the foreground postPromote.onData
       // handler stops buffering chunks that would never be drained
       // (the drain path only runs when `stream` becomes non-null,
       // which never happens after this branch).
-      promoteArtifacts.streamFailed = true;
+      promoteArtifacts.streamClosed = true;
       // PR-2.5 wave-3: record how many pre-
       // finalizer post-promote chunks are being dropped. Without
       // this an oncall engineer reading a truncated `bg_xxx.output`
@@ -2574,11 +2577,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // can land chunks in the buffer between when the wire fires
       // and when the buffer drain (during stream-open) sees them.
       // Without this drain those chunks are stranded. AND latch
-      // `streamFailed` together with the null so that any
+      // `streamClosed` together with the null so that any
       // chunk arriving AFTER `.end()` (during the flush window —
       // unlikely once the service has emitted settle, but kernel
       // buffers can deliver late on PTY) is DROPPED via the
-      // `else if (promoteArtifacts.streamFailed)` arm in `onData`
+      // `else if (promoteArtifacts.streamClosed)` arm in `onData`
       // instead of being pushed into the now-undrainable buffer.
       if (stream) {
         while (promoteArtifacts.buffer.length > 0) {
@@ -2588,7 +2591,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
             // Stream write failure during pre-end drain — log + drop,
             // same recovery posture as the foreground `onData` write
             // path. The error event will fire async if the stream is
-            // dead, latching `streamFailed` via the 'error' handler.
+            // dead, latching `streamClosed` via the 'error' handler.
             debugLogger.warn(
               `promote: pre-end buffer drain write failed: ${getErrorMessage(writeErr)}`,
             );
@@ -2596,7 +2599,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
       promoteArtifacts.stream = null;
-      promoteArtifacts.streamFailed = true;
+      promoteArtifacts.streamClosed = true;
       if (!stream) {
         // No stream (open failed or already ended) — transition right
         // away, no flush to wait on.
@@ -2614,13 +2617,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
           transitioned = true;
           transitionRegistry(info);
         };
-        const FLUSH_TIMEOUT_MS = 10_000;
         const flushTimer = setTimeout(() => {
           debugLogger.warn(
-            `promote: output stream flush timed out for ${shellId} after ${FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
+            `promote: output stream flush timed out for ${shellId} after ${PROMOTE_FLUSH_TIMEOUT_MS}ms — transitioning registry without flush confirmation`,
           );
           finalize();
-        }, FLUSH_TIMEOUT_MS);
+        }, PROMOTE_FLUSH_TIMEOUT_MS);
         flushTimer.unref();
         stream.once('finish', () => {
           clearTimeout(flushTimer);

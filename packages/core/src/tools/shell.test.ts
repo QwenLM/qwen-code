@@ -3538,7 +3538,7 @@ describe('ShellTool', () => {
         const promise = (invocation as ShellToolInvocation).execute(
           mockAbortSignal,
           undefined,
-          expect.objectContaining({}),
+          {},
           undefined,
           setPromoteAc,
         );
@@ -3833,7 +3833,7 @@ describe('ShellTool', () => {
         const promise = (invocation as ShellToolInvocation).execute(
           mockAbortSignal,
           undefined,
-          expect.objectContaining({}),
+          {},
           undefined,
           setPromoteAc,
         );
@@ -4366,7 +4366,7 @@ describe('ShellTool', () => {
         // kept pointing at the already-broken stream, and
         // `onSettleWired` attached a `.once('finish', ...)` listener
         // that would never fire → registry stuck on `running` forever.
-        // Fix: the error listener latches `streamFailed`, nulls the
+        // Fix: the error listener latches `streamClosed`, nulls the
         // shared `stream` slot, and `onSettleWired`'s existing
         // `if (!stream)` branch transitions the registry immediately.
         const errorListeners: Array<(err: Error) => void> = [];
@@ -4543,17 +4543,17 @@ describe('ShellTool', () => {
         }
       });
 
-      it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamFailed so post-end chunks drop instead of leaking the buffer', async () => {
+      it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamClosed so post-end chunks drop instead of leaking the buffer', async () => {
         // Regression for the buffer-drain race: previously
         // `onSettleWired` set `promoteArtifacts.stream = null` BEFORE
         // calling `stream.end()`. Any `onData` chunk that arrived
         // between the null assignment and the `'finish'` event saw
-        // `stream === null && streamFailed === false` and pushed
+        // `stream === null && streamClosed === false` and pushed
         // into `promoteArtifacts.buffer` — which has no further
         // drain path (the foreground finalizer has already
         // returned). Result: chunks stranded forever, no
         // observability. Fix drains the buffer to the stream BEFORE
-        // nulling AND latches `streamFailed=true` so any subsequent
+        // nulling AND latches `streamClosed=true` so any subsequent
         // chunks DROP via the third branch of `onData` instead.
         const writeStreamMock = {
           write: vi.fn(),
@@ -4633,7 +4633,7 @@ describe('ShellTool', () => {
         expect(writeStreamMock.write).toHaveBeenCalledWith('mid1');
 
         // Fire settle. onSettleWired now drains any remaining buffer,
-        // nulls stream, latches streamFailed.
+        // nulls stream, latches streamClosed.
         capturedPostPromote?.onSettle?.({
           exitCode: 0,
           signal: null,
@@ -4647,7 +4647,7 @@ describe('ShellTool', () => {
         capturedPostPromote?.onData?.({ type: 'data', chunk: 'post2' });
 
         // Stream.write should NOT have been called for post-settle
-        // chunks (stream is null + streamFailed latched → onData's
+        // chunks (stream is null + streamClosed latched → onData's
         // third branch drops).
         const writeCalls = writeStreamMock.write.mock.calls.map(
           (c: unknown[]) => c[0],
@@ -4734,7 +4734,7 @@ describe('ShellTool', () => {
         );
 
         // Post-settle chunks must not surface anywhere either —
-        // streamFailed was set by the catch path so subsequent
+        // streamClosed was set by the catch path so subsequent
         // onData chunks drop. Drive a settle, then a late chunk;
         // verify the registry still transitions normally and the
         // late chunk is dropped without crashing.
