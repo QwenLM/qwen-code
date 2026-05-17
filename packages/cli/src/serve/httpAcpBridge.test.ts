@@ -4460,6 +4460,15 @@ describe('createHttpAcpBridge', () => {
       };
       expect(result.outcome.outcome).toBe('cancelled');
       expect(bridge.pendingPermissionCount).toBe(0);
+      const resolvedIndex = events.findIndex(
+        (e) => e.type === 'permission_resolved',
+      );
+      const closedIndex = events.findIndex((e) => e.type === 'session_closed');
+      expect(resolvedIndex).toBeGreaterThanOrEqual(0);
+      expect(closedIndex).toBeGreaterThan(resolvedIndex);
+      expect(events[resolvedIndex]?.data).toMatchObject({
+        outcome: { outcome: 'cancelled' },
+      });
 
       await bridge.shutdown();
     });

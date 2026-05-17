@@ -2919,7 +2919,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             : ''),
       );
       if (defaultEntry === entry) defaultEntry = undefined;
-      byId.delete(sessionId);
       const ci = channelInfo;
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
@@ -2927,6 +2926,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       for (const id of Array.from(entry.pendingPermissionIds)) {
         resolvePending(id, { outcome: { outcome: 'cancelled' } });
       }
+      byId.delete(sessionId);
       try {
         entry.events.publish({
           type: 'session_closed',

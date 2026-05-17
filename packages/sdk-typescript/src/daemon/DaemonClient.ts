@@ -651,6 +651,12 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Cast a permission vote against an explicit daemon session. New clients
+   * should prefer this once `capabilities.features` includes
+   * `session_permission_vote`; the legacy request-id-only route remains for
+   * older daemons.
+   */
   async respondToSessionPermission(
     sessionId: string,
     requestId: string,
@@ -691,6 +697,10 @@ export class DaemonClient {
 
   // -- Session lifecycle ---------------------------------------------------
 
+  /**
+   * Close a daemon session. The daemon treats DELETE as idempotent for SDK
+   * callers: both 204 (closed) and 404 (already gone) resolve successfully.
+   */
   async closeSession(sessionId: string, clientId?: string): Promise<void> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}`,
@@ -714,6 +724,10 @@ export class DaemonClient {
 
   // -- Session metadata ----------------------------------------------------
 
+  /**
+   * Patch mutable session metadata and return the effective stored metadata
+   * reported by the daemon.
+   */
   async updateSessionMetadata(
     sessionId: string,
     metadata: { displayName?: string },
