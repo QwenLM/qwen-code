@@ -27,7 +27,11 @@ import {
   validateSkillName,
 } from './types.js';
 import type { Config } from '../config/config.js';
-import { validateConfig } from './skill-load.js';
+import {
+  normalizeSkillPriority,
+  parsePriorityField,
+  validateConfig,
+} from './skill-load.js';
 import { validateSymlinkTarget } from './symlinkScope.js';
 import {
   SkillActivationRegistry,
@@ -233,7 +237,8 @@ export class SkillManager {
     // Sort by priority desc (unspecified treated as 0), then by name.
     skills.sort(
       (a, b) =>
-        (b.priority ?? 0) - (a.priority ?? 0) || a.name.localeCompare(b.name),
+        normalizeSkillPriority(b.priority) -
+          normalizeSkillPriority(a.priority) || a.name.localeCompare(b.name),
     );
 
     debugLogger.info(`Listed ${skills.length} unique skills`);
@@ -681,13 +686,7 @@ export class SkillManager {
       const paths = parsePathsField(frontmatter);
 
       // Optional `priority` frontmatter: higher values sort first.
-      let priority: number | undefined;
-      if (frontmatter['priority'] !== undefined) {
-        priority = Number(frontmatter['priority']);
-        if (!Number.isFinite(priority)) {
-          throw new Error('"priority" must be a finite number');
-        }
-      }
+      const priority = parsePriorityField(frontmatter, filePath);
 
       const config: SkillConfig = {
         name,

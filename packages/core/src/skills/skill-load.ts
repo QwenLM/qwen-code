@@ -169,6 +169,7 @@ export function parseSkillContent(
   // Optional `paths` frontmatter: glob patterns that gate when this skill
   // is offered to the model (conditional skill).
   const paths = parsePathsField(frontmatter);
+  const priority = parsePriorityField(frontmatter, filePath);
 
   const config: SkillConfig = {
     name,
@@ -197,6 +198,7 @@ export function parseSkillContent(
     whenToUse,
     disableModelInvocation,
     paths,
+    priority,
   };
 
   // Validate the parsed configuration
@@ -242,6 +244,13 @@ export function validateConfig(
     }
   }
 
+  if (
+    config.priority !== undefined &&
+    (typeof config.priority !== 'number' || !Number.isFinite(config.priority))
+  ) {
+    errors.push('"priority" must be a finite number');
+  }
+
   // Warn if body is empty
   if (!config.body || config.body.trim() === '') {
     warnings.push('Skill body is empty');
@@ -252,4 +261,29 @@ export function validateConfig(
     errors,
     warnings,
   };
+}
+
+export function parsePriorityField(
+  frontmatter: Record<string, unknown>,
+  filePath: string,
+): number | undefined {
+  const raw = frontmatter['priority'];
+  if (raw === undefined || raw === null || raw === '') {
+    return undefined;
+  }
+
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+    debugLogger.warn(
+      `Ignoring invalid priority value in ${filePath}: expected a finite number.`,
+    );
+    return undefined;
+  }
+
+  return raw;
+}
+
+export function normalizeSkillPriority(priority: unknown): number {
+  return typeof priority === 'number' && Number.isFinite(priority)
+    ? priority
+    : 0;
 }

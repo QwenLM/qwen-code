@@ -80,7 +80,7 @@ describe('BundledSkillLoader', () => {
   });
 
   it('should load bundled skills as slash commands', async () => {
-    const skill = makeSkill();
+    const skill = makeSkill({ priority: 42 });
     mockSkillManager.listSkills.mockResolvedValue([skill]);
 
     const loader = new BundledSkillLoader(mockConfig);
@@ -90,6 +90,7 @@ describe('BundledSkillLoader', () => {
     expect(commands[0].name).toBe('review');
     expect(commands[0].description).toBe('Review code changes');
     expect(commands[0].kind).toBe(CommandKind.SKILL);
+    expect(commands[0].completionPriority).toBe(42);
     expect(mockSkillManager.listSkills).toHaveBeenCalledWith({
       level: 'bundled',
     });

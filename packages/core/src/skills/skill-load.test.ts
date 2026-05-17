@@ -50,6 +50,13 @@ describe('skill-load', () => {
           'argument-hint': '[topic]',
         };
       }
+      if (yamlString.includes('priority:')) {
+        return {
+          name: 'test-skill',
+          description: 'A test skill',
+          priority: yamlString.includes('priority: 25') ? 25 : true,
+        };
+      }
       // Default case
       return {
         name: 'test-skill',
@@ -194,6 +201,39 @@ Skill body.
       const config = parseSkillContent(markdownWithArgumentHint, testFilePath);
 
       expect(config.argumentHint).toBe('[topic]');
+    });
+
+    it('should parse numeric priority from frontmatter', () => {
+      const markdownWithPriority = `---
+name: test-skill
+description: A test skill
+priority: 25
+---
+
+Body.
+`;
+
+      const config = parseSkillContent(markdownWithPriority, testFilePath);
+
+      expect(config.priority).toBe(25);
+    });
+
+    it('should ignore invalid priority values without dropping the skill', () => {
+      const markdownWithInvalidPriority = `---
+name: test-skill
+description: A test skill
+priority: true
+---
+
+Body.
+`;
+
+      const config = parseSkillContent(
+        markdownWithInvalidPriority,
+        testFilePath,
+      );
+
+      expect(config.priority).toBeUndefined();
     });
 
     it('should throw error for invalid format without frontmatter', () => {
@@ -419,6 +459,20 @@ Symlinked skill body.
 
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain('Skill body is empty');
+    });
+
+    it('should return error for invalid priority', () => {
+      const config = {
+        name: 'test-skill',
+        description: 'A test skill',
+        body: 'Skill body',
+        priority: Number.NaN,
+      };
+
+      const result = validateConfig(config);
+
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('"priority" must be a finite number');
     });
   });
 
@@ -654,6 +708,19 @@ Symlinked skill body.
         '/test/extension/skills/tsx-helper/SKILL.md',
       );
       expect(config.skillRoot).toBe('/test/extension/skills/tsx-helper');
+    });
+
+    it('extracts priority', () => {
+      mockParseYaml.mockReturnValueOnce({
+        name: 'priority-helper',
+        description: 'Priority helper',
+        priority: 10,
+      });
+      const config = parseSkillContent(
+        `---\nname: priority-helper\ndescription: Priority helper\npriority: 10\n---\n\nBody.\n`,
+        '/test/extension/skills/priority-helper/SKILL.md',
+      );
+      expect(config.priority).toBe(10);
     });
   });
 

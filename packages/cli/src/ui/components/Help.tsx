@@ -497,8 +497,15 @@ function groupCommands(
     .sort((a, b) => a.order - b.order)
     .map((group) => ({
       ...group,
-      commands: group.commands.sort((a, b) => a.name.localeCompare(b.name)),
+      commands: group.commands.sort(compareCommandsForHelp),
     }));
+}
+
+function compareCommandsForHelp(a: SlashCommand, b: SlashCommand): number {
+  return (
+    (b.completionPriority ?? 0) - (a.completionPriority ?? 0) ||
+    a.name.localeCompare(b.name)
+  );
 }
 
 function truncateText(text: string, maxLength: number): string {

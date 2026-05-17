@@ -84,7 +84,7 @@ describe('SkillCommandLoader', () => {
   });
 
   it('should load user skill as slash command with correct properties', async () => {
-    const skill = makeSkill({ level: 'user' });
+    const skill = makeSkill({ level: 'user', priority: 42 });
     mockSkillManager.listSkills.mockImplementation(
       ({ level }: { level: string }) =>
         Promise.resolve(level === 'user' ? [skill] : []),
@@ -102,6 +102,7 @@ describe('SkillCommandLoader', () => {
     expect(cmd.sourceLabel).toBe('User');
     expect(cmd.sourceDetail).toBe('user');
     expect(cmd.modelInvocable).toBe(true);
+    expect(cmd.completionPriority).toBe(42);
   });
 
   it('should load project skill with sourceLabel "Project"', async () => {
