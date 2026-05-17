@@ -620,7 +620,11 @@ export interface InsightProgressProps {
 // Simplified message structure for internal feedback
 export type Message =
   | {
-      type: MessageType.INFO | MessageType.ERROR | MessageType.USER;
+      type:
+        | MessageType.INFO
+        | MessageType.WARNING
+        | MessageType.ERROR
+        | MessageType.USER;
       content: string; // Renamed from text for clarity in this context
       timestamp: Date;
     }

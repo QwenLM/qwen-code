@@ -10,10 +10,14 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
   'permission_request',
   'permission_resolved',
+  'permission_already_resolved',
   'model_switched',
   'model_switch_failed',
   'session_died',
+  'session_closed',
+  'session_metadata_updated',
   'client_evicted',
+  'slow_client_warning',
   'stream_error',
 ] as const;
 
@@ -53,6 +57,13 @@ export interface DaemonPermissionResolvedData {
   [key: string]: unknown;
 }
 
+export interface DaemonPermissionAlreadyResolvedData {
+  requestId: string;
+  sessionId: string;
+  outcome: PermissionOutcome;
+  [key: string]: unknown;
+}
+
 export interface DaemonModelSwitchedData {
   sessionId: string;
   modelId: string;
@@ -74,9 +85,38 @@ export interface DaemonSessionDiedData {
   [key: string]: unknown;
 }
 
+export type DaemonSessionClosedReason = 'client_close' | (string & {});
+
+export interface DaemonSessionClosedData {
+  sessionId: string;
+  reason: DaemonSessionClosedReason;
+  closedBy?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonSessionMetadataUpdatedData {
+  sessionId: string;
+  displayName?: string;
+  [key: string]: unknown;
+}
+
 export interface DaemonClientEvictedData {
   reason: string;
   droppedAfter?: number;
+  [key: string]: unknown;
+}
+
+export interface DaemonSlowClientWarningData {
+  /** Live (non-replay) items currently queued for this subscriber. */
+  queueSize: number;
+  /** Per-subscriber backlog cap that triggered the warning. */
+  maxQueued: number;
+  /**
+   * Most recent monotonic event id observed by the bus at warning
+   * time. Lets the client decide whether to reconnect with a
+   * `Last-Event-ID` or detach + drain.
+   */
+  lastEventId: number;
   [key: string]: unknown;
 }
 
@@ -97,6 +137,10 @@ export type DaemonPermissionResolvedEvent = DaemonEventEnvelope<
   'permission_resolved',
   DaemonPermissionResolvedData
 >;
+export type DaemonPermissionAlreadyResolvedEvent = DaemonEventEnvelope<
+  'permission_already_resolved',
+  DaemonPermissionAlreadyResolvedData
+>;
 export type DaemonModelSwitchedEvent = DaemonEventEnvelope<
   'model_switched',
   DaemonModelSwitchedData
@@ -109,9 +153,21 @@ export type DaemonSessionDiedEvent = DaemonEventEnvelope<
   'session_died',
   DaemonSessionDiedData
 >;
+export type DaemonSessionClosedEvent = DaemonEventEnvelope<
+  'session_closed',
+  DaemonSessionClosedData
+>;
+export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
+  'session_metadata_updated',
+  DaemonSessionMetadataUpdatedData
+>;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
+>;
+export type DaemonSlowClientWarningEvent = DaemonEventEnvelope<
+  'slow_client_warning',
+  DaemonSlowClientWarningData
 >;
 export type DaemonStreamErrorEvent = DaemonEventEnvelope<
   'stream_error',
@@ -122,14 +178,18 @@ export type DaemonSessionEvent =
   | DaemonSessionUpdateEvent
   | DaemonModelSwitchedEvent
   | DaemonModelSwitchFailedEvent
-  | DaemonSessionDiedEvent;
+  | DaemonSessionDiedEvent
+  | DaemonSessionClosedEvent
+  | DaemonSessionMetadataUpdatedEvent;
 
 export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
-  | DaemonPermissionResolvedEvent;
+  | DaemonPermissionResolvedEvent
+  | DaemonPermissionAlreadyResolvedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
+  | DaemonSlowClientWarningEvent
   | DaemonStreamErrorEvent;
 
 export type KnownDaemonEvent =
@@ -147,11 +207,13 @@ export interface DaemonSessionViewState {
    */
   alive: boolean;
   currentModelId?: string;
+  displayName?: string;
   pendingPermissions: Record<string, DaemonPermissionRequestData>;
   lastSessionUpdate?: DaemonSessionUpdateData;
   lastModelSwitchFailure?: DaemonModelSwitchFailedData;
   terminalEvent?:
     | DaemonSessionDiedEvent
+    | DaemonSessionClosedEvent
     | DaemonClientEvictedEvent
     | DaemonStreamErrorEvent;
   streamError?: DaemonStreamErrorData;
@@ -161,6 +223,14 @@ export interface DaemonSessionViewState {
   lastDroppedPermissionRequestId?: string;
   unmatchedPermissionResolutionCount: number;
   lastUnmatchedPermissionResolutionId?: string;
+  /**
+   * Count of `slow_client_warning` frames this stream has observed.
+   * Non-terminal — warnings precede eviction but don't themselves
+   * close the stream. Adapters tap this counter to surface "your
+   * stream is lagging" UI before `client_evicted` arrives.
+   */
+  slowClientWarningCount: number;
+  lastSlowClientWarning?: DaemonSlowClientWarningData;
 }
 
 export function createDaemonSessionViewState(
@@ -172,6 +242,7 @@ export function createDaemonSessionViewState(
     lastEventId: seed.lastEventId,
     sessionId: seed.sessionId,
     currentModelId: seed.currentModelId,
+    displayName: seed.displayName,
     lastSessionUpdate: seed.lastSessionUpdate,
     lastModelSwitchFailure: seed.lastModelSwitchFailure,
     terminalEvent: seed.terminalEvent,
@@ -184,6 +255,8 @@ export function createDaemonSessionViewState(
       seed.unmatchedPermissionResolutionCount ?? 0,
     lastUnmatchedPermissionResolutionId:
       seed.lastUnmatchedPermissionResolutionId,
+    slowClientWarningCount: seed.slowClientWarningCount ?? 0,
+    lastSlowClientWarning: seed.lastSlowClientWarning,
   };
 }
 
@@ -217,6 +290,10 @@ export function asKnownDaemonEvent(
       return isPermissionResolvedData(event.data)
         ? (event as DaemonPermissionResolvedEvent)
         : undefined;
+    case 'permission_already_resolved':
+      return isPermissionAlreadyResolvedData(event.data)
+        ? (event as DaemonPermissionAlreadyResolvedEvent)
+        : undefined;
     case 'model_switched':
       return isModelSwitchedData(event.data)
         ? (event as DaemonModelSwitchedEvent)
@@ -229,9 +306,21 @@ export function asKnownDaemonEvent(
       return isSessionDiedData(event.data)
         ? (event as DaemonSessionDiedEvent)
         : undefined;
+    case 'session_closed':
+      return isSessionClosedData(event.data)
+        ? (event as DaemonSessionClosedEvent)
+        : undefined;
+    case 'session_metadata_updated':
+      return isSessionMetadataUpdatedData(event.data)
+        ? (event as DaemonSessionMetadataUpdatedEvent)
+        : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
         ? (event as DaemonClientEvictedEvent)
+        : undefined;
+    case 'slow_client_warning':
+      return isSlowClientWarningData(event.data)
+        ? (event as DaemonSlowClientWarningEvent)
         : undefined;
     case 'stream_error':
       return isStreamErrorData(event.data)
@@ -300,6 +389,19 @@ export function reduceDaemonSessionEvent(
       delete pendingPermissions[event.data.requestId];
       return { ...base, pendingPermissions };
     }
+    case 'permission_already_resolved': {
+      if (!(event.data.requestId in base.pendingPermissions)) {
+        return {
+          ...base,
+          unmatchedPermissionResolutionCount:
+            base.unmatchedPermissionResolutionCount + 1,
+          lastUnmatchedPermissionResolutionId: event.data.requestId,
+        };
+      }
+      const pendingPermissions = { ...base.pendingPermissions };
+      delete pendingPermissions[event.data.requestId];
+      return { ...base, pendingPermissions };
+    }
     case 'model_switched':
       return {
         ...base,
@@ -321,12 +423,36 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
       };
+    case 'session_closed':
+      return {
+        ...base,
+        sessionId: event.data.sessionId,
+        alive: false,
+        terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
+        pendingPermissions: {},
+      };
+    case 'session_metadata_updated':
+      return {
+        ...base,
+        sessionId: event.data.sessionId,
+        displayName: event.data.displayName,
+      };
     case 'client_evicted':
       return {
         ...base,
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+      };
+    case 'slow_client_warning':
+      // Non-terminal: warning precedes eviction but doesn't close
+      // the stream on its own. Count + capture the latest snapshot
+      // so adapters can render lag UI (or pre-emptively detach).
+      // `alive` and `pendingPermissions` are unchanged.
+      return {
+        ...base,
+        slowClientWarningCount: base.slowClientWarningCount + 1,
+        lastSlowClientWarning: event.data,
       };
     case 'stream_error':
       return {
@@ -358,21 +484,27 @@ function isKnownDaemonEventTypeName(
   return DAEMON_KNOWN_EVENT_TYPES.has(type);
 }
 
-// Prefer the first stream-local terminal frame, but upgrade to session_died
-// once the daemon reports the underlying session actually ended.
+// Session-lifecycle terminals outrank stream-local terminals in
+// `terminalEvent`; they prove the underlying daemon session ended.
+type TerminalEvent =
+  | DaemonSessionDiedEvent
+  | DaemonSessionClosedEvent
+  | DaemonClientEvictedEvent
+  | DaemonStreamErrorEvent;
+
+function isSessionLifecycleTerminal(type: string): boolean {
+  return type === 'session_died' || type === 'session_closed';
+}
+
 function chooseTerminalEvent(
-  current:
-    | DaemonSessionDiedEvent
-    | DaemonClientEvictedEvent
-    | DaemonStreamErrorEvent
-    | undefined,
-  next:
-    | DaemonSessionDiedEvent
-    | DaemonClientEvictedEvent
-    | DaemonStreamErrorEvent,
-): DaemonSessionDiedEvent | DaemonClientEvictedEvent | DaemonStreamErrorEvent {
+  current: TerminalEvent | undefined,
+  next: TerminalEvent,
+): TerminalEvent {
   if (!current) return next;
-  if (current.type !== 'session_died' && next.type === 'session_died') {
+  if (
+    !isSessionLifecycleTerminal(current.type) &&
+    isSessionLifecycleTerminal(next.type)
+  ) {
     return next;
   }
   return current;
@@ -397,6 +529,17 @@ function isPermissionResolvedData(
   return (
     isRecord(value) &&
     isNonEmptyString(value['requestId']) &&
+    isPermissionOutcome(value['outcome'])
+  );
+}
+
+function isPermissionAlreadyResolvedData(
+  value: unknown,
+): value is DaemonPermissionAlreadyResolvedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['requestId']) &&
+    isNonEmptyString(value['sessionId']) &&
     isPermissionOutcome(value['outcome'])
   );
 }
@@ -430,11 +573,45 @@ function isSessionDiedData(value: unknown): value is DaemonSessionDiedData {
   );
 }
 
+function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['reason']) &&
+    isOptionalStringOrNull(value['closedBy'])
+  );
+}
+
+function isSessionMetadataUpdatedData(
+  value: unknown,
+): value is DaemonSessionMetadataUpdatedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isOptionalStringOrNull(value['displayName'])
+  );
+}
+
 function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['reason']) &&
     isOptionalNumber(value['droppedAfter'])
+  );
+}
+
+function isSlowClientWarningData(
+  value: unknown,
+): value is DaemonSlowClientWarningData {
+  // Mirror the sibling predicates' finite-number guard
+  // (`isOptionalNumber` → `isFiniteNumber`): `typeof NaN === 'number'`
+  // and `typeof Infinity === 'number'` both pass a bare `typeof`
+  // check but would be schema garbage for a queue-size measurement.
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value['queueSize']) &&
+    isFiniteNumber(value['maxQueued']) &&
+    isFiniteNumber(value['lastEventId'])
   );
 }
 

@@ -1685,6 +1685,7 @@ export async function loadCliConfig(
     fileFiltering: settings.context?.fileFiltering,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
+    plansDirectory: settings.plansDirectory,
     proxy:
       argv.proxy ||
       settings.proxy ||

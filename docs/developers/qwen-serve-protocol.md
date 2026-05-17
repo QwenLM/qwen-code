@@ -14,6 +14,10 @@ Without a configured token (loopback dev default) the header is optional. Token 
 
 **`/health` exemption** (Bctum): on loopback binds (`127.0.0.1` / `localhost` / `::1` / `[::1]`) `/health` is registered BEFORE the bearer middleware, so liveness probes inside the pod don't need to carry the token even when the daemon was started with `--token`. Non-loopback binds (`--hostname 0.0.0.0` etc.) gate `/health` behind the bearer like every other route — see the [`GET /health`](#get-health) section for the rationale.
 
+**`--require-auth` (#4175 PR 15).** Pass this flag at boot to extend the "must have a token" rule to loopback as well. Boot fails without a token; the `/health` exemption is dropped (so `/health` also requires `Authorization: Bearer …`).
+
+When the flag is on, the global `bearerAuth` middleware gates **every** route — including `/capabilities`. An **unauthenticated** client therefore cannot pre-flight `caps.features` to discover that auth is required: the discovery surface for that case is the **401 response body** itself (uniform across all routes per the [Authentication](#authentication) section). The `require_auth` capability tag is a **post-authentication confirmation** — once a client successfully authenticates and reads `/capabilities`, the tag's presence confirms the daemon was started with `--require-auth` (useful for audit / compliance UIs and for SDK clients to surface "this deployment is hardened" in a settings panel). Mutation routes that opt into per-route strict mode (Wave 4 follow-ups) refuse with `401 { code: "token_required", error: "…" }` when reached on a no-token loopback default — but with `--require-auth` enabled the global bearer middleware short-circuits the request before the per-route gate, so the legacy `Unauthorized` body is what unauthenticated callers actually see.
+
 ## Common error shape
 
 5xx responses carry the original error's `code` and `data` when present (JSON-RPC style — the ACP SDK forwards `{code, message, data}` from the agent):
@@ -91,20 +95,32 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 ['health', 'capabilities', 'session_create', 'session_scope_override',
  'session_load', 'unstable_session_resume',
  'session_list', 'session_prompt', 'session_cancel', 'session_events',
- 'session_set_model', 'permission_vote']
+ 'slow_client_warning', 'typed_event_schema',
+ 'session_set_model', 'client_identity', 'client_heartbeat',
+ 'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
+ 'workspace_providers', 'session_context', 'session_supported_commands',
+ 'session_close', 'session_metadata']
 ```
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
 `session_load` and `unstable_session_resume` advertise the explicit-restore routes (`POST /session/:id/load` and `POST /session/:id/resume`). Older daemons return `404` for these paths, so SDK clients should pre-flight `caps.features` before calling. The `unstable_` prefix on `unstable_session_resume` mirrors the underlying ACP method (`connection.unstable_resumeSession`) — the daemon's wire shape is committed for v1, but the ACP method name itself may change before ACP marks resume stable.
 
-## Routes
+`slow_client_warning` covers two co-released SSE backpressure knobs introduced in #4175 Wave 2.5 PR 10: (a) the daemon emits a `slow_client_warning` synthetic event-stream frame when a subscriber's queue crosses 75% full, once per overflow episode (rearmed after the queue drains below 37.5%); (b) `GET /session/:id/events` accepts a `?maxQueued=N` query param (range `[16, 2048]`) to pre-size the per-subscriber backlog for cold reconnects against a large replay ring. The daemon-wide ring size is controlled by `--event-ring-size` (default **8000**, per #3803 §02). Old daemons silently lack both — pre-flight this tag before opting in.
 
-> **Stage 1 limitation — no `DELETE /session/:id`.** Sessions live until
-> the agent child crashes (`session_died`), the daemon process exits, or
-> a server-side `killSession` (used internally by orphan-cleanup) fires.
-> HTTP clients have no explicit "close one session" route in Stage 1.
-> An explicit `DELETE /session/:id` is on the Stage 2 polish list.
+`typed_event_schema` advertises daemon event payloads that match the SDK's `KnownDaemonEvent` schema. Older daemons may still stream compatible frames, but SDK clients should pre-flight this tag before assuming typed event coverage.
+
+`client_heartbeat` advertises `POST /session/:id/heartbeat`. Older daemons return `404`; pre-flight this tag before issuing periodic heartbeats.
+
+`session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
+
+**Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
+
+| Tag            | Advertised when …                                                                                                                                                            |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds. |
+
+## Routes
 
 ### `GET /health`
 
@@ -143,6 +159,174 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 > **`modelServices` is always `[]` in Stage 1.** The agent uses its single default model service and doesn't enumerate it over the wire. Stage 2 will populate this from registered model adapters so SDK clients can build service-pickers; until then, do NOT rely on this field being non-empty.
 
 > **`workspaceCwd`** is the canonical absolute path this daemon binds to (#3803 §02 — 1 daemon = 1 workspace). Use it to (a) detect mismatch before posting `/session` and (b) omit `cwd` on `POST /session` (the route falls back to this path). Multi-workspace deployments expose multiple daemons on different ports, each with its own `workspaceCwd`. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
+
+### Read-only runtime status routes
+
+These routes report daemon-side runtime snapshots. They are additive v1 routes,
+do not mutate state, and do not change the serve protocol version. Workspace
+status routes intentionally do **not** start the ACP child process just because
+a client polls a GET route: if the daemon is idle, they return
+`initialized: false` with an empty snapshot. Session status routes require a
+live session and use the standard `404 SessionNotFoundError` shape for unknown
+ids.
+
+Capability tags:
+
+- `workspace_mcp` → `GET /workspace/mcp`
+- `workspace_skills` → `GET /workspace/skills`
+- `workspace_providers` → `GET /workspace/providers`
+- `session_context` → `GET /session/:id/context`
+- `session_supported_commands` → `GET /session/:id/supported-commands`
+
+Common status cell:
+
+```ts
+type DaemonStatus =
+  | 'ok'
+  | 'warning'
+  | 'error'
+  | 'disabled'
+  | 'not_started'
+  | 'unknown';
+
+interface DaemonStatusCell {
+  kind: string;
+  status: DaemonStatus;
+  error?: string;
+  errorKind?: string;
+  hint?: string;
+}
+```
+
+Status payloads never expose MCP env values, headers, OAuth/service-account
+details, provider API keys, provider `baseUrl` / `envKey`, skill body, skill
+filesystem paths, or hook definitions.
+
+### `GET /workspace/mcp`
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "discoveryState": "completed",
+  "servers": [
+    {
+      "kind": "mcp_server",
+      "status": "ok",
+      "name": "docs",
+      "mcpStatus": "connected",
+      "transport": "stdio",
+      "disabled": false,
+      "description": "Documentation server",
+      "extensionName": "docs-ext"
+    }
+  ]
+}
+```
+
+`discoveryState` is one of `not_started`, `in_progress`, or `completed`.
+`transport` is one of `stdio`, `sse`, `http`, `websocket`, `sdk`, or
+`unknown`. `errors` is omitted when discovery succeeds.
+
+### `GET /workspace/skills`
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "skills": [
+    {
+      "kind": "skill",
+      "status": "ok",
+      "name": "review",
+      "description": "Review code",
+      "level": "project",
+      "modelInvocable": true,
+      "argumentHint": "[path]"
+    }
+  ]
+}
+```
+
+`level` is one of `project`, `user`, `extension`, or `bundled`. `errors` is
+omitted when discovery succeeds.
+
+### `GET /workspace/providers`
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "current": { "authType": "qwen", "modelId": "qwen3(qwen)" },
+  "providers": [
+    {
+      "kind": "model_provider",
+      "status": "ok",
+      "authType": "qwen",
+      "current": true,
+      "models": [
+        {
+          "modelId": "qwen3(qwen)",
+          "baseModelId": "qwen3",
+          "name": "Qwen 3",
+          "description": null,
+          "contextLimit": 4096,
+          "isCurrent": true,
+          "isRuntime": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+Models are grouped by auth type. Provider connection diagnostics and environment
+preflight checks are intentionally out of scope here; deeper preflight/env
+checks belong to a later daemon status wave. `errors` is omitted when snapshot
+construction succeeds.
+
+### `GET /session/:id/context`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "workspaceCwd": "/canonical/path",
+  "state": {
+    "models": {},
+    "modes": {},
+    "configOptions": []
+  }
+}
+```
+
+`state` mirrors the same ACP model/mode/config-option shapes used by
+`POST /session`, `POST /session/:id/load`, and `POST /session/:id/resume`.
+
+### `GET /session/:id/supported-commands`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "availableCommands": [
+    {
+      "name": "init",
+      "description": "Initialize the project",
+      "input": null,
+      "_meta": { "source": "builtin" }
+    }
+  ],
+  "availableSkills": ["review"]
+}
+```
+
+`availableCommands` is the same command snapshot used by the
+`available_commands_update` SSE notification. `availableSkills` lists skill
+names only; clients must not expect skill bodies or paths over this route.
 
 ### `POST /session`
 
@@ -257,7 +441,16 @@ Response:
 
 ```json
 {
-  "sessions": [{ "sessionId": "<uuid>", "workspaceCwd": "/canonical/path" }]
+  "sessions": [
+    {
+      "sessionId": "<uuid>",
+      "workspaceCwd": "/canonical/path",
+      "createdAt": "2026-05-17T08:30:00.000Z",
+      "displayName": "My Session",
+      "clientCount": 2,
+      "hasActivePrompt": false
+    }
+  ]
 }
 ```
 
@@ -310,6 +503,72 @@ curl -X POST http://127.0.0.1:4170/session/$SID/cancel
 
 > **Multi-prompt contract:** cancel only affects the active prompt. Any prompts the same client previously POSTed and are still queued behind the active one will continue to execute. Multi-prompt queueing is a daemon-introduced behavior (not in ACP spec); the contract for queued prompts is "they keep running unless you cancel each, or kill the session via channel exit".
 
+### `DELETE /session/:id`
+
+Explicitly close a live session. Force-closes even when other clients are attached — cancels any active prompt, resolves pending permissions as cancelled, publishes `session_closed` event, closes the EventBus, and removes the session from daemon maps. On-disk persisted sessions are NOT deleted — they can be reloaded via `POST /session/:id/load`. Pre-flight `caps.features.session_close`.
+
+```bash
+curl -X DELETE http://127.0.0.1:4170/session/$SID
+# → 204 No Content
+```
+
+Idempotent: returns `404` for unknown sessions (same `SessionNotFoundError` shape as other routes).
+
+> **`session_closed` event.** SSE subscribers receive a terminal `session_closed` event with `{ sessionId, reason: 'client_close', closedBy?: '<clientId>' }` before the stream ends. SDK reducers treat this identically to `session_died` (sets `alive: false`, clears `pendingPermissions`).
+
+### `PATCH /session/:id/metadata`
+
+Update mutable session metadata. Currently supports `displayName` only. Pre-flight `caps.features.session_metadata`.
+
+Request:
+
+```json
+{ "displayName": "My Investigation Session" }
+```
+
+| Field         | Required | Notes                                                                          |
+| ------------- | -------- | ------------------------------------------------------------------------------ |
+| `displayName` | no       | String, max 256 characters. Empty string clears the name. Omit to leave as-is. |
+
+Response:
+
+```json
+{ "sessionId": "<uuid>", "displayName": "My Investigation Session" }
+```
+
+Publishes a `session_metadata_updated` event on the session's SSE stream with `{ sessionId, displayName }`.
+
+### `POST /session/:id/heartbeat`
+
+Bump the daemon's last-seen bookkeeping for this session. Long-lived adapters (TUI/IDE/web) ping this on an interval so future revocation policy (Wave 5 PR 24) can distinguish dead clients from quiet ones.
+
+Headers:
+
+| Header             | Required | Notes                                                                                                                                                                                                                                   |
+| ------------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Qwen-Client-Id` | no       | Echoes the daemon-issued id from `POST /session`. Identified clients also bump their per-client timestamp; anonymous heartbeats only bump the per-session watermark. Must satisfy the same `[A-Za-z0-9._:-]{1,128}` shape as elsewhere. |
+
+Request body is empty (`{}` is fine — no fields are read today).
+
+Response:
+
+```json
+{
+  "sessionId": "<sid>",
+  "clientId": "<cid>",
+  "lastSeenAt": 1700000000123
+}
+```
+
+`clientId` is echoed only when a trusted `X-Qwen-Client-Id` was supplied. `lastSeenAt` is the daemon-side `Date.now()` epoch (ms) the bridge stored.
+
+Errors:
+
+- `400` — `{ code: 'invalid_client_id' }` when the header is malformed (header-shape rule) or when it carries a `clientId` that isn't registered for this session (the bridge throws `InvalidClientIdError` before bumping any timestamp).
+- `404` — unknown session.
+
+Capability gating: pre-flight `caps.features.client_heartbeat`. Older daemons return `404` for this path.
+
 ### `POST /session/:id/model`
 
 Switch the active model **within** the session's currently bound model service. Serialized through the per-session model-change queue.
@@ -341,6 +600,12 @@ Accept: text/event-stream
 Last-Event-ID: 42        ← optional, replays from after id 42
 ```
 
+Query params:
+
+| Param       | Required | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `maxQueued` | no       | Per-subscriber **live-backlog** cap. Range `[16, 2048]`, default 256. Replay frames force-pushed at subscribe time are exempt from the cap; what actually consumes it is live events that arrive while the subscriber is still draining a large `Last-Event-ID: 0` replay. Bump for cold reconnects so the live tail doesn't trip the slow-client warning / eviction before the consumer catches up. Out-of-range / non-decimal / present-but-empty values return `400 invalid_max_queued` before the SSE handshake opens. Pre-flight `caps.features.slow_client_warning` — old daemons silently ignore the param. |
+
 Frame format. The `data:` line is the **full event envelope**, JSON-stringified on a single line — `{id?, v, type, data, originatorClientId?}`. The ACP-specific payload (`sessionUpdate`, `requestPermission` arguments, etc.) sits under the envelope's `data` field; the envelope's own `type` matches the SSE `event:` line.
 
 ```
@@ -360,28 +625,30 @@ data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedA
 
 The SSE-level `id:` / `event:` lines duplicate `envelope.id` / `envelope.type` for EventSource compatibility. Raw-`fetch` consumers (the SDK's `parseSseStream`) read everything off the JSON envelope and ignore the SSE preamble lines.
 
-| Event type            | Trigger                                                                                                                                                                                     |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `session_update`      | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                        |
-| `permission_request`  | Agent asked for tool approval                                                                                                                                                               |
-| `permission_resolved` | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                         |
-| `model_switched`      | `POST /session/:id/model` succeeded                                                                                                                                                         |
-| `model_switch_failed` | `POST /session/:id/model` rejected                                                                                                                                                          |
-| `session_died`        | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one. |
-| `client_evicted`      | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                   |
-| `stream_error`        | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                   |
+| Event type            | Trigger                                                                                                                                                                                                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session_update`      | Any ACP `sessionUpdate` notification (LLM chunks, tool calls, usage)                                                                                                                                                                                                                                                     |
+| `permission_request`  | Agent asked for tool approval                                                                                                                                                                                                                                                                                            |
+| `permission_resolved` | Some client voted on a permission via `POST /permission/:requestId`                                                                                                                                                                                                                                                      |
+| `model_switched`      | `POST /session/:id/model` succeeded                                                                                                                                                                                                                                                                                      |
+| `model_switch_failed` | `POST /session/:id/model` rejected                                                                                                                                                                                                                                                                                       |
+| `session_died`        | Agent child crashed unexpectedly. **Terminal: SSE stream closes after this frame; the session is gone from `byId`.** Subscribers should reconnect via `POST /session` to spawn a fresh one.                                                                                                                              |
+| `slow_client_warning` | Subscriber-local: queue ≥ 75% full. **Non-terminal** — the stream continues; the warning is a heads-up before eviction. Carries `{queueSize, maxQueued, lastEventId}`. Fires ONCE per overflow episode; re-arms after the queue drains below 37.5%. No `id` (synthetic). Pre-flight `caps.features.slow_client_warning`. |
+| `client_evicted`      | Subscriber-local: queue overflow. **Terminal: SSE stream closes after this frame** (no `id` — synthetic). Other subscribers on the same session continue.                                                                                                                                                                |
+| `stream_error`        | Daemon-side error during fan-out. **Terminal: SSE stream closes after this frame** (no `id` — synthetic).                                                                                                                                                                                                                |
 
 Reconnect semantics:
 
-- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth 4000)
+- Send `Last-Event-ID: <n>` to replay events with `id > n` from the per-session ring (default depth **8000**, tunable via `qwen serve --event-ring-size <n>`)
 - **Gap detection (client-side):** if `<n>` predates the oldest event still in the ring (e.g. you reconnect with `Last-Event-ID: 50` but the ring now holds 200–1199), the daemon replays from the oldest available event without raising. Compare the first replayed event's `id` against `n + 1`; any difference is the size of the lost window. Stage 2 will inject an explicit `stream_gap` synthetic frame on the daemon side; in Stage 1 detection is the client's responsibility.
 - IDs are monotonic per session, starting at 1
-- Synthetic terminal frames (`client_evicted`, `stream_error`) intentionally omit `id` so they don't burn a sequence slot for other subscribers
+- Synthetic frames (`client_evicted`, `slow_client_warning`, `stream_error`) intentionally omit `id` so they don't burn a sequence slot for other subscribers
 
 Backpressure:
 
-- Per-subscriber queue defaults to `maxQueued: 256` live items (replay frames during reconnect bypass the cap)
-- On overflow the bus emits the `client_evicted` terminal frame and closes the subscription
+- Per-subscriber queue defaults to `maxQueued: 256` live items (replay frames during reconnect bypass the cap). Override via `?maxQueued=N` (range `[16, 2048]`) on the SSE request.
+- When a subscriber's queue crosses 75% full the bus force-pushes a `slow_client_warning` synthetic frame to that subscriber (once per overflow episode; re-armed after drain below 37.5%). The stream stays open — the warning is a heads-up so the client can drain faster or detach + reconnect cleanly.
+- If the queue actually overflows the warning, the bus emits the `client_evicted` terminal frame and closes the subscription.
 
 ### `POST /permission/:requestId`
 
@@ -454,6 +721,7 @@ The connection then closes.
 | `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                        |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                |
 | `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry           |
+| `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + ACP ext method names          |
 | `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                  |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                          |
 | `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                           |

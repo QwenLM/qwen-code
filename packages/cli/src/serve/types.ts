@@ -64,6 +64,16 @@ export interface ServeOptions {
    */
   maxConnections?: number;
   /**
+   * Per-session SSE replay ring depth. Threaded into the bridge as
+   * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
+   * construction site. Defaults to 8000 (the target named in
+   * #3803 §02 for chatty Stage 1 sessions). Must be a positive
+   * finite integer — `0` / `NaN` / negative fail at boot. Larger
+   * rings let clients with longer reconnect gaps replay more history
+   * at the cost of a few hundred KB extra RAM per session.
+   */
+  eventRingSize?: number;
+  /**
    * Absolute workspace path this daemon binds to. Per #3803 §02 the
    * daemon is **1 daemon = 1 workspace × N sessions**: one bound
    * workspace at boot, sessions multiplexed on the single
@@ -83,6 +93,21 @@ export interface ServeOptions {
    * Defaults to `process.cwd()` when omitted.
    */
   workspace?: string;
+  /**
+   * Issue #4175 PR 15. When true, refuses to boot without a bearer
+   * token — even on loopback. Loopback's no-token developer default
+   * is convenient for local prototyping but unsafe to ship inside
+   * shared dev environments / CI runners / multi-tenant workstations
+   * (any local user can hit `127.0.0.1:4170` and drive the agent).
+   * `--require-auth` opts the operator into "token mandatory"
+   * regardless of bind interface; the global `bearerAuth` middleware
+   * then gates every route, including `/health`.
+   *
+   * Default `false` so existing single-user loopback workflows keep
+   * working bit-for-bit. Non-loopback binds already require a token
+   * irrespective of this flag.
+   */
+  requireAuth?: boolean;
 }
 
 /**

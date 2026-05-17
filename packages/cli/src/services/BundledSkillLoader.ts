@@ -8,7 +8,9 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
   appendToLastTextPart,
+  buildSkillLlmContent,
 } from '@qwen-code/qwen-code-core';
+import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import type {
   SlashCommand,
@@ -84,9 +86,16 @@ export class BundledSkillLoader implements ICommandLoader {
             }
           }
 
+          const skillPrompt = buildSkillLlmContent(
+            dirname(skill.filePath),
+            body,
+          );
           const content = context.invocation?.args
-            ? appendToLastTextPart([{ text: body }], context.invocation.raw)
-            : [{ text: body }];
+            ? appendToLastTextPart(
+                [{ text: skillPrompt }],
+                context.invocation.raw,
+              )
+            : [{ text: skillPrompt }];
 
           return {
             type: 'submit_prompt',

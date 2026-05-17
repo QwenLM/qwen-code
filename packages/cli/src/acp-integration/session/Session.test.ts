@@ -8,9 +8,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Session } from './Session.js';
+import { computeInitialTurnFromHistory, Session } from './Session.js';
 import type { Content } from '@google/genai';
-import type { Config, GeminiChat } from '@qwen-code/qwen-code-core';
+import type { ChatRecord, Config, GeminiChat } from '@qwen-code/qwen-code-core';
 import { ApprovalMode, AuthType } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
@@ -32,6 +32,96 @@ vi.mock('../../nonInteractiveCliCommands.js', () => ({
   getAvailableCommands: vi.fn(),
   handleSlashCommand: vi.fn(),
 }));
+
+function chatRecord(overrides: Record<string, unknown>): ChatRecord {
+  return {
+    uuid: 'record',
+    parentUuid: null,
+    sessionId: 'test-session-id',
+    timestamp: '2026-05-17T07:27:15.251Z',
+    type: 'user',
+    cwd: process.cwd(),
+    version: '0.15.11',
+    ...overrides,
+  } as ChatRecord;
+}
+
+describe('computeInitialTurnFromHistory', () => {
+  it('uses the largest numeric prompt id suffix for the current session', () => {
+    expect(
+      computeInitialTurnFromHistory(
+        [
+          chatRecord({
+            uuid: 'user-1',
+            promptId: 'test-session-id########1',
+            message: { parts: [{ text: '1' }] },
+          }),
+          chatRecord({
+            uuid: 'system-1',
+            timestamp: '2026-05-17T07:27:23.470Z',
+            type: 'system',
+            subtype: 'ui_telemetry',
+            systemPayload: {
+              uiEvent: {
+                prompt_id: 'test-session-id########2',
+              },
+            },
+          }),
+          chatRecord({
+            uuid: 'system-notification',
+            timestamp: '2026-05-17T07:27:24.000Z',
+            type: 'system',
+            subtype: 'ui_telemetry',
+            systemPayload: {
+              uiEvent: {
+                prompt_id: 'test-session-id########notification123',
+              },
+            },
+          }),
+          chatRecord({
+            uuid: 'other-session',
+            sessionId: 'other-session-id',
+            timestamp: '2026-05-17T07:27:25.000Z',
+            promptId: 'other-session-id########99',
+            message: { parts: [{ text: 'other' }] },
+          }),
+        ],
+        'test-session-id',
+      ),
+    ).toBe(2);
+  });
+
+  it('falls back to user message count when prompt ids are absent', () => {
+    expect(
+      computeInitialTurnFromHistory(
+        [
+          chatRecord({
+            uuid: 'user-1',
+            message: { parts: [{ text: '1' }] },
+          }),
+          chatRecord({
+            uuid: 'assistant-1',
+            timestamp: '2026-05-17T07:27:18.861Z',
+            type: 'assistant',
+            message: { parts: [{ text: 'answer 1' }] },
+          }),
+          chatRecord({
+            uuid: 'user-2',
+            timestamp: '2026-05-17T07:27:20.446Z',
+            message: { parts: [{ text: '2' }] },
+          }),
+          chatRecord({
+            uuid: 'other-session',
+            sessionId: 'other-session-id',
+            timestamp: '2026-05-17T07:27:25.000Z',
+            message: { parts: [{ text: 'other' }] },
+          }),
+        ],
+        'test-session-id',
+      ),
+    ).toBe(2);
+  });
+});
 
 // Helper to create empty async generator (avoids memory leak from inline generators)
 function createEmptyStream() {
@@ -560,6 +650,71 @@ describe('Session', () => {
       });
     });
 
+    it('honors explicit no-input override for built-in commands with subCommands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'doctor',
+          description: 'Run installation and environment diagnostics',
+          kind: 'built-in',
+          acceptsInput: false,
+          subCommands: [
+            {
+              name: 'memory',
+              description: 'Show current process memory diagnostics',
+              kind: 'built-in',
+            },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: expect.arrayContaining([
+              expect.objectContaining({
+                name: 'doctor',
+                description: 'Run installation and environment diagnostics',
+                input: null,
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it('honors explicit input override for built-in commands without input metadata', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'diagnostics',
+          description: 'Run diagnostics',
+          kind: 'built-in',
+          acceptsInput: true,
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: expect.arrayContaining([
+              expect.objectContaining({
+                name: 'diagnostics',
+                description: 'Run diagnostics',
+                input: { hint: '' },
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
     it('attaches available skills to available_commands_update metadata', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
@@ -619,6 +774,49 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('continues ACP prompt ids after replaying resumed history', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.replayHistory([
+        chatRecord({
+          uuid: 'user-1',
+          promptId: 'test-session-id########1',
+          message: { parts: [{ text: '1' }] },
+        }),
+        chatRecord({
+          uuid: 'assistant-1',
+          timestamp: '2026-05-17T07:27:18.861Z',
+          type: 'assistant',
+          promptId: 'test-session-id########1',
+          message: { parts: [{ text: 'answer 1' }] },
+        }),
+        chatRecord({
+          uuid: 'user-2',
+          timestamp: '2026-05-17T07:27:20.446Z',
+          promptId: 'test-session-id########2',
+          message: { parts: [{ text: '2' }] },
+        }),
+      ]);
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '3' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '3',
+      );
+      expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledWith(
+        'test-session-id########3',
+        false,
+        expect.any(AbortSignal),
+      );
+    });
+
     describe('auto-compress', () => {
       it('runs automatic compression before sending an ACP prompt', async () => {
         mockChat.sendMessageStream = vi

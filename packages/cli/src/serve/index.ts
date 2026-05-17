@@ -19,6 +19,7 @@ export {
   type Stage1Feature,
 } from './types.js';
 export {
+  CONDITIONAL_SERVE_FEATURES,
   SERVE_CAPABILITY_REGISTRY,
   SERVE_FEATURES,
   SERVE_PROTOCOL_VERSION,
@@ -27,11 +28,43 @@ export {
   getRegisteredServeFeatures,
   getServeFeatures,
   getServeProtocolVersions,
+  type AdvertiseFeatureToggles,
   type ServeCapabilityDescriptor,
   type ServeFeature,
   type ServeProtocolVersion,
   type ServeProtocolVersions,
 } from './capabilities.js';
+export {
+  SERVE_STATUS_EXT_METHODS,
+  STATUS_SCHEMA_VERSION,
+  createIdleWorkspaceMcpStatus,
+  createIdleWorkspaceProvidersStatus,
+  createIdleWorkspaceSkillsStatus,
+  type ServeMcpDiscoveryState,
+  type ServeMcpServerRuntimeStatus,
+  type ServeMcpTransport,
+  type ServeSessionContextStatus,
+  type ServeSessionSupportedCommandsStatus,
+  type ServeSkillLevel,
+  type ServeStatus,
+  type ServeStatusCell,
+  type ServeWorkspaceMcpServerStatus,
+  type ServeWorkspaceMcpStatus,
+  type ServeWorkspaceProviderCurrent,
+  type ServeWorkspaceProviderModel,
+  type ServeWorkspaceProviderStatus,
+  type ServeWorkspaceProvidersStatus,
+  type ServeWorkspaceSkillStatus,
+  type ServeWorkspaceSkillsStatus,
+} from './status.js';
+export {
+  bearerAuth,
+  createMutationGate,
+  denyBrowserOriginCors,
+  hostAllowlist,
+  type CreateMutationGateDeps,
+  type MutationGateOptions,
+} from './auth.js';
 export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
