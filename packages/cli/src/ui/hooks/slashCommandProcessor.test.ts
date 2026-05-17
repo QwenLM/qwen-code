@@ -196,7 +196,6 @@ describe('useSlashCommandProcessor', () => {
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
         null, // logger
-        undefined, // setSessionName
         mockUpdateItem,
       ),
     );
@@ -1150,7 +1149,6 @@ describe('useSlashCommandProcessor', () => {
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized
           null, // logger
-          undefined, // setSessionName
           mockUpdateItem,
         ),
       );

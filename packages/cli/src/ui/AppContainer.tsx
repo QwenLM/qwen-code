@@ -1079,8 +1079,8 @@ export const AppContainer = (props: AppContainerProps) => {
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
-    setSessionName,
     historyManager.updateItem,
+    setSessionName,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
