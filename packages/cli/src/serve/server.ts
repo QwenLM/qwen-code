@@ -587,12 +587,12 @@ export function createServeApp(
       return;
     }
     try {
-      bridge.updateSessionMetadata(
+      const effective = bridge.updateSessionMetadata(
         sessionId,
         { displayName },
         clientId !== undefined ? { clientId } : undefined,
       );
-      res.status(200).json({ sessionId, displayName });
+      res.status(200).json({ sessionId, ...effective });
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'PATCH /session/:id/metadata',

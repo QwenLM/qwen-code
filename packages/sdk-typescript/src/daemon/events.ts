@@ -437,8 +437,8 @@ function isKnownDaemonEventTypeName(
   return DAEMON_KNOWN_EVENT_TYPES.has(type);
 }
 
-// Prefer the first stream-local terminal frame, but upgrade to session_died
-// once the daemon reports the underlying session actually ended.
+// Prefer the first stream-local terminal frame, but upgrade to
+// session_died / session_closed once the daemon confirms the session ended.
 type TerminalEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
@@ -530,14 +530,19 @@ function isSessionClosedData(value: unknown): value is DaemonSessionClosedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
-    isNonEmptyString(value['reason'])
+    isNonEmptyString(value['reason']) &&
+    isOptionalStringOrNull(value['closedBy'])
   );
 }
 
 function isSessionMetadataUpdatedData(
   value: unknown,
 ): value is DaemonSessionMetadataUpdatedData {
-  return isRecord(value) && isNonEmptyString(value['sessionId']);
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isOptionalStringOrNull(value['displayName'])
+  );
 }
 
 function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {

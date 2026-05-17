@@ -130,7 +130,7 @@ interface FakeBridgeOpts {
     sessionId: string,
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
-  ) => void;
+  ) => SessionMetadataUpdate;
 }
 
 interface FakeBridge extends HttpAcpBridge {
@@ -234,7 +234,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const listImpl = opts.listImpl ?? (() => []);
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   const closeImpl = opts.closeImpl ?? (async () => {});
-  const updateMetadataImpl = opts.updateMetadataImpl ?? (() => {});
+  const updateMetadataImpl =
+    opts.updateMetadataImpl ??
+    ((_sid: string, m: SessionMetadataUpdate) => ({
+      displayName: m.displayName,
+    }));
   return {
     calls,
     loadCalls,

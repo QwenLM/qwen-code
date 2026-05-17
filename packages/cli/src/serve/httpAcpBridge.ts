@@ -216,9 +216,10 @@ export interface HttpAcpBridge {
    * Explicitly close a live session. Force-closes even when other clients
    * are attached — cancels any active prompt, resolves pending permissions
    * as cancelled, publishes `session_closed`, closes the EventBus, and
-   * removes the session from daemon maps. Idempotent on unknown sessions
-   * (throws `SessionNotFoundError`). On-disk persisted sessions are NOT
-   * deleted — they can still be reloaded via `POST /session/:id/load`.
+   * removes the session from daemon maps. Throws `SessionNotFoundError`
+   * for unknown ids (the SDK absorbs 404 to provide client-side
+   * idempotency). On-disk persisted sessions are NOT deleted — they can
+   * still be reloaded via `POST /session/:id/load`.
    */
   closeSession(
     sessionId: string,
@@ -227,14 +228,15 @@ export interface HttpAcpBridge {
 
   /**
    * Update mutable session metadata. Currently supports `displayName` only.
-   * Publishes a `session_metadata_updated` event. Throws
-   * `SessionNotFoundError` for unknown ids.
+   * Publishes a `session_metadata_updated` event when fields change.
+   * Returns the effective stored metadata. Throws `SessionNotFoundError`
+   * for unknown ids.
    */
   updateSessionMetadata(
     sessionId: string,
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
-  ): void;
+  ): SessionMetadataUpdate;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).
@@ -2826,15 +2828,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           );
         }
         entry.displayName = metadata.displayName || undefined;
+        try {
+          entry.events.publish({
+            type: 'session_metadata_updated',
+            data: { sessionId, displayName: entry.displayName },
+          });
+        } catch {
+          /* bus already closed */
+        }
       }
-      try {
-        entry.events.publish({
-          type: 'session_metadata_updated',
-          data: { sessionId, displayName: entry.displayName },
-        });
-      } catch {
-        /* bus already closed */
-      }
+      return { displayName: entry.displayName };
     },
 
     listWorkspaceSessions(workspaceCwd) {
