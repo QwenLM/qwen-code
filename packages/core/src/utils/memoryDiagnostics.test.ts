@@ -314,8 +314,11 @@ describe('collectMemoryDiagnostics', () => {
     expect(diagnostics.openFileDescriptors).toBeNull();
     expect(diagnostics.smapsRollup).toBeNull();
     expect(diagnostics.analysis.risks).toEqual([]);
-    expect(diagnostics.analysis.recommendation).toContain(
-      'No obvious leak indicators',
+    expect(diagnostics.analysis.recommendation).toBe(
+      'No obvious leak indicators detected.',
+    );
+    expect(diagnostics.analysis.recommendation).not.toContain(
+      'heap snapshot',
     );
     expect(debugLogger.debug).toHaveBeenCalledWith(
       expect.stringContaining('heapSpaceStatistics'),

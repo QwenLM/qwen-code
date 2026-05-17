@@ -326,6 +326,6 @@ function analyzeMemoryDiagnostics(
     recommendation:
       risks.length > 0
         ? `WARNING: ${risks.length} potential leak indicator(s) found.`
-        : 'No obvious leak indicators. Check heap snapshot for retained objects.',
+        : 'No obvious leak indicators detected.',
   };
 }
