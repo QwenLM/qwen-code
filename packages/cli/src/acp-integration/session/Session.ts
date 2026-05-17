@@ -1448,17 +1448,21 @@ export class Session implements SessionContext {
       // let users type arguments before submitting.  Commands with no argument
       // support get input: null so the client auto-submits them on selection.
       //
-      // A command is considered to accept arguments when any of:
-      //   - it is not a BUILT_IN command (skills, file commands, etc.)
-      //   - it has a completion function
-      //   - it declares an argumentHint
-      //   - it has subCommands
+      // acceptsInput is determined by:
+      //   1. cmd.acceptsInput, if explicitly set (true or false overrides
+      //      inference)
+      //   2. Otherwise, a command accepts arguments when any of:
+      //      - it is not a BUILT_IN command (skills, file commands, etc.)
+      //      - it has a completion function
+      //      - it declares an argumentHint
+      //      - it has subCommands
       const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
         const acceptsInput =
-          cmd.kind !== CommandKind.BUILT_IN ||
-          cmd.completion != null ||
-          cmd.argumentHint != null ||
-          (cmd.subCommands != null && cmd.subCommands.length > 0);
+          cmd.acceptsInput ??
+          (cmd.kind !== CommandKind.BUILT_IN ||
+            cmd.completion != null ||
+            cmd.argumentHint != null ||
+            (cmd.subCommands != null && cmd.subCommands.length > 0));
         return {
           name: cmd.name,
           description: cmd.description,
