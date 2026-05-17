@@ -841,9 +841,177 @@ describe('useGeminiStream', () => {
       expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['call_race_A']);
     });
 
+    // The deduped tool DID run locally — `recordCompletedToolCall` must
+    // still fire so toolCallCount / skillsModifiedInSession reflect it,
+    // even though the wire-side submission is dropped. (Regression guard
+    // for the gap mimo-v2.5-pro flagged: filtering deduped tools out of
+    // `geminiTools` without recording skipped the metric increment.)
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
+      path: '/tmp/x.txt',
+    });
+
     // No follow-up submission: the synthetic in history already closes
     // the tool_use ↔ tool_result pair.
     expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('runs Race A dedup BEFORE the isResponding early-return (regression guard)', async () => {
+    // The dedup block in handleCompletedTools is intentionally placed
+    // ABOVE the `if (isResponding) return;` early-return: the scheduler's
+    // `onAllToolCallsComplete` is single-shot per batch, so if the dedup
+    // sat below the guard a tool whose result was already paired in
+    // history would be left in `completed-but-not-submitted` forever
+    // whenever the late completion lands while the next stream is still
+    // in flight (isResponding=true). This test holds a stream open to
+    // pin isResponding=true, then asserts `markToolsAsSubmitted` still
+    // fires for the deduped callId. A future refactor that moves the
+    // dedup below the guard would silently break this and pass every
+    // other test.
+    const lateRealResult = {
+      request: {
+        callId: 'call_race_A_responding',
+        name: 'read_file',
+        args: { path: '/tmp/y.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-race-a-responding',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_race_A_responding',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_race_A_responding',
+              name: 'read_file',
+              response: { output: 'real file contents' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read /tmp/y.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    client.getHistory = vi.fn().mockReturnValue([
+      { role: 'user', parts: [{ text: 'open /tmp/y.txt' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_race_A_responding',
+              name: 'read_file',
+              args: { path: '/tmp/y.txt' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_race_A_responding',
+              name: 'read_file',
+              response: {
+                error: 'Tool execution result was not recorded',
+              },
+            },
+          },
+          { text: 'next prompt' },
+        ],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    // Held stream: never yields, never returns. Pins isResponding=true.
+    let releaseStream!: () => void;
+    const holdStream = new Promise<void>((resolve) => {
+      releaseStream = resolve;
+    });
+    // Intentionally yield-less: holds the stream open without producing
+    // chunks so isResponding stays true while we trigger onComplete.
+    // eslint-disable-next-line require-yield
+    const heldStream = (async function* () {
+      await holdStream;
+    })();
+    mockSendMessageStream.mockReturnValue(heldStream);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    // Kick the stream so submitQuery flips isResponding=true and parks
+    // on the first `await` inside the held async generator.
+    act(() => {
+      void result.current.submitQuery('next prompt');
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+    // Now fire the deduped completion while isResponding=true.
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([lateRealResult]);
+      }
+    });
+
+    // The dedup MUST still fire — markToolsAsSubmitted called with the
+    // deduped callId — even though the early-return on isResponding
+    // would otherwise skip every later branch.
+    await waitFor(() => {
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'call_race_A_responding',
+      ]);
+    });
+
+    // No additional sendMessageStream: the held one is still the only
+    // call. The dedup path does NOT submit a new request.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+    // Release the held stream so the test exits cleanly.
+    releaseStream();
   });
 
   it('should not flicker streaming state to Idle between tool completion and submission', async () => {

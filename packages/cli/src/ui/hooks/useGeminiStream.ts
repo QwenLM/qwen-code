@@ -2058,15 +2058,32 @@ export const useGeminiStream = (
           }
         }
       }
-      const dedupedCallIds = completedAndReadyToSubmitTools
-        .filter((tc) => historyCallIdsWithResponse.has(tc.request.callId))
-        .map((tc) => tc.request.callId);
+      const dedupedTools = completedAndReadyToSubmitTools.filter((tc) =>
+        historyCallIdsWithResponse.has(tc.request.callId),
+      );
+      const dedupedCallIds = dedupedTools.map((tc) => tc.request.callId);
       if (dedupedCallIds.length > 0) {
         debugLogger.warn(
           `[REPAIR] Dropping ${dedupedCallIds.length} late tool result(s) ` +
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
+        // Even though the wire-side submission is dropped, the tool DID
+        // run locally — `toolCallCount` and `skillsModifiedInSession`
+        // must reflect that. Without this, deduped skill-write tools
+        // (e.g. write_file under a project SKILLS path) would silently
+        // skip the `skillsModifiedInSession` flip that gates the
+        // skills-reload prompt at end-of-turn. Mirrors the
+        // `recordCompletedToolCall` loop below over `geminiTools` —
+        // filter to the same shape (non-client-initiated) so client
+        // tools (which the original loop also skipped) stay skipped.
+        for (const tc of dedupedTools) {
+          if (tc.request.isClientInitiated) continue;
+          geminiClient?.recordCompletedToolCall(
+            tc.request.name,
+            tc.request.args as Record<string, unknown>,
+          );
+        }
         markToolsAsSubmitted(dedupedCallIds);
       }
 

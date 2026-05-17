@@ -474,6 +474,13 @@ export function repairOrphanedToolUseTurns(
       // is supposed to escape. Mirrors upstream Claude Code's
       // `hoistToolResults` (`utils/messages.ts`).
       //
+      // CONSEQUENCE OF REMOVAL: dropping this hoist (e.g. naively
+      // `next.parts = [...existing, ...syntheticParts]`) re-introduces
+      // the exact 400 "tool_use_id ... must have a corresponding tool_use
+      // block in the previous message" the synthesis pass exists to
+      // prevent. The whole repair becomes a no-op and the session stays
+      // wedged. Do not "simplify" this branch.
+      //
       // Place synthetics AFTER any pre-existing functionResponse parts
       // (real tool_results the user is supplying in the same turn) so
       // their original ordering is preserved.
@@ -1461,6 +1468,18 @@ export class GeminiChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
+    // The marker is per-send-attempt. By the time external code calls
+    // addHistory (cancelled-tool synthesis in useGeminiStream, ACP
+    // session injects, shellCommandProcessor, etc.), the originating
+    // sendMessageStream has either already popped the partial via the
+    // retry loop or hit an unrecoverable break — in both cases the
+    // marker is no longer load-bearing. Clearing here matches the
+    // defensive reset already applied in setHistory/truncateHistory/
+    // clearHistory: any future addHistory variant that splices into
+    // the middle (instead of plain push) would shift indices and a
+    // stale marker could splice the wrong entry. Belt-and-suspenders;
+    // the next sendMessageStream entry also clears it.
+    this.pendingPartialAssistantTurnIndex = null;
   }
 
   setHistory(history: Content[]): void {
@@ -1489,6 +1508,10 @@ export class GeminiChat {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    // Filter+map replaces `this.history` with a new array, so any pending
+    // partial-push marker is now indexed against an array that no longer
+    // exists. Clear it for the same reason setHistory does.
+    this.pendingPartialAssistantTurnIndex = null;
   }
 
   /**
