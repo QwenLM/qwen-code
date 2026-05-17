@@ -96,9 +96,18 @@ function parseUploadArgs(argv) {
   return args;
 }
 
+const MAX_UPLOAD_ATTEMPTS = 3;
+const INITIAL_BACKOFF_MS = 2000;
+
 function uploadAssets({ assets, bucket, config, prefix }) {
   for (const asset of assets) {
     const key = `${prefix}/${path.basename(asset)}`;
+    uploadWithRetry(asset, bucket, key, config);
+  }
+}
+
+function uploadWithRetry(asset, bucket, key, config) {
+  for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt += 1) {
     const result = spawnSync(
       'ossutil',
       [
@@ -117,10 +126,20 @@ function uploadAssets({ assets, bucket, config, prefix }) {
     if (result.error) {
       throw result.error;
     }
-    if (result.status !== 0) {
-      fail(`ossutil failed while uploading ${asset}`);
+    if (result.status === 0) {
+      return;
+    }
+    if (attempt < MAX_UPLOAD_ATTEMPTS) {
+      const delayMs = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+      console.warn(
+        `Upload attempt ${attempt}/${MAX_UPLOAD_ATTEMPTS} failed for ${path.basename(asset)}, retrying in ${delayMs / 1000}s...`,
+      );
+      spawnSync('sleep', [String(delayMs / 1000)]);
     }
   }
+  fail(
+    `ossutil failed after ${MAX_UPLOAD_ATTEMPTS} attempts while uploading ${asset}`,
+  );
 }
 
 export { parseUploadArgs, uploadAssets };

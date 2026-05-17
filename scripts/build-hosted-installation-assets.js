@@ -49,6 +49,8 @@ const HOSTED_INSTALLATION_ASSETS = [
 const HOSTED_INSTALLATION_ASSET_NAMES = HOSTED_INSTALLATION_ASSETS.map(
   ({ output }) => output,
 );
+/** Regex guards that verify each installer script contains required behaviors.
+ *  Build fails if a pattern is missing, preventing broken entrypoints from shipping. */
 const HOSTED_INSTALLER_BEHAVIOR_PATTERNS = {
   'install-qwen-standalone.sh': [
     {

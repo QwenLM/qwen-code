@@ -434,6 +434,7 @@ jobs:
             exit 1
           fi
 
+          trap 'rm -f "${RUNNER_TEMP}/.ossutilconfig"' EXIT
           ossutil config \
             -e "${ALIYUN_OSS_ENDPOINT}" \
             -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \

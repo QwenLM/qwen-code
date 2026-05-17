@@ -454,7 +454,7 @@ exit /b 1
 
 :ValidateSource
 if "!SOURCE!"=="unknown" exit /b 0
-echo(!SOURCE!| findstr /R /C:"^[A-Za-z0-9._-][A-Za-z0-9._-]*$" >nul
+echo(!SOURCE!| findstr /R /C:"^[A-Za-z][A-Za-z0-9._-]*$" >nul
 if %ERRORLEVEL% EQU 0 exit /b 0
 
 echo ERROR: --source may only contain letters, numbers, dot, underscore, or dash.
@@ -668,13 +668,10 @@ set "CHECKSUM_SOURCE=%~2"
 set "ARCHIVE_NAME=%~3"
 set "CHECKSUM_FILE=!CHECKSUM_SOURCE!"
 set "TEMP_CHECKSUM="
-set "REQUIRE_CHECKSUM=1"
-
 if "!CHECKSUM_FILE!"=="" (
     for %%I in ("!ARCHIVE_FILE!") do set "CHECKSUM_FILE=%%~dpISHA256SUMS"
 ) else (
     if /i "!CHECKSUM_FILE:~0,8!"=="https://" (
-        set "REQUIRE_CHECKSUM=1"
         call :CreateTempFile "qwen-code-checksums"
         if !ERRORLEVEL! NEQ 0 exit /b 1
         set "TEMP_CHECKSUM=!TEMP_FILE!"
@@ -689,12 +686,8 @@ if "!CHECKSUM_FILE!"=="" (
 )
 
 if not exist "!CHECKSUM_FILE!" (
-    if "!REQUIRE_CHECKSUM!"=="1" (
-        echo ERROR: SHA256SUMS not found; cannot verify archive.
-        exit /b 1
-    )
-    echo WARNING: SHA256SUMS not found; skipping checksum verification.
-    exit /b 0
+    echo ERROR: SHA256SUMS not found; cannot verify archive.
+    exit /b 1
 )
 
 set "EXPECTED_HASH="
@@ -709,12 +702,8 @@ for /f "usebackq tokens=1,2" %%H in ("!CHECKSUM_FILE!") do (
 
 if "!EXPECTED_HASH!"=="" (
     if not "!TEMP_CHECKSUM!"=="" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
-    if "!REQUIRE_CHECKSUM!"=="1" (
-        echo ERROR: Checksum entry for !ARCHIVE_NAME! not found.
-        exit /b 1
-    )
-    echo WARNING: Checksum entry for !ARCHIVE_NAME! not found; skipping checksum verification.
-    exit /b 0
+    echo ERROR: Checksum entry for !ARCHIVE_NAME! not found.
+    exit /b 1
 )
 
 set "ACTUAL_HASH="
@@ -727,12 +716,8 @@ set "QWEN_HASH_FILE="
 if not "!TEMP_CHECKSUM!"=="" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
 
 if "!ACTUAL_HASH!"=="" (
-    if "!REQUIRE_CHECKSUM!"=="1" (
-        echo ERROR: Could not calculate SHA-256 checksum for archive.
-        exit /b 1
-    )
-    echo WARNING: Could not calculate SHA-256 checksum; skipping checksum verification.
-    exit /b 0
+    echo ERROR: Could not calculate SHA-256 checksum for archive.
+    exit /b 1
 )
 
 if /i not "!EXPECTED_HASH!"=="!ACTUAL_HASH!" (
