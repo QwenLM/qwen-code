@@ -53,9 +53,68 @@ export const SERVE_CAPABILITY_REGISTRY = {
   permission_vote: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
+  // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
+  // `requireAuth: true`), so even loopback callers must carry a bearer
+  // token. Advertised CONDITIONALLY — only when the flag is on — so
+  // SDK clients can branch on its presence to surface a clear "this
+  // deployment requires auth" hint instead of speculatively trying
+  // requests and parsing the resulting 401 body. Loopback developer
+  // defaults (no flag) omit the tag, preserving the bit-for-bit shape
+  // older clients expect.
+  require_auth: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
+
+/**
+ * Per-deployment feature toggles surfaced through `/capabilities`.
+ *
+ * `requireAuth` controls whether the conditional `require_auth` tag is
+ * advertised. Other Wave 4 follow-ups can extend this object as more
+ * deployment-shape capability tags appear (e.g. `redact_errors`).
+ */
+export interface AdvertiseFeatureToggles {
+  requireAuth?: boolean;
+}
+
+/**
+ * Subset of `ServeFeature` whose advertisement depends on runtime config
+ * (currently just `require_auth`, which is announced only when the
+ * daemon was started with `--require-auth`). Each entry pairs the
+ * feature key with a predicate over `AdvertiseFeatureToggles` — the
+ * toggle decision lives next to the feature key, so adding a new
+ * conditional tag is **two coordinated changes** instead of four:
+ *
+ * 1. Register the tag in `SERVE_CAPABILITY_REGISTRY` above with its
+ *    `since` protocol version (just like baseline tags).
+ * 2. Add an entry to THIS Map mapping the tag to a toggle predicate
+ *    (extend `AdvertiseFeatureToggles` first if the predicate needs a
+ *    new field to read).
+ *
+ * The previous `Set` + per-feature `if`-branch shape needed FOUR
+ * coordinated changes (registry, set, toggles interface, predicate
+ * branch) and silently fail-CLOSED when the branch was missed —
+ * fail-CLOSED is good, but invisible to the contributor adding the
+ * tag. The Map shape collapses the predicate-decision and the
+ * set-membership into one entry, so a future contributor either
+ * registers the predicate (advertised when toggle on) or doesn't
+ * register the tag in the Map at all (advertised unconditionally
+ * like baseline tags) — both are intentional, neither is a silent
+ * miss.
+ *
+ * Reviewed-through-failure: the
+ * `every conditional tag advertises when its toggle is on` test in
+ * `server.test.ts` iterates this Map's keys, so a future tag added
+ * here whose predicate isn't honored by `getAdvertisedServeFeatures`
+ * fails the suite — adoption-of-record for the Map shape rather than
+ * relying on a hand-maintained invariant.
+ */
+export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
+  ServeFeature,
+  (toggles: AdvertiseFeatureToggles) => boolean
+> = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
+  ['require_auth', (toggles) => toggles.requireAuth === true],
+]);
 
 export const SERVE_FEATURES = Object.freeze(
   Object.keys(SERVE_CAPABILITY_REGISTRY) as ServeFeature[],
@@ -81,10 +140,19 @@ export function getRegisteredServeFeatures(): ServeFeature[] {
 
 export function getAdvertisedServeFeatures(
   protocolVersion: ServeProtocolVersion = SERVE_PROTOCOL_VERSION,
+  toggles: AdvertiseFeatureToggles = {},
 ): ServeFeature[] {
-  return SERVE_FEATURES.filter((feature) =>
-    isFeatureAvailableInProtocol(feature, protocolVersion),
-  );
+  return SERVE_FEATURES.filter((feature) => {
+    if (!isFeatureAvailableInProtocol(feature, protocolVersion)) return false;
+    // Conditional tags route through the per-feature toggle predicate;
+    // baseline tags (no Map entry) advertise unconditionally. Without
+    // this gate every daemon would advertise the conditional tags
+    // regardless of operator opt-in, breaking the "tag presence =
+    // behavior is on" contract clients depend on.
+    const predicate = CONDITIONAL_SERVE_FEATURES.get(feature);
+    if (predicate !== undefined) return predicate(toggles);
+    return true;
+  });
 }
 
 export function getServeFeatures(): ServeFeature[] {

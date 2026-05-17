@@ -8,7 +8,12 @@ import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
+import {
+  bearerAuth,
+  createMutationGate,
+  denyBrowserOriginCors,
+  hostAllowlist,
+} from './auth.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
@@ -198,26 +203,54 @@ export function createServeApp(
   };
 
   const loopback = isLoopbackBind(opts.hostname);
-  if (loopback) {
+  // Issue #4175 PR 15. `--require-auth` extends the non-loopback "gate
+  // /health behind bearer too" rule to loopback. Without this, an
+  // operator who set the flag specifically to harden the loopback
+  // default would still see `/health` answering 200 to unauthenticated
+  // probes — defeating the flag's purpose. The boot check in
+  // `runQwenServe` guarantees `token` is set whenever `requireAuth`
+  // is true, so the post-`bearerAuth` registration always has a token
+  // to compare against.
+  const exposeHealthPreAuth = loopback && !opts.requireAuth;
+  if (exposeHealthPreAuth) {
     app.get('/health', healthHandler);
   }
 
   app.use(bearerAuth(opts.token));
   app.use(express.json({ limit: '10mb' }));
 
-  if (!loopback) {
-    // Non-loopback: register `/health` AFTER `bearerAuth` so probes
-    // must carry the token. Otherwise unauthenticated callers can
-    // ping any reachable address:port to confirm a daemon exists.
+  if (!exposeHealthPreAuth) {
+    // Non-loopback OR loopback with `--require-auth`: register
+    // `/health` AFTER `bearerAuth` so probes must carry the token.
+    // Otherwise unauthenticated callers can ping any reachable
+    // address:port to confirm a daemon exists.
     app.get('/health', healthHandler);
   }
+
+  // Issue #4175 PR 15. Mutation-route gate factory. Today's existing
+  // mutation routes (`POST /session*`, `/permission/:requestId`) opt
+  // into the default non-strict mode, which is a passthrough — so
+  // backward compatibility is bit-for-bit. Wave 4 PRs will pass
+  // `{ strict: true }` for routes (memory CRUD / file edit / tool
+  // enable / MCP restart / device-flow auth) that should require a
+  // token even when the daemon is on loopback no-token defaults.
+  const mutate = createMutationGate({
+    tokenConfigured: opts.token !== undefined,
+    requireAuth: opts.requireAuth === true,
+  });
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
       protocolVersions: getServeProtocolVersions(),
       mode: opts.mode,
-      features: getAdvertisedServeFeatures(),
+      // PR 15. Pass `requireAuth` so the `require_auth` tag appears
+      // ONLY when the operator opted in. Tag presence = behavior is
+      // on; older daemons without this PR omit the tag and SDKs that
+      // post-PR feature-detect on it stay backward compatible.
+      features: getAdvertisedServeFeatures(undefined, {
+        requireAuth: opts.requireAuth === true,
+      }),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect
       // mismatch pre-flight and omit `cwd` on `POST /session`.
@@ -226,7 +259,7 @@ export function createServeApp(
     res.status(200).json(envelope);
   });
 
-  app.post('/session', async (req, res) => {
+  app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
     // #3803 §02: 1 daemon = 1 workspace. Three input shapes:
     //   - `cwd` ABSENT from body → fall back to the daemon's bound
@@ -431,10 +464,10 @@ export function createServeApp(
       }
     };
 
-  app.post('/session/:id/load', restoreSessionHandler('load'));
-  app.post('/session/:id/resume', restoreSessionHandler('resume'));
+  app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
+  app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
 
-  app.post('/session/:id/prompt', async (req, res) => {
+  app.post('/session/:id/prompt', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const prompt = body['prompt'];
@@ -540,7 +573,7 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/heartbeat', (req, res) => {
+  app.post('/session/:id/heartbeat', mutate(), (req, res) => {
     // #4175 PR 9: clients ping the daemon to update last-seen
     // bookkeeping. Bridge throws `SessionNotFoundError` for unknown
     // ids and `InvalidClientIdError` when an `X-Qwen-Client-Id`
@@ -571,7 +604,7 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/cancel', async (req, res) => {
+  app.post('/session/:id/cancel', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const clientId = parseClientIdHeader(req, res);
@@ -668,7 +701,7 @@ export function createServeApp(
     res.status(200).json({ sessions });
   });
 
-  app.post('/session/:id/model', async (req, res) => {
+  app.post('/session/:id/model', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const modelId = body['modelId'];
@@ -699,7 +732,7 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/permission/:requestId', (req, res) => {
+  app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
     const sessionId = req.params['id'];
     const requestId = req.params['requestId'];
     const response = parsePermissionVoteBody(req, res);
@@ -732,7 +765,7 @@ export function createServeApp(
     res.status(200).json({});
   });
 
-  app.post('/permission/:requestId', (req, res) => {
+  app.post('/permission/:requestId', mutate(), (req, res) => {
     const requestId = req.params['requestId'];
     const response = parsePermissionVoteBody(req, res);
     if (response === undefined) return;

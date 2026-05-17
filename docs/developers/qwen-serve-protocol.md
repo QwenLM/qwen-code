@@ -14,6 +14,10 @@ Without a configured token (loopback dev default) the header is optional. Token 
 
 **`/health` exemption** (Bctum): on loopback binds (`127.0.0.1` / `localhost` / `::1` / `[::1]`) `/health` is registered BEFORE the bearer middleware, so liveness probes inside the pod don't need to carry the token even when the daemon was started with `--token`. Non-loopback binds (`--hostname 0.0.0.0` etc.) gate `/health` behind the bearer like every other route — see the [`GET /health`](#get-health) section for the rationale.
 
+**`--require-auth` (#4175 PR 15).** Pass this flag at boot to extend the "must have a token" rule to loopback as well. Boot fails without a token; the `/health` exemption is dropped (so `/health` also requires `Authorization: Bearer …`).
+
+When the flag is on, the global `bearerAuth` middleware gates **every** route — including `/capabilities`. An **unauthenticated** client therefore cannot pre-flight `caps.features` to discover that auth is required: the discovery surface for that case is the **401 response body** itself (uniform across all routes per the [Authentication](#authentication) section). The `require_auth` capability tag is a **post-authentication confirmation** — once a client successfully authenticates and reads `/capabilities`, the tag's presence confirms the daemon was started with `--require-auth` (useful for audit / compliance UIs and for SDK clients to surface "this deployment is hardened" in a settings panel). Mutation routes that opt into per-route strict mode (Wave 4 follow-ups) refuse with `401 { code: "token_required", error: "…" }` when reached on a no-token loopback default — but with `--require-auth` enabled the global bearer middleware short-circuits the request before the per-route gate, so the legacy `Unauthorized` body is what unauthenticated callers actually see.
+
 ## Common error shape
 
 5xx responses carry the original error's `code` and `data` when present (JSON-RPC style — the ACP SDK forwards `{code, message, data}` from the agent):
@@ -108,6 +112,12 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `client_heartbeat` advertises `POST /session/:id/heartbeat`. Older daemons return `404`; pre-flight this tag before issuing periodic heartbeats.
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
+
+**Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
+
+| Tag            | Advertised when …                                                                                                                                                            |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds. |
 
 ## Routes
 

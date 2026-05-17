@@ -12,6 +12,7 @@ import request from 'supertest';
 import { createServeApp } from './server.js';
 import { runQwenServe, type RunHandle } from './runQwenServe.js';
 import {
+  CONDITIONAL_SERVE_FEATURES,
   getAdvertisedServeFeatures,
   getRegisteredServeFeatures,
   getServeFeatures,
@@ -85,6 +86,17 @@ const EXPECTED_STAGE1_FEATURES = [
   'permission_vote',
   'session_close',
   'session_metadata',
+] as const;
+
+// Issue #4175 PR 15. `require_auth` is registered but conditionally
+// advertised (only when `--require-auth` is set), so the registry list
+// is a strict superset of the always-on list. Kept as a separate
+// constant rather than appended to `EXPECTED_STAGE1_FEATURES` so the
+// existing "advertised features" assertions stay tight against
+// surprise additions.
+const EXPECTED_REGISTERED_FEATURES = [
+  ...EXPECTED_STAGE1_FEATURES,
+  'require_auth',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -408,28 +420,87 @@ describe('createServeApp', () => {
   describe('serve capability registry', () => {
     it('returns a fresh ordered registered feature list', () => {
       const features = getRegisteredServeFeatures();
-      expect(features).toEqual([...EXPECTED_STAGE1_FEATURES]);
+      expect(features).toEqual([...EXPECTED_REGISTERED_FEATURES]);
 
       features.pop();
       expect(getRegisteredServeFeatures()).toEqual([
-        ...EXPECTED_STAGE1_FEATURES,
+        ...EXPECTED_REGISTERED_FEATURES,
       ]);
     });
 
     it('advertises current-protocol features separately from the registry', () => {
+      // Conditional tags (currently `require_auth`) are absent unless
+      // a runtime toggle is supplied; this is the "no toggles passed"
+      // baseline that older clients see on a default-loopback daemon.
       expect(getAdvertisedServeFeatures()).toEqual([
         ...EXPECTED_STAGE1_FEATURES,
       ]);
       expect(getServeFeatures()).toEqual(getAdvertisedServeFeatures());
     });
 
+    it('advertises `require_auth` only when the runtime toggle is on (#4175 PR 15)', () => {
+      // Tag presence = behavior is on. SDK clients use it to surface a
+      // "this deployment requires auth" hint; the toggle must therefore
+      // map exactly to `--require-auth` and stay off everywhere else.
+      expect(
+        getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+      ).toContain('require_auth');
+      expect(
+        getAdvertisedServeFeatures(undefined, { requireAuth: false }),
+      ).not.toContain('require_auth');
+      expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+        'require_auth',
+      );
+    });
+
+    it('honors every entry in CONDITIONAL_SERVE_FEATURES (PR #4236 review #3254467192 — drift insurance)', () => {
+      // Iterate the Map so any future conditional tag added here whose
+      // predicate isn't honored by `getAdvertisedServeFeatures` fails
+      // the suite — the test is the adoption-of-record for the
+      // "conditional features advertise via predicate" contract,
+      // replacing the previous hand-maintained Set + branch shape that
+      // could fail-CLOSED silently.
+      //
+      // For each entry: synthesize toggles that the predicate accepts
+      // and toggles that it rejects. The predicate must be deterministic
+      // and only read from `AdvertiseFeatureToggles` fields (no global
+      // state, no Date.now() etc.) — that's the contract any future
+      // entry must keep. We also assert the inverse: with toggles {} the
+      // predicate must be false, otherwise the tag would fail the
+      // "default-off" property baseline tags get for free.
+      for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
+        if (feature === 'require_auth') {
+          expect(predicate({ requireAuth: true })).toBe(true);
+          expect(predicate({ requireAuth: false })).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, { requireAuth: true }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        // Future conditional tag. Authors must add a branch above with
+        // the toggle field that drives this predicate. Failing here is
+        // intentional: it forces the new conditional tag to ship with a
+        // matching test rather than relying on the Map shape alone.
+        throw new Error(
+          `CONDITIONAL_SERVE_FEATURES added "${feature}" without an ` +
+            `assertion branch in this test — add one (synthesize toggles ` +
+            `the predicate accepts AND rejects) so drift insurance stays ` +
+            `enforced.`,
+        );
+      }
+    });
+
     it('marks every current feature with its historical v1 origin', () => {
       expect(Object.keys(SERVE_CAPABILITY_REGISTRY)).toEqual([
-        ...EXPECTED_STAGE1_FEATURES,
+        ...EXPECTED_REGISTERED_FEATURES,
       ]);
       expect(
         Object.values(SERVE_CAPABILITY_REGISTRY).map(({ since }) => since),
-      ).toEqual(EXPECTED_STAGE1_FEATURES.map(() => 'v1'));
+      ).toEqual(EXPECTED_REGISTERED_FEATURES.map(() => 'v1'));
     });
 
     it('returns protocol version metadata with a fresh supported array', () => {
@@ -491,6 +562,33 @@ describe('createServeApp', () => {
       // `/private/var/folders/...`; a raw `process.cwd()` assertion
       // would diverge there. Use the same realpath the route does.
       expect(res.body.workspaceCwd).toBe(realpathSync.native(process.cwd()));
+    });
+
+    it('omits the `require_auth` feature tag by default (#4175 PR 15)', async () => {
+      // Default loopback no-token daemon: existing clients see the
+      // bit-for-bit pre-PR feature list. This is the backward-compat
+      // anchor — adding the tag unconditionally would make every
+      // daemon look like it required auth.
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.features).not.toContain('require_auth');
+    });
+
+    it('advertises `require_auth` when the daemon was started with --require-auth', async () => {
+      const app = createServeApp({
+        ...baseOpts,
+        token: 'secret',
+        requireAuth: true,
+      });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(res.body.features).toContain('require_auth');
     });
   });
 
@@ -2043,6 +2141,29 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ status: 'ok' });
     });
+
+    it('gates /health behind bearer auth when --require-auth is set on loopback (#4175 PR 15)', async () => {
+      // The whole point of `--require-auth` is to harden the
+      // loopback default; the unauthenticated `/health` carve-out
+      // would defeat that on shared dev hosts. Boot-time check in
+      // `runQwenServe` guarantees a token whenever the flag is on,
+      // so this 401 is reachable only under operator opt-in.
+      const app = createServeApp({
+        ...baseOpts,
+        token: 'secret',
+        requireAuth: true,
+      });
+      const noAuth = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(noAuth.status).toBe(401);
+      const withAuth = await request(app)
+        .get('/health')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(withAuth.status).toBe(200);
+      expect(withAuth.body).toEqual({ status: 'ok' });
+    });
   });
 
   describe('payload-too-large handling (A-UsP)', () => {
@@ -2150,6 +2271,37 @@ describe('runQwenServe', () => {
         mode: 'http-bridge',
       }),
     ).rejects.toThrow(/Refusing to bind/);
+  });
+
+  it('refuses to start with --require-auth on loopback when no token configured (#4175 PR 15)', async () => {
+    // Boot-loud check: silently dropping the flag would leave the
+    // operator believing loopback is hardened when it isn't.
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        requireAuth: true,
+      }),
+    ).rejects.toThrow(/--require-auth/);
+  });
+
+  it('starts with --require-auth + token on loopback', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      token: 'secret',
+      requireAuth: true,
+    });
+    const port = (handle.server.address() as { port: number }).port;
+    // Token-required everywhere, including /health.
+    const noAuth = await fetch(`http://127.0.0.1:${port}/health`);
+    expect(noAuth.status).toBe(401);
+    const withAuth = await fetch(`http://127.0.0.1:${port}/health`, {
+      headers: { Authorization: 'Bearer secret' },
+    });
+    expect(withAuth.status).toBe(200);
   });
 
   it('accepts QWEN_SERVER_TOKEN from the env when binding non-loopback', async () => {
