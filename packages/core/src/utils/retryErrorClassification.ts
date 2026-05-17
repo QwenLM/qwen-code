@@ -18,7 +18,7 @@ export type RetryErrorKind =
   | 'provider-business'
   | 'unknown';
 
-export type RetryErrorDecision =
+export type RetryErrorDiagnosis =
   | 'retryable'
   | 'fail-fast'
   | 'fallback-eligible'
@@ -30,7 +30,7 @@ export interface RetryErrorClassificationContext {
 
 export interface RetryErrorClassification {
   kind: RetryErrorKind;
-  decision: RetryErrorDecision;
+  diagnosis: RetryErrorDiagnosis;
   reason: string;
   statusCode?: number;
   providerCode?: string;
@@ -40,10 +40,10 @@ export interface RetryErrorClassification {
 }
 
 /**
- * Classifies retry-related failures without performing the retry decision.
+ * Classifies retry-related failures for diagnostics.
  *
- * The result is intentionally conservative: it provides stable diagnostics and
- * policy inputs while leaving fallback/recovery execution to later layers.
+ * The result is intentionally conservative: it labels the observed error shape
+ * without performing or driving retry control.
  */
 export function classifyRetryError(
   error: unknown,
@@ -52,7 +52,7 @@ export function classifyRetryError(
   if (isRetryAbortError(error)) {
     return {
       kind: 'abort',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       reason: 'aborted',
     };
   }
@@ -77,7 +77,7 @@ export function classifyRetryError(
   ) {
     return {
       kind: 'provider-business',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       reason: 'qwen-oauth-free-tier-quota',
       ...common,
     };
@@ -86,7 +86,7 @@ export function classifyRetryError(
   if (isAllocatedQuotaExceeded(providerCode)) {
     return {
       kind: 'provider-business',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       reason: 'allocated-quota-exceeded',
       ...common,
     };
@@ -101,7 +101,7 @@ export function classifyRetryError(
           : 'provider';
     return {
       kind,
-      decision: 'retryable',
+      diagnosis: 'retryable',
       reason: 'rate-limit',
       ...common,
     };
@@ -114,7 +114,7 @@ export function classifyRetryError(
     if (statusCode === 529) {
       return {
         kind,
-        decision: 'fallback-eligible',
+        diagnosis: 'fallback-eligible',
         reason: 'capacity-overload',
         ...common,
       };
@@ -123,7 +123,7 @@ export function classifyRetryError(
     if (statusCode === 401 || statusCode === 403) {
       return {
         kind,
-        decision: 'fail-fast',
+        diagnosis: 'fail-fast',
         reason: 'auth-error',
         ...common,
       };
@@ -132,7 +132,7 @@ export function classifyRetryError(
     if (statusCode >= 400 && statusCode < 500) {
       return {
         kind,
-        decision: 'fail-fast',
+        diagnosis: 'fail-fast',
         reason: 'client-error',
         ...common,
       };
@@ -141,7 +141,7 @@ export function classifyRetryError(
     if (statusCode >= 500 && statusCode < 600) {
       return {
         kind,
-        decision: 'retryable',
+        diagnosis: 'retryable',
         reason: 'server-error',
         ...common,
       };
@@ -149,7 +149,7 @@ export function classifyRetryError(
 
     return {
       kind,
-      decision: 'unknown',
+      diagnosis: 'unknown',
       reason: 'http-status',
       ...common,
     };
@@ -159,7 +159,7 @@ export function classifyRetryError(
   if (transportCode !== undefined) {
     return {
       kind: 'transport',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       reason: 'transport-error',
       transportCode,
     };
@@ -167,7 +167,7 @@ export function classifyRetryError(
 
   return {
     kind: 'unknown',
-    decision: 'unknown',
+    diagnosis: 'unknown',
     reason: 'unclassified',
     ...common,
   };

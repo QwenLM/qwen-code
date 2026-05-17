@@ -14,7 +14,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 429, message: 'Too Many Requests' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       statusCode: 429,
       reason: 'rate-limit',
     });
@@ -25,7 +25,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 503, message: 'Provider overloaded' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       statusCode: 503,
       reason: 'rate-limit',
     });
@@ -40,7 +40,7 @@ describe('classifyRetryError', () => {
       ),
     ).toMatchObject({
       kind: 'provider',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       providerCode: '1302',
       providerMessage: '您的账户已达到速率限制，请您控制请求频率',
       reason: 'rate-limit',
@@ -52,7 +52,7 @@ describe('classifyRetryError', () => {
       }),
     ).toMatchObject({
       kind: 'provider',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       providerCode: '1305',
       providerMessage: 'IdealTalk rate limit',
       reason: 'rate-limit',
@@ -66,7 +66,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'sse-provider',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       statusCode: 429,
       providerCode: 'Throttling.RateLimit',
       providerMessage: 'Rate limit exceeded',
@@ -82,7 +82,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'provider-business',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       statusCode: 429,
       providerCode: 'Throttling.AllocationQuota',
       providerMessage: 'Allocated quota exceeded',
@@ -96,7 +96,7 @@ describe('classifyRetryError', () => {
       classifyRetryError(new Error('previously allocated quota exceeded')),
     ).toMatchObject({
       kind: 'unknown',
-      decision: 'unknown',
+      diagnosis: 'unknown',
       reason: 'unclassified',
     });
   });
@@ -113,7 +113,7 @@ describe('classifyRetryError', () => {
       ),
     ).toMatchObject({
       kind: 'provider-business',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       statusCode: 429,
       providerCode: 'insufficient_quota',
       reason: 'qwen-oauth-free-tier-quota',
@@ -129,7 +129,7 @@ describe('classifyRetryError', () => {
       }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       statusCode: 400,
       providerCode: 'invalid_request_error',
       reason: 'client-error',
@@ -141,7 +141,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 408, message: 'Request Timeout' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       statusCode: 408,
       reason: 'client-error',
     });
@@ -150,7 +150,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 425, message: 'Too Early' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       statusCode: 425,
       reason: 'client-error',
     });
@@ -161,7 +161,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 401, message: 'Unauthorized' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       statusCode: 401,
       reason: 'auth-error',
     });
@@ -170,7 +170,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 403, message: 'Forbidden' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       statusCode: 403,
       reason: 'auth-error',
     });
@@ -181,7 +181,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 529, message: 'Overloaded' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'fallback-eligible',
+      diagnosis: 'fallback-eligible',
       statusCode: 529,
       reason: 'capacity-overload',
     });
@@ -194,7 +194,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'sse-provider',
-      decision: 'fallback-eligible',
+      diagnosis: 'fallback-eligible',
       statusCode: 529,
       providerCode: 'Overloaded',
       providerMessage: 'Provider overloaded',
@@ -208,7 +208,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 500, message: 'Internal error' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       statusCode: 500,
       reason: 'server-error',
     });
@@ -219,7 +219,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 302, message: 'Redirect' }),
     ).toMatchObject({
       kind: 'http',
-      decision: 'unknown',
+      diagnosis: 'unknown',
       statusCode: 302,
       reason: 'http-status',
     });
@@ -228,7 +228,7 @@ describe('classifyRetryError', () => {
       classifyRetryError({ status: 700, message: 'Invalid status' }),
     ).toMatchObject({
       kind: 'unknown',
-      decision: 'unknown',
+      diagnosis: 'unknown',
       reason: 'unclassified',
     });
   });
@@ -240,7 +240,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'transport',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       transportCode: 'ETIMEDOUT',
       reason: 'transport-error',
     });
@@ -255,7 +255,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'transport',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       transportCode: 'ECONNRESET',
       reason: 'transport-error',
     });
@@ -270,7 +270,7 @@ describe('classifyRetryError', () => {
 
     expect(classification).toMatchObject({
       kind: 'unknown',
-      decision: 'unknown',
+      diagnosis: 'unknown',
       reason: 'unclassified',
     });
     expect(classification).not.toHaveProperty('providerCode');
@@ -284,7 +284,7 @@ describe('classifyRetryError', () => {
 
     expect(classification).toMatchObject({
       kind: 'sse-provider',
-      decision: 'retryable',
+      diagnosis: 'retryable',
       statusCode: 429,
       reason: 'rate-limit',
     });
@@ -298,7 +298,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'abort',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       reason: 'aborted',
     });
   });
@@ -311,7 +311,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'abort',
-      decision: 'fail-fast',
+      diagnosis: 'fail-fast',
       reason: 'aborted',
     });
   });

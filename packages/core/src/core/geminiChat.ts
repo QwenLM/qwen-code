@@ -445,7 +445,7 @@ export class GeminiChat {
               // The classifier is observation-only here; stream retry control
               // remains governed by isRateLimitError and the retry budget.
               const diagnosticFields = {
-                classificationDecision: classification.decision,
+                classificationDiagnosis: classification.diagnosis,
                 errorKind: classification.kind,
                 classificationReason: classification.reason,
                 ...details,
