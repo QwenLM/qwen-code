@@ -215,6 +215,18 @@ export interface HttpAcpBridge {
   ): boolean;
 
   /**
+   * Cast a vote scoped to an explicit session route. This keeps the legacy
+   * first-responder behavior but lets clients avoid accidentally voting on a
+   * request id that belongs to another live session.
+   */
+  respondToSessionPermission(
+    sessionId: string,
+    requestId: string,
+    response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
+  ): boolean;
+
+  /**
    * List all live sessions whose canonical workspace path matches the
    * supplied cwd. Empty array (not throw) when no sessions exist —
    * a session-picker UI shouldn't 404 just because the workspace is idle.
@@ -752,6 +764,27 @@ interface PendingPermission {
    * Stored as a Set for O(1) membership check.
    */
   allowedOptionIds: ReadonlySet<string>;
+}
+
+interface PermissionResolutionRecord {
+  requestId: string;
+  sessionId: string;
+  outcome: RequestPermissionResponse['outcome'];
+}
+
+// Bounded duplicate-vote cache. Stores only requestId/sessionId/outcome, so
+// 512 records stays small while covering normal UI reconnect/race windows.
+const MAX_RESOLVED_PERMISSION_RECORDS = 512;
+
+function isServeDebugLoggingEnabled(): boolean {
+  const value = process.env['QWEN_SERVE_DEBUG'];
+  if (!value) return false;
+  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+}
+
+function writeServeDebugLine(message: string): void {
+  if (!isServeDebugLoggingEnabled()) return;
+  writeStderrLine(`qwen serve debug: ${message}`);
 }
 
 /**
@@ -1337,6 +1370,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
   // across sessions are infeasible in practice.
   const pendingPermissions = new Map<string, PendingPermission>();
+  const resolvedPermissions = new Map<string, PermissionResolutionRecord>();
+  const resolvedPermissionOrder: string[] = [];
   // Set by `shutdown()` so any in-flight `spawnOrAttach` that was
   // dispatched on an existing connection AFTER the shutdown snapshot
   // taken in `shutdown()` fails fast instead of creating a child the
@@ -1444,6 +1479,44 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     entry.pendingPermissionIds.add(p.requestId);
   };
 
+  const rememberResolvedPermission = (record: PermissionResolutionRecord) => {
+    if (!resolvedPermissions.has(record.requestId)) {
+      resolvedPermissionOrder.push(record.requestId);
+    }
+    resolvedPermissions.set(record.requestId, record);
+    while (resolvedPermissionOrder.length > MAX_RESOLVED_PERMISSION_RECORDS) {
+      const oldest = resolvedPermissionOrder.shift();
+      if (oldest !== undefined) resolvedPermissions.delete(oldest);
+    }
+  };
+
+  const publishPermissionAlreadyResolved = (
+    record: PermissionResolutionRecord,
+  ) => {
+    const entry = byId.get(record.sessionId);
+    if (!entry) return;
+    try {
+      writeServeDebugLine(
+        `permission ${JSON.stringify(record.requestId)} ` +
+          `for session ${JSON.stringify(record.sessionId)} was already ` +
+          'resolved; publishing duplicate-vote notification.',
+      );
+      entry.events.publish({
+        type: 'permission_already_resolved',
+        data: {
+          requestId: record.requestId,
+          sessionId: record.sessionId,
+          outcome: record.outcome,
+        },
+      });
+    } catch {
+      writeServeDebugLine(
+        `skipped duplicate-vote notification for permission ` +
+          `${JSON.stringify(record.requestId)} during shutdown.`,
+      );
+    }
+  };
+
   /** Resolve a single pending request and clean up its bookkeeping. */
   const resolvePending = (
     requestId: string,
@@ -1469,6 +1542,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* bus closed during shutdown */
       }
     }
+    rememberResolvedPermission({
+      requestId,
+      sessionId: pending.sessionId,
+      outcome: response.outcome,
+    });
     pending.resolve(response);
     return true;
   };
@@ -2616,6 +2694,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           resolveAnyTrustedClientId(context.clientId);
         }
       }
+      if (!pending) {
+        const record = resolvedPermissions.get(requestId);
+        if (record) {
+          publishPermissionAlreadyResolved(record);
+        }
+        return false;
+      }
       // BkwQI: validate the voter's optionId against the original
       // options the agent advertised. The route already enforces
       // "non-empty string" structurally; this layer enforces
@@ -2624,15 +2709,54 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `ProceedAlways*` when the prompt's `hideAlwaysAllow`
       // policy intentionally suppressed them).
       if (response.outcome.outcome === 'selected') {
-        if (
-          pending &&
-          !pending.allowedOptionIds.has(response.outcome.optionId)
-        ) {
+        if (!pending.allowedOptionIds.has(response.outcome.optionId)) {
           throw new InvalidPermissionOptionError(
             requestId,
             response.outcome.optionId,
           );
         }
+      }
+      return resolvePending(requestId, response, originatorClientId);
+    },
+
+    respondToSessionPermission(sessionId, requestId, response, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const pending = pendingPermissions.get(requestId);
+      if (!pending) {
+        const record = resolvedPermissions.get(requestId);
+        if (record?.sessionId === sessionId) {
+          resolveTrustedClientId(entry, context?.clientId);
+          publishPermissionAlreadyResolved(record);
+        } else if (record) {
+          writeServeDebugLine(
+            `rejected permission vote ${JSON.stringify(requestId)} ` +
+              `for session ${JSON.stringify(sessionId)}; request belongs to ` +
+              `session ${JSON.stringify(record.sessionId)}.`,
+          );
+        }
+        return false;
+      }
+      if (pending.sessionId !== sessionId) {
+        writeServeDebugLine(
+          `rejected permission vote ${JSON.stringify(requestId)} ` +
+            `for session ${JSON.stringify(sessionId)}; request belongs to ` +
+            `session ${JSON.stringify(pending.sessionId)}.`,
+        );
+        return false;
+      }
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      if (
+        response.outcome.outcome === 'selected' &&
+        !pending.allowedOptionIds.has(response.outcome.optionId)
+      ) {
+        throw new InvalidPermissionOptionError(
+          requestId,
+          response.outcome.optionId,
+        );
       }
       return resolvePending(requestId, response, originatorClientId);
     },

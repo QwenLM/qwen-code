@@ -51,7 +51,8 @@ export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
  * IDE, and web backends: it binds one daemon session, forwards the existing
  * Stage 1 routes, and preserves SSE replay state. It intentionally does not
  * interpret daemon event payloads; typed event reducers belong to the protocol
- * schema layer.
+ * schema layer — see `asKnownDaemonEvent` and `reduceDaemonSessionEvent` in
+ * `./events.js` for the typed consumption surface.
  */
 export class DaemonSessionClient {
   readonly client: DaemonClient;
@@ -187,6 +188,18 @@ export class DaemonSessionClient {
     response: PermissionResponse,
   ): Promise<boolean> {
     return await this.client.respondToPermission(
+      requestId,
+      response,
+      this.clientId,
+    );
+  }
+
+  async respondToSessionPermission(
+    requestId: string,
+    response: PermissionResponse,
+  ): Promise<boolean> {
+    return await this.client.respondToSessionPermission(
+      this.sessionId,
       requestId,
       response,
       this.clientId,

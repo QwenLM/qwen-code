@@ -41,8 +41,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
   // clients pre-flight this tag before opting in.
   slow_client_warning: { since: 'v1' },
+  // SDK consumers can detect `KnownDaemonEvent` schema support without
+  // pinning against this SDK release — `narrowDaemonEvent` falls back
+  // to `kind: 'unknown'` for daemons that don't advertise the tag,
+  // so the tag is purely informational.
+  typed_event_schema: { since: 'v1' },
   session_set_model: { since: 'v1' },
   client_identity: { since: 'v1' },
+  session_permission_vote: { since: 'v1' },
   permission_vote: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 

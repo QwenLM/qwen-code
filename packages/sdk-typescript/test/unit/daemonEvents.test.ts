@@ -129,6 +129,18 @@ describe('daemon event schema', () => {
         },
       }),
     ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 10,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: {
+          requestId: 'req-1',
+          outcome: { outcome: 'cancelled' },
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it('reduces permission, model, and terminal events into a session view', () => {
@@ -337,6 +349,57 @@ describe('daemon event schema', () => {
     expect(unmatched.pendingPermissions).toEqual({});
     expect(unmatched.unmatchedPermissionResolutionCount).toBe(1);
     expect(unmatched.lastUnmatchedPermissionResolutionId).toBe('missing-req');
+  });
+
+  it('treats permission_already_resolved as an idempotent pending cleanup', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'req-1',
+          sessionId: 's-1',
+          toolCall: { name: 'write_file' },
+          options: [{ optionId: 'allow' }],
+        },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: {
+          requestId: 'req-1',
+          sessionId: 's-1',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      },
+    ]);
+
+    expect(state.sessionId).toBe('s-1');
+    expect(state.pendingPermissions).toEqual({});
+    expect(state.unmatchedPermissionResolutionCount).toBe(0);
+  });
+
+  it('tracks unmatched permission_already_resolved without rewriting session identity', () => {
+    const state = reduceDaemonSessionEvent(
+      createDaemonSessionViewState({ sessionId: 's-current' }),
+      {
+        id: 1,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: {
+          requestId: 'missing-req',
+          sessionId: 's-other',
+          outcome: { outcome: 'cancelled' },
+        },
+      },
+    );
+
+    expect(state.sessionId).toBe('s-current');
+    expect(state.pendingPermissions).toEqual({});
+    expect(state.unmatchedPermissionResolutionCount).toBe(1);
+    expect(state.lastUnmatchedPermissionResolutionId).toBe('missing-req');
   });
 
   it('caps tracked pending permissions at the daemon session limit', () => {

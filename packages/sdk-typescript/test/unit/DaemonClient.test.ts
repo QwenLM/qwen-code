@@ -508,6 +508,52 @@ describe('DaemonClient', () => {
         }),
       ).rejects.toMatchObject({ status: 400 });
     });
+
+    it('POSTs session-scoped permission votes', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const accepted = await client.respondToSessionPermission(
+        's-1',
+        'req/1',
+        { outcome: { outcome: 'cancelled' } },
+        'client-1',
+      );
+      expect(accepted).toBe(true);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s-1/permission/req%2F1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('returns false on session-scoped permission 404', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'missing' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.respondToSessionPermission('s-1', 'missing', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      ).resolves.toBe(false);
+    });
+
+    it('respondToSessionPermission throws on non-200/non-404 responses', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: 'bad option',
+          code: 'invalid_option_id',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.respondToSessionPermission('s-1', 'req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        body: { error: 'bad option', code: 'invalid_option_id' },
+      });
+    });
   });
 
   describe('subscribeEvents', () => {
