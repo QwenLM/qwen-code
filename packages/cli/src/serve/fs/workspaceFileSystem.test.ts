@@ -348,6 +348,32 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect((err as { kind: string }).kind).toBe('file_too_large');
   });
 
+  it('rejects edit() with empty oldText (would silently prepend newText otherwise)', async () => {
+    // JS `''.indexOf('')` returns 0, so without the empty-check
+    // `current.slice(0, 0) + newText + current.slice(0)` would
+    // silently prepend `newText` to the entire file with a success
+    // audit event — textbook silent data corruption. Reject up-front.
+    const target = path.join(h.workspace, 'silent.txt');
+    await fsp.writeFile(target, 'original\n');
+    const r = await h.fs.resolve('silent.txt', 'edit');
+    const err = await h.fs.edit(r, '', 'INJECTED').catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+    // File must be unchanged.
+    const after = await fsp.readFile(target, 'utf-8');
+    expect(after).toBe('original\n');
+  });
+
+  it('edit() error includes oldText snippet in the hint', async () => {
+    const target = path.join(h.workspace, 'snippet.txt');
+    await fsp.writeFile(target, 'foo=1\nbar=2\n');
+    const r = await h.fs.resolve('snippet.txt', 'edit');
+    const err = (await h.fs
+      .edit(r, 'this string is not present', 'X')
+      .catch((e: unknown) => e)) as { hint?: string };
+    expect(err.hint).toMatch(/this string is not present/);
+  });
+
   it('rejects edit on binary file', async () => {
     const bin = path.join(h.workspace, 'bin.dat');
     const buf = Buffer.alloc(64);
@@ -526,6 +552,21 @@ describe('WorkspaceFileSystem - audit always emits on body errors', () => {
     expect((err as { kind: string }).kind).toBe('parse_error');
     const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
     expect(denied).toBeDefined();
+  });
+
+  it('fs.denied audit payload carries the FsError message for forensic context', async () => {
+    // The earlier audit only recorded `errorKind` + `hint`; the
+    // underlying OS / `FsError` message (path, errno detail, byte
+    // count) was lost from the audit trail. `recordAndWrap` now
+    // forwards the message so audit consumers debugging a
+    // production incident can see the actual cause.
+    const err = (await h.fs
+      .resolve('../escape', 'read')
+      .catch((e: unknown) => e)) as { message: string };
+    expect(err.message).toMatch(/escapes workspace/);
+    const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
+    expect(denied).toBeDefined();
+    expect((denied!.data as { message?: string }).message).toBe(err.message);
   });
 });
 

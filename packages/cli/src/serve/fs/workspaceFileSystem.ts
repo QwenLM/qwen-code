@@ -231,7 +231,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       assertTrustedForIntent(this.deps.trusted, 'stat');
       const st = await fsp.lstat(p as string);
       const out: FsStat = {
-        kind: kindFromStats(st),
+        kind: kindFromStatLike(st),
         sizeBytes: st.size,
         modifiedMs: st.mtimeMs,
       };
@@ -413,7 +413,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         // call `resolve()` separately. Treating each child as
         // implicitly-resolved here would be a brand-cast bypass.
         const childAbs = path.join(p as string, d.name);
-        const kind = kindFromDirent(d);
+        const kind = kindFromStatLike(d);
         const verdict = shouldIgnore(
           childAbs as ResolvedPath,
           this.deps.boundWorkspace,
@@ -616,8 +616,13 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'write');
-      const buf = Buffer.from(content, 'utf-8');
-      enforceWriteSize(buf.length);
+      // `Buffer.byteLength` returns the UTF-8 byte count without
+      // allocating a Buffer. The earlier `Buffer.from(content,
+      // 'utf-8')` materialized the entire payload (up to
+      // `MAX_WRITE_BYTES = 5 MiB`) just to read its `.length`,
+      // wasting heap on every write.
+      const sizeBytes = Buffer.byteLength(content, 'utf-8');
+      enforceWriteSize(sizeBytes);
       await this.deps.lowFs.writeTextFile({
         path: p as string,
         content,
@@ -633,7 +638,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         intent: 'write',
         absolute: p,
         durationMs: performance.now() - start,
-        sizeBytes: buf.length,
+        sizeBytes,
         matchedIgnore: verdict.ignored ? verdict.category : undefined,
       });
     } catch (err) {
@@ -672,6 +677,22 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           hint: 'edit() works on text files only',
         });
       }
+      // Reject empty `oldText` BEFORE reading. JavaScript's
+      // `''.indexOf('')` returns `0`, so without this guard
+      // `current.slice(0, 0) + newText + current.slice(0)` would
+      // silently prepend `newText` to the entire file and emit a
+      // success audit event — a textbook silent data corruption
+      // bug. PR 20 routes that pass user-supplied `oldText`
+      // through verbatim must not be able to trigger it.
+      if (oldText.length === 0) {
+        throw new FsError(
+          'parse_error',
+          `oldText must be a non-empty string for edit on ${p}`,
+          {
+            hint: 'empty oldText would match at position 0 and silently prepend newText',
+          },
+        );
+      }
       const current = await fsp.readFile(p as string, 'utf-8');
       // Post-read TOCTOU guard — catches the swap-during-read
       // attack where `p` is replaced with a symlink between
@@ -686,14 +707,22 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // mechanical.
       const idx = current.indexOf(oldText);
       if (idx === -1) {
+        // Include a snippet of `oldText` in the hint so an operator
+        // staring at "edit failed" at 3 AM can tell whether the
+        // mismatch is whitespace, a stale file, or a wrong target
+        // path. Truncate to keep the hint readable on a one-line
+        // log; the full `oldText` is always reproducible from the
+        // request body.
+        const snippet =
+          oldText.length > 80 ? oldText.slice(0, 80) + '…' : oldText;
         throw new FsError('parse_error', `oldText not found in ${p}`, {
-          hint: 'edit() expects oldText to appear verbatim in the file',
+          hint: `edit() expects oldText to appear verbatim; searched for: ${JSON.stringify(snippet)}`,
         });
       }
       const next =
         current.slice(0, idx) + newText + current.slice(idx + oldText.length);
-      const buf = Buffer.from(next, 'utf-8');
-      enforceWriteSize(buf.length);
+      const writtenBytes = Buffer.byteLength(next, 'utf-8');
+      enforceWriteSize(writtenBytes);
       await this.deps.lowFs.writeTextFile({
         path: p as string,
         content: next,
@@ -713,10 +742,10 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         intent: 'edit',
         absolute: p,
         durationMs: performance.now() - start,
-        sizeBytes: buf.length,
+        sizeBytes: writtenBytes,
         matchedIgnore: editVerdict.ignored ? editVerdict.category : undefined,
       });
-      return { writtenBytes: buf.length };
+      return { writtenBytes };
     } catch (err) {
       throw this.recordAndWrap(err, 'edit', p as string);
     }
@@ -742,6 +771,11 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       input,
       errorKind: fs.kind,
       hint: fs.hint,
+      // Quote the underlying OS / FsError message so audit
+      // consumers debugging a production incident can see the
+      // actual cause (errno text, byte counts, glob pattern,
+      // etc.) rather than just `errorKind` + `hint`.
+      message: fs.message,
     });
     return fs;
   }
@@ -826,25 +860,23 @@ async function assertInodeStableAfterRead(
   }
 }
 
-function kindFromStats(st: {
+/**
+ * Map a `Stats` or `Dirent` (both expose the same `isFile` /
+ * `isDirectory` / `isSymbolicLink` methods) to the boundary's
+ * narrow `kind` union. `FsStat['kind']` and `FsEntry['kind']` are
+ * the same 4-value union, so a single helper keeps the
+ * classification rule in one place — reviewer flagged the previous
+ * `kindFromStats` + `kindFromDirent` pair as a maintenance hazard
+ * (drift risk if the union grows).
+ */
+function kindFromStatLike(s: {
   isFile(): boolean;
   isDirectory(): boolean;
   isSymbolicLink(): boolean;
 }): FsStat['kind'] {
-  if (st.isSymbolicLink()) return 'symlink';
-  if (st.isDirectory()) return 'directory';
-  if (st.isFile()) return 'file';
-  return 'other';
-}
-
-function kindFromDirent(d: {
-  isFile(): boolean;
-  isDirectory(): boolean;
-  isSymbolicLink(): boolean;
-}): FsEntry['kind'] {
-  if (d.isSymbolicLink()) return 'symlink';
-  if (d.isDirectory()) return 'directory';
-  if (d.isFile()) return 'file';
+  if (s.isSymbolicLink()) return 'symlink';
+  if (s.isDirectory()) return 'directory';
+  if (s.isFile()) return 'file';
   return 'other';
 }
 

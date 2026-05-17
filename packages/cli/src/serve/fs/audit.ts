@@ -77,6 +77,16 @@ export interface FsDeniedAuditPayload {
   relPath?: string;
   errorKind: FsErrorKind;
   hint?: string;
+  /**
+   * Human-readable error message from the underlying `FsError`.
+   * Audit consumers debugging a production incident need to see
+   * the actual OS error (e.g. errno detail, byte counts) rather
+   * than only `errorKind` + `hint`. Optional so privacy-sensitive
+   * deployments can suppress it; populated by default by
+   * `recordDenied` since the orchestrator already wraps every body
+   * error into an `FsError` whose message we can quote.
+   */
+  message?: string;
 }
 
 /**
@@ -204,6 +214,7 @@ export function createAuditPublisher(
         errorKind: record.errorKind,
       };
       if (record.hint) payload.hint = record.hint;
+      if (record.message) payload.message = record.message;
       if (includeRawPaths) {
         payload.relPath = relForAudit(record.input, boundWorkspace);
       }

@@ -125,6 +125,27 @@ describe('hasSuspiciousPathPattern', () => {
     expect(hasSuspiciousPathPattern('bar.LPT1')).toBe(true);
   });
 
+  it('rejects bare and multi-extension DOS device names (NTFS reserves regardless of extension)', () => {
+    // Bare reserved names
+    expect(hasSuspiciousPathPattern('CON')).toBe(true);
+    expect(hasSuspiciousPathPattern('NUL')).toBe(true);
+    expect(hasSuspiciousPathPattern('PRN')).toBe(true);
+    expect(hasSuspiciousPathPattern('AUX')).toBe(true);
+    expect(hasSuspiciousPathPattern('COM1')).toBe(true);
+    expect(hasSuspiciousPathPattern('LPT9')).toBe(true);
+    // First-extension forms
+    expect(hasSuspiciousPathPattern('CON.txt')).toBe(true);
+    expect(hasSuspiciousPathPattern('NUL.dat')).toBe(true);
+    expect(hasSuspiciousPathPattern('LPT1.log')).toBe(true);
+    // Middle-extension form
+    expect(hasSuspiciousPathPattern('CON.foo.bar')).toBe(true);
+    // Substring of longer name must NOT match (BACON, concat, lprint…)
+    expect(hasSuspiciousPathPattern('BACON')).toBe(false);
+    expect(hasSuspiciousPathPattern('concat.txt')).toBe(false);
+    expect(hasSuspiciousPathPattern('precon.go')).toBe(false);
+    expect(hasSuspiciousPathPattern('contemplating.md')).toBe(false);
+  });
+
   it('rejects three-or-more-dot path components', () => {
     expect(hasSuspiciousPathPattern('foo/.../bar')).toBe(true);
     expect(hasSuspiciousPathPattern('.../leaf')).toBe(true);

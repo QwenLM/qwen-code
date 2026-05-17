@@ -138,10 +138,14 @@ export function wrapAsFsError(
         hint: 'symlink chain forms a cycle or exceeds SYMLOOP_MAX',
       });
     case 'EISDIR':
+      return new FsError('parse_error', message, {
+        cause: err,
+        hint: 'EISDIR — path is a directory but a regular file was expected',
+      });
     case 'ENOTDIR':
       return new FsError('parse_error', message, {
         cause: err,
-        hint: 'a path component is not a directory where one was expected',
+        hint: 'ENOTDIR — a path component is a regular file but a directory was expected',
       });
     case 'ENOSPC':
       return new FsError('io_error', message, {

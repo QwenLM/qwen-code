@@ -180,7 +180,22 @@ export function hasSuspiciousPathPattern(p: string): boolean {
   for (const seg of p.split(/[\\/]/)) {
     if (seg === '' || seg === '.' || seg === '..') continue;
     if (/[.\s]+$/.test(seg)) return true;
-    if (/\.(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(seg)) return true;
+    // DOS / NTFS reserved device names. The Windows kernel treats
+    // these as device handles regardless of extension, so all four
+    // forms are reserved:
+    //   - bare:        `CON`, `NUL`, `LPT1`
+    //   - first-ext:   `CON.txt`, `NUL.dat`, `COM1.json`
+    //   - last-ext:    `file.CON`, `audit.PRN`, `bar.LPT9`
+    //   - any-ext:     `CON.foo.bar`
+    // The earlier regex anchored to `$` only caught the last-ext
+    // form. Anchor to either start (bare or first-ext) or `.`
+    // (last-ext or middle-ext) to cover the full set. Names
+    // containing the reserved word as a substring of a longer
+    // segment (e.g. `BACON`, `concat.txt`) are NOT reserved — the
+    // boundary anchor `(^|\.)` keeps those legitimate.
+    if (/(^|\.)(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i.test(seg)) {
+      return true;
+    }
   }
   return false;
 }
