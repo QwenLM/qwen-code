@@ -1645,6 +1645,44 @@ describe('McpClientManager — PR 14 guardrails', () => {
     vi.useRealTimers();
   });
 
+  it('incremental discovery still refuses past the cap after R6 pre-reservation removal (wenshao R6 line 956)', async () => {
+    // Round 6 removed the duplicate pre-reservation in
+    // discoverAllMcpToolsIncremental — refusal now happens INSIDE
+    // discoverMcpToolsForServerInternal's tryReserveSlot. Verify
+    // the observable refusal behavior is unchanged from the outside.
+    const created: string[] = [];
+    vi.mocked(McpClient).mockImplementation((name: string) => {
+      created.push(name);
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    const config = configWithServers({
+      first: { command: 'node' },
+      second: { command: 'node' },
+      third: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      { removeMcpToolsByServer: () => undefined } as unknown as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 2, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpToolsIncremental(config);
+    // First two declared servers fit; third refused. Refusal-order
+    // determinism preserved (config-declaration order) — the inner
+    // tryReserveSlot is called in the same serversToUpdate iteration
+    // order as the outer walk produced.
+    expect(created).toEqual(['first', 'second']);
+    expect(manager.getMcpClientAccounting().reservedSlots.sort()).toEqual([
+      'first',
+      'second',
+    ]);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([
+      'third',
+    ]);
+  });
+
   it('readResource late re-reserve clears stale refused entry (wenshao R5 line 1268)', async () => {
     // First: discoverAllMcpTools refuses `b` (budget=1, both a+b configured).
     // Then: disconnect `a` freeing the slot; readResource('b') succeeds and

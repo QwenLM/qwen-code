@@ -2696,26 +2696,19 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/enforce.*requires.*mcpClientBudget/);
   });
 
-  it('clears mcp env vars when caller omits the options (no leakage across daemons)', async () => {
-    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '99';
-    process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = 'enforce';
-    try {
-      handle = await runQwenServe({
-        hostname: '127.0.0.1',
-        port: 0,
-        mode: 'http-bridge',
-        // No mcpClientBudget / mcpBudgetMode — must wipe stale env
-        // from the previous daemon in the same process.
-      });
-      expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBeUndefined();
-      expect(process.env['QWEN_SERVE_MCP_BUDGET_MODE']).toBeUndefined();
-    } finally {
-      delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
-      delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
-    }
-  });
-
-  it('writes mcp env vars when caller provides the options', async () => {
+  // Round 6 (wenshao R5 line 216): replaced the R3 `process.env`
+  // mutation tests. `runQwenServe` now passes per-handle env
+  // overrides via `BridgeOptions.childEnvOverrides`, NOT by mutating
+  // global `process.env` — so concurrent embedded daemons don't
+  // cross-contaminate each other's MCP budget env. The two tests
+  // below assert (a) runQwenServe doesn't touch process.env and
+  // (b) a pre-existing process.env value survives runQwenServe
+  // calls unrelated to MCP overrides (proving runQwenServe is no
+  // longer the source of env mutation).
+  it('does not mutate process.env when caller provides mcp budget options (#4247 R6 line 216)', async () => {
+    // Sanity-check: no MCP env vars set before.
+    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
     handle = await runQwenServe({
       hostname: '127.0.0.1',
       port: 0,
@@ -2723,11 +2716,34 @@ describe('runQwenServe', () => {
       mcpClientBudget: 10,
       mcpBudgetMode: 'warn',
     });
-    expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBe('10');
-    expect(process.env['QWEN_SERVE_MCP_BUDGET_MODE']).toBe('warn');
-    // Cleanup so the next test starts clean.
-    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
-    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+    // Pre-R6 this leaked into global process.env. Post-R6 the values
+    // travel via `BridgeOptions.childEnvOverrides` closure → only
+    // the spawned ACP child sees them.
+    expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBeUndefined();
+    expect(process.env['QWEN_SERVE_MCP_BUDGET_MODE']).toBeUndefined();
+  });
+
+  it('preserves pre-existing process.env values (no longer wipes globals on omit) (#4247 R6 line 216)', async () => {
+    // Pre-R6 the "scrub on omit" code path delete'd these from
+    // process.env. Post-R6 runQwenServe doesn't touch process.env
+    // at all; the override mechanism handles "scrub" at the
+    // per-handle level inside the bridge's spawn factory. So if an
+    // operator had QWEN_SERVE_MCP_CLIENT_BUDGET exported in their
+    // shell BEFORE starting the daemon, it stays in their process
+    // env (and gets ignored by this daemon's child, which receives
+    // `undefined` via overrides to scrub it on spawn).
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '99';
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        // No mcpClientBudget — override will scrub the var on spawn.
+      });
+      expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBe('99');
+    } finally {
+      delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    }
   });
 
   it('starts with --require-auth + token on loopback', async () => {

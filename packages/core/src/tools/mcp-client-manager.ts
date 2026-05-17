@@ -949,20 +949,25 @@ export class McpClientManager {
       }
       const existingClient = this.clients.get(name);
       if (!existingClient) {
-        // Budget gate (PR 14): a brand-new server connect would push
-        // `clients.size` past the cap under `enforce` mode. Reconnects
-        // (the `else if` branch below) already hold a reservation
-        // from their first successful connect — they pass through.
-        const reservation = this.tryReserveSlot(name);
-        if (reservation === 'refused') {
-          this.lastRefusedServerNames.push(name);
-          process.stderr.write(
-            `qwen serve: MCP server '${name}' refused (budget exhausted, ` +
-              `budget=${this.clientBudget}, mode=enforce)\n`,
-          );
-          continue;
-        }
-        // New server
+        // PR 14 fix (review #4247 wenshao R6 line 956): pre-reservation
+        // here was a TOCTOU race. The inner
+        // `discoverMcpToolsForServerInternal` ALSO does `tryReserveSlot`
+        // (added in R1 fix #1). With BOTH sites reserving, the
+        // reservation lifecycle didn't align with the timeout
+        // cleanup site — `runWithDiscoveryTimeout`'s timeout handler
+        // could release the slot mid-flight while the inner
+        // `connect()` later resolves successfully, leaving a
+        // CONNECTED client with NO reservation. Next pass admits
+        // another new server because `reservedSlots.size < budget`,
+        // and `enforce` mode silently exceeds the cap.
+        //
+        // Fix: delete the pre-reservation. `discoverMcpToolsForServerInternal`
+        // owns the reservation lifecycle end-to-end (reserve →
+        // try-catch around connect → release on weReservedSlot
+        // failure path → cleared by timeout handler if it fires).
+        // Refusal still happens — just inside the inner call. The
+        // operator-visible behavior is identical; only the race is
+        // closed.
         serversToUpdate.push(name);
       } else if (existingClient.getStatus() === MCPServerStatus.DISCONNECTED) {
         // Disconnected server, try to reconnect
