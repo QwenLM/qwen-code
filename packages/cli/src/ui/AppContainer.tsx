@@ -2404,51 +2404,6 @@ export const AppContainer = (props: AppContainerProps) => {
       } finally {
         setIsRewindSelectorOpen(false);
       }
-
-      // 3. Truncate API history to the target point.
-      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
-      // reasoning_content continuity across all turns in the conversation.
-      geminiClient.truncateHistory(apiTruncateIndex);
-
-      // 4. Truncate UI history (keep everything before the target item)
-      // Strip suppressOnRestore flags so rewound items remain visible
-      const truncatedUi = originalHistory
-        .filter((h) => h.id < userItem.id)
-        .map((h) => {
-          if (!h.display?.suppressOnRestore) return h;
-          const { suppressOnRestore: _, ...rest } = h.display;
-          return {
-            ...h,
-            display: Object.keys(rest).length > 0 ? rest : undefined,
-          };
-        });
-      historyManager.loadHistory(truncatedUi);
-
-      // 5. Re-render the terminal
-      refreshStatic();
-
-      // 6. Pre-populate input with the original user text
-      if (userItem.type === 'user' && userItem.text) {
-        buffer.setText(userItem.text);
-      }
-
-      // 7. Add info message
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
-        },
-        Date.now(),
-      );
-
-      // 8. Record the rewind event — re-roots the parentUuid chain so
-      //    rewound messages end up on a dead branch during resume.
-      config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-        truncatedCount: originalLength - truncatedUi.length,
-      });
-
-      // 9. Close the selector
-      setIsRewindSelectorOpen(false);
     },
     [config, historyManager, refreshStatic, buffer],
   );

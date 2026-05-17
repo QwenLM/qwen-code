@@ -11,6 +11,7 @@ import {
   useResumeCommand,
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 
 import type { LoadedSettings } from '../../config/settings.js';
 

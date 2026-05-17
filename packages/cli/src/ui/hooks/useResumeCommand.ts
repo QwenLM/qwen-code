@@ -14,6 +14,7 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
 } from '../utils/resumeHistoryUtils.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItem } from '../types.js';
 import {
