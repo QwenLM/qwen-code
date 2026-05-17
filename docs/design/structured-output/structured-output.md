@@ -164,11 +164,13 @@ invocation time; the only call-site-specific binding is which
 The **post-helper termination flow** differs between the two sites:
 the main-turn path directly calls `return emitStructuredSuccess()`,
 while the drain-turn path requires a two-hop termination
-(`drainOneItem` returns a sentinel that its caller checks to break out
-of the drain loop before calling `emitStructuredSuccess`). Both
-converge on the same terminal block, but the extra indirection in the
-drain path is load-bearing — without it the drain loop would continue
-processing queued items after the structured result was captured.
+(`processToolCallBatch` captures the result into the closure-scoped
+`structuredSubmission`; `drainLocalQueue` checks it to stop the drain
+loop, then the holdback loop checks it to break out and call
+`emitStructuredSuccess`). Both converge on the same terminal block,
+but the extra indirection in the drain path is load-bearing —
+without it the drain loop would continue processing queued items
+after the structured result was captured.
 
 ### Structured success terminal block
 
@@ -203,7 +205,7 @@ the shared "we got a valid call, shut down" path:
 | Cause                                                             | Exit code                     | Surface                                                                                                                                                                                                                                                                            |
 | ----------------------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Model emits plain text only                                       | 1                             | Error with turn count + truncated `Output preview`.                                                                                                                                                                                                                                |
-| Model never calls `structured_output` for `maxSessionTurns` turns | 53                            | `Reached max session turns` + `--json-schema` hint pointing at the three common causes.                                                                                                                                                                                            |
+| Model never calls `structured_output` for `maxSessionTurns` turns | 53                            | `Reached max session turns` + `--json-schema` hint pointing at the common stuck-run symptom and its two likely causes.                                                                                                                                                             |
 | Validation fails repeatedly                                       | (eventually 53 via max-turns) | Each failure surfaces to the model on the next turn with the Ajv message.                                                                                                                                                                                                          |
 | Abort / SIGINT                                                    | 130                           | Cancellation path. A structured result is normally not emitted, but `emitStructuredSuccess()`'s holdback loop does not poll the abort signal — a SIGINT that arrives after capture but before/during the stdout emit may still flush the result. Exit code is the reliable signal. |
 
