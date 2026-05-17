@@ -868,6 +868,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'running' as const,
         startTime,
         abortController: new AbortController(),
+        outputFile: `/tmp/${id}.jsonl`,
+        isBackgrounded: true,
       };
     }
 
@@ -916,6 +918,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'paused',
         startTime: 1,
         abortController: new AbortController(),
+        outputFile: '/tmp/paused-1.jsonl',
+        isBackgrounded: true,
       });
       // Push terminal entries past the cap so prune is forced to choose
       // an eviction set.
@@ -956,6 +960,8 @@ describe('BackgroundTaskRegistry', () => {
         status: 'paused',
         startTime: 1,
         abortController: new AbortController(),
+        outputFile: '/tmp/paused-overflow.jsonl',
+        isBackgrounded: true,
       });
       registry.abandon('paused-overflow');
       for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS; i++) {
