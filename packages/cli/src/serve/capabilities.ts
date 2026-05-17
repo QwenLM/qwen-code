@@ -27,11 +27,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
   session_scope_override: { since: 'v1' },
+  session_load: { since: 'v1' },
+  // ACP backs this with `connection.unstable_resumeSession`. Surface
+  // the unstable prefix so clients don't pin against a `v1` shape that
+  // the underlying ACP method may still change.
+  unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
   session_set_model: { since: 'v1' },
+  client_identity: { since: 'v1' },
   permission_vote: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 

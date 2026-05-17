@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
+  RequestError,
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -27,6 +28,8 @@ import type {
   NewSessionResponse,
   PromptRequest,
   PromptResponse,
+  ResumeSessionRequest,
+  ResumeSessionResponse,
   SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse,
   SetSessionModeRequest,
@@ -34,9 +37,11 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   createHttpAcpBridge,
+  InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
+  RestoreInProgressError,
   SessionNotFoundError,
   WorkspaceMismatchError,
   type AcpChannel,
@@ -93,10 +98,20 @@ interface FakeAgentOpts {
     p: NewSessionRequest,
     self: FakeAgent,
   ) => Promise<NewSessionResponse> | NewSessionResponse;
+  loadSessionImpl?: (
+    p: LoadSessionRequest,
+    self: FakeAgent,
+  ) => Promise<LoadSessionResponse> | LoadSessionResponse;
+  resumeSessionImpl?: (
+    p: ResumeSessionRequest,
+    self: FakeAgent,
+  ) => Promise<ResumeSessionResponse> | ResumeSessionResponse;
 }
 
 class FakeAgent implements Agent {
   newSessionCalls: NewSessionRequest[] = [];
+  loadSessionCalls: LoadSessionRequest[] = [];
+  resumeSessionCalls: ResumeSessionRequest[] = [];
   promptCalls: PromptRequest[] = [];
   cancelCalls: CancelNotification[] = [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
@@ -129,8 +144,21 @@ class FakeAgent implements Agent {
     return { sessionId: `${prefix}:${p.cwd}${suffix}` };
   }
 
-  async loadSession(_p: LoadSessionRequest): Promise<LoadSessionResponse> {
-    throw new Error('not implemented in test fake');
+  async loadSession(p: LoadSessionRequest): Promise<LoadSessionResponse> {
+    this.loadSessionCalls.push(p);
+    if (this.opts.loadSessionImpl) {
+      return this.opts.loadSessionImpl(p, this);
+    }
+    return {};
+  }
+  async unstable_resumeSession(
+    p: ResumeSessionRequest,
+  ): Promise<ResumeSessionResponse> {
+    this.resumeSessionCalls.push(p);
+    if (this.opts.resumeSessionImpl) {
+      return this.opts.resumeSessionImpl(p, this);
+    }
+    return {};
   }
   async authenticate(_p: AuthenticateRequest): Promise<AuthenticateResponse> {
     throw new Error('not implemented in test fake');
@@ -253,6 +281,7 @@ describe('createHttpAcpBridge', () => {
     expect(session.sessionId).toBe(SESS_A);
     expect(session.workspaceCwd).toBe(WS_A);
     expect(session.attached).toBe(false);
+    expect(session.clientId).toMatch(/^client_/);
     expect(bridge.sessionCount).toBe(1);
     expect(handles).toHaveLength(1);
     expect(handles[0]?.agent.newSessionCalls[0]?.cwd).toBe(WS_A);
@@ -276,10 +305,656 @@ describe('createHttpAcpBridge', () => {
     expect(first.sessionId).toBe(second.sessionId);
     expect(first.attached).toBe(false);
     expect(second.attached).toBe(true);
+    expect(first.clientId).toMatch(/^client_/);
+    expect(second.clientId).toMatch(/^client_/);
+    expect(second.clientId).not.toBe(first.clientId);
     expect(handles).toHaveLength(1); // only one child spawned
     expect(bridge.sessionCount).toBe(1);
 
     await bridge.shutdown();
+  });
+
+  it('reuses an echoed daemon-issued client id on attach', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel();
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      clientId: first.clientId,
+    });
+
+    expect(second.attached).toBe(true);
+    expect(second.clientId).toBe(first.clientId);
+
+    await bridge.shutdown();
+    expect(handles[0]?.killed).toBe(true);
+  });
+
+  it('detachClient unregisters only the detached client id', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.detachClient(second.sessionId, second.clientId);
+
+    await expect(
+      bridge.sendPrompt(
+        first.sessionId,
+        {
+          sessionId: first.sessionId,
+          prompt: [{ type: 'text', text: 'still valid' }],
+        },
+        undefined,
+        { clientId: first.clientId },
+      ),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    await expect(
+      bridge.sendPrompt(
+        second.sessionId,
+        {
+          sessionId: second.sessionId,
+          prompt: [{ type: 'text', text: 'detached' }],
+        },
+        undefined,
+        { clientId: second.clientId },
+      ),
+    ).rejects.toBeInstanceOf(InvalidClientIdError);
+
+    await bridge.shutdown();
+  });
+
+  it('detachClient preserves an echoed client id owned by an earlier attach', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      clientId: first.clientId,
+    });
+    expect(second.clientId).toBe(first.clientId);
+
+    await bridge.detachClient(second.sessionId, second.clientId);
+
+    await expect(
+      bridge.sendPrompt(
+        first.sessionId,
+        {
+          sessionId: first.sessionId,
+          prompt: [{ type: 'text', text: 'still valid' }],
+        },
+        undefined,
+        { clientId: first.clientId },
+      ),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+    await bridge.shutdown();
+  });
+
+  it('loads an existing ACP session and registers it for daemon routes', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: () => ({ configOptions: [] }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-1',
+      workspaceCwd: WS_A,
+    });
+
+    expect(loaded).toEqual({
+      sessionId: 'persisted-1',
+      workspaceCwd: WS_A,
+      attached: false,
+      clientId: expect.stringMatching(/^client_/),
+      state: { configOptions: [] },
+    });
+    expect(handles[0]?.agent.loadSessionCalls).toEqual([
+      { sessionId: 'persisted-1', cwd: WS_A, mcpServers: [] },
+    ]);
+    expect(bridge.sessionCount).toBe(1);
+
+    await expect(
+      bridge.sendPrompt('persisted-1', {
+        sessionId: 'ignored',
+        prompt: [{ type: 'text', text: 'hi' }],
+      }),
+    ).resolves.toEqual({ stopReason: 'end_turn' });
+    expect(handles[0]?.agent.promptCalls[0]?.sessionId).toBe('persisted-1');
+
+    await bridge.shutdown();
+  });
+
+  it('buffers load replay events until the restored session is registered', async () => {
+    let capturedConn: AgentSideConnection | undefined;
+    const factory: ChannelFactory = async () => {
+      const { clientStream, agentStream } = createInMemoryChannel();
+      const fakeAgent = new FakeAgent({
+        loadSessionImpl: async (p) => {
+          await capturedConn!.sessionUpdate({
+            sessionId: p.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: 'replayed' },
+            },
+          });
+          return {};
+        },
+      });
+      capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+      return {
+        stream: clientStream,
+        exited: new Promise<
+          | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+          | undefined
+        >(() => {}),
+        kill: async () => {},
+        killSync: () => {},
+      };
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-history',
+      workspaceCwd: WS_A,
+    });
+    const iterator = bridge
+      .subscribeEvents(loaded.sessionId, { lastEventId: 0 })
+      [Symbol.asyncIterator]();
+    let timer: NodeJS.Timeout | undefined;
+    const next = await Promise.race([
+      iterator.next(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('timed out waiting for replay event')),
+          500,
+        );
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+
+    expect(next.value.type).toBe('session_update');
+    expect(next.value.data).toMatchObject({
+      sessionId: 'persisted-history',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { text: 'replayed' },
+      },
+    });
+
+    await iterator.return?.();
+    await bridge.shutdown();
+  });
+
+  it('resumes an existing ACP session without calling session/load', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        resumeSessionImpl: () => ({ modes: null }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const resumed = await bridge.resumeSession({
+      sessionId: 'persisted-2',
+      workspaceCwd: WS_A,
+    });
+
+    expect(resumed).toEqual({
+      sessionId: 'persisted-2',
+      workspaceCwd: WS_A,
+      attached: false,
+      clientId: expect.stringMatching(/^client_/),
+      state: { modes: null },
+    });
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toEqual([
+      { sessionId: 'persisted-2', cwd: WS_A, mcpServers: [] },
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('attaches to an already live session and returns the cached restore state', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        // `_meta` is the permissive escape hatch on the ACP response
+        // schema — any record-shaped payload survives the wire. The
+        // assertions only need the bridge to forward it intact.
+        loadSessionImpl: () => ({ _meta: { tag: 'restored-foo' } }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-3',
+      workspaceCwd: WS_A,
+    });
+    const attached = await bridge.resumeSession({
+      sessionId: 'persisted-3',
+      workspaceCwd: WS_A,
+    });
+
+    expect(loaded.attached).toBe(false);
+    expect(loaded.state).toEqual({ _meta: { tag: 'restored-foo' } });
+    // Late attachers must observe the SAME restore state the original
+    // caller saw — `entry.restoreState` is cached at load time.
+    expect(attached).toEqual({
+      sessionId: 'persisted-3',
+      workspaceCwd: WS_A,
+      attached: true,
+      clientId: expect.stringMatching(/^client_/),
+      state: { _meta: { tag: 'restored-foo' } },
+    });
+    expect(attached.clientId).not.toBe(loaded.clientId);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(1);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
+  it('propagates the original ACP state to coalesced restore waiters', async () => {
+    let releaseLoad: ((value: LoadSessionResponse) => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = resolve;
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const first = bridge.loadSession({
+      sessionId: 'coalesce-state',
+      workspaceCwd: WS_A,
+    });
+    // Wait for the first call to register inFlight before issuing
+    // the second.
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+    const second = bridge.loadSession({
+      sessionId: 'coalesce-state',
+      workspaceCwd: WS_A,
+    });
+
+    releaseLoad!({ _meta: { tag: 'restored-baz' } });
+    const [r1, r2] = await Promise.all([first, second]);
+
+    expect(r1.attached).toBe(false);
+    expect(r1.state).toEqual({ _meta: { tag: 'restored-baz' } });
+    expect(r2.attached).toBe(true);
+    // Coalesced waiter sees the same state, not `{}`.
+    expect(r2.state).toEqual({ _meta: { tag: 'restored-baz' } });
+
+    await bridge.shutdown();
+  });
+
+  it('survives spawn-owner disconnect kill while a coalesced restore is mid-flight', async () => {
+    let releaseLoad: ((value: LoadSessionResponse) => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = resolve;
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const first = bridge.loadSession({
+      sessionId: 'race-target',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    // Second caller coalesces synchronously and reserves the attach.
+    const second = bridge.loadSession({
+      sessionId: 'race-target',
+      workspaceCwd: WS_A,
+    });
+
+    releaseLoad!({});
+    const r1 = await first;
+    expect(r1.attached).toBe(false);
+
+    // First caller "disconnected" — simulate by issuing the same
+    // disconnect-cleanup the route handler would. The
+    // `requireZeroAttaches` guard MUST see B's reserved attach and
+    // skip the kill, otherwise B observes a 404'd sessionId on its
+    // next call.
+    await bridge.killSession(r1.sessionId, { requireZeroAttaches: true });
+
+    // The session must still be alive for B.
+    expect(bridge.sessionCount).toBe(1);
+    const r2 = await second;
+    expect(r2.attached).toBe(true);
+    expect(r2.sessionId).toBe('race-target');
+
+    await bridge.shutdown();
+  });
+
+  it('does not kill the channel when the last live session leaves while a restore is pending', async () => {
+    let releaseLoad: ((value: LoadSessionResponse) => void) | undefined;
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = resolve;
+          }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    // Spawn a regular session first, then kick off a slow restore on
+    // the same channel.
+    const spawned = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const restore = bridge.loadSession({
+      sessionId: 'pending-restore',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    // Kill the only registered session; the channel must NOT die
+    // because pendingRestoreIds is non-empty.
+    await bridge.killSession(spawned.sessionId);
+    expect(handles[0]?.killed).toBe(false);
+
+    // Let the restore finish — it joins the channel as the new
+    // sole session.
+    releaseLoad!({});
+    const restored = await restore;
+    expect(restored.sessionId).toBe('pending-restore');
+    expect(bridge.sessionCount).toBe(1);
+    expect(handles[0]?.killed).toBe(false);
+
+    await bridge.shutdown();
+  });
+
+  it('does not promote a restored session into the omitted-id attach default', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: () => ({}),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    await bridge.loadSession({
+      sessionId: 'persisted-explicit',
+      workspaceCwd: WS_A,
+    });
+    // A subsequent omitted-id `POST /session` (single scope) MUST
+    // create a fresh session rather than silently attaching to the
+    // explicitly restored one.
+    const spawned = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(spawned.sessionId).not.toBe('persisted-explicit');
+    expect(spawned.attached).toBe(false);
+    expect(bridge.sessionCount).toBe(2);
+
+    await bridge.shutdown();
+  });
+
+  it('maps an ACP missing persisted session to SessionNotFoundError', async () => {
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: (p) => {
+          throw RequestError.resourceNotFound(`session:${p.sessionId}`);
+        },
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'missing-persisted',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toMatchObject({
+      name: 'SessionNotFoundError',
+      sessionId: 'missing-persisted',
+    });
+    expect(bridge.sessionCount).toBe(0);
+    expect(handles[0]?.killed).toBe(false);
+
+    await bridge.shutdown();
+  });
+
+  // The `isAcpSessionResourceNotFound` `message`-fallback path can't
+  // be exercised through the FakeAgent end-to-end: the ACP SDK
+  // normalizes non-RequestError throws to `-32603 Internal error`,
+  // so a fake-agent thrown plain Object with `code: -32002` arrives
+  // at the bridge as -32603 with the original message buried under
+  // `data.details`. The fallback covers ACP variants that emit the
+  // URI in `message` directly (without `data.uri`); the primary
+  // `data.uri` path is covered by the test above. The exact-match
+  // tightening (vs. substring) is exercised by inspection.
+
+  it('rejects load while a resume for the same session is in flight', async () => {
+    let releaseResume: (() => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        resumeSessionImpl: () =>
+          new Promise<ResumeSessionResponse>((resolve) => {
+            releaseResume = () => resolve({});
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const resume = bridge.resumeSession({
+      sessionId: 'persisted-race',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseResume; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseResume).toBeDefined();
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'persisted-race',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+    releaseResume?.();
+    await resume;
+    await bridge.shutdown();
+  });
+
+  it('rejects resume while a load for the same session is in flight (mirror of load-on-resume)', async () => {
+    let releaseLoad: (() => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = () => resolve({});
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const load = bridge.loadSession({
+      sessionId: 'persisted-mirror',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    // Resume coalescing onto load would silently subscribe the
+    // resume client to history-replay frames it explicitly opted
+    // out of; it must throw instead.
+    await expect(
+      bridge.resumeSession({
+        sessionId: 'persisted-mirror',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+    releaseLoad?.();
+    await load;
+    await bridge.shutdown();
+  });
+
+  it('does not kill a shared channel when one of multiple pending restores fails', async () => {
+    let releaseGood: (() => void) | undefined;
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: (p) => {
+          if (p.sessionId === 'bad-restore') {
+            throw RequestError.resourceNotFound(`session:${p.sessionId}`);
+          }
+          return new Promise<LoadSessionResponse>((resolve) => {
+            releaseGood = () => resolve({});
+          });
+        },
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const good = bridge.loadSession({
+      sessionId: 'good-restore',
+      workspaceCwd: WS_A,
+    });
+    for (
+      let i = 0;
+      i < 50 && handles[0]?.agent.loadSessionCalls.length !== 1;
+      i++
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(handles[0]?.agent.loadSessionCalls[0]?.sessionId).toBe(
+      'good-restore',
+    );
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'bad-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    expect(handles[0]?.killed).toBe(false);
+
+    releaseGood?.();
+    await expect(good).resolves.toMatchObject({
+      sessionId: 'good-restore',
+      attached: false,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('does not surface an unhandledRejection when the channel exits after a successful restore', async () => {
+    // Regression for the dangling-rejection bug: `transportClosed`
+    // is a fresh `.then(throw)` promise per restore. If `withTimeout`
+    // wins the race, `transportClosed` stays pending and a later
+    // channel exit fires the inner `throw` with no observer attached
+    // — Node 22 logs `unhandledRejection`, and
+    // `--unhandled-rejections=throw` deployments crash the daemon.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({ loadSessionImpl: () => ({}) });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-leak',
+        workspaceCwd: WS_A,
+      });
+      expect(restored.attached).toBe(false);
+      // Now resolve `channel.exited` AFTER the restore promise has
+      // already settled. `transportClosed` was the race-loser, so
+      // its `.then(throw)` fires now. With the `.catch(() => {})`
+      // suppression in place, no `unhandledRejection` is emitted;
+      // without it, the test would observe one.
+      handles[0]!.crash({ exitCode: null, signalCode: null });
+      // Give the rejection a tick to surface if it were unhandled.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      await bridge.shutdown();
+    }
+  });
+
+  it('shutdown awaits in-flight restores before resolving', async () => {
+    // `shutdown()` adds `inFlightRestoreAwaits` to the wait list so
+    // shutting the daemon down doesn't orphan a half-completed
+    // restore. Verify by racing the restore-settled signal against
+    // the shutdown-resolved signal: if shutdown is awaiting the
+    // restore, the restore MUST settle first (or simultaneously
+    // — `Promise.race` ties go to the earlier-registered handler,
+    // which is the restore here).
+    let releaseLoad: (() => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = () => resolve({});
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const restore = bridge.loadSession({
+      sessionId: 'persisted-shutdown',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    const restoreFirst = restore
+      .catch(() => undefined)
+      .then(() => 'restore' as const);
+    const shutdownFirst = bridge.shutdown().then(() => 'shutdown' as const);
+    const winner = await Promise.race([restoreFirst, shutdownFirst]);
+    expect(winner).toBe('restore');
+    // Both must have settled cleanly by the end.
+    await Promise.all([restoreFirst, shutdownFirst]);
   });
 
   it('rejects cross-workspace requests with WorkspaceMismatchError (#3803 §02)', async () => {
@@ -1462,16 +2137,55 @@ describe('createHttpAcpBridge', () => {
       const it = iter[Symbol.asyncIterator]();
       const reqEvt = (await it.next()).value!;
       const requestId = (reqEvt.data as { requestId: string }).requestId;
-      bridge.respondToPermission(requestId, {
-        outcome: { outcome: 'selected', optionId: 'allow' },
-      });
+      bridge.respondToPermission(
+        requestId,
+        {
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+        { clientId: session.clientId },
+      );
 
       const resolvedEvt = (await it.next()).value!;
       expect(resolvedEvt.type).toBe('permission_resolved');
+      expect(resolvedEvt.originatorClientId).toBe(session.clientId);
       expect(resolvedEvt.data).toMatchObject({
         requestId,
         outcome: { outcome: 'selected', optionId: 'allow' },
       });
+
+      subAbort.abort();
+      await bridge.shutdown();
+    });
+
+    it('rejects permission votes with unregistered client ids', async () => {
+      const { bridge, session, conn } = await setupForPermission();
+
+      const subAbort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: subAbort.signal,
+      });
+      void (
+        conn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-1', title: 'x' },
+        options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+      });
+
+      const it = iter[Symbol.asyncIterator]();
+      const reqEvt = (await it.next()).value!;
+      const requestId = (reqEvt.data as { requestId: string }).requestId;
+      expect(() =>
+        bridge.respondToPermission(
+          requestId,
+          {
+            outcome: { outcome: 'selected', optionId: 'allow' },
+          },
+          { clientId: 'client-not-issued' },
+        ),
+      ).toThrow(InvalidClientIdError);
 
       subAbort.abort();
       await bridge.shutdown();
@@ -1485,6 +2199,34 @@ describe('createHttpAcpBridge', () => {
         outcome: { outcome: 'cancelled' },
       });
       expect(accepted).toBe(false);
+      await bridge.shutdown();
+    });
+
+    it('rejects unknown permission votes with unregistered client ids', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.respondToPermission(
+          'does-not-exist',
+          {
+            outcome: { outcome: 'cancelled' },
+          },
+          { clientId: 'client-not-issued' },
+        ),
+      ).toThrow(InvalidClientIdError);
+      expect(
+        bridge.respondToPermission(
+          'does-not-exist',
+          {
+            outcome: { outcome: 'cancelled' },
+          },
+          { clientId: session.clientId },
+        ),
+      ).toBe(false);
+
       await bridge.shutdown();
     });
 
@@ -2685,6 +3427,59 @@ describe('createHttpAcpBridge', () => {
         modelId: 'qwen3-coder',
       });
       abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('stamps model events with the trusted originator client id', async () => {
+      const { bridge, session } = await setup();
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+      await bridge.setSessionModel(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          modelId: 'qwen3-coder',
+        },
+        { clientId: session.clientId },
+      );
+      const it = iter[Symbol.asyncIterator]();
+      const next = await it.next();
+      expect(next.value?.type).toBe('model_switched');
+      expect(next.value?.originatorClientId).toBe(session.clientId);
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('rejects unregistered client ids on session-scoped requests', async () => {
+      const { bridge, session } = await setup();
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.cancelSession(session.sessionId, undefined, {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.setSessionModel(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            modelId: 'qwen3-coder',
+          },
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
       await bridge.shutdown();
     });
 
