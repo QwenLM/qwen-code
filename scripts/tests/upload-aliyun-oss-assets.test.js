@@ -4,8 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseUploadArgs } from '../upload-aliyun-oss-assets.js';
+import { parseUploadArgs, uploadAssets } from '../upload-aliyun-oss-assets.js';
 
 describe('parseUploadArgs', () => {
   it('returns help=true and skips later validation when --help is passed', () => {
@@ -77,4 +80,93 @@ describe('parseUploadArgs', () => {
   it('errors when an option is missing its value', () => {
     expect(() => parseUploadArgs(['--bucket'])).toThrow();
   });
+});
+
+describe('uploadAssets (integration)', () => {
+  function makeOssutilShim(workDir, behavior = 'success') {
+    fs.mkdirSync(workDir, { recursive: true });
+    const ossutilPath = path.join(workDir, 'ossutil');
+    const logPath = path.join(workDir, 'ossutil.log');
+    const successScript = `#!/usr/bin/env bash
+printf '%s\\n' "$@" >> "${logPath}"
+exit 0
+`;
+    const failScript = `#!/usr/bin/env bash
+printf '%s\\n' "$@" >> "${logPath}"
+exit 1
+`;
+    fs.writeFileSync(
+      ossutilPath,
+      behavior === 'fail' ? failScript : successScript,
+    );
+    fs.chmodSync(ossutilPath, 0o755);
+    return { ossutilPath, logPath };
+  }
+
+  it('spawns ossutil with the expected cp arguments per asset', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-'));
+    try {
+      const { logPath } = makeOssutilShim(tmp);
+      const assets = ['a.tar.gz', 'b.zip'].map((name) => {
+        const filePath = path.join(tmp, name);
+        fs.writeFileSync(filePath, name);
+        return filePath;
+      });
+      const configPath = path.join(tmp, '.ossutilconfig');
+      fs.writeFileSync(configPath, '[Credentials]\n');
+
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${tmp}${path.delimiter}${previousPath}`;
+      try {
+        await uploadAssets({
+          assets,
+          bucket: 'qwen-test-bucket',
+          config: configPath,
+          prefix: 'releases/qwen-code/v0.0.0',
+        });
+      } finally {
+        process.env.PATH = previousPath;
+      }
+
+      const log = fs.readFileSync(logPath, 'utf8');
+      expect(log).toContain(
+        `oss://qwen-test-bucket/releases/qwen-code/v0.0.0/a.tar.gz`,
+      );
+      expect(log).toContain(
+        `oss://qwen-test-bucket/releases/qwen-code/v0.0.0/b.zip`,
+      );
+      expect(log).toContain(`-c\n${configPath}`);
+      expect(log).toContain('--acl\npublic-read');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('aggregates failures from ossutil non-zero exits', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-fail-'));
+    try {
+      makeOssutilShim(tmp, 'fail');
+      const assetPath = path.join(tmp, 'asset.tar.gz');
+      fs.writeFileSync(assetPath, 'asset');
+      const configPath = path.join(tmp, '.ossutilconfig');
+      fs.writeFileSync(configPath, '[Credentials]\n');
+
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${tmp}${path.delimiter}${previousPath}`;
+      try {
+        await expect(
+          uploadAssets({
+            assets: [assetPath],
+            bucket: 'qwen-test-bucket',
+            config: configPath,
+            prefix: 'releases/qwen-code/v0.0.0',
+          }),
+        ).rejects.toThrow(/asset uploads failed/);
+      } finally {
+        process.env.PATH = previousPath;
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  }, 30_000);
 });
