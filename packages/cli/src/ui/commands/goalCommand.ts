@@ -55,7 +55,7 @@ const formatTurns = (n: number) => `${n} ${n === 1 ? 'turn' : 'turns'}`;
 function formatTerminalSummary(event: GoalTerminalEvent): string {
   // Mirrors GoalStatusMessage: empty-`/goal` after completion surfaces the
   // most recent terminal event, including the judge's `lastReason` (when
-  // present) so this view matches the inline `Goal achieved / aborted`
+  // present) so this view matches the inline terminal
   // history card.
   const title =
     event.kind === 'achieved'
@@ -115,9 +115,8 @@ export const goalCommand: SlashCommand = {
           `Goal active: ${active.condition} (${turns})${lastReason}`,
         );
       }
-      // No active goal — surface a summary of the most recent terminal goal
-      // for this session. Only achieved / aborted entries flow through
-      // `getLastGoalTerminal`; user-initiated `/goal clear` does not
+      // No active goal — surface a summary of the most recent automatic
+      // terminal goal for this session. User-initiated `/goal clear` does not
       // populate it.
       const last = getLastGoalTerminal(sessionId);
       if (last) {
@@ -133,7 +132,7 @@ export const goalCommand: SlashCommand = {
     // When an active goal exists, drop the Stop hook and emit a `cleared`
     // history sentinel. When no active goal exists, this is a no-op that just
     // returns "No goal set." The cached terminal summary is left intact so a
-    // later empty `/goal` can still show the latest achieved/aborted state.
+    // later empty `/goal` can still show the latest automatic terminal state.
     if (CLEAR_KEYWORDS.has(q.toLowerCase())) {
       const cleared = unregisterGoalHook(config, sessionId);
       if (!cleared) {

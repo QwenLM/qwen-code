@@ -110,6 +110,20 @@ describe('judgeGoal', () => {
     });
   });
 
+  it('ignores impossible=true when the judge also reports ok=true', async () => {
+    const client = makeMockClient({
+      reply: '{"ok": true, "impossible": true, "reason": "tests passed"}',
+    });
+    const config = makeConfig({ client });
+    const verdict = await judgeGoal(config, {
+      condition: 'tests pass',
+      lastAssistantText: 'tests passed',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toEqual({ ok: true, reason: 'tests passed' });
+  });
+
   it('falls back to main model when no fast model is configured', async () => {
     const client = makeMockClient({});
     const config = makeConfig({ client, model: 'big-main' });

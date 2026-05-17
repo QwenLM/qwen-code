@@ -70,6 +70,12 @@ export function __resetActiveGoalStoreForTests(): void {
 // callback; any side effect (e.g. context.ui.addItem) should be guarded.
 // ───────────────────────────────────────────────────────────────────────────
 
+/**
+ * Terminal outcomes for an automatic `/goal` loop:
+ * - `achieved`: the judge found transcript evidence that satisfies the goal.
+ * - `aborted`: the loop stopped at a system safety limit.
+ * - `failed`: the judge found the goal is genuinely impossible this session.
+ */
 export type GoalTerminalKind = 'achieved' | 'aborted' | 'failed';
 
 export interface GoalTerminalEvent {
@@ -119,8 +125,8 @@ export function notifyGoalTerminal(
 // Last-completed-goal cache
 //
 // Empty `/goal` after the active goal is gone should show the most recent
-// actually-finished goal. Only `achieved` and `aborted` qualify (those are
-// the `GoalTerminalKind`s); the user-driven `/goal clear` path emits a
+// actually-finished goal. Automatic terminal states (`achieved`, `aborted`,
+// and `failed`) qualify; the user-driven `/goal clear` path emits a
 // `cleared` history card directly and never flows through this notifier.
 // ───────────────────────────────────────────────────────────────────────────
 

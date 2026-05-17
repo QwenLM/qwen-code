@@ -83,7 +83,7 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
         };
       case 'failed':
         return {
-          prefix: '!',
+          prefix: '✖',
           prefixColor: theme.status.error,
           title: 'Goal could not be achieved',
         };

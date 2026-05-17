@@ -38,6 +38,7 @@ describe('<GoalStatusMessage />', () => {
     );
 
     const output = lastFrame();
+    expect(output).toContain('✖');
     expect(output).toContain('Goal could not be achieved');
     expect(output).toContain('2 turns');
     expect(output).toContain('Goal: merge a nonexistent branch');
