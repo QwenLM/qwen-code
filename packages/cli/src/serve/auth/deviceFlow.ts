@@ -42,16 +42,42 @@ export type DeviceFlowStatus =
   | 'error'
   | 'cancelled';
 
+/**
+ * Terminal error classifications surfaced on `auth_device_flow_failed`.
+ *
+ * RFC 8628 §3.5 defines the upstream error codes for the polling
+ * endpoint; the daemon adds one daemon-internal kind (`persist_failed`)
+ * for the disk-write phase. Keep these mutually exclusive — a
+ * mis-classification (e.g. routing a network error into
+ * `invalid_grant`) drives operators toward the wrong remediation.
+ */
 export type DeviceFlowErrorKind =
+  /** RFC 8628: device_code has aged out (`expires_in` elapsed
+   *  upstream) before user authorization. Recovery: re-issue
+   *  `client.auth.start`; daemon also surfaces this kind on its own
+   *  time-based sweep when the entry's `expiresAt` passes. */
   | 'expired_token'
+  /** RFC 8628: user explicitly rejected the authorization at the
+   *  IdP page. Recovery: re-issue with consent, or surface the
+   *  refusal back to the human. */
   | 'access_denied'
+  /** RFC 8628: protocol-level violation — `device_code` /
+   *  `client_id` / PKCE verifier didn't validate. Treat as a
+   *  programmer error in the daemon's flow construction (the user
+   *  can't fix this themselves). */
   | 'invalid_grant'
+  /** Catch-all for IdP-side failures that don't map to an RFC 8628
+   *  code: network errors, malformed JSON, 5xx responses, unknown
+   *  error codes. Distinguished from `persist_failed` by the LOCATION
+   *  of the failure (upstream HTTP vs daemon-local disk). */
   | 'upstream_error'
-  // Disk-write / `provider.persist()` failure path. Distinguished from
-  // `upstream_error` because it's NOT an IdP fault — the token exchange
-  // succeeded; the daemon couldn't durably store the credentials
-  // (EACCES, EROFS, ENOSPC, etc.). Recovery: fix permissions and retry
-  // `client.auth.start`.
+  /** Daemon-local: the IdP exchange succeeded, but the daemon could
+   *  not durably store the credentials (EACCES, EROFS, ENOSPC, etc.).
+   *  Distinct from `upstream_error` so operators can route remediation
+   *  to disk / permissions rather than chasing an IdP outage. The
+   *  `device_code` was consumed upstream, so the user must
+   *  `client.auth.start` again after fixing the underlying disk
+   *  condition. */
   | 'persist_failed';
 
 /**
@@ -119,8 +145,15 @@ export function brandSecret<T extends string>(value: T): BrandedSecret<T> {
 export function revealSecret<T extends string>(secret: BrandedSecret<T>): T {
   const value = SECRETS.get(secret);
   if (value === undefined) {
+    // The earlier message claimed "secret has been GC-evicted", but a
+    // `WeakMap` only evicts entries when the KEY object becomes
+    // unreachable — and if that happened, the caller couldn't hold a
+    // reference to pass in here. So the only path to `undefined` is
+    // an argument that was never registered (e.g. forged structural
+    // shape, mistakenly serialized + reparsed object that retained
+    // the public surface but lost the WeakMap binding).
     throw new Error(
-      'revealSecret: argument is not a BrandedSecret (or secret has been GC-evicted)',
+      'revealSecret: argument is not a BrandedSecret (was never registered, or its WeakMap binding was lost via serialization)',
     );
   }
   return value as T;
@@ -737,9 +770,15 @@ export class DeviceFlowRegistry {
    *
    * On a successful transition:
    *   1. clears any pending poll timer
-   *   2. wipes the secret material so a stale timer firing late cannot
-   *      leak the device_code (defense in depth — the timer is also
-   *      cleared, but registry state may outlive the timer reference)
+   *   2. wipes the secret material from `entry.deviceCode` /
+   *      `entry.pkceVerifier`. The PRIMARY guard against secret leaks
+   *      is the `entry.status !== 'pending'` check at the top of
+   *      `runPollTick` — a stale timer that managed to fire post-clear
+   *      bails out before touching the entry. Secret-clearing here is
+   *      DEFENSE IN DEPTH: even if a future refactor weakens the
+   *      status guard, the registry's in-memory state can no longer
+   *      hand out the upstream `device_code` to a late-arriving
+   *      logger / serializer.
    *   3. records `terminalAt` for the sweeper to evict after grace
    *   4. removes the per-provider singleton index so a new POST creates
    *      a fresh flow instead of taking over the terminal one

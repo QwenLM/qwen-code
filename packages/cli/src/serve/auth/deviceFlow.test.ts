@@ -107,6 +107,11 @@ class FakeProvider implements DeviceFlowProvider {
   startError: Error | undefined;
   expiresIn = 600; // 10 minutes
   interval: number | undefined = undefined;
+  /** Most recent `opts.signal` observed by `poll`. Test hook for the
+   *  abort-mid-poll assertion: after `registry.cancel(...)`, this
+   *  signal MUST report `.aborted === true` so the upstream HTTP
+   *  socket can be torn down. */
+  lastPollSignal: AbortSignal | undefined;
 
   async start(): Promise<{
     deviceCode: ReturnType<typeof brandSecret>;
@@ -135,6 +140,7 @@ class FakeProvider implements DeviceFlowProvider {
     opts: { signal: AbortSignal },
   ): Promise<DeviceFlowPollResult> {
     this.pollCount += 1;
+    this.lastPollSignal = opts.signal;
     if (opts.signal.aborted) return { kind: 'pending' };
     if (this.pollScript.length === 0) {
       return { kind: 'pending' };
@@ -515,6 +521,51 @@ describe('DeviceFlowRegistry — polling state machine', () => {
         expect(src).not.toMatch(pattern);
       }
     }
+  });
+});
+
+describe('DeviceFlowRegistry — abort propagation to provider.poll', () => {
+  it('cancel() aborts the signal observed by the in-flight provider.poll', async () => {
+    const provider = new FakeProvider();
+    const built = buildRegistry(provider);
+    const { registry, env } = built;
+    try {
+      const { view: started } = await registry.start({
+        providerId: 'qwen-oauth',
+      });
+      // Drive one polling tick so the provider records its signal.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      // Two microtask flushes so the poll handler resolves and
+      // `lastPollSignal` is populated.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(provider.lastPollSignal).toBeDefined();
+      expect(provider.lastPollSignal!.aborted).toBe(false);
+
+      // Cancel the flow — registry should abort the entry's
+      // cancelController, which is the SAME signal the provider's
+      // `poll` saw. A real Qwen provider passes this to `fetch`, so
+      // an in-flight HTTP socket gets torn down immediately.
+      registry.cancel(started.deviceFlowId);
+      expect(provider.lastPollSignal!.aborted).toBe(true);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('dispose() also aborts the signal observed by every active flow', async () => {
+    const provider = new FakeProvider();
+    const built = buildRegistry(provider);
+    const { registry, env } = built;
+    await registry.start({ providerId: 'qwen-oauth' });
+    env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+    env.scheduler.flushDue(env.clock.now);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(provider.lastPollSignal!.aborted).toBe(false);
+    registry.dispose();
+    expect(provider.lastPollSignal!.aborted).toBe(true);
   });
 });
 

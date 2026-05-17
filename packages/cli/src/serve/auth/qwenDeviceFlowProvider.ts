@@ -111,16 +111,19 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
     }
     let response: Awaited<ReturnType<IQwenOAuth2Client['pollDeviceToken']>>;
     try {
-      // The class's `pollDeviceToken` doesn't accept a signal yet — see
-      // `qwenOAuth2.ts:333`. We honor the signal at the boundary
-      // (abort check before the call, abort check after) so that
-      // dispose / cancel during a slow IdP request still results in
-      // the registry suppressing the resolved frame. Threading signal
-      // INTO `pollDeviceToken`'s `fetch` is a Wave 5 follow-up.
-      response = await this.client.pollDeviceToken({
-        device_code: revealSecret(state.deviceCode),
-        code_verifier: revealSecret(state.pkceVerifier),
-      });
+      // Pass `signal` through to the IdP fetch so cancel / dispose
+      // during a slow upstream response aborts the in-flight socket
+      // immediately instead of waiting for the IdP's own timeout.
+      // The post-await abort check is still useful: an early cancel
+      // can land before fetch even starts, in which case the abort
+      // throws synchronously into our catch block below.
+      response = await this.client.pollDeviceToken(
+        {
+          device_code: revealSecret(state.deviceCode),
+          code_verifier: revealSecret(state.pkceVerifier),
+        },
+        { signal: opts.signal },
+      );
     } catch (err: unknown) {
       // The class throws on non-OAuth error responses (network, malformed
       // upstream payloads) and on RFC 8628 terminal errors that aren't

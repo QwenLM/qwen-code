@@ -8,6 +8,18 @@ import { DaemonHttpError, type DaemonClient } from './DaemonClient.js';
 import type { DaemonAuthProviderId, DaemonDeviceFlowState } from './types.js';
 
 /**
+ * Grace period added past the daemon-stated `expiresAt` before
+ * `awaitCompletion` gives up. Covers (a) clock skew between SDK and
+ * daemon, (b) the daemon's own ~30s sweeper interval (so we don't
+ * bail one tick before the daemon would surface a synthetic `expired`
+ * terminal), and (c) per-poll network latency. Matches the registry's
+ * `DEVICE_FLOW_SWEEP_INTERVAL_MS` so an `awaitCompletion` caller
+ * observes the daemon's authoritative final state rather than timing
+ * out client-side ahead of the sweeper.
+ */
+export const DEVICE_FLOW_EXPIRY_GRACE_MS = 30_000;
+
+/**
  * High-level convenience wrapper around the four `client.*DeviceFlow*` HTTP
  * helpers. SDK users should normally write:
  *
@@ -55,8 +67,13 @@ export interface AwaitCompletionOptions {
    *  daemon-supplied `intervalMs` from `start(...)` and respects bumps
    *  from `slow_down`. */
   pollOverrideMs?: number;
-  /** Hard ceiling on `awaitCompletion`'s wall-clock duration. Defaults to
-   *  the daemon's `expiresAt - Date.now()`. */
+  /** Hard ceiling on `awaitCompletion`'s wall-clock duration, in ms.
+   *  When omitted, `awaitCompletion` runs until the daemon-stated
+   *  `expiresAt` plus `DEVICE_FLOW_EXPIRY_GRACE_MS` (default 30s),
+   *  which lets the daemon's own sweeper surface the authoritative
+   *  terminal state instead of timing out client-side. Set explicitly
+   *  to clamp the wait shorter; values past `expiresAt` will still see
+   *  the daemon return `expired` once its sweeper fires. */
   timeoutMs?: number;
 }
 
@@ -119,12 +136,13 @@ async function awaitCompletion(
   clientId: string | undefined,
   opts: AwaitCompletionOptions,
 ): Promise<DaemonDeviceFlowState> {
-  // The SSE stream is workspace-scoped today and only flows through
-  // session subscriptions; without a session id we have no stream to
-  // attach to. PR 21 §3 ships device-flow events on the session bus
-  // fan-out for now (PR 16's `bridge.publishWorkspaceEvent` lands the
-  // shared workspace topic). Until then, GET polling is the universal
-  // path.
+  // Workspace-scoped events fan out through whatever session buses
+  // happen to be live, but `awaitCompletion` is workspace-level (no
+  // session id) — so attaching to a single SSE stream isn't a stable
+  // contract here. GET polling against the daemon's authoritative
+  // device-flow state is the universal path; `auth_device_flow_*`
+  // events remain a real-time hint for clients that ARE already
+  // subscribed to a session stream.
   return await pollUntilTerminal(client, start, clientId, opts);
 }
 
@@ -141,7 +159,7 @@ async function pollUntilTerminal(
   const signal = opts.signal;
   const ceiling = opts.timeoutMs
     ? Date.now() + opts.timeoutMs
-    : start.expiresAt + 30_000;
+    : start.expiresAt + DEVICE_FLOW_EXPIRY_GRACE_MS;
   let interval = Math.max(
     1_000,
     opts.pollOverrideMs ?? start.intervalMs ?? 5_000,

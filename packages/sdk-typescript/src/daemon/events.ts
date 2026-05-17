@@ -706,9 +706,11 @@ export interface DaemonDeviceFlowReducerState {
   hint?: string;
   /** Most recent `intervalMs` reported by `auth_device_flow_throttled`. */
   intervalMs?: number;
-  /** Daemon-clock epoch ms, set on `started` and refreshed when the same
-   *  flow's later events arrive. */
-  lastSeenAt: number;
+  /** Most recent SSE event id observed for this flow (NOT a wall-clock
+   *  timestamp). Used as a monotonic counter so out-of-order delivery
+   *  doesn't let a stale frame overwrite a newer one. `0` if the
+   *  underlying envelope omitted `id` (synthetic / terminal frames). */
+  lastSeenEventId: number;
   /** Set on `authorized` to the credential's expiry, when known. */
   authorizedExpiresAt?: number;
   /** Best-effort non-PII account label echoed from `authorized`. */
@@ -757,7 +759,8 @@ export function reduceDaemonAuthEvent(
           [providerId]: {
             deviceFlowId: event.data.deviceFlowId,
             status: 'pending',
-            lastSeenAt: rawEvent.id ?? state.flows[providerId]?.lastSeenAt ?? 0,
+            lastSeenEventId:
+              rawEvent.id ?? state.flows[providerId]?.lastSeenEventId ?? 0,
           },
         },
       };
@@ -769,7 +772,7 @@ export function reduceDaemonAuthEvent(
         (flow) => ({
           ...flow,
           intervalMs: event.data.intervalMs,
-          lastSeenAt: rawEvent.id ?? flow.lastSeenAt,
+          lastSeenEventId: rawEvent.id ?? flow.lastSeenEventId,
         }),
       );
       return updated ?? state;
@@ -786,7 +789,7 @@ export function reduceDaemonAuthEvent(
         authorizedExpiresAt: event.data.expiresAt,
         accountAlias: event.data.accountAlias,
         errorKind: undefined,
-        lastSeenAt: rawEvent.id ?? existing.lastSeenAt,
+        lastSeenEventId: rawEvent.id ?? existing.lastSeenEventId,
       };
       return { flows: { ...state.flows, [providerId]: next } };
     }
@@ -807,7 +810,7 @@ export function reduceDaemonAuthEvent(
           status: 'error',
           errorKind: event.data.errorKind,
           hint: event.data.hint,
-          lastSeenAt: rawEvent.id ?? flow.lastSeenAt,
+          lastSeenEventId: rawEvent.id ?? flow.lastSeenEventId,
         }),
       );
       return updated ?? state;
@@ -819,7 +822,7 @@ export function reduceDaemonAuthEvent(
         (flow) => ({
           ...flow,
           status: 'cancelled',
-          lastSeenAt: rawEvent.id ?? flow.lastSeenAt,
+          lastSeenEventId: rawEvent.id ?? flow.lastSeenEventId,
         }),
       );
       return updated ?? state;

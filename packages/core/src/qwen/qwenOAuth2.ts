@@ -242,10 +242,13 @@ export interface IQwenOAuth2Client {
     code_challenge: string;
     code_challenge_method: string;
   }): Promise<DeviceAuthorizationResponse>;
-  pollDeviceToken(options: {
-    device_code: string;
-    code_verifier: string;
-  }): Promise<DeviceTokenResponse>;
+  pollDeviceToken(
+    options: {
+      device_code: string;
+      code_verifier: string;
+    },
+    fetchOpts?: { signal?: AbortSignal },
+  ): Promise<DeviceTokenResponse>;
   refreshAccessToken(): Promise<TokenRefreshResponse>;
 }
 
@@ -330,10 +333,13 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
     return result;
   }
 
-  async pollDeviceToken(options: {
-    device_code: string;
-    code_verifier: string;
-  }): Promise<DeviceTokenResponse> {
+  async pollDeviceToken(
+    options: {
+      device_code: string;
+      code_verifier: string;
+    },
+    fetchOpts?: { signal?: AbortSignal },
+  ): Promise<DeviceTokenResponse> {
     const bodyData = {
       grant_type: QWEN_OAUTH_GRANT_TYPE,
       client_id: QWEN_OAUTH_CLIENT_ID,
@@ -348,6 +354,11 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
         Accept: 'application/json',
       },
       body: objectToUrlEncoded(bodyData),
+      // PR #4255 — daemon device-flow registry passes its per-entry
+      // `cancelController.signal` so cancel() / dispose() during a
+      // slow IdP response actually aborts the in-flight socket
+      // instead of waiting for the upstream timeout.
+      ...(fetchOpts?.signal ? { signal: fetchOpts.signal } : {}),
     });
 
     if (!response.ok) {
@@ -989,18 +1000,50 @@ export async function cacheQwenCredentials(credentials: QwenCredentials) {
     await fs.writeFile(filePath, credString, {
       mode: QWEN_CREDENTIAL_FILE_MODE,
     });
+    // `fs.writeFile`'s `mode` only applies when the file is CREATED; an
+    // existing `oauth_creds.json` written under a broader umask (or by
+    // earlier code that didn't pass `mode`) keeps its old permissions.
+    // Explicit `chmod` after every write tightens it on existing files
+    // so upgrades actually fix the insecure-permissions case.
+    try {
+      await fs.chmod(filePath, QWEN_CREDENTIAL_FILE_MODE);
+    } catch (chmodErr) {
+      // chmod is a no-op on some Windows file systems and `EPERM`s
+      // otherwise. Surface as a warning rather than silently dropping
+      // the invariant — operators on hardened/exotic FSes need a
+      // breadcrumb if `oauth_creds.json` retains a wider mode.
+      debugLogger.warn(
+        `cacheQwenCredentials: chmod 0o${QWEN_CREDENTIAL_FILE_MODE.toString(
+          8,
+        )} on ${filePath} failed: ${
+          chmodErr instanceof Error ? chmodErr.message : String(chmodErr)
+        }`,
+      );
+    }
     // SharedTokenManager throttles file checks and serves an in-memory cache;
     // without an explicit invalidation a follow-up `getValidCredentials` in
     // the same process can stay on the previous (often empty) cache and
     // re-trigger device auth despite the just-written file. The original
-    // device-flow site at L820+L829 paired write+clear; folding the clear
-    // here keeps every caller (PR 21 daemon device-flow registry included)
+    // device-flow site (L820+L829) paired write+clear; folding the clear
+    // here keeps every caller (#4255 daemon device-flow registry included)
     // correct without re-pairing the call.
     try {
       SharedTokenManager.getInstance().clearCache();
-    } catch {
-      // Best-effort: unit tests sometimes stub SharedTokenManager with a
-      // minimal shape; cache invalidation is non-critical to the write.
+    } catch (clearErr) {
+      // In production, a failed cache clear means subsequent
+      // `getValidCredentials` reads in the same process may serve
+      // stale (pre-write) credentials until the SharedTokenManager
+      // mtime watcher catches up. That's a recoverable degradation
+      // (worst case: device auth re-prompts), but the silent swallow
+      // it used to be made the symptom invisible. Warn so logs show
+      // it. Unit tests stubbing `SharedTokenManager.getInstance()`
+      // with a minimal shape will also flow through here — acceptable
+      // noise for the production-visibility win.
+      debugLogger.warn(
+        `cacheQwenCredentials: SharedTokenManager.clearCache failed; in-process callers may serve stale credentials until the next mtime poll: ${
+          clearErr instanceof Error ? clearErr.message : String(clearErr)
+        }`,
+      );
     }
   } catch (error: unknown) {
     // Handle file system errors (e.g., EACCES permission denied)
