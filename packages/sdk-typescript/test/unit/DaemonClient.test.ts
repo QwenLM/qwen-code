@@ -1456,6 +1456,34 @@ describe('DaemonClient', () => {
       );
     });
 
+    it('updateWorkspaceAgent surfaces the daemon `changed` flag on the typed result', async () => {
+      // The route emits `changed: false` on no-op updates so adapters
+      // can suppress redundant cache invalidation. The SDK type
+      // exposes the field as optional so typed callers can branch.
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          ok: true,
+          agent: {
+            kind: 'agent',
+            name: 'x',
+            description: 'd',
+            level: 'project',
+            isBuiltin: false,
+            hasTools: false,
+            systemPrompt: 'p',
+          },
+          changed: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.updateWorkspaceAgent('x', {
+        description: 'd',
+      });
+      expect(result.changed).toBe(false);
+      expect(result.ok).toBe(true);
+      expect(result.agent.name).toBe('x');
+    });
+
     it('deleteWorkspaceAgent treats 204 as success and only swallows structured 404', async () => {
       // 204 → resolves silently
       {

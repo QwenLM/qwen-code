@@ -434,6 +434,18 @@ export interface DaemonUpdateAgentRequest {
 export interface DaemonAgentMutationResult {
   ok: true;
   agent: DaemonWorkspaceAgentDetail;
+  /**
+   * `true` when the daemon actually rewrote the agent definition;
+   * `false` when the request was a no-op (every supplied field
+   * already matched the existing record). The update route emits
+   * the field on every response (introduced alongside the no-op
+   * short-circuit in PR 16); create responses currently omit it
+   * because every successful create is a write — typed consumers
+   * should treat `undefined` as `true` (the legacy contract). This
+   * mirrors `DaemonWriteMemoryResult.changed`. Optional at the type
+   * level for forward-compat with daemons that predate the field.
+   */
+  changed?: boolean;
 }
 
 export interface DaemonSessionContextStatus {
