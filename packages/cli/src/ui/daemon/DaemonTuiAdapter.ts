@@ -208,6 +208,47 @@ function formatToolResultDisplay(
   }
 }
 
+function formatToolContentText(value: unknown): string | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const parts = value
+    .map((item) => {
+      if (!isRecord(item)) {
+        return undefined;
+      }
+      const content = item['content'];
+      if (isRecord(content)) {
+        return getString(content['text']);
+      }
+      return getString(item['text']);
+    })
+    .filter((part): part is string => part !== undefined && part.length > 0);
+  return parts.length > 0 ? parts.join('\n') : undefined;
+}
+
+function terminalUpdates(
+  event: DaemonTuiEvent,
+  reason: string,
+): DaemonTuiUpdate[] {
+  const sanitizedReason = sanitizeReason(reason);
+  return [
+    {
+      type: 'disconnected',
+      reason: sanitizedReason,
+      daemonEventId: event.id,
+    },
+    {
+      type: 'history',
+      item: {
+        type: 'error',
+        text: `Daemon session disconnected: ${sanitizedReason}`,
+      },
+      daemonEventId: event.id,
+    },
+  ];
+}
+
 function toolUpdateToHistoryItem(
   update: Record<string, unknown>,
   state?: DaemonTuiReducerState,
@@ -220,12 +261,13 @@ function toolUpdateToHistoryItem(
   const title = getString(update['title']);
   const kind = getString(update['kind']);
   const rawOutput = formatToolResultDisplay(update['rawOutput']);
+  const contentOutput = formatToolContentText(update['content']);
   const previous = state?.toolCallsById.get(toolCallId);
   const tool: IndividualToolCallDisplay = {
     callId: toolCallId,
     name: kind ?? title ?? previous?.name ?? toolCallId,
     description: title ?? kind ?? previous?.description ?? toolCallId,
-    resultDisplay: rawOutput ?? previous?.resultDisplay,
+    resultDisplay: rawOutput ?? contentOutput ?? previous?.resultDisplay,
     status:
       update['status'] === undefined
         ? (previous?.status ?? ToolCallStatus.Pending)
@@ -367,22 +409,27 @@ export function reduceDaemonEventToTuiUpdates(
     }
 
     case 'session_died': {
-      const reason = sanitizeReason(
+      const reason =
         isRecord(event.data) && typeof event.data['reason'] === 'string'
           ? event.data['reason']
-          : 'session_died',
-      );
-      return [
-        { type: 'disconnected', reason, daemonEventId: event.id },
-        {
-          type: 'history',
-          item: {
-            type: 'error',
-            text: `Daemon session disconnected: ${reason}`,
-          },
-          daemonEventId: event.id,
-        },
-      ];
+          : 'session_died';
+      return terminalUpdates(event, reason);
+    }
+
+    case 'client_evicted': {
+      const reason =
+        isRecord(event.data) && typeof event.data['reason'] === 'string'
+          ? event.data['reason']
+          : 'client_evicted';
+      return terminalUpdates(event, reason);
+    }
+
+    case 'stream_error': {
+      const reason =
+        isRecord(event.data) && typeof event.data['error'] === 'string'
+          ? event.data['error']
+          : 'stream_error';
+      return terminalUpdates(event, reason);
     }
 
     default:

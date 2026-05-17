@@ -249,6 +249,44 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         daemonEventId: 5,
       },
     ]);
+
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 6,
+        v: 1,
+        type: 'client_evicted',
+        data: { reason: 'queue_overflow' },
+      }),
+    ).toEqual([
+      { type: 'disconnected', reason: 'queue_overflow', daemonEventId: 6 },
+      {
+        type: 'history',
+        item: {
+          type: 'error',
+          text: 'Daemon session disconnected: queue_overflow',
+        },
+        daemonEventId: 6,
+      },
+    ]);
+
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 7,
+        v: 1,
+        type: 'stream_error',
+        data: { error: '\x1b[31mstream failed\x1b[0m' },
+      }),
+    ).toEqual([
+      { type: 'disconnected', reason: 'stream failed', daemonEventId: 7 },
+      {
+        type: 'history',
+        item: {
+          type: 'error',
+          text: 'Daemon session disconnected: stream failed',
+        },
+        daemonEventId: 7,
+      },
+    ]);
   });
 
   it('accumulates tool updates and preserves structured result displays', () => {
@@ -351,6 +389,43 @@ describe('reduceDaemonEventToTuiUpdates', () => {
           tools: [
             { callId: 'tool-1' },
             { callId: 'tool-2', status: ToolCallStatus.Error },
+          ],
+        },
+      },
+    ]);
+
+    expect(
+      reduceDaemonEventToTuiUpdates(
+        {
+          id: 4,
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'session-1',
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tool-3',
+              kind: 'shell',
+              status: 'failed',
+              content: [{ content: { text: 'command failed' } }],
+            },
+          },
+        },
+        state,
+      ),
+    ).toMatchObject([
+      {
+        type: 'tool_group_update',
+        item: {
+          type: 'tool_group',
+          tools: [
+            { callId: 'tool-1' },
+            { callId: 'tool-2' },
+            {
+              callId: 'tool-3',
+              status: ToolCallStatus.Error,
+              resultDisplay: 'command failed',
+            },
           ],
         },
       },
