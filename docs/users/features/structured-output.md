@@ -116,10 +116,10 @@ decidable cases). When in doubt it defers to Ajv at runtime.
 >
 > ```jsonc
 > // Rejected:
-> { "$ref": "#/$defs/MyObj", "$defs": { … } }
+> { "$ref": "#/$defs/MyObj", "$defs": { "MyObj": { "type": "object", "properties": { "name": { "type": "string" } } } } }
 >
 > // Accepted (root accepts objects via the allOf branch):
-> { "allOf": [{ "$ref": "#/$defs/MyObj" }], "$defs": { … } }
+> { "allOf": [{ "$ref": "#/$defs/MyObj" }], "$defs": { "MyObj": { "type": "object", "properties": { "name": { "type": "string" } } } } }
 > ```
 >
 > `$ref` inside `anyOf` / `oneOf` / `allOf` is deferred to Ajv at
@@ -304,5 +304,6 @@ fi
 
 - [Headless Mode](headless.md) — the `-p`-based flow `--json-schema`
   builds on.
-- [Dual Output](dual-output.md) — when you want both the TUI and a
-  structured JSON-event sidecar for the same run.
+- [Dual Output](dual-output.md) — records a JSON-event sidecar
+  alongside the TUI (a different approach to machine-readable output;
+  does not require `--json-schema`).

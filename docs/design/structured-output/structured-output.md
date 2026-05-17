@@ -20,10 +20,11 @@ When `--json-schema` is set, `Config.createToolRegistry` registers a
 synthetic `structured_output` tool
 ([`syntheticOutput.ts`](../../../packages/core/src/tools/syntheticOutput.ts)).
 Its `parametersJsonSchema` is exactly the schema the user passed; its
-`execute()` returns a stop-message `llmContent`. The function-calling
-API already validates tool args against `parametersJsonSchema`, so
-"the model returned an answer conforming to the schema" reduces to
-"the model successfully called `structured_output`."
+`execute()` returns a stop-message `llmContent`. The tool-call
+infrastructure already validates args against `parametersJsonSchema`
+client-side (via Ajv in `BaseDeclarativeTool.build()`), so "the model
+returned an answer conforming to the schema" reduces to "the model
+successfully called `structured_output`."
 
 Three properties fall out of this for free:
 
@@ -35,8 +36,8 @@ Three properties fall out of this for free:
    does. The model sees the Ajv message and can correct in the next
    turn.
 3. **Provider-agnostic.** Gemini, OpenAI, and Anthropic all serialize
-   tool param schemas the same way; the synthetic tool plugs into all
-   three.
+   tool param schemas the same way (via the `DeclarativeTool`
+   abstraction); the synthetic tool plugs into all three.
 
 The tool is registered with `alwaysLoad: true` so the ToolSearch
 on-demand-loading infrastructure (introduced in #3589 — keeps the
@@ -108,9 +109,10 @@ needs whole-schema satisfiability analysis to Ajv at runtime.
   is narrow because the flag is a CLI argument, not a network input).
 
 The `maxSessionTurns` exit path appends a `--json-schema`-specific
-hint pointing users at the three common stuck-run causes (schema
-unsatisfiable / tool denied / model never called) so the runtime
-fallthrough has user-visible diagnostics.
+hint pointing users at the common stuck-run symptom (model never
+called `structured_output`) and its two likely causes (tool denied
+via permissions / schema unsatisfiable) so the runtime fallthrough
+has user-visible diagnostics.
 
 ## Runtime: turn dispatch
 
