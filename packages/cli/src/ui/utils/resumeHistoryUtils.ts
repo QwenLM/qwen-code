@@ -493,7 +493,7 @@ export function buildResumedHistoryItems(
  * `display.suppressOnRestore` so the rendering layer skips them while
  * the canonical history (used by /rewind turn mapping) is preserved.
  */
-export function applyResumeDisplayPolicy(
+function applyResumeDisplayPolicy(
   items: HistoryItem[],
   options: { collapseOnResume?: boolean },
 ): HistoryItem[] {
@@ -508,7 +508,7 @@ export function applyResumeDisplayPolicy(
  * Creates the summary INFO item shown when resume-time collapse suppresses
  * the transcript display.
  */
-export function createHistoryCollapseSummaryItem(
+function createHistoryCollapseSummaryItem(
   messageCount: number,
 ): HistoryItemInfo & { display: { kind: 'collapse-summary' } } {
   return {
@@ -533,7 +533,11 @@ export function applyCollapsePolicyAndSummary(
   });
 
   if (collapseOnResume && rawItems.length > 0) {
-    const nextId = Math.max(...rawItems.map((i) => i.id)) + 1;
+    let maxId = 0;
+    for (const item of rawItems) {
+      if (item.id > maxId) maxId = item.id;
+    }
+    const nextId = maxId + 1;
     const summaryHistoryItem: HistoryItem = {
       id: nextId,
       ...createHistoryCollapseSummaryItem(rawItems.length),

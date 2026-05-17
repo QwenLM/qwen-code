@@ -646,7 +646,7 @@ export const useSlashCommandProcessor = (
                   };
                 case 'message':
                   if (result.messageType === 'info') {
-                    if (commandToExecute.name !== 'history') {
+                    if (resolvedCommandPath[0] !== 'history') {
                       addMessage({
                         type: MessageType.INFO,
                         content: result.content,
