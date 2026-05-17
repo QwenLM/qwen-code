@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   Storage,
+  WorkspaceMemoryFileTooLargeError,
   getAllGeminiMdFilenames,
   writeWorkspaceContextFile,
 } from '@qwen-code/qwen-code-core';
@@ -191,14 +192,51 @@ export function mountWorkspaceMemoryRoutes(
         }
         res.status(200).json(responseBody);
       } catch (err) {
+        // 413 + structured fields for the "memory file is past the
+        // safe-append cap" case so callers can tell pathological
+        // file size apart from generic file errors. The helper
+        // refuses to pull >16 MB into memory on append; clients
+        // either trim the file or switch to mode=replace.
+        if (err instanceof WorkspaceMemoryFileTooLargeError) {
+          writeStderrLine(
+            `qwen serve: POST /workspace/memory refused — existing file ` +
+              `${err.filePath} is ${err.bytes} bytes (cap ${err.limit})`,
+          );
+          res.status(413).json({
+            error: err.message,
+            code: 'memory_file_too_large',
+            scope,
+            mode,
+            filePath: err.filePath,
+            bytes: err.bytes,
+            limit: err.limit,
+          });
+          return;
+        }
         writeStderrLine(
           `qwen serve: POST /workspace/memory failed (scope=${scope} mode=${mode}): ${
             err instanceof Error ? (err.stack ?? err.message) : String(err)
           }`,
         );
+        // Surface enough context for callers to debug without
+        // leaking the stack trace. Operating-system error codes
+        // (`EACCES`, `EROFS`, `EDQUOT`, `ENOSPC`, …) are propagated
+        // as `osCode` so SDK clients can branch — e.g. distinguish
+        // "permissions" from "disk full" without parsing a free-form
+        // message. The `errorMessage` is the bridge's `err.message`
+        // (no stack), matching the redaction posture of
+        // `errorPayload` in server.ts.
+        const osCode =
+          err && typeof err === 'object' && 'code' in err
+            ? (err as { code?: unknown }).code
+            : undefined;
         res.status(500).json({
           error: 'Failed to write workspace memory',
           code: 'file_error',
+          scope,
+          mode,
+          ...(typeof osCode === 'string' ? { osCode } : {}),
+          errorMessage: err instanceof Error ? err.message : String(err),
         });
       }
     },

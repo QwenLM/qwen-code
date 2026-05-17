@@ -654,6 +654,59 @@ describe('workspace agents routes', () => {
     ).toEqual(['created', 'updated', 'deleted']);
   });
 
+  it('rejects 422 when create has whitespace-only systemPrompt', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: 'whitespace-prompt',
+      description: 'a description longer than ten chars',
+      systemPrompt: '   \n  \t  ',
+      scope: 'workspace',
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/systemPrompt.*non-empty/);
+  });
+
+  it('rejects 422 when update has whitespace-only systemPrompt', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'prompt-target',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a prompt-target agent',
+      scope: 'workspace',
+    });
+    const res = await request(app)
+      .post('/workspace/agents/prompt-target')
+      .send({ systemPrompt: '\n\n  \t' });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+  });
+
+  it('toDetail.runConfig only emits the documented fields', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app)
+      .post('/workspace/agents')
+      .send({
+        name: 'detail-pick',
+        description: 'a description longer than ten chars',
+        systemPrompt: 'you are a detail-pick agent',
+        scope: 'workspace',
+        runConfig: { max_time_minutes: 5, max_turns: 7 },
+      });
+    const res = await request(app).get('/workspace/agents/detail-pick');
+    expect(res.status).toBe(200);
+    // Detail must contain ONLY the whitelisted runConfig keys; if
+    // `SubagentConfig.runConfig` ever gains a new field in core, this
+    // assertion fails until the route schema is updated explicitly.
+    expect(Object.keys(res.body.runConfig).sort()).toEqual([
+      'max_time_minutes',
+      'max_turns',
+    ]);
+  });
+
   it('rejects 422 when update body has whitespace-only description', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });

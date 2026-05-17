@@ -670,9 +670,16 @@ function parseAgentConfig(
     return undefined;
   }
   const systemPrompt = body['systemPrompt'];
-  if (typeof systemPrompt !== 'string' || systemPrompt.length === 0) {
+  if (typeof systemPrompt !== 'string' || systemPrompt.trim().length === 0) {
+    // Reject whitespace-only systemPrompts to match the description
+    // field's `trim().length === 0` rule. A pure-whitespace prompt
+    // would land on disk as effectively empty (the YAML serializer
+    // collapses blank lines), and the agent can't operate without
+    // instructions, so a 422 at the boundary is friendlier than a
+    // mysterious downstream "agent does nothing" failure.
     res.status(422).json({
-      error: '`systemPrompt` is required and must be a non-empty string',
+      error:
+        '`systemPrompt` is required and must be a non-empty string (whitespace only is rejected)',
       code: 'invalid_config',
     });
     return undefined;
@@ -760,12 +767,14 @@ function parseAgentUpdates(
   }
   if ('systemPrompt' in body) {
     const value = body['systemPrompt'];
-    if (typeof value !== 'string' || value.length === 0) {
-      // Mirror create's `systemPrompt.length === 0` check (create does
-      // NOT trim systemPrompt — leading whitespace can be meaningful in
-      // Markdown prose — but does require a non-empty string).
+    if (typeof value !== 'string' || value.trim().length === 0) {
+      // Mirror create's `systemPrompt.trim().length === 0` check.
+      // A whitespace-only prompt is effectively empty after YAML
+      // serialization and the agent can't operate without
+      // instructions, so reject at the boundary.
       res.status(422).json({
-        error: '`systemPrompt` must be a non-empty string when provided',
+        error:
+          '`systemPrompt` must be a non-empty string (whitespace only is rejected) when provided',
         code: 'invalid_config',
       });
       return undefined;
@@ -1037,9 +1046,20 @@ function toDetail(config: SubagentConfig): ServeWorkspaceAgentDetail {
     detail.disallowedTools = [...config.disallowedTools];
   }
   if (config.runConfig) {
-    detail.runConfig = {
-      ...config.runConfig,
-    } as ServeWorkspaceAgentDetail['runConfig'];
+    // Explicit field pick rather than spread-with-cast. If
+    // `SubagentConfig.runConfig` gains new fields in core, the
+    // spread-then-cast pattern would silently leak them through the
+    // HTTP response without a compile error. Picking `max_time_minutes`
+    // and `max_turns` by name forces a deliberate schema bump if a
+    // future core field needs to surface on the daemon route.
+    const runConfig: ServeWorkspaceAgentDetail['runConfig'] = {};
+    if (typeof config.runConfig.max_time_minutes === 'number') {
+      runConfig.max_time_minutes = config.runConfig.max_time_minutes;
+    }
+    if (typeof config.runConfig.max_turns === 'number') {
+      runConfig.max_turns = config.runConfig.max_turns;
+    }
+    detail.runConfig = runConfig;
   }
   return detail;
 }

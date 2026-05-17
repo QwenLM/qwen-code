@@ -155,14 +155,59 @@ function resolveContextFilePath(
   return path.join(Storage.getGlobalQwenDir(), DEFAULT_CONTEXT_FILENAME);
 }
 
+/**
+ * Cap on the existing-file size we'll read into memory before
+ * appending. The POST route caps NEW content at 1 MB but a malicious
+ * or accidental client could grow the file to arbitrary size over
+ * time (workspace QWEN.md is operator-controlled but the global
+ * `~/.qwen/QWEN.md` may have been edited externally). 16 MB sits
+ * three orders of magnitude above any realistic user-authored
+ * memory file while still bounding the daemon's transient memory
+ * cost per append. Hitting this cap means QWEN.md has grown past
+ * any reasonable size and the operator should clean it up — we
+ * 500 the route with a structured error rather than try to
+ * stream-process a corrupted file.
+ */
+const MAX_EXISTING_FILE_BYTES = 16 * 1024 * 1024;
+
+export class WorkspaceMemoryFileTooLargeError extends Error {
+  readonly filePath: string;
+  readonly bytes: number;
+  readonly limit: number;
+  constructor(filePath: string, bytes: number, limit: number) {
+    super(
+      `Existing memory file at ${filePath} is ${bytes} bytes, exceeds ` +
+        `the ${limit}-byte cap for safe append. Trim the file or use ` +
+        `mode=replace to overwrite it.`,
+    );
+    this.name = 'WorkspaceMemoryFileTooLargeError';
+    this.filePath = filePath;
+    this.bytes = bytes;
+    this.limit = limit;
+  }
+}
+
 async function composeAppendedContent(
   filePath: string,
   newContent: string,
 ): Promise<string> {
   let existing = '';
   try {
+    // `stat` first so we can refuse pathological files BEFORE pulling
+    // them into memory. Without this check a 200 MB QWEN.md would
+    // load fully into the daemon's heap on every append, even though
+    // the route's 1 MB new-content cap caught the request body.
+    const stat = await fs.stat(filePath);
+    if (stat.size > MAX_EXISTING_FILE_BYTES) {
+      throw new WorkspaceMemoryFileTooLargeError(
+        filePath,
+        stat.size,
+        MAX_EXISTING_FILE_BYTES,
+      );
+    }
     existing = await fs.readFile(filePath, 'utf8');
   } catch (err) {
+    if (err instanceof WorkspaceMemoryFileTooLargeError) throw err;
     if (!isEnoent(err)) throw err;
   }
 
