@@ -56,6 +56,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_providers: { since: 'v1' },
   session_context: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
+  session_close: { since: 'v1' },
+  session_metadata: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

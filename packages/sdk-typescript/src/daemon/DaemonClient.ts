@@ -21,6 +21,7 @@ import type {
   PromptContentBlock,
   PromptResult,
   SetModelResult,
+  SessionMetadataResult,
 } from './types.js';
 
 /**
@@ -763,6 +764,65 @@ export class DaemonClient {
           res,
           'POST /session/:id/permission/:requestId',
         );
+      },
+    );
+  }
+
+  // -- Session lifecycle ---------------------------------------------------
+
+  /**
+   * Close a daemon session. The daemon treats DELETE as idempotent for SDK
+   * callers: both 204 (closed) and 404 (already gone) resolve successfully.
+   */
+  async closeSession(sessionId: string, clientId?: string): Promise<void> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'DELETE /session/:id');
+      },
+    );
+  }
+
+  // -- Session metadata ----------------------------------------------------
+
+  /**
+   * Patch mutable session metadata and return the effective stored metadata
+   * reported by the daemon.
+   */
+  async updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+    clientId?: string,
+  ): Promise<SessionMetadataResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/metadata`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(metadata),
+      },
+      async (res) => {
+        if (res.status === 200) {
+          const body = (await res.json()) as {
+            displayName?: unknown;
+          };
+          return typeof body.displayName === 'string'
+            ? { displayName: body.displayName }
+            : {};
+        }
+        throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },
     );
   }

@@ -46,6 +46,7 @@ export {
   type DaemonProtocolVersions,
   type DaemonRestoredSession,
   type DaemonSession,
+  type DaemonSessionClosedReason,
   type DaemonSessionClientOptions,
   type DaemonSessionContextStatus,
   type DaemonSessionDiedData,
@@ -95,6 +96,7 @@ export {
   type PromptTextContent,
   type RestoreSessionRequest,
   type SetModelResult,
+  type SessionMetadataResult,
   type SubscribeOptions,
 } from './daemon/index.js';
 

@@ -31,6 +31,7 @@ import type {
 import {
   InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidSessionMetadataError,
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
   SessionLimitExceededError,
@@ -45,6 +46,7 @@ import {
   type BridgeSessionSummary,
   type BridgeSpawnRequest,
   type HttpAcpBridge,
+  type SessionMetadataUpdate,
 } from './httpAcpBridge.js';
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
@@ -94,6 +96,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_providers',
   'session_context',
   'session_supported_commands',
+  'session_close',
+  'session_metadata',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -156,6 +160,15 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  closeImpl?: (
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ) => Promise<void>;
+  updateMetadataImpl?: (
+    sessionId: string,
+    metadata: SessionMetadataUpdate,
+    context?: BridgeClientRequestContext,
+  ) => SessionMetadataUpdate;
   heartbeatImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -205,6 +218,15 @@ interface FakeBridge extends HttpAcpBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  closeCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  updateMetadataCalls: Array<{
+    sessionId: string;
+    metadata: SessionMetadataUpdate;
+    context?: BridgeClientRequestContext;
+  }>;
   heartbeatCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -233,6 +255,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const closeCalls: FakeBridge['closeCalls'] = [];
+  const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
   const heartbeatStateCalls: string[] = [];
   let shutdownCalls = 0;
@@ -310,6 +334,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       availableSkills: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const closeImpl = opts.closeImpl ?? (async () => {});
+  const updateMetadataImpl =
+    opts.updateMetadataImpl ??
+    ((_sid: string, m: SessionMetadataUpdate) => ({
+      displayName: m.displayName,
+    }));
   const heartbeatImpl =
     opts.heartbeatImpl ??
     ((sessionId, context) => ({
@@ -339,6 +369,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextCalls,
     sessionSupportedCommandsCalls,
     setModelCalls,
+    closeCalls,
+    updateMetadataCalls,
     heartbeatCalls,
     heartbeatStateCalls,
     get shutdownCalls() {
@@ -445,6 +477,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async closeSession(sessionId, context) {
+      closeCalls.push({ sessionId, ...(context ? { context } : {}) });
+      return closeImpl(sessionId, context);
+    },
+    updateSessionMetadata(sessionId, metadata, context) {
+      updateMetadataCalls.push({
+        sessionId,
+        metadata,
+        ...(context ? { context } : {}),
+      });
+      return updateMetadataImpl(sessionId, metadata, context);
     },
     recordHeartbeat(sessionId, context) {
       heartbeatCalls.push({
@@ -1605,8 +1649,20 @@ describe('createServeApp', () => {
       // we'll query so the happy path runs.
       const bridge = fakeBridge({
         listImpl: () => [
-          { sessionId: 's-1', workspaceCwd: WS_BOUND },
-          { sessionId: 's-2', workspaceCwd: WS_BOUND },
+          {
+            sessionId: 's-1',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+          {
+            sessionId: 's-2',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:01:00.000Z',
+            clientCount: 0,
+            hasActivePrompt: true,
+          },
         ],
       });
       const app = createServeApp(
@@ -1619,6 +1675,22 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(2);
+      expect(res.body.sessions).toEqual([
+        {
+          sessionId: 's-1',
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 's-2',
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:01:00.000Z',
+          clientCount: 0,
+          hasActivePrompt: true,
+        },
+      ]);
       expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
@@ -2050,6 +2122,141 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('DELETE /session/:id', () => {
+    it('204 on successful close', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .delete('/session/session-A')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(204);
+      expect(bridge.closeCalls).toHaveLength(1);
+      expect(bridge.closeCalls[0]?.sessionId).toBe('session-A');
+    });
+
+    it('passes client identity context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .delete('/session/session-A')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1');
+      expect(res.status).toBe(204);
+      expect(bridge.closeCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('404 on unknown session', async () => {
+      const bridge = fakeBridge({
+        closeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .delete('/session/missing')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('400 invalid_client_id when bridge rejects client', async () => {
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          throw new InvalidClientIdError('session-A', 'bad-client');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .delete('/session/session-A')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad-client');
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_client_id');
+    });
+  });
+
+  describe('PATCH /session/:id/metadata', () => {
+    it('200 on successful metadata update', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ displayName: 'My Session' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        displayName: 'My Session',
+      });
+      expect(bridge.updateMetadataCalls).toHaveLength(1);
+      expect(bridge.updateMetadataCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
+        displayName: 'My Session',
+      });
+    });
+
+    it('passes client identity context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ displayName: 'test' });
+      expect(res.status).toBe(200);
+      expect(bridge.updateMetadataCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('400 when displayName is not a string', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ displayName: 123 });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('displayName');
+    });
+
+    it('404 on unknown session', async () => {
+      const bridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .patch('/session/missing/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ displayName: 'test' });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+
+    it('400 invalid_metadata when displayName exceeds max length', async () => {
+      const bridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must be a string of at most 256 characters',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ displayName: 'x'.repeat(300) });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
     });
   });
 
