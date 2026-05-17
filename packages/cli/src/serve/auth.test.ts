@@ -78,7 +78,11 @@ describe('createMutationGate (#4175 PR 15)', () => {
     // exact text so future copy edits don't churn the assertion.
     expect(res.body.error).toMatch(/QWEN_SERVER_TOKEN/);
     expect(res.body.error).toMatch(/--token/);
-    expect(res.body.error).toMatch(/--require-auth/);
+    // `--require-auth` is intentionally NOT named here as a remediation:
+    // setting it without a token is itself a boot-error path (see
+    // `runQwenServe.ts`). The error must point operators at fixes that
+    // work standalone.
+    expect(res.body.error).not.toMatch(/--require-auth/);
   });
 
   it('returns the same passthrough handler instance across calls when global auth is on (allocation discipline)', () => {

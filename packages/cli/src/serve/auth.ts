@@ -255,11 +255,19 @@ export function createMutationGate(
   return (opts: MutationGateOptions = {}): RequestHandler => {
     if (!opts.strict) return passthrough;
     return (_req: Request, res: Response) => {
+      // Only list remediations that work standalone. `--require-auth`
+      // is paired-required-with-a-token at boot (`runQwenServe.ts`
+      // refuses to start with the flag set but no token), so naming
+      // it as a third standalone option here would loop the operator
+      // into a different boot error. Configuring a token via
+      // `QWEN_SERVER_TOKEN` or `--token` IS the fix; the operator can
+      // decide separately whether to also harden loopback with
+      // `--require-auth`.
       res.status(401).json({
         error:
           'This route requires the daemon to be configured with a bearer ' +
-          'token. Set QWEN_SERVER_TOKEN, pass --token, or restart with ' +
-          '--require-auth.',
+          'token. Set QWEN_SERVER_TOKEN or pass --token to enable bearer ' +
+          'auth.',
         code: 'token_required',
       });
     };

@@ -59,6 +59,21 @@ export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
  * daemon was started with `--require-auth`). Kept as a single source of
  * truth so `getAdvertisedServeFeatures` and the route layer stay in
  * agreement about which tags are baseline-on vs. opt-in.
+ *
+ * **Drift insurance — required when adding a new conditional tag:**
+ * 1. Register the tag in `SERVE_CAPABILITY_REGISTRY` above with its
+ *    `since` protocol version (just like baseline tags).
+ * 2. Add the same tag identifier to THIS set. Forgetting this step
+ *    silently advertises the tag to every client regardless of operator
+ *    opt-in, defeating the "tag presence = behavior is on" contract.
+ * 3. Extend `AdvertiseFeatureToggles` with the matching boolean toggle.
+ * 4. Add a branch in `getAdvertisedServeFeatures`'s
+ *    `CONDITIONAL_SERVE_FEATURES.has(feature)` block to map the
+ *    feature to its toggle field.
+ *
+ * When this set grows past one entry, fold steps 2-4 into a
+ * `Map<ServeFeature, (toggles) => boolean>` so the toggle decision
+ * lives in one place per feature instead of two.
  */
 export const CONDITIONAL_SERVE_FEATURES: ReadonlySet<ServeFeature> = new Set([
   'require_auth',

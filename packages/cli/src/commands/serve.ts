@@ -92,7 +92,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Refuse to start without a bearer token, even on loopback. ' +
           'Hardens the loopback developer default for shared dev hosts / CI ' +
           'runners / multi-tenant workstations where any local user can hit ' +
-          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN.',
+          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          'requires Authorization when enabled (no loopback exemption — ' +
+          'k8s/Compose probes must pass the bearer too).',
       })
       .option('http-bridge', {
         type: 'boolean',
