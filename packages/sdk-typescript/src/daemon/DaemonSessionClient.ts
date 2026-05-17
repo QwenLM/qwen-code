@@ -51,7 +51,8 @@ export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
  * IDE, and web backends: it binds one daemon session, forwards the existing
  * Stage 1 routes, and preserves SSE replay state. It intentionally does not
  * interpret daemon event payloads; typed event reducers belong to the protocol
- * schema layer.
+ * schema layer — see `asKnownDaemonEvent` and `reduceDaemonSessionEvent` in
+ * `./events.js` for the typed consumption surface.
  */
 export class DaemonSessionClient {
   readonly client: DaemonClient;
