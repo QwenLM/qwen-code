@@ -5,17 +5,30 @@
  */
 
 import * as path from 'node:path';
-import type { Ignore} from '@qwen-code/qwen-code-core';
+import type { Ignore } from '@qwen-code/qwen-code-core';
 import { isBinaryFile } from '@qwen-code/qwen-code-core';
 import { FsError } from './errors.js';
 import type { Intent, ResolvedPath } from './paths.js';
 
 /**
- * Maximum bytes returned by `readText`. Mirrors claude-code's
+ * Maximum bytes the `readText` boundary is willing to slurp before
+ * delegating to the core service. Mirrors claude-code's
  * `MAX_OUTPUT_SIZE` (`src/utils/file.ts`) — large enough for
  * typical source files, small enough that an SSE replay buffer
- * doesn't fill on a single read. Reads above this size return
- * truncated content with `meta.truncated = true`.
+ * doesn't fill on a single read.
+ *
+ * Files **above** this cap are refused with `file_too_large` rather
+ * than truncated — the underlying `readFileWithLineAndLimit`
+ * reads the whole file into memory before slicing lines, so soft
+ * truncation past the cap would still OOM the daemon. Files
+ * **at or below** the cap honor a tighter `opts.maxBytes` via
+ * post-decode truncation (`enforceReadSize`); that's where the
+ * `meta.truncated = true` flag fires.
+ *
+ * `enforceReadBytesSize` (the `readBytes` gate) and `edit()` use the
+ * same constant as a hard upper bound — multi-GB files in the
+ * workspace can no longer reach `fsp.readFile` through any
+ * boundary path.
  */
 export const MAX_READ_BYTES = 256 * 1024;
 

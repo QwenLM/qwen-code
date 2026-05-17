@@ -86,12 +86,15 @@ export interface ServeAppDeps {
    * Workspace filesystem boundary factory (#4175 PR 18). When
    * supplied, PR 19/20 routes will pull a per-request
    * `WorkspaceFileSystem` off it; when omitted, `createServeApp`
-   * builds a permissive default (trusted=true, no-op audit emit).
-   * No PR 18 routes consume the factory yet — the slot is wired so
-   * PR 19 read-only file routes can drop in without re-shaping
-   * `ServeAppDeps`. Once PR 19 lands, `runQwenServe` will inject a
-   * factory whose `trusted` flag mirrors `Config.isTrustedFolder()`
-   * and whose `emit` plumbs into the per-session EventBus.
+   * builds a strict default (`trusted: false`, warn-once no-op
+   * `emit`) so an upstream refactor that forgets to inject
+   * `fsFactory` never silently allows writes against an untrusted
+   * workspace. No PR 18 routes consume the factory yet — the slot
+   * is wired so PR 19 read-only file routes can drop in without
+   * re-shaping `ServeAppDeps`. Once PR 19 lands, `runQwenServe`
+   * will inject a factory whose `trusted` flag mirrors
+   * `Config.isTrustedFolder()` and whose `emit` plumbs into the
+   * per-session EventBus.
    */
   fsFactory?: WorkspaceFileSystemFactory;
 }

@@ -240,6 +240,39 @@ describe('WorkspaceFileSystem - glob', () => {
     expect((err as { kind: string }).kind).toBe('parse_error');
   });
 
+  it('rejects POSIX-absolute patterns up-front (no I/O outside workspace)', async () => {
+    const err = await h.fs.glob('/etc/**/*').catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('rejects Win32 drive-letter and UNC patterns up-front', async () => {
+    for (const pattern of [
+      'C:\\Users\\foo\\**\\*.ts',
+      'C:/Users/foo/**/*.ts',
+      '\\\\server\\share\\**',
+      '//server/share/**',
+    ]) {
+      const err = await h.fs.glob(pattern).catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('parse_error');
+    }
+  });
+
+  it('respects directory-only ignore rules (e.g. dist/) on glob hits', async () => {
+    const ignore = new Ignore().add(['dist/']);
+    h = await makeHarness({ ignore });
+    await fsp.mkdir(path.join(h.workspace, 'dist'));
+    await fsp.writeFile(path.join(h.workspace, 'dist', 'bundle.js'), '');
+    await fsp.writeFile(path.join(h.workspace, 'src.ts'), '');
+    const hits = await h.fs.glob('*');
+    const names = hits.map((p) => path.basename(p)).sort();
+    // `dist` directory is filtered because the trailing-slash dir
+    // pattern now probes `<rel>/` against the directory ignorer.
+    expect(names).not.toContain('dist');
+    expect(names).toContain('src.ts');
+  });
+
   it('respects maxResults', async () => {
     const hits = await h.fs.glob('**/*', { maxResults: 1 });
     expect(hits).toHaveLength(1);
@@ -302,6 +335,44 @@ describe('WorkspaceFileSystem - write/edit', () => {
     const err = await h.fs.edit(r, 'NOT THERE', 'X').catch((e) => e);
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('rejects edit on file > MAX_READ_BYTES with file_too_large (no slurp)', async () => {
+    const policy = await import('./policy.js');
+    const big = path.join(h.workspace, 'huge.txt');
+    await fsp.writeFile(big, 'a'.repeat(policy.MAX_READ_BYTES + 1));
+    const r = await h.fs.resolve('huge.txt', 'write');
+    const err = await h.fs.edit(r, 'a', 'b').catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+  });
+
+  it('rejects edit on binary file', async () => {
+    const bin = path.join(h.workspace, 'bin.dat');
+    const buf = Buffer.alloc(64);
+    buf[5] = 0;
+    await fsp.writeFile(bin, buf);
+    const r = await h.fs.resolve('bin.dat', 'write');
+    const err = await h.fs.edit(r, '\x00', 'x').catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('binary_file');
+  });
+
+  it('readText converts 1-based line to 0-based slice (line: 1 returns from first line)', async () => {
+    const target = path.join(h.workspace, 'lines.txt');
+    await fsp.writeFile(target, 'one\ntwo\nthree\n');
+    const r = await h.fs.resolve('lines.txt', 'read');
+    const out = await h.fs.readText(r, { line: 1, limit: 1 });
+    // 1-based line 1 → 0-based slice index 0 → first line "one"
+    expect(out.content.split('\n')[0]).toBe('one');
+  });
+
+  it('readText with line: 2 starts from the second line', async () => {
+    const target = path.join(h.workspace, 'lines2.txt');
+    await fsp.writeFile(target, 'one\ntwo\nthree\n');
+    const r = await h.fs.resolve('lines2.txt', 'read');
+    const out = await h.fs.readText(r, { line: 2, limit: 1 });
+    expect(out.content.split('\n')[0]).toBe('two');
   });
 });
 

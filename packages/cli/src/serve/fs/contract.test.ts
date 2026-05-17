@@ -11,7 +11,14 @@ import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { WorkspaceContext } from '@qwen-code/qwen-code-core';
 import { canonicalizeWorkspace, resolveWithinWorkspace } from './paths.js';
-import type { FsError, isFsError, type FsErrorKind } from './errors.js';
+// `isFsError` is a runtime guard called below — must stay a value
+// import. `FsError` is type-only here (typed `catch` variable); same
+// for `FsErrorKind`. The eslint-disable mirrors the workspaceFileSystem.ts
+// fix and exists because the auto-fix at commit 7b0db4c3a promoted the
+// whole line to `import type`, erasing `isFsError` at runtime and
+// failing 11 tests in this file alone.
+ 
+import { isFsError, type FsError, type FsErrorKind } from './errors.js';
 
 /**
  * Kinds the boundary throws to indicate the path is *outside the

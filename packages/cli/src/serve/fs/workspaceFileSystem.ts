@@ -7,10 +7,19 @@
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import { glob as globAsync } from 'glob';
-import type {
-  Ignore,
+// `StandardFileSystemService` is constructed and `loadIgnoreRules` is
+// invoked at runtime — they MUST stay as value imports. The eslint
+// auto-fix in commit 7b0db4c3a hoisted the whole block to `import type`
+// (because the same line referenced the `Ignore` and `WriteTextFileOptions`
+// types), which silently erased the value bindings and broke the runtime
+// + 31 tests post-commit. The inline `type` modifiers below tell the
+// `consistent-type-imports` rule per-symbol intent so future autofixes
+// don't repeat the regression.
+ 
+import {
   StandardFileSystemService,
   loadIgnoreRules,
+  type Ignore,
   type WriteTextFileOptions,
 } from '@qwen-code/qwen-code-core';
 import type { BridgeEvent } from '../eventBus.js';
@@ -69,7 +78,13 @@ export interface ReadMeta {
 export interface ReadTextOptions {
   /** Cap returned bytes; defaults to MAX_READ_BYTES. */
   maxBytes?: number;
-  /** 1-based starting line for partial reads. */
+  /**
+   * 1-based starting line for partial reads. `1` returns the file
+   * from its first line. The boundary converts to the 0-based slice
+   * index `readFileWithLineAndLimit` expects internally; SDK
+   * consumers don't need to adjust. Values < 1 (or undefined) are
+   * treated as "from the beginning".
+   */
   line?: number;
   /** Maximum number of lines to return. */
   limit?: number;
@@ -269,11 +284,17 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const sizeOutcome = enforceReadSize(st.size, opts.maxBytes);
       // Delegate encoding-aware read to the existing core service so
       // BOM, CRLF, and iconv-supported codepages remain consistent
-      // with what the tools layer already does.
+      // with what the tools layer already does. The core service's
+      // `line` parameter is a 0-based slice index whereas the
+      // boundary's public `ReadTextOptions.line` is 1-based (the
+      // convention SDK consumers expect from line-numbered errors,
+      // editor jump-to-line, etc.). Convert here so the public
+      // contract isn't tied to the internal helper's indexing.
+      const startLineIndex = opts.line && opts.line > 1 ? opts.line - 1 : 0;
       const result = await this.deps.lowFs.readTextFile({
         path: p as string,
         limit: opts.limit ?? Number.POSITIVE_INFINITY,
-        line: opts.line ?? 0,
+        line: startLineIndex,
       });
       const ignoreVerdict = shouldIgnore(
         p,
@@ -305,7 +326,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         opts.limit !== undefined &&
         Number.isFinite(opts.limit) &&
         result._meta?.originalLineCount !== undefined &&
-        result._meta.originalLineCount > opts.limit + (opts.line ?? 0)
+        result._meta.originalLineCount > opts.limit + startLineIndex
       ) {
         meta.truncated = true;
       }
@@ -386,15 +407,34 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'glob');
-      // Reject `..` segments in the pattern outright. A pattern like
-      // `../../**/*.js` would otherwise let a caller search outside
-      // `cwd`. Boundary-checking each individual hit catches escapes
-      // too, but rejecting at the pattern level is cheaper and gives
-      // a clearer error.
+      // Reject patterns up-front before delegating to `glob` — the
+      // per-hit filter below catches escapes after the walk, but
+      // letting a clearly out-of-workspace pattern reach `globAsync`
+      // burns I/O *outside* the workspace before we drop the
+      // results. Three rejection classes:
+      //   1. `..` segments  — would let `cwd` be escaped lexically.
+      //   2. POSIX absolute (`/etc/**`) — `glob` rooted outside cwd.
+      //   3. Windows-style absolute / device prefixes (`C:\…`,
+      //      `\\?\…`, `\\server\share`) — same hazard on the other
+      //      platform. `path.isAbsolute` covers POSIX `/`; the
+      //      drive-letter / UNC checks cover Win32 even when the
+      //      daemon runs on POSIX (clients may send Win32 paths).
       if (pattern.split(/[\\/]/).some((seg) => seg === '..')) {
         throw new FsError(
           'parse_error',
           `glob pattern may not contain '..' segments: ${pattern}`,
+        );
+      }
+      if (
+        path.isAbsolute(pattern) ||
+        /^[A-Za-z]:[\\/]/.test(pattern) ||
+        pattern.startsWith('\\\\') ||
+        pattern.startsWith('//')
+      ) {
+        throw new FsError(
+          'parse_error',
+          `glob pattern must be workspace-relative: ${pattern}`,
+          { hint: 'pass a relative pattern such as "src/**/*.ts"' },
         );
       }
       const cwd = (opts.cwd as string | undefined) ?? this.deps.boundWorkspace;
@@ -434,11 +474,29 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           escapedCount += 1;
           continue;
         }
+        // Check the dirent kind so directory ignore rules (`dist/`,
+        // `.git/`, `node_modules/`) actually match — `shouldIgnore`
+        // probes `<rel>/` for the directory filter, which the
+        // underlying `ignore` library requires for trailing-slash
+        // patterns. Probing every hit as a `file` (the prior
+        // behavior) silently leaks ignored directories from
+        // `glob('**/*')` even when `includeIgnored` is false. We
+        // already realpath'd the hit, so an extra `lstat` here is
+        // cheap; on `lstat` failure (raced unlink) we conservatively
+        // treat the hit as a file so the file-pattern check still
+        // runs.
+        let dirent: { isDirectory(): boolean } | null = null;
+        try {
+          dirent = await fsp.lstat(canonical);
+        } catch {
+          dirent = null;
+        }
+        const kind = dirent?.isDirectory() ? 'directory' : 'file';
         const verdict = shouldIgnore(
           canonical as ResolvedPath,
           this.deps.boundWorkspace,
           this.deps.ignore,
-          'file',
+          kind,
         );
         if (verdict.ignored && !opts.includeIgnored) continue;
         out.push(canonical as ResolvedPath);
@@ -504,6 +562,29 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'edit');
+      // Mirror `readText`'s pre-stat OOM gate: `fsp.readFile` would
+      // otherwise slurp the whole target into memory before
+      // `enforceWriteSize` got a chance to refuse. A multi-GB file
+      // already inside the workspace can OOM the daemon even though
+      // the *edited output* would later fail the size check.
+      // Reject above `MAX_READ_BYTES` outright with a typed
+      // `file_too_large`; binary content is also refused since
+      // `current.indexOf(oldText)` over arbitrary bytes is meaningless.
+      const st = await fsp.stat(p as string);
+      if (st.size > MAX_READ_BYTES) {
+        throw new FsError(
+          'file_too_large',
+          `file of ${st.size} bytes exceeds edit cap of ${MAX_READ_BYTES} bytes`,
+          {
+            hint: 'split large edits into bounded readBytes/writeText sequences',
+          },
+        );
+      }
+      if (await detectBinary(p)) {
+        throw new FsError('binary_file', `cannot edit binary file: ${p}`, {
+          hint: 'edit() works on text files only',
+        });
+      }
       const current = await fsp.readFile(p as string, 'utf-8');
       // Single replacement to preserve atomic write-once semantics.
       // Multi-occurrence handling lives in PR 20's edit endpoint
