@@ -135,6 +135,10 @@ export class DaemonSessionClient {
     return this.session.attached;
   }
 
+  get clientId(): string | undefined {
+    return this.session.clientId;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
   }
@@ -147,22 +151,30 @@ export class DaemonSessionClient {
     req: PromptRequest,
     signal?: AbortSignal,
   ): Promise<PromptResult> {
-    return await this.client.prompt(this.sessionId, req, signal);
+    return await this.client.prompt(this.sessionId, req, signal, this.clientId);
   }
 
   async cancel(): Promise<void> {
-    await this.client.cancel(this.sessionId);
+    await this.client.cancel(this.sessionId, this.clientId);
   }
 
   async setModel(modelId: string): Promise<SetModelResult> {
-    return await this.client.setSessionModel(this.sessionId, modelId);
+    return await this.client.setSessionModel(
+      this.sessionId,
+      modelId,
+      this.clientId,
+    );
   }
 
   async respondToPermission(
     requestId: string,
     response: PermissionResponse,
   ): Promise<boolean> {
-    return await this.client.respondToPermission(requestId, response);
+    return await this.client.respondToPermission(
+      requestId,
+      response,
+      this.clientId,
+    );
   }
 
   events(

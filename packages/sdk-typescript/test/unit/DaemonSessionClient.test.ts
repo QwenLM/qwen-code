@@ -77,6 +77,7 @@ describe('DaemonSessionClient', () => {
         sessionId: 's-1',
         workspaceCwd: '/work/a',
         attached: false,
+        clientId: 'client-1',
       }),
     );
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -89,6 +90,7 @@ describe('DaemonSessionClient', () => {
     expect(session.sessionId).toBe('s-1');
     expect(session.workspaceCwd).toBe('/work/a');
     expect(session.attached).toBe(false);
+    expect(session.clientId).toBe('client-1');
     expect(calls[0]?.url).toBe('http://daemon/session');
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       cwd: '/work/a',
@@ -132,6 +134,7 @@ describe('DaemonSessionClient', () => {
           sessionId: 's-1',
           workspaceCwd: '/work/a',
           attached: false,
+          clientId: 'client-1',
           state: { configOptions: [] },
         });
       }
@@ -147,6 +150,7 @@ describe('DaemonSessionClient', () => {
     });
 
     expect(session.sessionId).toBe('s-1');
+    expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ configOptions: [] });
     expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
 
@@ -163,6 +167,7 @@ describe('DaemonSessionClient', () => {
           sessionId: 's-1',
           workspaceCwd: '/work/a',
           attached: true,
+          clientId: 'client-1',
           state: { modes: null },
         });
       }
@@ -176,6 +181,7 @@ describe('DaemonSessionClient', () => {
     const session = await DaemonSessionClient.resume(client, 's-1');
 
     expect(session.attached).toBe(true);
+    expect(session.clientId).toBe('client-1');
     expect(session.state).toEqual({ modes: null });
     for await (const _event of session.events()) {
       /* empty */
@@ -209,6 +215,7 @@ describe('DaemonSessionClient', () => {
         sessionId: 's-1',
         workspaceCwd: '/work/a',
         attached: true,
+        clientId: 'client-1',
       },
     });
 
@@ -236,6 +243,12 @@ describe('DaemonSessionClient', () => {
       'http://daemon/permission/req-1',
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
+    expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+      'client-1',
+    ]);
   });
 
   it('tracks Last-Event-ID across event subscriptions', async () => {

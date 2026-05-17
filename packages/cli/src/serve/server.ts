@@ -13,6 +13,7 @@ import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
+  InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
@@ -293,10 +294,13 @@ export function createServeApp(
       }
       sessionScope = rawSessionScope;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
       const session = await bridge.spawnOrAttach({
         workspaceCwd: cwd,
         modelServiceId,
+        ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
@@ -369,11 +373,21 @@ export function createServeApp(
       const body = safeBody(req);
       const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
       if (cwd === undefined) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
       try {
         const session =
           action === 'load'
-            ? await bridge.loadSession({ sessionId, workspaceCwd: cwd })
-            : await bridge.resumeSession({ sessionId, workspaceCwd: cwd });
+            ? await bridge.loadSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              })
+            : await bridge.resumeSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              });
         // Mirror the `POST /session` disconnect-cleanup path (see the
         // long comment above the matching `if (!res.writable)` there
         // for the rationale around `res.writable` vs `req.aborted` /
@@ -453,6 +467,11 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      res.off('close', onResClose);
+      return;
+    }
     try {
       // SECURITY NOTE: this `...(body as object)` passthrough is
       // intentional — the bridge / ACP SDK ignores fields it
@@ -473,6 +492,7 @@ export function createServeApp(
           prompt,
         } as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
+        clientId !== undefined ? { clientId } : undefined,
       );
       res.status(200).json(result);
     } catch (err) {
@@ -511,11 +531,17 @@ export function createServeApp(
   app.post('/session/:id/cancel', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      await bridge.cancelSession(sessionId, {
-        ...(body as object),
+      await bridge.cancelSession(
         sessionId,
-      } as Parameters<HttpAcpBridge['cancelSession']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+        } as Parameters<HttpAcpBridge['cancelSession']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -562,12 +588,18 @@ export function createServeApp(
       });
       return;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      const response = await bridge.setSessionModel(sessionId, {
-        ...(body as object),
+      const response = await bridge.setSessionModel(
         sessionId,
-        modelId,
-      } as Parameters<HttpAcpBridge['setSessionModel']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+          modelId,
+        } as Parameters<HttpAcpBridge['setSessionModel']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(200).json(response);
     } catch (err) {
       sendBridgeError(res, err, {
@@ -588,12 +620,18 @@ export function createServeApp(
       });
       return;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(requestId, {
-        ...(body as object),
-        outcome,
-      } as Parameters<HttpAcpBridge['respondToPermission']>[1]);
+      accepted = bridge.respondToPermission(
+        requestId,
+        {
+          ...(body as object),
+          outcome,
+        } as Parameters<HttpAcpBridge['respondToPermission']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
     } catch (err) {
       // BkwQI: voter's `optionId` wasn't in the option set the agent
       // originally offered (e.g. forging `ProceedAlways*` when the
@@ -904,6 +942,10 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
   'prototype',
 ]);
 
+const CLIENT_ID_HEADER = 'x-qwen-client-id';
+const MAX_CLIENT_ID_LENGTH = 128;
+const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
+
 /**
  * Coerce `req.body` into a safe `Record<string, unknown>` for route
  * handlers. Replaces the 5-site copy-pasted preamble
@@ -954,6 +996,23 @@ function parseOptionalWorkspaceCwd(
     return undefined;
   }
   return cwd;
+}
+
+function parseClientIdHeader(
+  req: import('express').Request,
+  res: import('express').Response,
+): string | undefined | null {
+  const raw = req.get(CLIENT_ID_HEADER);
+  if (raw === undefined || raw === '') return undefined;
+  if (raw.length > MAX_CLIENT_ID_LENGTH || !CLIENT_ID_RE.test(raw)) {
+    res.status(400).json({
+      error:
+        '`X-Qwen-Client-Id` must be a non-empty token of 128 characters or fewer',
+      code: 'invalid_client_id',
+    });
+    return null;
+  }
+  return raw;
 }
 
 function isValidOutcome(
@@ -1045,6 +1104,15 @@ function sendBridgeError(
 ): void {
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    return;
+  }
+  if (err instanceof InvalidClientIdError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_client_id',
+      sessionId: err.sessionId,
+      clientId: err.clientId,
+    });
     return;
   }
   if (err instanceof WorkspaceMismatchError) {
