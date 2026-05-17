@@ -107,17 +107,27 @@ export interface McpClientAccounting {
 export class BudgetExhaustedError extends Error {
   readonly serverName: string;
   readonly budget: number;
-  readonly liveCount: number;
-  constructor(serverName: string, budget: number, liveCount: number) {
+  /**
+   * Number of slots currently reserved (== `reservedSlots.size` at the
+   * time of the refusal). PR 14 fix (review #4247 wenshao S6): renamed
+   * from `liveCount` because `reservedSlots` tracks reserved server
+   * NAMES, not `MCPServerStatus.CONNECTED` clients — a reserved-but-
+   * disconnected server still consumes a slot, and that's the
+   * accurate quantity blocking this new server from getting in.
+   * `getMcpClientAccounting().total` would have been the genuine
+   * "live" count and is a different number.
+   */
+  readonly reservedCount: number;
+  constructor(serverName: string, budget: number, reservedCount: number) {
     super(
       `MCP client budget exhausted: cannot reserve slot for '${serverName}' ` +
-        `(budget=${budget}, liveCount=${liveCount}). ` +
+        `(budget=${budget}, reservedCount=${reservedCount}). ` +
         `Raise --mcp-client-budget or remove servers from mcpServers config.`,
     );
     this.name = 'BudgetExhaustedError';
     this.serverName = serverName;
     this.budget = budget;
-    this.liveCount = liveCount;
+    this.reservedCount = reservedCount;
   }
 }
 
@@ -166,6 +176,17 @@ function readBudgetFromEnv(): McpBudgetConfig {
     budgetMode = rawMode;
   } else {
     budgetMode = clientBudget === undefined ? 'off' : 'warn';
+  }
+  // PR 14 fix (review #4247 wenshao S4): enforce-without-budget would
+  // silently fail-open — `tryReserveSlot` returns 'reserved' when
+  // `clientBudget === undefined`, so a daemon spawned with the env-var
+  // pair `MODE=enforce` + `BUDGET=<unset>` would advertise enforcement
+  // but allow unlimited servers. The CLI handler + `runQwenServe`
+  // both reject this combination; the env-var fallback path
+  // (e.g. child manually launched with stale env) now mirrors that
+  // invariant: downgrade to `off` rather than masquerade as enforce.
+  if (budgetMode === 'enforce' && clientBudget === undefined) {
+    budgetMode = 'off';
   }
   return { clientBudget, budgetMode };
 }
@@ -307,6 +328,30 @@ export class McpClientManager {
   }
 
   /**
+   * PR 14 fix (review #4247 wenshao S5): post-discovery budget
+   * telemetry was duplicated verbatim in `discoverAllMcpTools` and
+   * `discoverAllMcpToolsIncremental`. Centralized here so future
+   * field additions to `mcp_budget_decision` happen in one place.
+   * `off` mode is a no-op — operators who never set a budget don't
+   * pollute the startup-event sink.
+   *
+   * Invariant: `mode !== 'off'` ⇒ `clientBudget` was resolved (both
+   * `readBudgetFromEnv` and the CLI handler downgrade enforce-without-
+   * budget to `off`). `clientBudget ?? 0` is defense-in-depth for
+   * future code paths that might set `mode='warn'` programmatically.
+   */
+  private emitBudgetTelemetry(configuredCount: number): void {
+    if (this.budgetMode === 'off') return;
+    recordStartupEvent('mcp_budget_decision', {
+      mode: this.budgetMode,
+      budget: this.clientBudget ?? 0,
+      configured: configuredCount,
+      reserved: this.reservedSlots.size,
+      refused: this.lastRefusedServerNames.length,
+    });
+  }
+
+  /**
    * Initiates the tool discovery process for all configured MCP servers.
    * It connects to each server, discovers its available tools, and registers
    * them with the `ToolRegistry`.
@@ -374,6 +419,15 @@ export class McpClientManager {
           await client.discover(cliConfig);
           this.eventEmitter?.emit('mcp-client-update', this.clients);
         } catch (error) {
+          // PR 14 fix (review #4247 wenshao C2): zombie slot leak.
+          // `tryReserveSlot(name)` reserved a slot above. If `connect()`
+          // throws, the slot would stay reserved forever and the client
+          // entry would stay in `this.clients` in a never-CONNECTED
+          // state, blocking other servers in `enforce` mode until a
+          // full discovery restart. Release both so the budget cap
+          // reflects actual usable capacity.
+          this.reservedSlots.delete(name);
+          this.clients.delete(name);
           this.eventEmitter?.emit('mcp-client-update', this.clients);
           // Log the error but don't let a single failed server stop the others
           debugLogger.error(
@@ -387,20 +441,7 @@ export class McpClientManager {
 
     await Promise.all(discoveryPromises);
     this.discoveryState = MCPDiscoveryState.COMPLETED;
-    // PR 14: post-discovery budget telemetry (legacy non-incremental
-    // path; the incremental path emits the same event near its
-    // `mcp_all_servers_settled`).
-    if (this.budgetMode !== 'off') {
-      // Invariant: `mode !== 'off'` ⇒ `clientBudget` was resolved
-      // (env-var fallback would have flipped mode to `off` otherwise).
-      recordStartupEvent('mcp_budget_decision', {
-        mode: this.budgetMode,
-        budget: this.clientBudget ?? 0,
-        configured: Object.keys(servers).length,
-        reserved: this.reservedSlots.size,
-        refused: this.lastRefusedServerNames.length,
-      });
-    }
+    this.emitBudgetTelemetry(Object.keys(servers).length);
   }
 
   /**
@@ -913,20 +954,7 @@ export class McpClientManager {
       serverCount: Object.keys(servers).length,
       incremental: true,
     });
-    // PR 14: post-discovery budget telemetry. Operators see the active
-    // policy + outcome in the startup event sink without parsing
-    // `/workspace/mcp` or `/capabilities`.
-    if (this.budgetMode !== 'off') {
-      // Invariant: `mode !== 'off'` ⇒ `clientBudget` was resolved
-      // (env-var fallback would have flipped mode to `off` otherwise).
-      recordStartupEvent('mcp_budget_decision', {
-        mode: this.budgetMode,
-        budget: this.clientBudget ?? 0,
-        configured: Object.keys(servers).length,
-        reserved: this.reservedSlots.size,
-        refused: this.lastRefusedServerNames.length,
-      });
-    }
+    this.emitBudgetTelemetry(Object.keys(servers).length);
     // Trailing `mcp-client-update` AFTER flipping discoveryState to
     // COMPLETED. Without this the per-server updates above all fire while
     // the state is still IN_PROGRESS, so the AppContainer batch-flush
@@ -1107,6 +1135,12 @@ export class McpClientManager {
     options?: { signal?: AbortSignal },
   ): Promise<ReadResourceResult> {
     let client = this.clients.get(serverName);
+    // PR 14 fix (review #4247 wenshao C3): track whether THIS call
+    // reserved the slot + created the client, so the zombie-leak
+    // cleanup on `connect()` failure (below) only fires for
+    // newly-created lazy spawns — never for a reuse of an already-
+    // CONNECTED client (`client !== undefined` branch).
+    let weReservedSlot = false;
     if (!client) {
       const servers = populateMcpServerCommand(
         this.cliConfig.getMcpServers() || {},
@@ -1134,6 +1168,7 @@ export class McpClientManager {
           this.reservedSlots.size,
         );
       }
+      weReservedSlot = reservation === 'reserved';
 
       const sdkCallback = isSdkMcpServerConfig(serverConfig)
         ? this.sendSdkMcpMessage
@@ -1153,7 +1188,24 @@ export class McpClientManager {
     }
 
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {
-      await client.connect();
+      try {
+        await client.connect();
+      } catch (err) {
+        // PR 14 fix (review #4247 wenshao C3): zombie slot leak.
+        // A failed lazy spawn would otherwise permanently consume a
+        // budget slot AND leave a never-CONNECTED client entry in
+        // `this.clients` (which `getMcpClientAccounting` correctly
+        // excludes from `total`, but the slot still blocks other
+        // servers). Only release if THIS call did the reservation —
+        // a reuse path with an already-tracked client must not
+        // collateral-damage another caller's slot.
+        if (weReservedSlot) {
+          this.reservedSlots.delete(serverName);
+          this.clients.delete(serverName);
+          this.eventEmitter?.emit('mcp-client-update', this.clients);
+        }
+        throw err;
+      }
     }
 
     return client.readResource(uri, options);

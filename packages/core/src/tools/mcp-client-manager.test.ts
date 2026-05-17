@@ -1405,4 +1405,108 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(accounting.reservedSlots).toEqual([]);
     expect(accounting.refusedServerNames).toEqual([]);
   });
+
+  // Round 2 review fixes (PR #4247 wenshao Critical 2, Critical 3, Suggestion 4).
+  it('connect() failure releases the reserved slot in discoverAllMcpTools (wenshao C2)', async () => {
+    // Failing client: getStatus stays DISCONNECTED; connect() throws.
+    // Pre-fix the slot stayed reserved → permanent leak under enforce
+    // → second server couldn't claim a freed slot until full restart.
+    let firstCall = true;
+    vi.mocked(McpClient).mockImplementation(() => {
+      if (firstCall) {
+        firstCall = false;
+        return {
+          connect: vi.fn().mockRejectedValue(new Error('boom')),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(),
+        } as unknown as McpClient;
+      }
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    const config = configWithServers({
+      a: { command: 'node' }, // will fail
+      b: { command: 'node' }, // would be refused pre-fix
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    // `a` failed → slot freed → `b` ought to fit (budget=1, current=0
+    // after `a` released). But discoverAllMcpTools walks all servers
+    // concurrently — `b` may have been refused at the time of its
+    // synchronous reserve check (before `a` released). What we MUST
+    // assert is the post-conditions: `a` released its slot, `a` not
+    // in clients map. `b` may be either reserved or refused depending
+    // on the schedule, but the slot leak itself is gone.
+    const accounting = manager.getMcpClientAccounting();
+    expect(accounting.reservedSlots).not.toContain('a');
+    // No leaked client entry either:
+    expect(
+      (manager as unknown as { clients: Map<string, unknown> }).clients.has(
+        'a',
+      ),
+    ).toBe(false);
+  });
+
+  it('connect() failure in readResource releases the slot AND re-throws (wenshao C3)', async () => {
+    let getResourceCalled = false;
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          // Stays disconnected → readResource code path forces a
+          // `client.connect()` before `client.readResource(...)`.
+          connect: vi.fn().mockRejectedValue(new Error('lazy connect boom')),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(),
+          readResource: vi.fn().mockImplementation(() => {
+            getResourceCalled = true;
+            return Promise.resolve({});
+          }),
+        }) as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    // No discovery yet → `a` not in clients → lazy spawn path.
+    await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
+      'lazy connect boom',
+    );
+    // Slot must NOT leak — pre-fix one failed readResource permanently
+    // burned a budget slot.
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    expect(
+      (manager as unknown as { clients: Map<string, unknown> }).clients.has(
+        'a',
+      ),
+    ).toBe(false);
+    // And the readResource ext-method was never reached (we threw at connect).
+    expect(getResourceCalled).toBe(false);
+  });
+
+  it('readBudgetFromEnv downgrades enforce-without-budget to off (wenshao S4)', async () => {
+    process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = 'enforce';
+    // No QWEN_SERVE_MCP_CLIENT_BUDGET — silently fail-open pre-fix:
+    // `tryReserveSlot` returns 'reserved' when `clientBudget === undefined`,
+    // so an "enforce" daemon would let unlimited servers through.
+    const config = configWithServers({});
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    expect(manager.getMcpClientBudget()).toBeUndefined();
+    // Downgraded — not 'enforce' — because enforce requires a budget.
+    expect(manager.getMcpBudgetMode()).toBe('off');
+  });
 });

@@ -677,8 +677,15 @@ class QwenAgent implements Agent {
       } catch (err) {
         // Accounting failure must not crash the snapshot — the per-
         // server data is still useful even without budget overlay.
-        debugLogger.debug(
-          `getMcpClientAccounting failed: ${err instanceof Error ? err.message : String(err)}`,
+        // PR 14 fix (review #4247 wenshao S7a): bumped from
+        // `debugLogger.debug` to stderr `process.stderr.write` so a
+        // production daemon emits a visible warning when accounting
+        // breaks. `debugLogger.debug` is gated on the operator
+        // having set debug=true, which makes silent slot-leak / type-
+        // mismatch failures invisible in real deployments.
+        process.stderr.write(
+          `qwen serve: getMcpClientAccounting failed: ` +
+            `${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
 
