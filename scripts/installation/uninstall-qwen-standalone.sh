@@ -171,7 +171,9 @@ remove_install_wrapper() {
 }
 
 remove_shell_path_entry() {
-    local marker="# Added by qwen-code installer (multi-qwen shadow fix)"
+    local begin_marker="# Qwen Code PATH block begin"
+    local end_marker="# Qwen Code PATH block end"
+    local legacy_marker="# Added by qwen-code installer (multi-qwen shadow fix)"
     local rc_files=()
     local rc_file
 
@@ -184,7 +186,9 @@ remove_shell_path_entry() {
 
     for rc_file in "${rc_files[@]}"; do
         [[ -f "${rc_file}" ]] || continue
-        grep -qF "${marker}" "${rc_file}" 2>/dev/null || continue
+        grep -qF "${begin_marker}" "${rc_file}" 2>/dev/null ||
+            grep -qF "${legacy_marker}" "${rc_file}" 2>/dev/null ||
+            continue
 
         local temp_file
         temp_file=$(mktemp "${rc_file}.qwen-uninstall.XXXXXX") || {
@@ -192,8 +196,40 @@ remove_shell_path_entry() {
             continue
         }
 
-        awk -v marker="${marker}" '
-            index($0, marker) { check_next = 1; next }
+        awk -v begin_marker="${begin_marker}" \
+            -v end_marker="${end_marker}" \
+            -v legacy_marker="${legacy_marker}" '
+            function reset_block(   i) {
+                for (i = 1; i <= block_count; i++) {
+                    delete block[i]
+                }
+                block_count = 0
+                in_block = 0
+            }
+            function flush_block(   i) {
+                for (i = 1; i <= block_count; i++) {
+                    print block[i]
+                }
+                reset_block()
+            }
+            index($0, begin_marker) {
+                if (in_block) {
+                    flush_block()
+                }
+                in_block = 1
+                block_count = 1
+                block[block_count] = $0
+                next
+            }
+            in_block {
+                block_count++
+                block[block_count] = $0
+                if (index($0, end_marker)) {
+                    reset_block()
+                }
+                next
+            }
+            index($0, legacy_marker) { check_next = 1; next }
             check_next == 1 {
                 check_next = 0
                 if ($0 ~ /^[[:space:]]*export PATH=/ ||
@@ -202,6 +238,11 @@ remove_shell_path_entry() {
                 }
             }
             { print }
+            END {
+                if (in_block) {
+                    flush_block()
+                }
+            }
         ' "${rc_file}" > "${temp_file}" && mv "${temp_file}" "${rc_file}" || {
             rm -f "${temp_file}"
             log_warning "Could not remove Qwen Code PATH entry from ${rc_file}."

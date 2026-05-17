@@ -511,12 +511,16 @@ maybe_update_shell_path() {
             fi
             ;;
         */fish) rc_file="${HOME}/.config/fish/config.fish" ;;
-        *)      rc_file="${HOME}/.profile" ;;
+        *)
+            log_warning "Unsupported shell for automatic PATH update: ${SHELL:-unknown}. Add ${install_bin_dir} to PATH manually."
+            return 0
+            ;;
     esac
 
     [[ -z "${rc_file}" ]] && return 0
 
-    local marker="# Added by qwen-code installer (multi-qwen shadow fix)"
+    local begin_marker="# Qwen Code PATH block begin"
+    local end_marker="# Qwen Code PATH block end"
     local quoted_install_bin_dir
     quoted_install_bin_dir=$(shell_quote "${install_bin_dir}")
     local export_line
@@ -534,8 +538,9 @@ maybe_update_shell_path() {
     mkdir -p "$(dirname "${rc_file}")" 2>/dev/null || true
     {
         echo ""
-        echo "${marker}"
+        echo "${begin_marker}"
         echo "${export_line}"
+        echo "${end_marker}"
     } >> "${rc_file}" || {
         log_warning "Could not write PATH update to ${rc_file}."
         return 0
@@ -638,9 +643,39 @@ resolve_aliyun_version_path() {
     echo "${resolved_version_path}"
 }
 
-# Race two HEAD probes; print "aliyun" or "github" based on which mirror's
-# SHA256SUMS responds first, or "timeout" if neither responds before the
-# deadline. Caller decides what to do with "timeout" (currently: log it and
+# Probe a URL with a HEAD request first, then fall back to a 1-byte ranged GET
+# for object stores or CDNs that reject HEAD while still serving the object.
+probe_url_available() {
+    local url="$1"
+    local timeout="${2:-30}"
+
+    if command_exists curl; then
+        if curl -fsIL --retry 1 --connect-timeout 10 --max-time "${timeout}" "${url}" >/dev/null 2>&1; then
+            return 0
+        fi
+        curl -fsL --retry 1 --connect-timeout 10 --max-time "${timeout}" \
+            --range 0-0 -o /dev/null "${url}" >/dev/null 2>&1
+        return $?
+    fi
+
+    if command_exists wget; then
+        local wget_args=(--tries=2 --timeout=10)
+        if wget --help 2>&1 | grep -q -- '--read-timeout'; then
+            wget_args+=(--read-timeout="${timeout}")
+        fi
+        if wget -q --spider "${wget_args[@]}" "${url}" >/dev/null 2>&1; then
+            return 0
+        fi
+        wget -q "${wget_args[@]}" --header='Range: bytes=0-0' -O /dev/null "${url}" >/dev/null 2>&1
+        return $?
+    fi
+
+    return 1
+}
+
+# Race two availability probes; print "aliyun" or "github" based on which
+# mirror's SHA256SUMS responds first, or "timeout" if neither responds before
+# the deadline. Caller decides what to do with "timeout" (currently: log it and
 # fall back to github).
 race_mirror_head() {
     local timeout="${1:-2}"
@@ -651,9 +686,9 @@ race_mirror_head() {
     mkdir -p "${tmpdir}" 2>/dev/null || true
     register_temp_dir "${tmpdir}"
 
-    (curl -fsIL -m "${timeout}" -o /dev/null "${oss_url}" >/dev/null 2>&1 && : > "${tmpdir}/aliyun") &
+    (probe_url_available "${oss_url}" "${timeout}" && : > "${tmpdir}/aliyun") &
     local oss_pid=$!
-    (curl -fsIL -m "${timeout}" -o /dev/null "${gh_url}"  >/dev/null 2>&1 && : > "${tmpdir}/github") &
+    (probe_url_available "${gh_url}" "${timeout}" && : > "${tmpdir}/github") &
     local gh_pid=$!
 
     local winner=""
@@ -741,21 +776,7 @@ download_file() {
 url_exists() {
     local url="$1"
 
-    if command_exists curl; then
-        curl -fsIL --retry 1 --connect-timeout 10 --max-time 30 "${url}" >/dev/null 2>&1
-        return $?
-    fi
-
-    if command_exists wget; then
-        local wget_args=(--tries=2 --timeout=10)
-        if wget --help 2>&1 | grep -q -- '--read-timeout'; then
-            wget_args+=(--read-timeout=30)
-        fi
-        wget -q --spider "${wget_args[@]}" "${url}" >/dev/null 2>&1
-        return $?
-    fi
-
-    return 1
+    probe_url_available "${url}" 30
 }
 
 sha256_file() {
@@ -985,10 +1006,13 @@ write_unix_wrapper() {
     local quoted_qwen_bin
     quoted_qwen_bin=$(shell_quote "${qwen_bin}")
 
-    cat > "${wrapper_path}" <<EOF
+    if ! cat > "${wrapper_path}" <<EOF
 #!/usr/bin/env sh
 exec ${quoted_qwen_bin} "\$@"
 EOF
+    then
+        return 1
+    fi
     chmod +x "${wrapper_path}"
 }
 

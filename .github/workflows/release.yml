@@ -413,9 +413,11 @@ jobs:
           fi
 
           chmod +x "${ossutil_path}"
-          sudo install -m 0755 "${ossutil_path}" /usr/local/bin/ossutil
+          mkdir -p "${HOME}/.local/bin"
+          install -m 0755 "${ossutil_path}" "${HOME}/.local/bin/ossutil"
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
           rm -rf "${tmp_dir}"
-          ossutil >/dev/null
+          "${HOME}/.local/bin/ossutil" >/dev/null
 
       - name: 'Configure Aliyun OSS Credentials'
         if: |-
@@ -464,16 +466,18 @@ jobs:
           IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
           IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
         run: |-
+          set -euo pipefail
+
           PRERELEASE_FLAG=""
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
           fi
 
+          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths)
+
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
-            dist/standalone/qwen-code-*.tar.gz \
-            dist/standalone/qwen-code-*.zip \
-            dist/standalone/SHA256SUMS \
+            "${release_assets[@]}" \
             --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
             --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
@@ -489,20 +493,12 @@ jobs:
         run: |-
           set -euo pipefail
 
-          upload_asset() {
-            local source="$1"
-            local key="$2"
-            ossutil cp "${source}" "oss://${ALIYUN_OSS_BUCKET}/${key}" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
-          }
-
-          upload_release_assets() {
-            local prefix="$1"
-            for asset in dist/standalone/qwen-code-*.tar.gz dist/standalone/qwen-code-*.zip dist/standalone/SHA256SUMS; do
-              upload_asset "${asset}" "${prefix}/$(basename "${asset}")"
-            done
-          }
-
-          upload_release_assets "releases/qwen-code/${RELEASE_TAG}"
+          mapfile -t release_assets < <(node scripts/verify-installation-release.js --dir dist/standalone --list-release-asset-paths)
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "releases/qwen-code/${RELEASE_TAG}" \
+            "${release_assets[@]}"
 
       - name: 'Verify Aliyun OSS Release Assets'
         if: |-
@@ -543,26 +539,24 @@ jobs:
         run: |-
           set -euo pipefail
 
-          upload_asset() {
-            local source="$1"
-            local key="$2"
-            ossutil cp "${source}" "oss://${ALIYUN_OSS_BUCKET}/${key}" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
-          }
-
-          upload_hosted_installation_assets() {
-            local prefix="$1"
-            for asset in \
-              dist/installation/install-qwen-standalone.sh \
-              dist/installation/install-qwen-standalone.ps1 \
-              dist/installation/install-qwen-standalone.bat \
-              dist/installation/uninstall-qwen-standalone.sh \
-              dist/installation/uninstall-qwen-standalone.ps1 \
-              dist/installation/SHA256SUMS; do
-              upload_asset "${asset}" "${prefix}/$(basename "${asset}")"
-            done
-          }
-
-          upload_hosted_installation_assets "installation/${RELEASE_TAG}"
+          hosted_assets=(
+            dist/installation/install-qwen-standalone.sh
+            dist/installation/install-qwen-standalone.ps1
+            dist/installation/install-qwen-standalone.bat
+            dist/installation/uninstall-qwen-standalone.sh
+            dist/installation/uninstall-qwen-standalone.ps1
+            dist/installation/SHA256SUMS
+          )
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "installation/${RELEASE_TAG}" \
+            "${hosted_assets[@]}"
+          node scripts/upload-aliyun-oss-assets.js \
+            --bucket "${ALIYUN_OSS_BUCKET}" \
+            --config "${RUNNER_TEMP}/.ossutilconfig" \
+            --prefix "installation" \
+            "${hosted_assets[@]}"
 
       - name: 'Verify Aliyun OSS Hosted Installation Assets'
         if: |-
@@ -575,16 +569,25 @@ jobs:
 
           hosted_tmp_dir="$(mktemp -d)"
           trap 'rm -rf "${hosted_tmp_dir}"' EXIT
+          mkdir -p "${hosted_tmp_dir}/versioned" "${hosted_tmp_dir}/global"
           for asset in install-qwen-standalone.sh install-qwen-standalone.ps1 install-qwen-standalone.bat uninstall-qwen-standalone.sh uninstall-qwen-standalone.ps1 SHA256SUMS; do
             url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${RELEASE_TAG}/${asset}"
-            curl -fsSL --connect-timeout 15 --max-time 300 "${url}" -o "${hosted_tmp_dir}/${asset}"
+            global_url="${ALIYUN_OSS_PUBLIC_BASE_URL}/installation/${asset}"
+            curl -fsSL --connect-timeout 15 --max-time 300 "${url}" -o "${hosted_tmp_dir}/versioned/${asset}"
+            curl -fsSL --connect-timeout 15 --max-time 300 "${global_url}" -o "${hosted_tmp_dir}/global/${asset}"
           done
-          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/SHA256SUMS" || {
+          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/versioned/SHA256SUMS" || {
             echo "::error::Hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
-            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/SHA256SUMS" || true
+            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/versioned/SHA256SUMS" || true
             exit 1
           }
-          (cd "${hosted_tmp_dir}" && sha256sum -c SHA256SUMS)
+          cmp -s "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/global/SHA256SUMS" || {
+            echo "::error::Global hosted installation SHA256SUMS does not match local dist/installation/SHA256SUMS"
+            diff -u "dist/installation/SHA256SUMS" "${hosted_tmp_dir}/global/SHA256SUMS" || true
+            exit 1
+          }
+          (cd "${hosted_tmp_dir}/versioned" && sha256sum -c SHA256SUMS)
+          (cd "${hosted_tmp_dir}/global" && sha256sum -c SHA256SUMS)
 
       - name: 'Create PR to merge release branch into main'
         if: |-

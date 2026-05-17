@@ -59,14 +59,6 @@ function Get-QwenInstallBinDir {
         return $env:QWEN_INSTALL_BIN_DIR
     }
 
-    if (-not [string]::IsNullOrEmpty($env:QWEN_INSTALL_ROOT)) {
-        return Join-Path (Get-QwenInstallBase) 'bin'
-    }
-
-    if (-not [string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
-        return Join-Path (Get-QwenInstallBase) 'bin'
-    }
-
     return Join-Path (Get-QwenInstallBase) 'bin'
 }
 
@@ -203,6 +195,16 @@ function Add-PathCandidate {
     [void]$Candidates.Add($Directory.Trim().Trim('"'))
 }
 
+function Test-SystemManagedPathDirectory {
+    param([string]$Directory)
+
+    $normalizedDirectory = Get-NormalizedPath -PathValue $Directory
+    return (
+        -not [string]::IsNullOrEmpty($normalizedDirectory) -and
+        $normalizedDirectory -match '\\Microsoft\\WindowsApps$'
+    )
+}
+
 function Install-CurrentCmdPathShim {
     param([string]$QwenCommand, [string]$PathValue)
 
@@ -210,9 +212,6 @@ function Install-CurrentCmdPathShim {
     $candidates = [System.Collections.Generic.List[string]]::new()
     $preferredDirectories = @()
 
-    if (-not [string]::IsNullOrEmpty($env:LOCALAPPDATA)) {
-        $preferredDirectories += Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps'
-    }
     if (-not [string]::IsNullOrEmpty($env:APPDATA)) {
         $preferredDirectories += Join-Path $env:APPDATA 'npm'
     }
@@ -232,6 +231,9 @@ function Install-CurrentCmdPathShim {
 
     $userRoot = Get-NormalizedPath -PathValue $env:USERPROFILE
     foreach ($entry in $pathEntries) {
+        if (Test-SystemManagedPathDirectory -Directory $entry) {
+            continue
+        }
         $entryNormalized = Get-NormalizedPath -PathValue $entry
         if (
             -not [string]::IsNullOrEmpty($userRoot) -and
@@ -334,6 +336,10 @@ if ([string]::IsNullOrEmpty($env:QWEN_INSTALLER_CHECKSUMS_URL)) {
 $qwenInstallerName = [IO.Path]::GetFileName(([Uri]$qwenInstallerUrl).AbsolutePath)
 if ([string]::IsNullOrEmpty($qwenInstallerName)) {
     $qwenInstallerName = 'install-qwen-standalone.bat'
+}
+if ([string]::IsNullOrEmpty($env:TEMP)) {
+    Write-Error "TEMP environment variable is not set. Please set TEMP to a writable directory."
+    exit 1
 }
 $qwenInstallerPath = Join-Path $env:TEMP $qwenInstallerName
 $qwenChecksumsPath = Join-Path $env:TEMP 'qwen-installation-SHA256SUMS'

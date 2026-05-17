@@ -5,6 +5,9 @@ REM This script intentionally does not install Node.js or change npm config.
 
 setlocal enabledelayedexpansion
 
+call :ValidateRawEnvironmentOptions
+if %ERRORLEVEL% NEQ 0 exit /b 1
+
 set "SOURCE=unknown"
 set "METHOD="
 if defined QWEN_INSTALL_METHOD set "METHOD=!QWEN_INSTALL_METHOD!"
@@ -314,6 +317,12 @@ if /i not "!DISPLAY_VERSION!"=="latest" (
 echo Installing Qwen Code version: !DISPLAY_VERSION!
 exit /b 0
 
+:ValidateRawEnvironmentOptions
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); $rawNames = @('QWEN_INSTALL_METHOD','QWEN_INSTALL_MIRROR','QWEN_NO_MODIFY_PATH','QWEN_INSTALL_BASE_URL','QWEN_INSTALL_ARCHIVE','QWEN_INSTALL_VERSION','QWEN_NPM_REGISTRY','QWEN_INSTALL_ROOT','QWEN_INSTALL_LIB_DIR','QWEN_INSTALL_BIN_DIR','QWEN_INSTALL_GITHUB_REPO'); foreach ($name in $rawNames) { $value = [Environment]::GetEnvironmentVariable($name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }; exit 0"
+if %ERRORLEVEL% EQU 0 exit /b 0
+echo ERROR: installer options contain unsafe command characters.
+exit /b 1
+
 :ValidateOptions
 if "!METHOD!"=="" set "METHOD=detect"
 
@@ -453,10 +462,13 @@ exit /b 1
 
 :DetectTarget
 set "TARGET="
+rem Keep :DetectTarget in sync with RELEASE_TARGETS in scripts/build-standalone-release.js.
 if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "TARGET=win-x64"
 if /i "!PROCESSOR_ARCHITECTURE!"=="X64" set "TARGET=win-x64"
+if /i "!PROCESSOR_ARCHITECTURE!"=="ARM64" set "TARGET=win-arm64"
 if /i "!PROCESSOR_ARCHITEW6432!"=="AMD64" set "TARGET=win-x64"
 if /i "!PROCESSOR_ARCHITEW6432!"=="X64" set "TARGET=win-x64"
+if /i "!PROCESSOR_ARCHITEW6432!"=="ARM64" set "TARGET=win-arm64"
 if "!TARGET!"=="" (
     echo WARNING: Standalone archive is not available for this Windows architecture.
     exit /b 1
@@ -586,7 +598,7 @@ exit /b %PS_STATUS%
 set "QWEN_CHECK_URL=%~1"
 rem Prefer Tls12+Tls13; fall back to Tls12 alone on older .NET Framework where the Tls13 enum is missing.
 rem AllowAutoRedirect=true is required for GitHub release asset URLs which return HTTP 302.
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Timeout = 10000; $request.Method = 'HEAD'; if ($request -is [Net.HttpWebRequest]) { $request.ReadWriteTimeout = 30000; $request.AllowAutoRedirect = $true }; try { $response = $request.GetResponse(); $response.Close(); exit 0 } catch { exit 1 }" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; function Test-QwenUrl($method, $range) { try { $request = [Net.WebRequest]::Create($env:QWEN_CHECK_URL); $request.Timeout = 10000; $request.Method = $method; if ($range) { $request.Headers.Add('Range', 'bytes=0-0') }; if ($request -is [Net.HttpWebRequest]) { $request.ReadWriteTimeout = 30000; $request.AllowAutoRedirect = $true }; $response = $request.GetResponse(); $response.Close(); return $true } catch { return $false } }; if (Test-QwenUrl 'HEAD' $false) { exit 0 }; if (Test-QwenUrl 'GET' $true) { exit 0 }; exit 1" >nul 2>&1
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_CHECK_URL="
 exit /b %PS_STATUS%
@@ -747,7 +759,7 @@ if not "!ARCHIVE_PATH!"=="" (
     call :DetectTarget
     if !ERRORLEVEL! NEQ 0 exit /b 2
 
-    set "ARCHIVE_NAME=qwen-code-win-x64.zip"
+    set "ARCHIVE_NAME=qwen-code-!TARGET!.zip"
     set "REQUESTED_MIRROR=!MIRROR!"
     set "REQUESTED_VERSION_PATH="
     set "GITHUB_FALLBACK_BASE_URL="

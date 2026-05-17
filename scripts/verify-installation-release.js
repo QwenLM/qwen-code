@@ -6,8 +6,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { RELEASE_TARGETS } from './build-standalone-release.js';
 import {
@@ -44,6 +47,10 @@ function standaloneArchiveNamesFromReleaseTargets(releaseTargets) {
 const ARG_DEFS = {
   '--dir': { key: 'dir', type: 'value' },
   '--base-url': { key: 'baseUrl', type: 'value' },
+  '--list-release-asset-paths': {
+    key: 'listReleaseAssetPaths',
+    type: 'flag',
+  },
 };
 
 if (isMainModule(import.meta.url)) {
@@ -64,6 +71,19 @@ async function main() {
   if (args.dir && args.baseUrl) {
     fail('Pass --dir or --base-url, not both.');
   }
+  if (args.listReleaseAssetPaths && args.baseUrl) {
+    fail('Pass --list-release-asset-paths with --dir, not --base-url.');
+  }
+  if (args.listReleaseAssetPaths) {
+    const dir = path.resolve(
+      args.dir || path.join(rootDir, 'dist', 'standalone'),
+    );
+    await verifyReleaseDirectory(dir, { silent: true });
+    for (const assetPath of releaseAssetPaths(dir)) {
+      console.log(assetPath);
+    }
+    return;
+  }
   if (args.baseUrl) {
     await verifyReleaseBaseUrl(args.baseUrl);
     return;
@@ -77,19 +97,21 @@ function printUsage() {
   console.log(`Usage: npm run verify:installation-release -- [options]
 
 Verifies that an installation release directory contains the expected standalone
-archives with matching SHA256SUMS entries. For a release URL, verifies that
-SHA256SUMS is reachable, lists the expected archives, and that each archive URL
-is reachable without downloading the full archive.
+archives with matching SHA256SUMS entries. For a release URL, downloads
+SHA256SUMS and the expected archives, then verifies each archive hash.
 
 Options:
   --dir PATH         Verify a local release directory. Defaults to dist/standalone.
   --base-url URL     Verify a remote release URL (e.g. a GitHub release download
                      prefix). Cannot be combined with --dir.
+  --list-release-asset-paths
+                     Verify --dir, then print explicit asset paths for upload.
   -h, --help         Show this help message.
 `);
 }
 
-async function verifyReleaseDirectory(dir) {
+async function verifyReleaseDirectory(dir, options = {}) {
+  const { silent = false } = options;
   const checksums = readReleaseChecksums(dir);
   assertExpectedChecksumEntries(checksums);
   assertExpectedArchiveFiles(dir);
@@ -106,9 +128,11 @@ async function verifyReleaseDirectory(dir) {
     }
   }
 
-  console.log(
-    `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release assets in ${dir}`,
-  );
+  if (!silent) {
+    console.log(
+      `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release assets in ${dir}`,
+    );
+  }
 }
 
 async function verifyReleaseBaseUrl(baseUrl, options = {}) {
@@ -117,14 +141,11 @@ async function verifyReleaseBaseUrl(baseUrl, options = {}) {
   const checksumUrl = new URL('SHA256SUMS', normalizedBaseUrl).toString();
   const checksums = parseSha256Sums(await fetchText(checksumUrl, fetchImpl));
   assertExpectedChecksumEntries(checksums);
-  console.warn(
-    'WARNING: Remote release verification checks URL reachability only; it does not download archive bodies or verify archive hashes. Run --dir against downloaded assets for checksum verification.',
-  );
 
-  await assertRemoteAssetsAvailable(normalizedBaseUrl, fetchImpl);
+  await assertRemoteAssetChecksums(normalizedBaseUrl, checksums, fetchImpl);
 
   console.log(
-    `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release asset URLs at ${baseUrl}`,
+    `Verified ${EXPECTED_RELEASE_ASSET_NAMES.length} installation release assets at ${baseUrl}`,
   );
 }
 
@@ -166,14 +187,26 @@ function assertExpectedArchiveFiles(dir) {
   }
 }
 
-async function assertRemoteAssetsAvailable(normalizedBaseUrl, fetchImpl) {
+function releaseAssetPaths(dir) {
+  return EXPECTED_RELEASE_ASSET_NAMES.map((assetName) =>
+    path.join(dir, assetName),
+  );
+}
+
+async function assertRemoteAssetChecksums(
+  normalizedBaseUrl,
+  checksums,
+  fetchImpl,
+) {
   const failures = [];
   for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
     try {
-      await assertRemoteAssetAvailable(
-        new URL(assetName, normalizedBaseUrl).toString(),
-        fetchImpl,
-      );
+      const assetUrl = new URL(assetName, normalizedBaseUrl).toString();
+      const actual = await fetchSha256(assetUrl, fetchImpl);
+      const expected = checksums.get(assetName);
+      if (actual !== expected) {
+        fail(`Checksum verification failed for ${assetName}`);
+      }
     } catch (reason) {
       failures.push({
         assetName,
@@ -191,31 +224,26 @@ async function assertRemoteAssetsAvailable(normalizedBaseUrl, fetchImpl) {
     );
   }
   fail(
-    `Unavailable release asset URL(s): ${failures
+    `Unavailable or invalid release asset(s): ${failures
       .map(({ assetName, reason }) => `${assetName} (${reason})`)
       .join('; ')}`,
   );
 }
 
-async function assertRemoteAssetAvailable(url, fetchImpl) {
-  let response = await fetchWithTimeout(fetchImpl, url, { method: 'HEAD' });
-  if (response.ok) {
-    await response.body?.cancel?.();
-    return;
-  }
-  await response.body?.cancel?.();
-
-  // Some object-storage hosts disable HEAD; fall back to a 1-byte ranged GET
-  // so the verifier can confirm reachability without downloading the archive.
-  response = await fetchWithTimeout(fetchImpl, url, {
-    headers: {
-      Range: 'bytes=0-0',
-    },
-  });
+async function fetchSha256(url, fetchImpl) {
+  const response = await fetchWithTimeout(fetchImpl, url);
   if (!response.ok) {
-    fail(`Release asset URL is not available: ${url}`);
+    fail(
+      `Failed to download ${url}: ${response.status} ${response.statusText}`,
+    );
   }
-  await response.body?.cancel?.();
+  if (!response.body) {
+    fail(`Downloaded response has no body: ${url}`);
+  }
+
+  const hash = crypto.createHash('sha256');
+  await pipeline(Readable.fromWeb(response.body), hash);
+  return hash.digest('hex');
 }
 
 function formatErrorReason(reason) {
@@ -260,6 +288,8 @@ function normalizeHttpsBaseUrl(baseUrl) {
 
 export {
   EXPECTED_STANDALONE_ARCHIVE_NAMES,
+  EXPECTED_RELEASE_ASSET_NAMES,
+  releaseAssetPaths,
   verifyReleaseBaseUrl,
   verifyReleaseDirectory,
 };
