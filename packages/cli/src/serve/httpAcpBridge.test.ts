@@ -398,6 +398,124 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
+  describe('recordHeartbeat', () => {
+    it('updates the per-session timestamp for an anonymous heartbeat', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Anonymous heartbeats (no `X-Qwen-Client-Id`) bump only the session
+      // watermark — every identified-client lookup must stay empty so a
+      // future revocation policy doesn't see ghost timestamps.
+      const before = Date.now();
+      const result = bridge.recordHeartbeat(session.sessionId);
+      const after = Date.now();
+
+      expect(result.sessionId).toBe(session.sessionId);
+      expect(result.clientId).toBeUndefined();
+      expect(result.lastSeenAt).toBeGreaterThanOrEqual(before);
+      expect(result.lastSeenAt).toBeLessThanOrEqual(after);
+
+      const state = bridge.getHeartbeatState(session.sessionId);
+      expect(state?.sessionLastSeenAt).toBe(result.lastSeenAt);
+      expect(state?.clientLastSeenAt.size).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('records per-client timestamps when a trusted client id is supplied', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const result = bridge.recordHeartbeat(session.sessionId, {
+        clientId: session.clientId,
+      });
+
+      expect(result.clientId).toBe(session.clientId);
+      const state = bridge.getHeartbeatState(session.sessionId);
+      expect(state?.sessionLastSeenAt).toBe(result.lastSeenAt);
+      expect(state?.clientLastSeenAt.get(session.clientId!)).toBe(
+        result.lastSeenAt,
+      );
+
+      await bridge.shutdown();
+    });
+
+    it('throws SessionNotFoundError on unknown sessions', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      // No `session/spawnOrAttach` first — the bridge must reject before
+      // touching any timestamp store.
+      expect(() => bridge.recordHeartbeat('missing')).toThrow(
+        SessionNotFoundError,
+      );
+      expect(bridge.getHeartbeatState('missing')).toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    it('rejects an unknown client id without bumping any timestamp', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Pre-validation guarantees an attacker holding a valid bearer
+      // token can't mask client absence by spamming heartbeats with
+      // forged ids — `sessionLastSeenAt` must stay undefined here.
+      expect(() =>
+        bridge.recordHeartbeat(session.sessionId, { clientId: 'forged' }),
+      ).toThrow(InvalidClientIdError);
+
+      const state = bridge.getHeartbeatState(session.sessionId);
+      expect(state?.sessionLastSeenAt).toBeUndefined();
+      expect(state?.clientLastSeenAt.size).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('drops per-client last-seen on detach but preserves the session watermark', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.recordHeartbeat(session.sessionId, { clientId: session.clientId });
+
+      const before = bridge.getHeartbeatState(session.sessionId);
+      expect(before?.clientLastSeenAt.get(session.clientId!)).toBeDefined();
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+
+      const after = bridge.getHeartbeatState(session.sessionId);
+      // session watermark stays — diagnostics still see "this session
+      // was alive at T"; per-client entry is gone since the client
+      // ref-count hit zero.
+      expect(after?.sessionLastSeenAt).toBe(before?.sessionLastSeenAt);
+      expect(after?.clientLastSeenAt.size).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('returns a snapshot map that callers cannot use to mutate live state', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.recordHeartbeat(session.sessionId, { clientId: session.clientId });
+
+      const snapshot = bridge.getHeartbeatState(session.sessionId);
+      // Mutating the returned map must NOT leak into the bridge — the
+      // accessor exists so future PR 12 read-only routes can serialize
+      // a snapshot without coupling to internal storage.
+      (snapshot!.clientLastSeenAt as Map<string, number>).set('attacker', 0);
+
+      const fresh = bridge.getHeartbeatState(session.sessionId);
+      expect(fresh?.clientLastSeenAt.has('attacker')).toBe(false);
+
+      await bridge.shutdown();
+    });
+  });
+
   it('loads an existing ACP session and registers it for daemon routes', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {

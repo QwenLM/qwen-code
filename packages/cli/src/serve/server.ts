@@ -75,6 +75,7 @@ export interface ServeAppDeps {
  *   - `GET  /workspace/:id/sessions`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
+ *   - `POST /session/:id/heartbeat`
  *   - `POST /session/:id/model`
  *   - `GET  /session/:id/events` (SSE)
  *   - `POST /session/:id/permission/:requestId`
@@ -561,6 +562,37 @@ export function createServeApp(
       });
     } finally {
       res.off('close', onResClose);
+    }
+  });
+
+  app.post('/session/:id/heartbeat', mutate(), (req, res) => {
+    // #4175 PR 9: clients ping the daemon to update last-seen
+    // bookkeeping. Bridge throws `SessionNotFoundError` for unknown
+    // ids and `InvalidClientIdError` when an `X-Qwen-Client-Id`
+    // header is supplied but not registered for this session — both
+    // are routed through `sendBridgeError` so they share the same
+    // typed shape (`404` and `400 invalid_client_id`) the rest of
+    // the routes use.
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = bridge.recordHeartbeat(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/heartbeat',
+        sessionId,
+      });
     }
   });
 
