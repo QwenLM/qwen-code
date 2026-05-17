@@ -477,8 +477,11 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         // construction (matches the existing eventBus.test.ts:103 pattern).
         const iter = bus.subscribe({ maxQueued: 2, signal: ac.signal });
 
-        // Publish 3 events into a 2-deep queue. The 3rd trips eviction →
-        // a synthetic client_evicted terminal frame is appended.
+        // Publish 3 events into a 2-deep queue:
+        //   - event 2 fills the queue to 100% (above the 75% warn threshold),
+        //     so the bus force-pushes a `slow_client_warning` synthetic frame.
+        //   - event 3 trips the eviction path → terminal `client_evicted` frame.
+        // Resulting order: tick(1), tick(2), slow_client_warning, client_evicted.
         bus.publish({ type: 'tick', data: { i: 1 } });
         bus.publish({ type: 'tick', data: { i: 2 } });
         bus.publish({ type: 'tick', data: { i: 3 } });
@@ -489,8 +492,9 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         }
         ac.abort();
 
-        expect(collected).toHaveLength(3);
-        expect(collected[2]!.type).toBe('client_evicted');
+        expect(collected).toHaveLength(4);
+        expect(collected[2]!.type).toBe('slow_client_warning');
+        expect(collected[3]!.type).toBe('client_evicted');
         snapshot.sseBackpressure = {
           ringSize: 4_000,
           maxQueuedDefault: 256,
