@@ -442,9 +442,10 @@ describe('createHttpAcpBridge', () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
       const h = makeChannel({
-        loadSessionImpl: () => ({
-          configOptions: [{ id: 'foo', name: 'Foo', value: false }],
-        }),
+        // `_meta` is the permissive escape hatch on the ACP response
+        // schema — any record-shaped payload survives the wire. The
+        // assertions only need the bridge to forward it intact.
+        loadSessionImpl: () => ({ _meta: { tag: 'restored-foo' } }),
       });
       handles.push(h);
       return h.channel;
@@ -461,16 +462,14 @@ describe('createHttpAcpBridge', () => {
     });
 
     expect(loaded.attached).toBe(false);
-    expect(loaded.state).toEqual({
-      configOptions: [{ id: 'foo', name: 'Foo', value: false }],
-    });
+    expect(loaded.state).toEqual({ _meta: { tag: 'restored-foo' } });
     // Late attachers must observe the SAME restore state the original
     // caller saw — `entry.restoreState` is cached at load time.
     expect(attached).toEqual({
       sessionId: 'persisted-3',
       workspaceCwd: WS_A,
       attached: true,
-      state: { configOptions: [{ id: 'foo', name: 'Foo', value: false }] },
+      state: { _meta: { tag: 'restored-foo' } },
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(1);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
@@ -504,18 +503,14 @@ describe('createHttpAcpBridge', () => {
       workspaceCwd: WS_A,
     });
 
-    releaseLoad!({ configOptions: [{ id: 'baz', name: 'Baz', value: true }] });
+    releaseLoad!({ _meta: { tag: 'restored-baz' } });
     const [r1, r2] = await Promise.all([first, second]);
 
     expect(r1.attached).toBe(false);
-    expect(r1.state).toEqual({
-      configOptions: [{ id: 'baz', name: 'Baz', value: true }],
-    });
+    expect(r1.state).toEqual({ _meta: { tag: 'restored-baz' } });
     expect(r2.attached).toBe(true);
     // Coalesced waiter sees the same state, not `{}`.
-    expect(r2.state).toEqual({
-      configOptions: [{ id: 'baz', name: 'Baz', value: true }],
-    });
+    expect(r2.state).toEqual({ _meta: { tag: 'restored-baz' } });
 
     await bridge.shutdown();
   });
