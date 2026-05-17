@@ -39,6 +39,8 @@ export type {
   DaemonModelSwitchFailedData,
   DaemonModelSwitchFailedEvent,
   DaemonPermissionOption,
+  DaemonPermissionAlreadyResolvedData,
+  DaemonPermissionAlreadyResolvedEvent,
   DaemonPermissionRequestData,
   DaemonPermissionRequestEvent,
   DaemonPermissionResolvedData,
