@@ -19,6 +19,7 @@ import { glob as globAsync } from 'glob';
 import {
   StandardFileSystemService,
   loadIgnoreRules,
+  isWithinRoot,
   type Ignore,
   type WriteTextFileOptions,
 } from '@qwen-code/qwen-code-core';
@@ -327,11 +328,17 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       };
       let truncatedContent = result.content;
       if (sizeOutcome.truncated) {
+        // Use `safeUtf8Truncate` instead of `subarray(0,n).toString('utf-8')`
+        // so the slice never splits a multi-byte codepoint (CJK,
+        // emoji). The plain `subarray + toString` approach silently
+        // emits U+FFFD at the boundary and breaks downstream JSON /
+        // source-code parsing of the truncated prefix.
         const buf = Buffer.from(result.content, 'utf-8');
         if (buf.length > sizeOutcome.bytesToRead) {
-          truncatedContent = buf
-            .subarray(0, sizeOutcome.bytesToRead)
-            .toString('utf-8');
+          truncatedContent = safeUtf8Truncate(
+            buf,
+            sizeOutcome.bytesToRead,
+          ).toString('utf-8');
         }
         meta.truncated = true;
       }
@@ -348,6 +355,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         meta.truncated = true;
       }
       if (ignoreVerdict.ignored) meta.matchedIgnore = ignoreVerdict.category;
+      // Post-read TOCTOU check: confirm the path's inode hasn't
+      // changed and it isn't now a symlink. Catches the
+      // swap-during-read attack where the file is replaced
+      // mid-operation with a symlink pointing outside the
+      // workspace.
+      await assertInodeStableAfterRead(p as string, st.ino);
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'read',
         absolute: p,
@@ -372,6 +385,8 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const st = await fsp.stat(p as string);
       enforceReadBytesSize(st.size, opts.maxBytes);
       const buf = await fsp.readFile(p as string);
+      // Post-read TOCTOU guard — same shape as `readText`.
+      await assertInodeStableAfterRead(p as string, st.ino);
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'read',
         absolute: p,
@@ -454,9 +469,25 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           { hint: 'pass a relative pattern such as "src/**/*.ts"' },
         );
       }
+      // `opts.cwd` is typed `ResolvedPath` but a brand cast in
+      // calling code can produce a path that's never been verified
+      // against `boundWorkspace` (or was verified at a stale
+      // moment). Re-validate at the entry point so a glob with
+      // `cwd: '/etc'` cannot enumerate files outside the workspace
+      // even when the *pattern* is harmlessly relative. The
+      // pattern-side checks above only constrain the pattern
+      // shape; without this check `cwd` is the actual hazard.
       const cwd = (opts.cwd as string | undefined) ?? this.deps.boundWorkspace;
+      const cwdAbs = path.resolve(cwd);
+      if (!isWithinRoot(cwdAbs, this.deps.boundWorkspace)) {
+        throw new FsError(
+          'path_outside_workspace',
+          `glob cwd is outside workspace: ${cwd}`,
+          { hint: 'opts.cwd must be a path obtained from fs.resolve()' },
+        );
+      }
       const matches = await globAsync(pattern, {
-        cwd,
+        cwd: cwdAbs,
         nodir: false,
         absolute: true,
         dot: true,
@@ -642,6 +673,13 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         });
       }
       const current = await fsp.readFile(p as string, 'utf-8');
+      // Post-read TOCTOU guard — catches the swap-during-read
+      // attack where `p` is replaced with a symlink between
+      // `fsp.stat` above and `fsp.readFile` here. The full
+      // read-modify-write race window (between this check and
+      // `lowFs.writeTextFile` below) is the deferred PR 20
+      // follow-up that adds atomic-via-temp + `expectedHash`.
+      await assertInodeStableAfterRead(p as string, st.ino);
       // Single replacement to preserve atomic write-once semantics.
       // Multi-occurrence handling lives in PR 20's edit endpoint
       // where the route can decide policy; the boundary stays
@@ -706,6 +744,85 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       hint: fs.hint,
     });
     return fs;
+  }
+}
+
+/**
+ * Truncate a UTF-8 buffer to at most `maxBytes` bytes WITHOUT
+ * splitting a multi-byte codepoint. `Buffer.subarray(0, n).toString('utf-8')`
+ * silently emits U+FFFD replacement chars when `n` falls in the
+ * middle of a 2-4-byte sequence (CJK, emoji); a downstream consumer
+ * parsing JSON / source code over the truncated content sees corrupted
+ * trailing bytes. We back off `n` to the last valid codepoint
+ * boundary so the truncated string is always a clean prefix of the
+ * original.
+ *
+ * Algorithm:
+ * 1. If the buffer fits, return as-is.
+ * 2. Walk back from `maxBytes` while the previous byte is a UTF-8
+ *    continuation byte (`0b10xxxxxx`).
+ * 3. The byte at the new boundary is now either ASCII (`<0x80`) or
+ *    a leading byte. If it's a leading byte, check whether the full
+ *    multi-byte sequence fits within `maxBytes`. If not, drop the
+ *    leading byte too — the sequence is incomplete.
+ */
+function safeUtf8Truncate(buf: Buffer, maxBytes: number): Buffer {
+  if (buf.length <= maxBytes) return buf;
+  let end = maxBytes;
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
+  if (end > 0) {
+    const lead = buf[end - 1];
+    let seqLen = 1;
+    if ((lead & 0x80) === 0) seqLen = 1;
+    else if ((lead & 0xe0) === 0xc0) seqLen = 2;
+    else if ((lead & 0xf0) === 0xe0) seqLen = 3;
+    else if ((lead & 0xf8) === 0xf0) seqLen = 4;
+    if (seqLen > 1 && end - 1 + seqLen > maxBytes) {
+      end = end - 1;
+    }
+  }
+  return buf.subarray(0, end);
+}
+
+/**
+ * Post-read TOCTOU guard. After reading the file at `p`, re-`lstat`
+ * to confirm the inode hasn't changed and the path isn't now a
+ * symlink. Catches the swap-then-leave attack where a regular
+ * file is replaced with a symlink to outside the workspace
+ * BETWEEN the boundary's pre-stat and the actual read — the
+ * pre-stat saw the original (small, regular) file but the read
+ * followed the swap to wherever the attacker pointed. There's a
+ * residual race where the attacker swaps back after our read but
+ * before this check; that window is much smaller than the swap-
+ * and-leave attack and outside PR 18's threat model. The proper
+ * fix is fd-based reading (`fsp.open` + `fileHandle.read`) so the
+ * fd binds to the inode at open time; that's a follow-up since it
+ * requires a new variant of `lowFs.readTextFile` that takes a
+ * FileHandle instead of a path.
+ */
+async function assertInodeStableAfterRead(
+  p: string,
+  preIno: bigint | number,
+): Promise<void> {
+  const post = await fsp.lstat(p);
+  if (post.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path was replaced with a symlink during read: ${p}`,
+      { hint: 'TOCTOU swap detected via post-read lstat' },
+    );
+  }
+  // ino can be 0 on virtual filesystems (procfs etc.) — only compare
+  // when both sides report a meaningful value.
+  const preNum = typeof preIno === 'bigint' ? preIno : BigInt(preIno as number);
+  const postNum =
+    typeof post.ino === 'bigint' ? post.ino : BigInt(post.ino as number);
+  if (preNum !== 0n && postNum !== 0n && preNum !== postNum) {
+    throw new FsError(
+      'symlink_escape',
+      `path inode changed during read: ${p}`,
+      { hint: 'TOCTOU swap detected via inode comparison' },
+    );
   }
 }
 

@@ -14,6 +14,7 @@ import {
   FS_ACCESS_EVENT_TYPE,
   FS_DENIED_EVENT_TYPE,
   createWorkspaceFileSystemFactory,
+  type ResolvedPath,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
 } from './index.js';
@@ -436,6 +437,60 @@ describe('WorkspaceFileSystem - trust gate', () => {
     const err = await h.fs.edit(r, 'old', 'new').catch((e) => e);
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+  });
+});
+
+describe('WorkspaceFileSystem - TOCTOU + UTF-8 + cwd hardening', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('readText detects post-stat symlink swap and rejects with symlink_escape', async () => {
+    // Simulate the swap: write a regular file, resolve, then
+    // replace it with a symlink to outside the workspace AFTER the
+    // boundary's pre-stat. We approximate by performing the swap
+    // *before* the call but after `resolve`; since the pre-stat
+    // and post-lstat happen back-to-back in the actual call, the
+    // post-lstat catches the symlink state.
+    const target = path.join(h.workspace, 'victim.txt');
+    await fsp.writeFile(target, 'plain');
+    const r = await h.fs.resolve('victim.txt', 'read');
+    // Replace the regular file with a symlink to an outside path.
+    const outside = path.join(h.scratch, 'sensitive.txt');
+    await fsp.writeFile(outside, 'sensitive');
+    await fsp.unlink(target);
+    await fsp.symlink(outside, target, 'file');
+    const err = await h.fs.readText(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+  });
+
+  it('safeUtf8Truncate keeps multi-byte codepoints intact at the boundary', async () => {
+    // 4-char Chinese string, each char 3 bytes UTF-8 = 12 bytes.
+    // A naive slice at 7 bytes would split the 3rd char.
+    const src = '中文测试';
+    const target = path.join(h.workspace, 'cjk.txt');
+    await fsp.writeFile(target, src, 'utf-8');
+    const r = await h.fs.resolve('cjk.txt', 'read');
+    const out = await h.fs.readText(r, { maxBytes: 7 });
+    expect(out.meta.truncated).toBe(true);
+    // Result must be a valid prefix (no U+FFFD); 7 bytes / 3 bytes
+    // per char → 2 complete chars.
+    expect(out.content).toBe('中文');
+    expect(out.content).not.toMatch(/�/);
+  });
+
+  it('glob rejects opts.cwd that lies outside boundWorkspace', async () => {
+    // Forge a `cwd` brand cast pointing outside the workspace; the
+    // entry-point validation should refuse before `globAsync` runs.
+    const outsideCwd = h.scratch as unknown as ResolvedPath;
+    const err = await h.fs
+      .glob('**/*', { cwd: outsideCwd })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('path_outside_workspace');
   });
 });
 
