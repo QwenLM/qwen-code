@@ -15,6 +15,10 @@ import type {
   RequestPermissionResponse,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
+import {
+  DaemonClient,
+  DaemonSessionClient as SdkDaemonSessionClient,
+} from '@qwen-code/sdk';
 import type { AskUserQuestionRequest } from '../types/acpTypes.js';
 
 export interface DaemonIdeEvent {
@@ -73,39 +77,23 @@ export interface DaemonIdeConnectionOptions
   sessionFactory?: DaemonIdeSessionFactory;
 }
 
-type SdkModule = {
-  DaemonClient: new (opts: { baseUrl: string; token?: string }) => unknown;
-  DaemonSessionClient: {
-    createOrAttach(
-      client: unknown,
-      req?: {
-        workspaceCwd?: string;
-        modelServiceId?: string;
-      },
-    ): Promise<DaemonIdeSessionClient>;
-  };
-};
-
-// Uses new Function to bypass esbuild static analysis so @qwen-code/sdk is
-// loaded dynamically at runtime rather than bundled into the extension.
-const dynamicImport = new Function('specifier', 'return import(specifier)') as (
-  specifier: string,
-) => Promise<unknown>;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function isSdkModule(value: unknown): value is SdkModule {
-  if (!isRecord(value)) {
-    return false;
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (normalized === 'localhost' || normalized === '::1') {
+    return true;
   }
-
-  const sessionClient = value['DaemonSessionClient'];
+  const parts = normalized.split('.');
   return (
-    typeof value['DaemonClient'] === 'function' &&
-    isRecord(sessionClient) &&
-    typeof sessionClient['createOrAttach'] === 'function'
+    parts.length === 4 &&
+    parts[0] === '127' &&
+    parts.every((part) => {
+      const value = Number(part);
+      return /^\d+$/.test(part) && value >= 0 && value <= 255;
+    })
   );
 }
 
@@ -117,7 +105,12 @@ function validateDaemonBaseUrl(baseUrl: string): string {
   if (url.username || url.password) {
     throw new Error('Daemon baseUrl must not contain credentials');
   }
-  return baseUrl;
+  if (!isLoopbackHostname(url.hostname)) {
+    throw new Error(
+      `Daemon baseUrl must target a loopback address, got "${url.hostname}"`,
+    );
+  }
+  return url.href;
 }
 
 function normalizePrompt(prompt: string | ContentBlock[]): ContentBlock[] {
@@ -143,20 +136,17 @@ function isPermissionRequestData(
 
 export function createSdkDaemonSessionFactory(): DaemonIdeSessionFactory {
   return async (opts: DaemonIdeSessionFactoryOptions) => {
-    const sdk = await dynamicImport('@qwen-code/sdk');
-    if (!isSdkModule(sdk)) {
-      throw new Error('Loaded @qwen-code/sdk does not expose daemon clients');
-    }
-
-    const daemon = new sdk.DaemonClient({
+    const daemon = new DaemonClient({
       baseUrl: validateDaemonBaseUrl(opts.baseUrl),
       token: opts.token,
     });
-    const session = await sdk.DaemonSessionClient.createOrAttach(daemon, {
+    const session = await SdkDaemonSessionClient.createOrAttach(daemon, {
       workspaceCwd: opts.workspaceCwd,
       modelServiceId: opts.modelServiceId,
     });
-    session.setLastEventId?.(opts.lastEventId);
+    if (opts.lastEventId !== undefined) {
+      session.setLastEventId?.(opts.lastEventId);
+    }
     return session;
   };
 }
@@ -233,9 +223,17 @@ export class DaemonIdeConnection {
   ): Promise<DaemonIdePromptResult> {
     const session = this.ensureSession();
     const promptBlocks = normalizePrompt(prompt);
-    const response = await session.prompt({ prompt: promptBlocks });
-    this.onEndTurn(response.stopReason);
-    return response;
+    try {
+      const response = await session.prompt(
+        { prompt: promptBlocks },
+        this.eventController?.signal,
+      );
+      this.onEndTurn(response.stopReason);
+      return response;
+    } catch (error) {
+      this.onEndTurn('error');
+      throw error;
+    }
   }
 
   async cancelSession(): Promise<void> {
@@ -251,6 +249,7 @@ export class DaemonIdeConnection {
   }
 
   async disconnect(): Promise<void> {
+    const session = this.session;
     this.eventController?.abort();
     if (this.eventPump) {
       try {
@@ -261,7 +260,10 @@ export class DaemonIdeConnection {
     }
     this.eventController = null;
     this.eventPump = null;
-    this.session = null;
+    if (session && this.session === session) {
+      this.session = null;
+      this.onDisconnected(null, 'disconnected');
+    }
   }
 
   get isConnected(): boolean {
@@ -299,8 +301,9 @@ export class DaemonIdeConnection {
         lastEventId: resumeId,
         resume: true,
       })) {
+        let shouldAdvanceLastSeenEventId = true;
         try {
-          await this.handleEvent(event, signal);
+          shouldAdvanceLastSeenEventId = await this.handleEvent(event, signal);
         } catch (error) {
           console.warn('[DaemonIdeConnection] Event handler failed:', {
             eventType: event.type,
@@ -308,7 +311,7 @@ export class DaemonIdeConnection {
             error: toSafeErrorMessage(error),
           });
         } finally {
-          if (event.id !== undefined) {
+          if (shouldAdvanceLastSeenEventId && event.id !== undefined) {
             this.lastSeenEventId = event.id;
           }
         }
@@ -337,48 +340,65 @@ export class DaemonIdeConnection {
   private async handleEvent(
     event: DaemonIdeEvent,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     switch (event.type) {
       case 'session_update':
         this.onSessionUpdate(event.data as SessionNotification);
-        break;
+        return true;
       case 'permission_request':
-        await this.handlePermissionRequest(event.data, signal);
-        break;
+        return await this.handlePermissionRequest(event.data, signal);
       case 'session_died':
         this.handleSessionDied(event.data);
-        break;
+        return true;
       default:
-        break;
+        console.debug('[DaemonIdeConnection] Ignoring daemon event:', {
+          eventType: event.type,
+          eventId: event.id,
+        });
+        return true;
     }
   }
 
   private async handlePermissionRequest(
     data: unknown,
     signal: AbortSignal,
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!isPermissionRequestData(data)) {
-      return;
+      console.warn('[DaemonIdeConnection] Malformed permission request data');
+      return true;
     }
 
     const requestId = data['requestId'];
     const request = data;
+    const session = this.session;
+    if (!session) {
+      return true;
+    }
     const response = await this.resolvePermissionResponseUntilAbort(
       request,
       signal,
     );
     if (!response) {
-      return;
+      return true;
     }
-    const accepted = await this.ensureSession().respondToPermission(
-      requestId,
-      response,
-    );
-    if (!accepted) {
+    if (this.session !== session) {
+      return true;
+    }
+    try {
+      const accepted = await session.respondToPermission(requestId, response);
+      if (!accepted) {
+        console.warn(
+          '[DaemonIdeConnection] Permission response rejected by daemon for request:',
+          requestId,
+        );
+      }
+      return true;
+    } catch (error) {
       console.warn(
-        '[DaemonIdeConnection] Permission response rejected by daemon for request:',
-        requestId,
+        '[DaemonIdeConnection] Permission response failed:',
+        toSafeErrorMessage(error),
       );
+      return false;
     }
   }
 
@@ -433,9 +453,13 @@ export class DaemonIdeConnection {
       ) {
         return { outcome: { outcome: 'cancelled' } };
       }
-      const optionId =
-        this.resolvePermissionOptionId(request, askResponse.optionId) ??
-        askResponse.optionId;
+      const optionId = this.resolvePermissionOptionId(
+        request,
+        askResponse.optionId,
+      );
+      if (!optionId) {
+        return { outcome: { outcome: 'cancelled' } };
+      }
       return {
         outcome: {
           outcome: 'selected',
@@ -448,7 +472,7 @@ export class DaemonIdeConnection {
     }
 
     const response = await this.onPermissionRequest(request);
-    if (response.optionId === '' || this.isCancelledOption(response.optionId)) {
+    if (!response.optionId || this.isCancelledOption(response.optionId)) {
       return { outcome: { outcome: 'cancelled' } };
     }
 
@@ -470,11 +494,14 @@ export class DaemonIdeConnection {
       isRecord(data) && typeof data['sessionId'] === 'string'
         ? data['sessionId']
         : undefined;
-    if (
-      eventSessionId !== undefined &&
-      this.session &&
-      eventSessionId !== this.session.sessionId
-    ) {
+    if (!this.session) {
+      return;
+    }
+    if (eventSessionId === undefined) {
+      console.warn('[DaemonIdeConnection] Malformed session_died event');
+      return;
+    }
+    if (eventSessionId !== this.session.sessionId) {
       return;
     }
 
@@ -483,11 +510,7 @@ export class DaemonIdeConnection {
         ? data['reason']
         : 'session_died';
     this.eventController?.abort();
-    if (this.session) {
-      this.clearCurrentSession(this.session, reason);
-    } else {
-      this.onDisconnected(null, reason);
-    }
+    this.clearCurrentSession(this.session, reason);
   }
 
   private isCancelledOption(optionId?: string): boolean {
@@ -518,7 +541,7 @@ export class DaemonIdeConnection {
       options.find((option) => option.optionId === 'proceed_once')?.optionId ||
       // Some ACP producers namespace standard option ids. Prefer an
       // explicit allow_once kind first, then tolerate namespaced proceed_once.
-      options.find((option) => option.optionId.includes('proceed_once'))
+      options.find((option) => option.optionId?.includes('proceed_once'))
         ?.optionId ||
       options[0]?.optionId
     );
