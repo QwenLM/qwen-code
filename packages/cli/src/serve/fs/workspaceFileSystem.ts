@@ -15,7 +15,7 @@ import { glob as globAsync } from 'glob';
 // + 31 tests post-commit. The inline `type` modifiers below tell the
 // `consistent-type-imports` rule per-symbol intent so future autofixes
 // don't repeat the regression.
- 
+
 import {
   StandardFileSystemService,
   loadIgnoreRules,
@@ -447,6 +447,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const out: ResolvedPath[] = [];
       const max = opts.maxResults ?? Number.POSITIVE_INFINITY;
       let escapedCount = 0;
+      let transientErrorCount = 0;
       for (const hit of matches) {
         if (out.length >= max) break;
         const absolute = path.resolve(hit);
@@ -462,11 +463,26 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         let canonical: string;
         try {
           canonical = await fsp.realpath(absolute);
-        } catch {
-          // Dangling symlink or transient error: treat as escape
-          // so the hit isn't returned to the caller and the audit
-          // surfaces the count.
-          escapedCount += 1;
+        } catch (err) {
+          // Distinguish between the security-relevant escape kinds
+          // and transient I/O errors. `ENOENT` (dangling symlink
+          // or unlinked-mid-glob hit) and `ELOOP` (symlink cycle)
+          // are the cases that legitimately signal "this hit
+          // resolved outside of what the boundary trusts" — they
+          // count as `symlink_escape`. Other errnos (`EIO`,
+          // `EACCES`, `ENAMETOOLONG`, `EBUSY`) are environmental
+          // failures; treating them as escapes mislabels the audit
+          // and gives operators false security signal. Drop those
+          // hits silently from the result set but track them
+          // separately for the audit emission below so a
+          // monitoring pipeline can distinguish "filtered for
+          // escape" from "filtered for transient FS error".
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code === 'ENOENT' || code === 'ELOOP') {
+            escapedCount += 1;
+          } else {
+            transientErrorCount += 1;
+          }
           continue;
         }
         const rel = path.relative(this.deps.boundWorkspace, canonical);
@@ -507,6 +523,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           input: pattern,
           errorKind: 'symlink_escape',
           hint: `glob filtered ${escapedCount} hit(s) that resolved outside workspace`,
+        });
+      }
+      if (transientErrorCount > 0) {
+        this.deps.audit.recordDenied(this.deps.ctx, {
+          intent: 'glob',
+          input: pattern,
+          errorKind: 'permission_denied',
+          hint: `glob skipped ${transientErrorCount} hit(s) due to transient I/O errors (EIO/EACCES/ENAMETOOLONG/EBUSY)`,
         });
       }
       this.deps.audit.recordAccess(this.deps.ctx, {

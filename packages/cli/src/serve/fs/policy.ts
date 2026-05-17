@@ -160,11 +160,19 @@ export interface ReadSizeOutcome {
 }
 
 /**
- * Decide how many bytes a `readText` call should pull off disk
- * given the file's actual size. Reads above the cap surface
- * `truncated: true`; the boundary intentionally does NOT throw,
- * matching claude-code's behavior so a large config file still
- * returns useful content rather than an opaque error.
+ * Decide how many bytes a `readText` call should return given the
+ * file's actual size and the caller's optional tighter cap.
+ *
+ * **Note**: this helper is the *soft* truncation gate that fires
+ * when `opts.maxBytes < fileSize <= MAX_READ_BYTES`. It runs only
+ * AFTER `readText`'s pre-stat hard-cap check has rejected files
+ * above `MAX_READ_BYTES` with `file_too_large` (see
+ * `workspaceFileSystem.ts:readText`). Within the hard cap the
+ * caller can opt into a tighter byte ceiling via `opts.maxBytes`,
+ * and we surface that truncation via `truncated: true` rather
+ * than throwing — operators want to see a partial config file
+ * rather than an opaque error when they explicitly opted in to a
+ * smaller window.
  */
 export function enforceReadSize(
   fileBytes: number,

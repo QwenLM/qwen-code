@@ -230,6 +230,42 @@ describe('resolveWithinWorkspace', () => {
     ).rejects.toMatchObject({ kind: 'parse_error' });
   });
 
+  it('rejects a dangling symlink whose target escapes the workspace (write intent)', async () => {
+    // Reproduces the exploit class flagged at PR #4250: an attacker
+    // creates `<ws>/escape -> /etc/cron.d/evil` BEFORE the target
+    // exists, then issues a write request. Without the lstat-then-
+    // readlink check the ENOENT-tolerant ancestor walk would happily
+    // return `<ws>/escape` as the canonical write target and the
+    // OS-level write would create the file at the symlink target
+    // outside the workspace.
+    const outsideTarget = path.join(scratch, 'outside-not-yet-existing.txt');
+    const danglingLink = path.join(workspace, 'escape');
+    await fsp.symlink(outsideTarget, danglingLink, 'file');
+    const err = await resolveWithinWorkspace(
+      'escape',
+      workspace,
+      'write',
+    ).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+  });
+
+  it('allows a dangling symlink whose (not-yet-existing) target stays inside workspace', async () => {
+    // Symmetric to the escape case: a dangling symlink pointing at
+    // a future file INSIDE the workspace is a normal ahead-of-mkdir
+    // flow (test fixtures, atomic-write-via-rename). Resolve must
+    // succeed for write intent.
+    const insideTarget = path.join(workspace, 'will-create.txt');
+    const link = path.join(workspace, 'pending-link');
+    await fsp.symlink(insideTarget, link, 'file');
+    const out = await resolveWithinWorkspace(
+      'pending-link',
+      workspace,
+      'write',
+    );
+    expect(typeof out).toBe('string');
+  });
+
   it('returns a value usable as ResolvedPath brand', async () => {
     const target = path.join(workspace, 'b.txt');
     await fsp.writeFile(target, 'b');

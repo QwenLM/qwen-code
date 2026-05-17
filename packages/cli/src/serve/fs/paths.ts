@@ -311,6 +311,51 @@ export async function resolveWithinWorkspace(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code === 'ENOENT' && ENOENT_TOLERATING_INTENTS.has(intent)) {
+      // Dangling-symlink write-escape guard. `realpath` follows
+      // symlinks, so a path like `<ws>/leak -> /etc/cron.d/evil`
+      // (where the target doesn't exist YET) throws ENOENT here.
+      // Without this branch the ENOENT-tolerant ancestor walk
+      // below would happily walk up to the workspace root and
+      // return `<ws>/leak` as the canonical write target — but
+      // the OS-level write would follow the symlink to
+      // `/etc/cron.d/evil` and create the file there. `lstat`
+      // detects the symlink without following it; `readlink` +
+      // resolved-target containment closes the loop.
+      try {
+        const linkStat = await fsp.lstat(absolute);
+        if (linkStat.isSymbolicLink()) {
+          const target = await fsp.readlink(absolute);
+          const absTarget = path.isAbsolute(target)
+            ? target
+            : path.resolve(path.dirname(absolute), target);
+          // The symlink target itself doesn't exist (that's why
+          // we're in the ENOENT branch), so resolve via the
+          // deepest existing ancestor so case-insensitive
+          // filesystems and macOS `/var` vs `/private/var`
+          // canonicalize consistently with `boundCanonical`.
+          const { ancestor: targetAncestor, tail: targetTail } =
+            await findExistingAncestor(absTarget);
+          const targetAncestorReal = await fsp.realpath(targetAncestor);
+          const canonicalTarget = targetTail
+            ? path.join(targetAncestorReal, targetTail)
+            : targetAncestorReal;
+          if (!isWithinRoot(canonicalTarget, boundCanonical)) {
+            throw new FsError(
+              'symlink_escape',
+              `dangling symlink target escapes workspace: ${input}`,
+              { hint: `symlink points to ${target}` },
+            );
+          }
+        }
+      } catch (err2) {
+        if (err2 instanceof FsError) throw err2;
+        // `lstat` ENOENT means the input path itself doesn't
+        // exist (input is a path through a non-existent
+        // ancestor) — no symlink to worry about; fall through
+        // to the ancestor walk.
+        const code2 = (err2 as NodeJS.ErrnoException)?.code;
+        if (code2 !== 'ENOENT') throw err2;
+      }
       const { ancestor, tail } = await findExistingAncestor(absolute);
       const ancestorReal = await fsp.realpath(ancestor);
       canonical = tail ? path.join(ancestorReal, tail) : ancestorReal;
