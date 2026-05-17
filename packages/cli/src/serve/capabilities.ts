@@ -51,6 +51,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   client_heartbeat: { since: 'v1' },
   session_permission_vote: { since: 'v1' },
   permission_vote: { since: 'v1' },
+  session_close: { since: 'v1' },
+  session_metadata: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

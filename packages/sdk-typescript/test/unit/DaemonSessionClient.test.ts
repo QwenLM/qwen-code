@@ -329,6 +329,15 @@ describe('DaemonSessionClient', () => {
       if (req.url.endsWith('/session/s-1/permission/req-2')) {
         return jsonResponse(200, {});
       }
+      if (req.method === 'DELETE' && req.url.endsWith('/session/s-1')) {
+        return new Response(null, { status: 204 });
+      }
+      if (req.url.endsWith('/session/s-1/metadata')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          displayName: 'My Session',
+        });
+      }
       return jsonResponse(500, { error: `unexpected ${req.url}` });
     });
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
@@ -363,6 +372,10 @@ describe('DaemonSessionClient', () => {
         outcome: { outcome: 'cancelled' },
       }),
     ).resolves.toBe(true);
+    await expect(
+      session.updateMetadata({ displayName: 'My Session' }),
+    ).resolves.toEqual({ displayName: 'My Session' });
+    await expect(session.close()).resolves.toBeUndefined();
 
     expect(calls.map((c) => c.url)).toEqual([
       'http://daemon/session/s-1/prompt',
@@ -370,9 +383,13 @@ describe('DaemonSessionClient', () => {
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
       'http://daemon/session/s-1/permission/req-2',
+      'http://daemon/session/s-1/metadata',
+      'http://daemon/session/s-1',
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

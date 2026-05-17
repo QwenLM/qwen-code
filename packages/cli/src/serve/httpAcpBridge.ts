@@ -109,6 +109,8 @@ export interface BridgeSession {
    * initiating client without trusting request bodies.
    */
   clientId?: string;
+  /** ISO 8601 timestamp of when the session was created. */
+  createdAt?: string;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -131,6 +133,14 @@ export interface BridgeRestoredSession extends BridgeSession {
 export interface BridgeSessionSummary {
   sessionId: string;
   workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  hasActivePrompt: boolean;
+}
+
+export interface SessionMetadataUpdate {
+  displayName?: string;
 }
 
 export interface BridgeClientRequestContext {
@@ -230,6 +240,32 @@ export interface HttpAcpBridge {
     sessionId: string,
     opts?: SubscribeOptions,
   ): AsyncIterable<BridgeEvent>;
+
+  /**
+   * Explicitly close a live session. Force-closes even when other clients
+   * are attached — cancels any active prompt, resolves pending permissions
+   * as cancelled, publishes `session_closed`, closes the EventBus, and
+   * removes the session from daemon maps. Throws `SessionNotFoundError`
+   * for unknown ids (the SDK absorbs 404 to provide client-side
+   * idempotency). On-disk persisted sessions are NOT deleted — they can
+   * still be reloaded via `POST /session/:id/load`.
+   */
+  closeSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<void>;
+
+  /**
+   * Update mutable session metadata. Currently supports `displayName` only.
+   * Publishes a `session_metadata_updated` event when fields change.
+   * Returns the effective stored metadata. Throws `SessionNotFoundError`
+   * for unknown ids.
+   */
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: SessionMetadataUpdate,
+    context?: BridgeClientRequestContext,
+  ): SessionMetadataUpdate;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).
@@ -721,6 +757,8 @@ interface ChannelInfo {
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -874,6 +912,27 @@ export class InvalidPermissionOptionError extends Error {
     this.name = 'InvalidPermissionOptionError';
     this.requestId = requestId;
     this.optionId = optionId;
+  }
+}
+
+const MAX_DISPLAY_NAME_LENGTH = 256;
+
+function hasControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export class InvalidSessionMetadataError extends Error {
+  readonly field: string;
+  constructor(field: string, reason: string) {
+    super(`Invalid session metadata: ${field} ${reason}`);
+    this.name = 'InvalidSessionMetadataError';
+    this.field = field;
   }
 }
 
@@ -1963,6 +2022,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       workspaceCwd: entry.workspaceCwd,
       attached: false,
       clientId,
+      createdAt: entry.createdAt,
     };
   }
 
@@ -2124,6 +2184,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
+      createdAt: new Date().toISOString(),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -2189,6 +2250,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         workspaceCwd: existing.workspaceCwd,
         attached: true,
         clientId,
+        createdAt: existing.createdAt,
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
@@ -2247,6 +2309,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ...restored,
         attached: true,
         clientId: registerClient(entry, req.clientId),
+        createdAt: entry.createdAt,
       };
     }
 
@@ -2363,6 +2426,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           workspaceCwd: racedEntry.workspaceCwd,
           attached: true,
           clientId,
+          createdAt: racedEntry.createdAt,
           state: racedEntry.restoreState ?? {},
         };
       }
@@ -2395,6 +2459,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         workspaceCwd: entry.workspaceCwd,
         attached: false,
         clientId,
+        createdAt: entry.createdAt,
         state,
       };
     })().finally(() => {
@@ -2515,6 +2580,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             workspaceCwd: existing.workspaceCwd,
             attached: true,
             clientId,
+            createdAt: existing.createdAt,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -2839,13 +2905,106 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return resolvePending(requestId, response, originatorClientId);
     },
 
+    async closeSession(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      let originatorClientId: string | undefined;
+      if (context?.clientId !== undefined) {
+        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+      }
+      writeStderrLine(
+        `qwen serve: closing session ${JSON.stringify(sessionId)}` +
+          (originatorClientId
+            ? ` by client ${JSON.stringify(originatorClientId)}`
+            : ''),
+      );
+      if (defaultEntry === entry) defaultEntry = undefined;
+      const ci = channelInfo;
+      if (ci && ci.channel === entry.channel) {
+        ci.sessionIds.delete(sessionId);
+      }
+      for (const id of Array.from(entry.pendingPermissionIds)) {
+        resolvePending(id, { outcome: { outcome: 'cancelled' } });
+      }
+      byId.delete(sessionId);
+      try {
+        entry.events.publish({
+          type: 'session_closed',
+          data: {
+            sessionId,
+            reason: 'client_close',
+            ...(originatorClientId ? { closedBy: originatorClientId } : {}),
+          },
+        });
+      } catch {
+        /* bus already closed */
+      }
+      // `session_closed` is terminal. Close the bus before ACP cancel so any
+      // late cancellation frames from the agent are intentionally dropped.
+      entry.events.close();
+      try {
+        await entry.connection.cancel({ sessionId });
+      } catch {
+        /* no active prompt or session already torn down */
+      }
+      if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+        ci.isDying = true;
+        await ci.channel.kill().catch((err) => {
+          writeStderrLine(
+            `qwen serve: closeSession channel kill failed for session ` +
+              `${JSON.stringify(sessionId)}: ${String(err)}`,
+          );
+        });
+      }
+    },
+
+    updateSessionMetadata(sessionId, metadata, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (context?.clientId !== undefined) {
+        resolveTrustedClientId(entry, context.clientId);
+      }
+      if (metadata.displayName !== undefined) {
+        if (
+          typeof metadata.displayName !== 'string' ||
+          metadata.displayName.length > MAX_DISPLAY_NAME_LENGTH
+        ) {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            `must be a string of at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
+          );
+        }
+        if (hasControlCharacter(metadata.displayName)) {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not contain control characters',
+          );
+        }
+        const nextDisplayName = metadata.displayName || undefined;
+        if (entry.displayName !== nextDisplayName) {
+          entry.displayName = nextDisplayName;
+          writeStderrLine(
+            `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
+              `displayName=${entry.displayName === undefined ? 'cleared' : 'set'}` +
+              (context?.clientId
+                ? ` by client ${JSON.stringify(context.clientId)}`
+                : ''),
+          );
+          try {
+            entry.events.publish({
+              type: 'session_metadata_updated',
+              data: { sessionId, displayName: entry.displayName },
+            });
+          } catch {
+            /* bus already closed */
+          }
+        }
+      }
+      return { displayName: entry.displayName };
+    },
+
     listWorkspaceSessions(workspaceCwd) {
       if (!path.isAbsolute(workspaceCwd)) return [];
-      // fast-path: under §02 single-workspace, string equality
-      // with boundWorkspace avoids a realpathSync syscall on
-      // every poll. If the literal doesn't match, canonicalize
-      // to handle symlink aliases; if that still doesn't match,
-      // this daemon doesn't own the workspace.
       const key =
         workspaceCwd === boundWorkspace
           ? boundWorkspace
@@ -2857,6 +3016,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           out.push({
             sessionId: entry.sessionId,
             workspaceCwd: entry.workspaceCwd,
+            createdAt: entry.createdAt,
+            displayName: entry.displayName,
+            clientCount: entry.clientIds.size,
+            hasActivePrompt: entry.activePromptOriginatorClientId !== undefined,
           });
         }
       }

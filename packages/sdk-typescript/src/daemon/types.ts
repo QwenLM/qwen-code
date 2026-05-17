@@ -120,6 +120,8 @@ export interface DaemonSession {
    * daemons return it from create/load/resume; older daemons omit it.
    */
   clientId?: string;
+  /** ISO 8601 timestamp of when the session was created. */
+  createdAt?: string;
 }
 
 /**
@@ -156,6 +158,15 @@ export interface DaemonRestoredSession extends DaemonSession {
 export interface DaemonSessionSummary {
   sessionId: string;
   workspaceCwd: string;
+  createdAt?: string;
+  displayName?: string;
+  clientCount?: number;
+  hasActivePrompt?: boolean;
+}
+
+/** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
+export interface SessionMetadataResult {
+  displayName?: string;
 }
 
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */

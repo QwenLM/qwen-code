@@ -613,6 +613,87 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('closeSession', () => {
+    it('sends DELETE to /session/:id and returns void on 204', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.closeSession('s-1');
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1');
+      expect(calls[0]?.method).toBe('DELETE');
+    });
+
+    it('returns void on 404 (idempotent — session already gone)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.closeSession('s-1')).resolves.toBeUndefined();
+    });
+
+    it('sends client identity header', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.closeSession('s-1', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 500', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'boom' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.closeSession('s-1')).rejects.toMatchObject({
+        status: 500,
+      });
+    });
+  });
+
+  describe('updateSessionMetadata', () => {
+    it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          displayName: 'My Session',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.updateSessionMetadata('s-1', {
+        displayName: 'My Session',
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/metadata');
+      expect(calls[0]?.method).toBe('PATCH');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        displayName: 'My Session',
+      });
+      expect(result).toEqual({ displayName: 'My Session' });
+    });
+
+    it('sends client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.updateSessionMetadata(
+        's-1',
+        { displayName: 'test' },
+        'client-1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 404', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.updateSessionMetadata('s-1', { displayName: 'test' }),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+  });
+
   describe('subscribeEvents', () => {
     it('GETs /events and yields parsed frames', async () => {
       const { fetch, calls } = recordingFetch(() =>

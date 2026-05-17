@@ -20,6 +20,7 @@ import {
   createHttpAcpBridge,
   InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
@@ -621,6 +622,53 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'POST /session/:id/cancel',
+        sessionId,
+      });
+    }
+  });
+
+  app.delete('/session/:id', async (req, res) => {
+    const sessionId = req.params['id'];
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      await bridge.closeSession(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(204).end();
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'DELETE /session/:id',
+        sessionId,
+      });
+    }
+  });
+
+  app.patch('/session/:id/metadata', (req, res) => {
+    const sessionId = req.params['id'];
+    const body = safeBody(req);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    const displayName = body['displayName'];
+    if (displayName !== undefined && typeof displayName !== 'string') {
+      res.status(400).json({
+        error: '`displayName` must be a string',
+        code: 'invalid_metadata',
+        field: 'displayName',
+      });
+      return;
+    }
+    try {
+      const effective = bridge.updateSessionMetadata(
+        sessionId,
+        { displayName },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json({ sessionId, ...effective });
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'PATCH /session/:id/metadata',
         sessionId,
       });
     }
@@ -1382,6 +1430,14 @@ function sendBridgeError(
     res.status(400).json({
       error: err.message,
       code: 'invalid_session_scope',
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionMetadataError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_metadata',
+      field: err.field,
     });
     return;
   }
