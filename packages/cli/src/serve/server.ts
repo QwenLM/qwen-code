@@ -134,6 +134,13 @@ export function createServeApp(
     deps.bridge ??
     createHttpAcpBridge({
       maxSessions: opts.maxSessions,
+      // Symmetric with `runQwenServe.ts` — direct embeds / tests that
+      // call `createServeApp` without supplying their own bridge and
+      // pass `ServeOptions.eventRingSize` would otherwise silently
+      // get the default 8000 ring instead of their configured value.
+      ...(opts.eventRingSize !== undefined
+        ? { eventRingSize: opts.eventRingSize }
+        : {}),
       boundWorkspace,
     });
 
@@ -743,6 +750,12 @@ export function createServeApp(
   app.get('/session/:id/events', (req, res) => {
     const sessionId = req.params['id'];
     const lastEventId = parseLastEventId(req.headers['last-event-id']);
+    const maxQueued = parseMaxQueuedQuery(req.query['maxQueued'], res);
+    // `parseMaxQueuedQuery` sends its own 400 + JSON body on rejection
+    // (returns `null`) so the SSE handshake doesn't get half-written.
+    // `undefined` means "client didn't ask for an override; use bus
+    // default 256" — proceed as before.
+    if (maxQueued === null) return;
 
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
@@ -750,6 +763,7 @@ export function createServeApp(
       const iterable = bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
+        ...(maxQueued !== undefined ? { maxQueued } : {}),
       });
       iter = iterable[Symbol.asyncIterator]();
     } catch (err) {
@@ -1135,6 +1149,83 @@ function isValidOutcome(
   );
 }
 
+/** Range bounds for the `?maxQueued=N` query param on `/session/:id/events`. */
+const MIN_QUERY_MAX_QUEUED = 16;
+const MAX_QUERY_MAX_QUEUED = 2048;
+
+/**
+ * Parse the optional `?maxQueued=N` query param on
+ * `GET /session/:id/events`. Returns:
+ *   - `undefined` — param absent, EventBus uses its default cap (256).
+ *   - a positive integer in `[16, 2048]` — caller wants a custom cap.
+ *   - `null` — malformed value; the function ALREADY sent a 400 JSON
+ *     response and the route must short-circuit. (Pre-handshake 400
+ *     is safer than half-opening an SSE stream and emitting a
+ *     `stream_error` frame the client has to parse — `EventSource`
+ *     auto-reconnects on the latter.)
+ *
+ * Cap range rationale: lower bound 16 (smaller is useless for any
+ * replay backlog); upper bound 2048 (so a single subscriber can't
+ * pin ~1 MB of queue memory just by asking).
+ */
+function parseMaxQueuedQuery(
+  raw: unknown,
+  res: import('express').Response,
+): number | undefined | null {
+  // Absent param → undefined (use bus default). Present-but-empty
+  // (`?maxQueued=` typed explicitly) → fail-CLOSED 400 — the API
+  // documents fail-closed for any malformed value before opening
+  // SSE, and an empty string is unambiguously malformed (real values
+  // are positive integers in [16, 2048]).
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    // Sanitize via JSON.stringify so an attacker-controlled value
+    // containing `\n` / `\r` / other control chars can't inject extra
+    // log lines into stderr (line-based shipper like
+    // journald/Loki/Splunk would otherwise treat the injected line as
+    // a fresh entry). Matches the `workspace_mismatch` log style in
+    // `sendBridgeError`.
+    writeStderrLine(
+      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
+        `(not a decimal integer)`,
+    );
+    res.status(400).json({
+      error: '`maxQueued` must be a decimal integer',
+      code: 'invalid_max_queued',
+    });
+    return null;
+  }
+  const n = Number.parseInt(raw, 10);
+  if (
+    !Number.isFinite(n) ||
+    n < MIN_QUERY_MAX_QUEUED ||
+    n > MAX_QUERY_MAX_QUEUED
+  ) {
+    writeStderrLine(
+      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
+        `(outside [${MIN_QUERY_MAX_QUEUED}, ${MAX_QUERY_MAX_QUEUED}])`,
+    );
+    res.status(400).json({
+      error: `\`maxQueued\` must be in [${MIN_QUERY_MAX_QUEUED}, ${MAX_QUERY_MAX_QUEUED}]`,
+      code: 'invalid_max_queued',
+    });
+    return null;
+  }
+  return n;
+}
+
+/**
+ * Wrap an attacker-controllable string for safe interpolation into a
+ * stderr log line. `JSON.stringify` escapes control characters
+ * (`\n`, `\r`, etc.) and wraps the result in quotes — any injection
+ * attempt surfaces as visible-as-quoted-noise rather than a
+ * forged log line. Truncated AFTER stringify to keep the budget
+ * predictable even for control-heavy inputs.
+ */
+function safeLogValue(raw: unknown): string {
+  return JSON.stringify(String(raw)).slice(0, 82);
+}
+
 function parseLastEventId(raw: unknown): number | undefined {
   // Stricter than Number.parseInt: only accept pure decimal digits to avoid
   // values like "1abc" or "1.5e10z" silently parsing to 1.
@@ -1147,7 +1238,7 @@ function parseLastEventId(raw: unknown): number | undefined {
     // "first connect, no resume").
     if (typeof raw === 'string' && raw.length > 0) {
       writeStderrLine(
-        `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+        `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
           `(not a decimal integer)`,
       );
     }
@@ -1159,7 +1250,7 @@ function parseLastEventId(raw: unknown): number | undefined {
   // tries to resume from beyond that is either malicious or broken.
   if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) {
     writeStderrLine(
-      `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+      `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
         `(exceeds Number.MAX_SAFE_INTEGER)`,
     );
     return undefined;

@@ -268,6 +268,40 @@ function makeChannel(opts: FakeAgentOpts = {}): ChannelHandle {
 }
 
 describe('createHttpAcpBridge', () => {
+  it('accepts a valid BridgeOptions.eventRingSize at construction time', () => {
+    // Smoke: positive finite integers are accepted; the underlying
+    // EventBus ring-size threading is exercised end-to-end in
+    // `eventBus.test.ts` ("default ring size is 8000 (#3803 §02
+    // target)"). The bridge layer only contributes validation +
+    // pass-through.
+    expect(() => makeBridge({ eventRingSize: 1 })).not.toThrow();
+    expect(() => makeBridge({ eventRingSize: 8000 })).not.toThrow();
+    expect(() => makeBridge({ eventRingSize: 100_000 })).not.toThrow();
+  });
+
+  it('rejects an invalid eventRingSize at construction time', () => {
+    expect(() => makeBridge({ eventRingSize: 0 })).toThrow(
+      /Invalid eventRingSize/,
+    );
+    expect(() => makeBridge({ eventRingSize: -1 })).toThrow(
+      /Invalid eventRingSize/,
+    );
+    expect(() => makeBridge({ eventRingSize: 1.5 })).toThrow(
+      /Invalid eventRingSize/,
+    );
+    expect(() => makeBridge({ eventRingSize: Number.NaN })).toThrow(
+      /Invalid eventRingSize/,
+    );
+    expect(() =>
+      makeBridge({ eventRingSize: Number.POSITIVE_INFINITY }),
+    ).toThrow(/Invalid eventRingSize/);
+    // Upper-bound typo defense (1M cap). `80_000_000` here mimics the
+    // common shell typo `--event-ring-size 80000000` vs `8000000`.
+    expect(() => makeBridge({ eventRingSize: 80_000_000 })).toThrow(
+      /Invalid eventRingSize/,
+    );
+  });
+
   it('spawns a session and returns the agent-assigned id', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {

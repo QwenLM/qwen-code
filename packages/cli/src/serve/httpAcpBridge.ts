@@ -17,6 +17,7 @@ import {
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   EventBus,
+  DEFAULT_RING_SIZE,
   type BridgeEvent,
   type SubscribeOptions,
 } from './eventBus.js';
@@ -590,6 +591,22 @@ export interface BridgeOptions {
    * `ServeOptions.maxSessions` for the rationale.
    */
   maxSessions?: number;
+  /**
+   * Per-session SSE replay ring depth. Sets `ringSize` on every
+   * `new EventBus(...)` the bridge constructs (both fresh sessions
+   * and restored sessions). Defaults to `DEFAULT_RING_SIZE` (8000,
+   * #3803 §02 target). Must be a positive finite integer; `0` /
+   * `NaN` / negative throw at boot (fail-CLOSED — same posture as
+   * `maxSessions`, where silently disabling a backpressure knob on a
+   * config typo is worse than failing to start).
+   *
+   * Operators tune via `qwen serve --event-ring-size <n>`. Cost
+   * scales linearly with `ringSize`; each retained `BridgeEvent` is
+   * an object reference plus its serialized payload (text chunks /
+   * tool-call args / etc.), so the per-session memory ceiling is
+   * `ringSize × average-event-size` held until the session ends.
+   */
+  eventRingSize?: number;
   /**
    * Bd1yh: per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
@@ -1248,6 +1265,14 @@ class BridgeClient implements Client {
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
+/**
+ * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
+ * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
+ * 1 000 000-frame ring already pins ~500 MB per session — well past
+ * any realistic workload. Not a security boundary (the flag is
+ * operator-controlled), just typo defense.
+ */
+const MAX_EVENT_RING_SIZE = 1_000_000;
 // Bd1yh: per-permission-request wall clock. Without this, an agent
 // calling `requestPermission` while no SSE subscriber is connected
 // would hang the per-session FIFO promptQueue forever (the prompt
@@ -1299,6 +1324,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     throw new TypeError(
       `Invalid sessionScope: ${JSON.stringify(defaultSessionScope)}. ` +
         `Expected 'single' or 'thread'.`,
+    );
+  }
+  // `eventRingSize` follows the same fail-CLOSED posture as
+  // `maxSessions`: silently disabling SSE backpressure on a config
+  // typo is worse than failing to start. Unlike `maxSessions` there
+  // is NO unlimited sentinel — an unbounded ring would grow forever.
+  // Soft upper bound MAX_EVENT_RING_SIZE catches operator typos
+  // (`--event-ring-size 80000000` instead of `8000000`); at 1M
+  // frames × ~500 B/frame the per-session ceiling is already
+  // ~500 MB, well past any legitimate use.
+  const eventRingSize = opts.eventRingSize ?? DEFAULT_RING_SIZE;
+  // `Number.isInteger` already rejects NaN / Infinity / non-finite
+  // — no separate `Number.isFinite` guard needed.
+  if (
+    !Number.isInteger(eventRingSize) ||
+    eventRingSize < 1 ||
+    eventRingSize > MAX_EVENT_RING_SIZE
+  ) {
+    throw new TypeError(
+      `Invalid eventRingSize: ${opts.eventRingSize}. ` +
+        `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
@@ -2073,7 +2119,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = new EventBus(),
+    events = new EventBus(eventRingSize),
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -2211,7 +2257,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = new EventBus();
+    const restoreEvents = new EventBus(eventRingSize);
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore

@@ -64,6 +64,16 @@ export interface ServeOptions {
    */
   maxConnections?: number;
   /**
+   * Per-session SSE replay ring depth. Threaded into the bridge as
+   * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
+   * construction site. Defaults to 8000 (the target named in
+   * #3803 §02 for chatty Stage 1 sessions). Must be a positive
+   * finite integer — `0` / `NaN` / negative fail at boot. Larger
+   * rings let clients with longer reconnect gaps replay more history
+   * at the cost of a few hundred KB extra RAM per session.
+   */
+  eventRingSize?: number;
+  /**
    * Absolute workspace path this daemon binds to. Per #3803 §02 the
    * daemon is **1 daemon = 1 workspace × N sessions**: one bound
    * workspace at boot, sessions multiplexed on the single
