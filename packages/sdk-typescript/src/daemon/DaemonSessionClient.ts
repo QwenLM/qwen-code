@@ -193,6 +193,18 @@ export class DaemonSessionClient {
     );
   }
 
+  async respondToSessionPermission(
+    requestId: string,
+    response: PermissionResponse,
+  ): Promise<boolean> {
+    return await this.client.respondToSessionPermission(
+      this.sessionId,
+      requestId,
+      response,
+      this.clientId,
+    );
+  }
+
   events(
     opts: DaemonSessionSubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent, void, unknown> {

@@ -74,6 +74,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_events',
   'session_set_model',
   'client_identity',
+  'session_permission_vote',
   'permission_vote',
 ] as const;
 
@@ -101,6 +102,12 @@ interface FakeBridgeOpts {
     opts?: SubscribeOptions,
   ) => AsyncIterable<BridgeEvent>;
   respondImpl?: (
+    requestId: string,
+    response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
+  ) => boolean;
+  sessionRespondImpl?: (
+    sessionId: string,
     requestId: string,
     response: RequestPermissionResponse,
     context?: BridgeClientRequestContext,
@@ -138,6 +145,12 @@ interface FakeBridge extends HttpAcpBridge {
     response: RequestPermissionResponse;
     context?: BridgeClientRequestContext;
   }>;
+  sessionPermissionVotes: Array<{
+    sessionId: string;
+    requestId: string;
+    response: RequestPermissionResponse;
+    context?: BridgeClientRequestContext;
+  }>;
   listCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
@@ -159,6 +172,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
   const permissionVotes: FakeBridge['permissionVotes'] = [];
+  const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   let shutdownCalls = 0;
@@ -192,6 +206,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
+  const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
   const listImpl = opts.listImpl ?? (() => []);
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   return {
@@ -203,6 +218,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     killCalls,
     detachCalls,
     permissionVotes,
+    sessionPermissionVotes,
     listCalls,
     setModelCalls,
     get shutdownCalls() {
@@ -252,6 +268,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     respondToPermission(requestId, response, context) {
       const accepted = respondImpl(requestId, response, context);
       permissionVotes.push({
+        requestId,
+        response,
+        ...(context ? { context } : {}),
+      });
+      return accepted;
+    },
+    respondToSessionPermission(sessionId, requestId, response, context) {
+      const accepted = sessionRespondImpl(
+        sessionId,
+        requestId,
+        response,
+        context,
+      );
+      sessionPermissionVotes.push({
+        sessionId,
         requestId,
         response,
         ...(context ? { context } : {}),
@@ -1283,6 +1314,125 @@ describe('createServeApp', () => {
         .post('/session/missing/model')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ modelId: 'qwen3-coder' });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/permission/:requestId', () => {
+    it('200 when bridge accepts the scoped vote', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
+      expect(res.status).toBe(200);
+      expect(bridge.sessionPermissionVotes).toEqual([
+        {
+          sessionId: 'session-A',
+          requestId: 'req-1',
+          response: { outcome: { outcome: 'selected', optionId: 'allow' } },
+        },
+      ]);
+    });
+
+    it('passes client identity context into scoped permission votes', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ outcome: { outcome: 'cancelled' } });
+      expect(res.status).toBe(200);
+      expect(bridge.sessionPermissionVotes[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('404 when bridge reports no pending scoped request', async () => {
+      const bridge = fakeBridge({ sessionRespondImpl: () => false });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/missing')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'cancelled' } });
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        sessionId: 'session-A',
+        requestId: 'missing',
+      });
+    });
+
+    it('400 on a malformed scoped selected outcome', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'selected' } });
+      expect(res.status).toBe(400);
+      expect(bridge.sessionPermissionVotes).toHaveLength(0);
+    });
+
+    it('400 when scoped outcome is missing entirely', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(400);
+      expect(bridge.sessionPermissionVotes).toHaveLength(0);
+    });
+
+    it('400 when scoped selected outcome has an empty-string optionId', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'selected', optionId: '' } });
+      expect(res.status).toBe(400);
+      expect(bridge.sessionPermissionVotes).toHaveLength(0);
+    });
+
+    it('400 with invalid_option_id when bridge rejects a scoped option', async () => {
+      const bridge = fakeBridge({
+        sessionRespondImpl: () => {
+          throw new InvalidPermissionOptionError(
+            'req-1',
+            'ProceedAlwaysProject',
+          );
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          outcome: { outcome: 'selected', optionId: 'ProceedAlwaysProject' },
+        });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_option_id',
+        requestId: 'req-1',
+        optionId: 'ProceedAlwaysProject',
+      });
+    });
+
+    it('404 when bridge reports unknown session on scoped vote', async () => {
+      const bridge = fakeBridge({
+        sessionRespondImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ outcome: { outcome: 'cancelled' } });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
     });

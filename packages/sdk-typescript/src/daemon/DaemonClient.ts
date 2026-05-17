@@ -601,6 +601,50 @@ export class DaemonClient {
       },
     );
   }
+
+  /**
+   * Cast a permission vote against an explicit daemon session. New clients
+   * should prefer this once `capabilities.features` includes
+   * `session_permission_vote`; the legacy request-id-only route remains for
+   * older daemons.
+   */
+  async respondToSessionPermission(
+    sessionId: string,
+    requestId: string,
+    response: PermissionResponse,
+    clientId?: string,
+  ): Promise<boolean> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(response),
+      },
+      async (res) => {
+        if (res.status === 200) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return true;
+        }
+        if (res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return false;
+        }
+        throw await this.failOnError(
+          res,
+          'POST /session/:id/permission/:requestId',
+        );
+      },
+    );
+  }
 }
 
 /**

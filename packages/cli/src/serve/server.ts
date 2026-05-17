@@ -72,6 +72,7 @@ export interface ServeAppDeps {
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/model`
  *   - `GET  /session/:id/events` (SSE)
+ *   - `POST /session/:id/permission/:requestId`
  *   - `POST /permission/:requestId`
  *
  * **Workspace validation contract.** `createServeApp` itself does NOT
@@ -611,44 +612,56 @@ export function createServeApp(
     }
   });
 
-  app.post('/permission/:requestId', (req, res) => {
+  app.post('/session/:id/permission/:requestId', (req, res) => {
+    const sessionId = req.params['id'];
     const requestId = req.params['requestId'];
-    const body = safeBody(req);
-    const outcome = body['outcome'];
-    if (!isValidOutcome(outcome)) {
-      res.status(400).json({
-        error:
-          '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`',
+    const response = parsePermissionVoteBody(req, res);
+    if (response === undefined) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    let accepted: boolean;
+    try {
+      accepted = bridge.respondToSessionPermission(
+        sessionId,
+        requestId,
+        response,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+    } catch (err) {
+      sendPermissionVoteError(res, err, {
+        route: 'POST /session/:id/permission/:requestId',
+        sessionId,
       });
       return;
     }
+    if (!accepted) {
+      res.status(404).json({
+        error: 'No pending permission request for session',
+        sessionId,
+        requestId,
+      });
+      return;
+    }
+    res.status(200).json({});
+  });
+
+  app.post('/permission/:requestId', (req, res) => {
+    const requestId = req.params['requestId'];
+    const response = parsePermissionVoteBody(req, res);
+    if (response === undefined) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     let accepted: boolean;
     try {
       accepted = bridge.respondToPermission(
         requestId,
-        {
-          ...(body as object),
-          outcome,
-        } as Parameters<HttpAcpBridge['respondToPermission']>[1],
+        response,
         clientId !== undefined ? { clientId } : undefined,
       );
     } catch (err) {
-      // BkwQI: voter's `optionId` wasn't in the option set the agent
-      // originally offered (e.g. forging `ProceedAlways*` when the
-      // prompt's `hideAlwaysAllow` policy suppressed it). 400, not
-      // 404 — the requestId IS known, but the chosen option isn't.
-      if (err instanceof InvalidPermissionOptionError) {
-        res.status(400).json({
-          error: err.message,
-          code: 'invalid_option_id',
-          requestId: err.requestId,
-          optionId: err.optionId,
-        });
-        return;
-      }
-      sendBridgeError(res, err, { route: 'POST /permission/:requestId' });
+      sendPermissionVoteError(res, err, {
+        route: 'POST /permission/:requestId',
+      });
       return;
     }
     if (!accepted) {
@@ -948,6 +961,12 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
 const CLIENT_ID_HEADER = 'x-qwen-client-id';
 const MAX_CLIENT_ID_LENGTH = 128;
 const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
+const INVALID_PERMISSION_OUTCOME_ERROR =
+  '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
+
+type PermissionVoteResponse = Parameters<
+  HttpAcpBridge['respondToPermission']
+>[1];
 
 /**
  * Coerce `req.body` into a safe `Record<string, unknown>` for route
@@ -1018,6 +1037,22 @@ function parseClientIdHeader(
   return raw;
 }
 
+function parsePermissionVoteBody(
+  req: import('express').Request,
+  res: import('express').Response,
+): PermissionVoteResponse | undefined {
+  const body = safeBody(req);
+  const outcome = body['outcome'];
+  if (!isValidOutcome(outcome)) {
+    res.status(400).json({ error: INVALID_PERMISSION_OUTCOME_ERROR });
+    return undefined;
+  }
+  return {
+    ...(body as object),
+    outcome,
+  } as PermissionVoteResponse;
+}
+
 function isValidOutcome(
   raw: unknown,
 ): raw is { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } {
@@ -1065,6 +1100,27 @@ function parseLastEventId(raw: unknown): number | undefined {
     return undefined;
   }
   return n;
+}
+
+function sendPermissionVoteError(
+  res: import('express').Response,
+  err: unknown,
+  ctx: { route: string; sessionId?: string },
+): void {
+  // BkwQI: voter's `optionId` wasn't in the option set the agent
+  // originally offered (e.g. forging `ProceedAlways*` when the
+  // prompt's `hideAlwaysAllow` policy suppressed it). 400, not
+  // 404 — the requestId IS known, but the chosen option isn't.
+  if (err instanceof InvalidPermissionOptionError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_option_id',
+      requestId: err.requestId,
+      optionId: err.optionId,
+    });
+    return;
+  }
+  sendBridgeError(res, err, ctx);
 }
 
 function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
