@@ -169,6 +169,132 @@ export interface SessionMetadataResult {
   displayName?: string;
 }
 
+export type DaemonStatus =
+  | 'ok'
+  | 'warning'
+  | 'error'
+  | 'disabled'
+  | 'not_started'
+  | 'unknown';
+
+export interface DaemonStatusCell {
+  kind: string;
+  status: DaemonStatus;
+  error?: string;
+  errorKind?: string;
+  hint?: string;
+}
+
+export type DaemonMcpDiscoveryState =
+  | 'not_started'
+  | 'in_progress'
+  | 'completed';
+
+export type DaemonMcpServerRuntimeStatus =
+  | 'connected'
+  | 'connecting'
+  | 'disconnected';
+
+export type DaemonMcpTransport =
+  | 'stdio'
+  | 'sse'
+  | 'http'
+  | 'websocket'
+  | 'sdk'
+  | 'unknown';
+
+export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
+  kind: 'mcp_server';
+  name: string;
+  mcpStatus?: DaemonMcpServerRuntimeStatus;
+  transport: DaemonMcpTransport;
+  disabled: boolean;
+  description?: string;
+  extensionName?: string;
+}
+
+export interface DaemonWorkspaceMcpStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  discoveryState?: DaemonMcpDiscoveryState;
+  servers: DaemonWorkspaceMcpServerStatus[];
+  errors?: DaemonStatusCell[];
+}
+
+export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
+
+export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
+  kind: 'skill';
+  name: string;
+  description: string;
+  level: DaemonSkillLevel;
+  modelInvocable: boolean;
+  argumentHint?: string;
+  model?: string;
+  extensionName?: string;
+}
+
+export interface DaemonWorkspaceSkillsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  skills: DaemonWorkspaceSkillStatus[];
+  errors?: DaemonStatusCell[];
+}
+
+export interface DaemonWorkspaceProviderCurrent {
+  authType?: string;
+  modelId?: string;
+}
+
+export interface DaemonWorkspaceProviderModel {
+  modelId: string;
+  baseModelId: string;
+  name: string;
+  description?: string | null;
+  contextLimit?: number;
+  isCurrent: boolean;
+  isRuntime: boolean;
+}
+
+export interface DaemonWorkspaceProviderStatus extends DaemonStatusCell {
+  kind: 'model_provider';
+  authType: string;
+  current: boolean;
+  models: DaemonWorkspaceProviderModel[];
+}
+
+export interface DaemonWorkspaceProvidersStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  current?: DaemonWorkspaceProviderCurrent;
+  providers: DaemonWorkspaceProviderStatus[];
+  errors?: DaemonStatusCell[];
+}
+
+export interface DaemonSessionContextStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  state: DaemonSessionState;
+}
+
+export interface DaemonAvailableCommand {
+  name: string;
+  description?: string;
+  input: { hint: string } | null;
+  _meta?: Record<string, unknown> | null;
+}
+
+export interface DaemonSessionSupportedCommandsStatus {
+  v: 1;
+  sessionId: string;
+  availableCommands: DaemonAvailableCommand[];
+  availableSkills: string[];
+}
+
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;

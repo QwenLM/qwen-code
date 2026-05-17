@@ -97,7 +97,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_list', 'session_prompt', 'session_cancel', 'session_events',
  'slow_client_warning', 'typed_event_schema',
  'session_set_model', 'client_identity', 'client_heartbeat',
- 'session_permission_vote', 'permission_vote',
+ 'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
+ 'workspace_providers', 'session_context', 'session_supported_commands',
  'session_close', 'session_metadata']
 ```
 
@@ -158,6 +159,174 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 > **`modelServices` is always `[]` in Stage 1.** The agent uses its single default model service and doesn't enumerate it over the wire. Stage 2 will populate this from registered model adapters so SDK clients can build service-pickers; until then, do NOT rely on this field being non-empty.
 
 > **`workspaceCwd`** is the canonical absolute path this daemon binds to (#3803 §02 — 1 daemon = 1 workspace). Use it to (a) detect mismatch before posting `/session` and (b) omit `cwd` on `POST /session` (the route falls back to this path). Multi-workspace deployments expose multiple daemons on different ports, each with its own `workspaceCwd`. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
+
+### Read-only runtime status routes
+
+These routes report daemon-side runtime snapshots. They are additive v1 routes,
+do not mutate state, and do not change the serve protocol version. Workspace
+status routes intentionally do **not** start the ACP child process just because
+a client polls a GET route: if the daemon is idle, they return
+`initialized: false` with an empty snapshot. Session status routes require a
+live session and use the standard `404 SessionNotFoundError` shape for unknown
+ids.
+
+Capability tags:
+
+- `workspace_mcp` → `GET /workspace/mcp`
+- `workspace_skills` → `GET /workspace/skills`
+- `workspace_providers` → `GET /workspace/providers`
+- `session_context` → `GET /session/:id/context`
+- `session_supported_commands` → `GET /session/:id/supported-commands`
+
+Common status cell:
+
+```ts
+type DaemonStatus =
+  | 'ok'
+  | 'warning'
+  | 'error'
+  | 'disabled'
+  | 'not_started'
+  | 'unknown';
+
+interface DaemonStatusCell {
+  kind: string;
+  status: DaemonStatus;
+  error?: string;
+  errorKind?: string;
+  hint?: string;
+}
+```
+
+Status payloads never expose MCP env values, headers, OAuth/service-account
+details, provider API keys, provider `baseUrl` / `envKey`, skill body, skill
+filesystem paths, or hook definitions.
+
+### `GET /workspace/mcp`
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "discoveryState": "completed",
+  "servers": [
+    {
+      "kind": "mcp_server",
+      "status": "ok",
+      "name": "docs",
+      "mcpStatus": "connected",
+      "transport": "stdio",
+      "disabled": false,
+      "description": "Documentation server",
+      "extensionName": "docs-ext"
+    }
+  ]
+}
+```
+
+`discoveryState` is one of `not_started`, `in_progress`, or `completed`.
+`transport` is one of `stdio`, `sse`, `http`, `websocket`, `sdk`, or
+`unknown`. `errors` is omitted when discovery succeeds.
+
+### `GET /workspace/skills`
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "skills": [
+    {
+      "kind": "skill",
+      "status": "ok",
+      "name": "review",
+      "description": "Review code",
+      "level": "project",
+      "modelInvocable": true,
+      "argumentHint": "[path]"
+    }
+  ]
+}
+```
+
+`level` is one of `project`, `user`, `extension`, or `bundled`. `errors` is
+omitted when discovery succeeds.
+
+### `GET /workspace/providers`
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/canonical/path",
+  "initialized": true,
+  "current": { "authType": "qwen", "modelId": "qwen3(qwen)" },
+  "providers": [
+    {
+      "kind": "model_provider",
+      "status": "ok",
+      "authType": "qwen",
+      "current": true,
+      "models": [
+        {
+          "modelId": "qwen3(qwen)",
+          "baseModelId": "qwen3",
+          "name": "Qwen 3",
+          "description": null,
+          "contextLimit": 4096,
+          "isCurrent": true,
+          "isRuntime": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+Models are grouped by auth type. Provider connection diagnostics and environment
+preflight checks are intentionally out of scope here; deeper preflight/env
+checks belong to a later daemon status wave. `errors` is omitted when snapshot
+construction succeeds.
+
+### `GET /session/:id/context`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "workspaceCwd": "/canonical/path",
+  "state": {
+    "models": {},
+    "modes": {},
+    "configOptions": []
+  }
+}
+```
+
+`state` mirrors the same ACP model/mode/config-option shapes used by
+`POST /session`, `POST /session/:id/load`, and `POST /session/:id/resume`.
+
+### `GET /session/:id/supported-commands`
+
+```json
+{
+  "v": 1,
+  "sessionId": "<sid>",
+  "availableCommands": [
+    {
+      "name": "init",
+      "description": "Initialize the project",
+      "input": null,
+      "_meta": { "source": "builtin" }
+    }
+  ],
+  "availableSkills": ["review"]
+}
+```
+
+`availableCommands` is the same command snapshot used by the
+`available_commands_update` SSE notification. `availableSkills` lists skill
+names only; clients must not expect skill bodies or paths over this route.
 
 ### `POST /session`
 
@@ -552,6 +721,7 @@ The connection then closes.
 | `packages/cli/src/serve/server.ts`                   | Express routes + middleware                                        |
 | `packages/cli/src/serve/auth.ts`                     | bearer + Host allowlist + CORS deny                                |
 | `packages/cli/src/serve/httpAcpBridge.ts`            | spawn-or-attach + per-session FIFO + permission registry           |
+| `packages/cli/src/serve/status.ts`                   | read-only daemon status wire types + ACP ext method names          |
 | `packages/cli/src/serve/eventBus.ts`                 | bounded async queue + replay ring                                  |
 | `packages/sdk-typescript/src/daemon/DaemonClient.ts` | TS client                                                          |
 | `packages/sdk-typescript/src/daemon/sse.ts`          | EventSource frame parser                                           |

@@ -49,6 +49,13 @@ import {
   type SessionMetadataUpdate,
 } from './httpAcpBridge.js';
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+import type {
+  ServeSessionContextStatus,
+  ServeSessionSupportedCommandsStatus,
+  ServeWorkspaceMcpStatus,
+  ServeWorkspaceProvidersStatus,
+  ServeWorkspaceSkillsStatus,
+} from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
 
 const baseOpts: ServeOptions = {
@@ -84,6 +91,11 @@ const EXPECTED_STAGE1_FEATURES = [
   'client_heartbeat',
   'session_permission_vote',
   'permission_vote',
+  'workspace_mcp',
+  'workspace_skills',
+  'workspace_providers',
+  'session_context',
+  'session_supported_commands',
   'session_close',
   'session_metadata',
 ] as const;
@@ -134,6 +146,15 @@ interface FakeBridgeOpts {
     context?: BridgeClientRequestContext,
   ) => boolean;
   listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
+  workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
+  workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
+  workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
+  sessionContextImpl?: (
+    sessionId: string,
+  ) => Promise<ServeSessionContextStatus>;
+  sessionSupportedCommandsImpl?: (
+    sessionId: string,
+  ) => Promise<ServeSessionSupportedCommandsStatus>;
   setModelImpl?: (
     sessionId: string,
     req: SetSessionModelRequest,
@@ -187,6 +208,11 @@ interface FakeBridge extends HttpAcpBridge {
     context?: BridgeClientRequestContext;
   }>;
   listCalls: string[];
+  workspaceMcpCalls: number;
+  workspaceSkillsCalls: number;
+  workspaceProvidersCalls: number;
+  sessionContextCalls: string[];
+  sessionSupportedCommandsCalls: string[];
   setModelCalls: Array<{
     sessionId: string;
     req: SetSessionModelRequest;
@@ -223,6 +249,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
+  let workspaceMcpCalls = 0;
+  let workspaceSkillsCalls = 0;
+  let workspaceProvidersCalls = 0;
+  const sessionContextCalls: string[] = [];
+  const sessionSupportedCommandsCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
@@ -261,6 +292,47 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const respondImpl = opts.respondImpl ?? (() => true);
   const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
   const listImpl = opts.listImpl ?? (() => []);
+  const workspaceMcpImpl =
+    opts.workspaceMcpImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: false,
+      discoveryState: 'not_started' as const,
+      servers: [],
+    }));
+  const workspaceSkillsImpl =
+    opts.workspaceSkillsImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: false,
+      skills: [],
+    }));
+  const workspaceProvidersImpl =
+    opts.workspaceProvidersImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: false,
+      providers: [],
+    }));
+  const sessionContextImpl =
+    opts.sessionContextImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      workspaceCwd: WS_BOUND,
+      state: {},
+    }));
+  const sessionSupportedCommandsImpl =
+    opts.sessionSupportedCommandsImpl ??
+    (async (sessionId) => ({
+      v: 1 as const,
+      sessionId,
+      availableCommands: [],
+      availableSkills: [],
+    }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
@@ -294,6 +366,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     permissionVotes,
     sessionPermissionVotes,
     listCalls,
+    sessionContextCalls,
+    sessionSupportedCommandsCalls,
     setModelCalls,
     closeCalls,
     updateMetadataCalls,
@@ -301,6 +375,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     heartbeatStateCalls,
     get shutdownCalls() {
       return shutdownCalls;
+    },
+    get workspaceMcpCalls() {
+      return workspaceMcpCalls;
+    },
+    get workspaceSkillsCalls() {
+      return workspaceSkillsCalls;
+    },
+    get workspaceProvidersCalls() {
+      return workspaceProvidersCalls;
     },
     get sessionCount() {
       return calls.length;
@@ -370,6 +453,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     listWorkspaceSessions(workspaceCwd) {
       listCalls.push(workspaceCwd);
       return listImpl(workspaceCwd);
+    },
+    async getWorkspaceMcpStatus() {
+      workspaceMcpCalls += 1;
+      return workspaceMcpImpl();
+    },
+    async getWorkspaceSkillsStatus() {
+      workspaceSkillsCalls += 1;
+      return workspaceSkillsImpl();
+    },
+    async getWorkspaceProvidersStatus() {
+      workspaceProvidersCalls += 1;
+      return workspaceProvidersImpl();
+    },
+    async getSessionContextStatus(sessionId) {
+      sessionContextCalls.push(sessionId);
+      return sessionContextImpl(sessionId);
+    },
+    async getSessionSupportedCommandsStatus(sessionId) {
+      sessionSupportedCommandsCalls.push(sessionId);
+      return sessionSupportedCommandsImpl(sessionId);
     },
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
@@ -589,6 +692,180 @@ describe('createServeApp', () => {
         .set('Authorization', 'Bearer secret');
       expect(res.status).toBe(200);
       expect(res.body.features).toContain('require_auth');
+    });
+  });
+
+  describe('read-only status routes', () => {
+    it('returns workspace MCP status from the bridge', async () => {
+      const payload: ServeWorkspaceMcpStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'docs',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+            description: 'Docs server',
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceMcpImpl: async () => payload });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/mcp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(payload);
+      expect(bridge.workspaceMcpCalls).toBe(1);
+    });
+
+    it('returns workspace skills and providers status from the bridge', async () => {
+      const skills: ServeWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'project',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const providers: ServeWorkspaceProvidersStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        current: { authType: 'qwen', modelId: 'qwen3(qwen)' },
+        providers: [
+          {
+            kind: 'model_provider',
+            status: 'ok',
+            authType: 'qwen',
+            current: true,
+            models: [
+              {
+                modelId: 'qwen3(qwen)',
+                baseModelId: 'qwen3',
+                name: 'Qwen 3',
+                description: null,
+                contextLimit: 4096,
+                isCurrent: true,
+                isRuntime: false,
+              },
+            ],
+          },
+        ],
+      };
+      const bridge = fakeBridge({
+        workspaceSkillsImpl: async () => skills,
+        workspaceProvidersImpl: async () => providers,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const skillsRes = await request(app)
+        .get('/workspace/skills')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const providersRes = await request(app)
+        .get('/workspace/providers')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(skillsRes.status).toBe(200);
+      expect(skillsRes.body).toEqual(skills);
+      expect(providersRes.status).toBe(200);
+      expect(providersRes.body).toEqual(providers);
+      expect(bridge.workspaceSkillsCalls).toBe(1);
+      expect(bridge.workspaceProvidersCalls).toBe(1);
+    });
+
+    it('returns session context and supported commands from the bridge', async () => {
+      const context: ServeSessionContextStatus = {
+        v: 1,
+        sessionId: 's-1',
+        workspaceCwd: WS_BOUND,
+        state: { models: { currentModelId: 'qwen3' } },
+      };
+      const commands: ServeSessionSupportedCommandsStatus = {
+        v: 1,
+        sessionId: 's-1',
+        availableCommands: [
+          {
+            name: 'init',
+            description: 'Initialize',
+            input: null,
+            _meta: { source: 'builtin' },
+          },
+        ],
+        availableSkills: ['review'],
+      };
+      const bridge = fakeBridge({
+        sessionContextImpl: async () => context,
+        sessionSupportedCommandsImpl: async () => commands,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const contextRes = await request(app)
+        .get('/session/s-1/context')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const commandsRes = await request(app)
+        .get('/session/s-1/supported-commands')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(contextRes.status).toBe(200);
+      expect(contextRes.body).toEqual(context);
+      expect(commandsRes.status).toBe(200);
+      expect(commandsRes.body).toEqual(commands);
+      expect(bridge.sessionContextCalls).toEqual(['s-1']);
+      expect(bridge.sessionSupportedCommandsCalls).toEqual(['s-1']);
+    });
+
+    it('maps missing sessions on read-only session routes to 404', async () => {
+      const bridge = fakeBridge({
+        sessionContextImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+        sessionSupportedCommandsImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const contextRes = await request(app)
+        .get('/session/missing/context')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const commandsRes = await request(app)
+        .get('/session/missing/supported-commands')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(contextRes.status).toBe(404);
+      expect(contextRes.body.sessionId).toBe('missing');
+      expect(commandsRes.status).toBe(404);
+      expect(commandsRes.body.sessionId).toBe('missing');
     });
   });
 

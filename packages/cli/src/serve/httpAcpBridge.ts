@@ -21,6 +21,17 @@ import {
   type BridgeEvent,
   type SubscribeOptions,
 } from './eventBus.js';
+import {
+  SERVE_STATUS_EXT_METHODS,
+  createIdleWorkspaceMcpStatus,
+  createIdleWorkspaceProvidersStatus,
+  createIdleWorkspaceSkillsStatus,
+  type ServeSessionContextStatus,
+  type ServeSessionSupportedCommandsStatus,
+  type ServeWorkspaceMcpStatus,
+  type ServeWorkspaceProvidersStatus,
+  type ServeWorkspaceSkillsStatus,
+} from './status.js';
 import type {
   CancelNotification,
   Client,
@@ -323,6 +334,34 @@ export interface HttpAcpBridge {
    * process callers (tests, future read-only diagnostics routes).
    */
   getHeartbeatState(sessionId: string): BridgeHeartbeatState | undefined;
+
+  /**
+   * Read daemon-runtime MCP status for the bound workspace. Does not spawn an
+   * ACP child when the daemon is idle; idle daemons return initialized:false.
+   */
+  getWorkspaceMcpStatus(): Promise<ServeWorkspaceMcpStatus>;
+
+  /**
+   * Read daemon-runtime skill status for the bound workspace. Does not spawn an
+   * ACP child when the daemon is idle; idle daemons return initialized:false.
+   */
+  getWorkspaceSkillsStatus(): Promise<ServeWorkspaceSkillsStatus>;
+
+  /**
+   * Read daemon-runtime model-provider status for the bound workspace. Does
+   * not spawn an ACP child when the daemon is idle.
+   */
+  getWorkspaceProvidersStatus(): Promise<ServeWorkspaceProvidersStatus>;
+
+  /** Read the current ACP context/config state for a live session. */
+  getSessionContextStatus(
+    sessionId: string,
+  ): Promise<ServeSessionContextStatus>;
+
+  /** Read slash-command/skill command availability for a live session. */
+  getSessionSupportedCommandsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionSupportedCommandsStatus>;
 
   /**
    * Switch the active model service for a session. Forwards through ACP's
@@ -724,6 +763,12 @@ interface ChannelInfo {
    * restore fails while another is still healthy.
    */
   pendingRestoreIds: Set<string>;
+  /**
+   * Cached channel-close race for workspace-scoped status requests. Workspace
+   * status can be polled frequently by dashboards, so keep one promise per
+   * channel instead of attaching a new `.then()` to `channel.exited` per poll.
+   */
+  statusClosedReject?: Promise<never>;
   /**
    * MUST be set to `true` synchronously by any teardown path BEFORE
    * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
@@ -2175,6 +2220,66 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return workspaceKey;
   };
 
+  const liveChannelInfo = (): ChannelInfo | undefined => {
+    if (!channelInfo || channelInfo.isDying) return undefined;
+    return channelInfo;
+  };
+
+  const channelInfoForEntry = (
+    entry: SessionEntry,
+  ): ChannelInfo | undefined => {
+    if (channelInfo?.channel === entry.channel) return channelInfo;
+    for (const info of aliveChannels) {
+      if (info.channel === entry.channel) return info;
+    }
+    return undefined;
+  };
+
+  const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
+    if (!info.statusClosedReject) {
+      info.statusClosedReject = info.channel.exited.then(() => {
+        throw new Error('agent channel closed mid-request (workspace status)');
+      });
+    }
+    return info.statusClosedReject;
+  };
+
+  const requestWorkspaceStatus = async <T>(
+    method: string,
+    idle: () => T,
+  ): Promise<T> => {
+    const info = liveChannelInfo();
+    if (!info) return idle();
+    const response = await withTimeout(
+      Promise.race([
+        info.connection.extMethod(method, { cwd: boundWorkspace }),
+        getChannelClosedReject(info),
+      ]),
+      initTimeoutMs,
+      method,
+    );
+    return response as unknown as T;
+  };
+
+  const requestSessionStatus = async <T>(
+    sessionId: string,
+    method: string,
+  ): Promise<T> => {
+    const entry = byId.get(sessionId);
+    if (!entry) throw new SessionNotFoundError(sessionId);
+    const info = channelInfoForEntry(entry);
+    if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+    const response = await Promise.race([
+      withTimeout(
+        entry.connection.extMethod(method, { sessionId }),
+        initTimeoutMs,
+        method,
+      ),
+      getTransportClosedReject(entry),
+    ]);
+    return response as unknown as T;
+  };
+
   const createSessionEntry = (
     ci: ChannelInfo,
     sessionId: string,
@@ -3060,6 +3165,40 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           : {}),
         clientLastSeenAt: new Map(entry.clientLastSeenAt),
       };
+    },
+
+    async getWorkspaceMcpStatus() {
+      return requestWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceMcp, () =>
+        createIdleWorkspaceMcpStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceSkillsStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceSkills,
+        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceProvidersStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        () => createIdleWorkspaceProvidersStatus(boundWorkspace),
+      );
+    },
+
+    async getSessionContextStatus(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionContext,
+      );
+    },
+
+    async getSessionSupportedCommandsStatus(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionSupportedCommands,
+      );
     },
 
     async setSessionModel(sessionId, req, context) {

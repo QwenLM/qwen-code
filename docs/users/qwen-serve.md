@@ -38,6 +38,12 @@ curl http://127.0.0.1:4170/capabilities
 
 The `workspaceCwd` field surfaces the bound workspace so clients can pre-flight check + omit `cwd` on `POST /session`.
 
+The daemon also exposes read-only runtime snapshots for client UIs:
+`GET /workspace/mcp`, `GET /workspace/skills`, `GET /workspace/providers`,
+`GET /session/:id/context`, and `GET /session/:id/supported-commands`. The
+workspace routes report the live daemon runtime and do not start the ACP child
+when idle; an idle daemon returns `initialized: false` with an empty snapshot.
+
 ### 3. Open a session
 
 ```bash

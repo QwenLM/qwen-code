@@ -70,10 +70,15 @@ export interface ServeAppDeps {
  * Stage 1 routes shipped (matches §04 of issue #3803):
  *   - `GET  /health`
  *   - `GET  /capabilities`
+ *   - `GET  /workspace/mcp`
+ *   - `GET  /workspace/skills`
+ *   - `GET  /workspace/providers`
  *   - `POST /session`
  *   - `POST /session/:id/load`
  *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
+ *   - `GET  /session/:id/context`
+ *   - `GET  /session/:id/supported-commands`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
  *   - `POST /session/:id/heartbeat`
@@ -257,6 +262,30 @@ export function createServeApp(
       workspaceCwd: boundWorkspace,
     };
     res.status(200).json(envelope);
+  });
+
+  app.get('/workspace/mcp', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceMcpStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/mcp' });
+    }
+  });
+
+  app.get('/workspace/skills', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceSkillsStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/skills' });
+    }
+  });
+
+  app.get('/workspace/providers', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceProvidersStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/providers' });
+    }
   });
 
   app.post('/session', mutate(), async (req, res) => {
@@ -466,6 +495,44 @@ export function createServeApp(
 
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
+
+  app.get('/session/:id/context', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getSessionContextStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/context',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/supported-commands', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res
+        .status(200)
+        .json(await bridge.getSessionSupportedCommandsStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/supported-commands',
+        sessionId,
+      });
+    }
+  });
 
   app.post('/session/:id/prompt', mutate(), async (req, res) => {
     const sessionId = req.params['id'];

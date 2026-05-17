@@ -320,6 +320,28 @@ describe('DaemonSessionClient', () => {
       if (req.url.endsWith('/session/s-1/model')) {
         return jsonResponse(200, { modelId: 'qwen3-coder' });
       }
+      if (req.url.endsWith('/session/s-1/context')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          state: { models: { currentModelId: 'qwen3-coder' } },
+        });
+      }
+      if (req.url.endsWith('/session/s-1/supported-commands')) {
+        return jsonResponse(200, {
+          v: 1,
+          sessionId: 's-1',
+          availableCommands: [
+            {
+              name: 'init',
+              description: 'Initialize',
+              input: null,
+            },
+          ],
+          availableSkills: ['review'],
+        });
+      }
       if (req.url.endsWith('/session/s-1/cancel')) {
         return new Response(null, { status: 204 });
       }
@@ -361,6 +383,24 @@ describe('DaemonSessionClient', () => {
     await expect(session.setModel('qwen3-coder')).resolves.toEqual({
       modelId: 'qwen3-coder',
     });
+    await expect(session.context()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      workspaceCwd: '/work/a',
+      state: { models: { currentModelId: 'qwen3-coder' } },
+    });
+    await expect(session.supportedCommands()).resolves.toEqual({
+      v: 1,
+      sessionId: 's-1',
+      availableCommands: [
+        {
+          name: 'init',
+          description: 'Initialize',
+          input: null,
+        },
+      ],
+      availableSkills: ['review'],
+    });
     await expect(session.cancel()).resolves.toBeUndefined();
     await expect(
       session.respondToPermission('req-1', {
@@ -380,6 +420,8 @@ describe('DaemonSessionClient', () => {
     expect(calls.map((c) => c.url)).toEqual([
       'http://daemon/session/s-1/prompt',
       'http://daemon/session/s-1/model',
+      'http://daemon/session/s-1/context',
+      'http://daemon/session/s-1/supported-commands',
       'http://daemon/session/s-1/cancel',
       'http://daemon/permission/req-1',
       'http://daemon/session/s-1/permission/req-2',
@@ -388,6 +430,8 @@ describe('DaemonSessionClient', () => {
     ]);
     expect(calls[0]?.signal).toBe(controller.signal);
     expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

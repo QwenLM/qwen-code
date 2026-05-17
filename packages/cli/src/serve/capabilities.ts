@@ -51,6 +51,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   client_heartbeat: { since: 'v1' },
   session_permission_vote: { since: 'v1' },
   permission_vote: { since: 'v1' },
+  workspace_mcp: { since: 'v1' },
+  workspace_skills: { since: 'v1' },
+  workspace_providers: { since: 'v1' },
+  session_context: { since: 'v1' },
+  session_supported_commands: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
