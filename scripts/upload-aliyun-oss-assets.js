@@ -7,25 +7,26 @@
  */
 
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fail, isMainModule, readOptionValue } from './release-script-utils.js';
 
 if (isMainModule(import.meta.url)) {
   try {
-    main(process.argv.slice(2));
+    await main(process.argv.slice(2));
   } catch (error) {
     console.error(error instanceof Error ? error.message : error);
     process.exitCode = 1;
   }
 }
 
-function main(argv) {
+async function main(argv) {
   const args = parseUploadArgs(argv);
   if (args.help) {
     printUsage();
     return;
   }
-  uploadAssets(args);
+  await uploadAssets(args);
 }
 
 function printUsage() {
@@ -99,16 +100,54 @@ function parseUploadArgs(argv) {
 const MAX_UPLOAD_ATTEMPTS = 3;
 const INITIAL_BACKOFF_MS = 2000;
 
-function uploadAssets({ assets, bucket, config, prefix }) {
-  for (const asset of assets) {
-    const key = `${prefix}/${path.basename(asset)}`;
-    uploadWithRetry(asset, bucket, key, config);
+async function uploadAssets({ assets, bucket, config, prefix }) {
+  // Upload assets in parallel; each asset has its own retry budget. Failures
+  // are collected and reported together so a flaky run is not masked by a
+  // later failure aborting earlier ones.
+  const failures = [];
+  await Promise.all(
+    assets.map(async (asset) => {
+      const key = `${prefix}/${path.basename(asset)}`;
+      try {
+        await uploadWithRetry(asset, bucket, key, config);
+      } catch (error) {
+        failures.push({ asset, error });
+      }
+    }),
+  );
+  if (failures.length > 0) {
+    for (const { asset, error } of failures) {
+      console.error(
+        `Upload failed for ${asset}: ${error instanceof Error ? error.message : error}`,
+      );
+    }
+    fail(`${failures.length} of ${assets.length} asset uploads failed.`);
   }
 }
 
-function uploadWithRetry(asset, bucket, key, config) {
+async function uploadWithRetry(asset, bucket, key, config) {
   for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt += 1) {
-    const result = spawnSync(
+    const exitInfo = await runOssutilCp(asset, bucket, key, config);
+
+    if (exitInfo.status === 0) {
+      return;
+    }
+    if (attempt < MAX_UPLOAD_ATTEMPTS) {
+      const delayMs = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
+      console.warn(
+        `Upload attempt ${attempt}/${MAX_UPLOAD_ATTEMPTS} failed for ${path.basename(asset)}, retrying in ${delayMs / 1000}s...`,
+      );
+      await delay(delayMs);
+    }
+  }
+  throw new Error(
+    `ossutil failed after ${MAX_UPLOAD_ATTEMPTS} attempts while uploading ${asset}`,
+  );
+}
+
+function runOssutilCp(asset, bucket, key, config) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
       'ossutil',
       [
         'cp',
@@ -122,30 +161,9 @@ function uploadWithRetry(asset, bucket, key, config) {
       ],
       { stdio: 'inherit' },
     );
-
-    if (result.error) {
-      throw result.error;
-    }
-    if (result.status === 0) {
-      return;
-    }
-    if (attempt < MAX_UPLOAD_ATTEMPTS) {
-      const delayMs = INITIAL_BACKOFF_MS * 2 ** (attempt - 1);
-      console.warn(
-        `Upload attempt ${attempt}/${MAX_UPLOAD_ATTEMPTS} failed for ${path.basename(asset)}, retrying in ${delayMs / 1000}s...`,
-      );
-      sleepSync(delayMs);
-    }
-  }
-  fail(
-    `ossutil failed after ${MAX_UPLOAD_ATTEMPTS} attempts while uploading ${asset}`,
-  );
-}
-
-// Cross-platform synchronous sleep. `spawnSync('sleep', ...)` is unavailable
-// on Windows runners; Atomics.wait blocks the current thread without spawning.
-function sleepSync(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    child.once('error', reject);
+    child.once('close', (status) => resolve({ status: status ?? 1 }));
+  });
 }
 
 export { parseUploadArgs, uploadAssets };

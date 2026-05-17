@@ -434,12 +434,18 @@ jobs:
             exit 1
           fi
 
-          ossutil config \
-            -e "${ALIYUN_OSS_ENDPOINT}" \
-            -i "${ALIYUN_OSS_ACCESS_KEY_ID}" \
-            -k "${ALIYUN_OSS_ACCESS_KEY_SECRET}" \
-            -L EN \
-            -c "${RUNNER_TEMP}/.ossutilconfig"
+          # Write the ossutil config file directly instead of invoking
+          # `ossutil config -k <secret>`, so the access-key secret never lands
+          # in /proc/<pid>/cmdline. Restrictive umask scopes the file to the
+          # current runner user.
+          umask 077
+          {
+            printf '[Credentials]\n'
+            printf 'language=EN\n'
+            printf 'endpoint=%s\n' "${ALIYUN_OSS_ENDPOINT}"
+            printf 'accessKeyID=%s\n' "${ALIYUN_OSS_ACCESS_KEY_ID}"
+            printf 'accessKeySecret=%s\n' "${ALIYUN_OSS_ACCESS_KEY_SECRET}"
+          } > "${RUNNER_TEMP}/.ossutilconfig"
 
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'

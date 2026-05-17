@@ -78,8 +78,11 @@ The staged `install-qwen-standalone.sh`, `install-qwen-standalone.ps1`,
 `uninstall-qwen-standalone.ps1` files map to the standalone-suffixed hosted URLs
 shown above. The staging command also writes `SHA256SUMS` for upload
 verification. During a non-dry-run stable release, the publish workflow uploads
-a byte-for-byte snapshot to `installation/vX.Y.Z/` for audit and rollback
-instead of overwriting the global `installation/` entrypoint objects. The hosted
+a byte-for-byte snapshot to `installation/vX.Y.Z/` for audit and rollback, and
+also refreshes the global `installation/` entrypoint objects so `curl | bash`
+links keep resolving without a version segment. The versioned snapshot lets you
+roll back by repointing the global objects to a previous tag if a regression is
+caught after publish. The hosted
 installers intentionally default to `latest`; on Aliyun OSS this means reading
 `releases/qwen-code/latest/VERSION` first, then downloading the matching
 versioned release directory. Use `--version` or `QWEN_INSTALL_VERSION` to pin a
