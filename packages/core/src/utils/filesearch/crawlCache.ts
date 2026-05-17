@@ -76,7 +76,7 @@ export const write = (key: string, results: string[], ttlMs: number): void => {
       totalPaths += entry.length;
     }
   }
-  while (totalPaths + results.length > MAX_TOTAL_PATHS && crawlCache.size > 1) {
+  while (totalPaths + results.length > MAX_TOTAL_PATHS && crawlCache.size > 0) {
     // Find and remove the entry with the most paths (never evict the current key)
     let largestKey: string | undefined;
     let largestSize = 0;

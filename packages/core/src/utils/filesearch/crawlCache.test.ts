@@ -186,5 +186,31 @@ describe('CrawlCache', () => {
       // key-1 should be evicted (it became the oldest after key-0 was bumped)
       expect(read('key-1')).toBeUndefined();
     });
+
+    it('should evict other entries when a new key exceeds MAX_TOTAL_PATHS', () => {
+      // Exact scenario from reviewer comment #2: a new key whose array
+      // alone exceeds MAX_TOTAL_PATHS should trigger eviction of others.
+      const makePaths = (n: number) =>
+        Array.from({ length: n }, (_, i) => `path/${i}`);
+
+      const keyA = 'project-a';
+      const keyB = 'project-b';
+      const keyC = 'project-c';
+
+      // Pre-populate with moderate entries
+      write(keyA, makePaths(10000), 60000);
+      write(keyB, makePaths(10000), 60000);
+      write(keyC, makePaths(10000), 60000);
+
+      // New key with 60000 paths — exceeds MAX_TOTAL_PATHS (50000) alone
+      write('project-new', makePaths(60000), 60000);
+
+      // New key should be stored, others evicted to make room
+      expect(read('project-new')).toBeDefined();
+      expect(read('project-new')!.length).toBe(60000);
+      expect(read(keyA)).toBeUndefined();
+      expect(read(keyB)).toBeUndefined();
+      expect(read(keyC)).toBeUndefined();
+    });
   });
 });
