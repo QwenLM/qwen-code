@@ -98,6 +98,15 @@ describe('findGoalToRestore', () => {
       ]),
     ).toBeNull();
   });
+
+  it('returns null when last goal_status is failed', () => {
+    expect(
+      findGoalToRestore([
+        goalItem({ kind: 'set', condition: 'do x' }),
+        goalItem({ kind: 'failed', condition: 'do x' }),
+      ]),
+    ).toBeNull();
+  });
 });
 
 describe('restoreGoalFromHistory', () => {
@@ -269,5 +278,22 @@ describe('findLastTerminalGoal', () => {
     ]);
     expect(result?.kind).toBe('aborted');
     expect(result?.condition).toBe('goal B');
+  });
+
+  it('returns failed when it is the most recent terminal', () => {
+    const result = findLastTerminalGoal([
+      goalItem({ kind: 'achieved', condition: 'goal A' }),
+      goalItem({ kind: 'set', condition: 'goal B' }),
+      goalItem({
+        kind: 'failed',
+        condition: 'goal B',
+        lastReason: 'external service unavailable',
+      }),
+    ]);
+    expect(result).toMatchObject({
+      kind: 'failed',
+      condition: 'goal B',
+      lastReason: 'external service unavailable',
+    });
   });
 });
