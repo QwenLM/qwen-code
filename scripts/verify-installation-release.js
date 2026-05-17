@@ -120,11 +120,13 @@ async function verifyReleaseDirectory(dir, options = {}) {
   assertExpectedChecksumEntries(checksums);
   assertExpectedArchiveFiles(dir);
 
-  for (const assetName of EXPECTED_STANDALONE_ARCHIVE_NAMES) {
-    const assetPath = path.join(dir, assetName);
-    if (!fs.existsSync(assetPath)) {
-      fail(`Missing release asset: ${assetName}`);
-    }
+  const unexpected = fs
+    .readdirSync(dir)
+    .filter((fileName) => !EXPECTED_RELEASE_ASSET_NAMES.includes(fileName))
+    .sort();
+  if (unexpected.length > 0) {
+    fail(`Unexpected file(s) in release directory: ${unexpected.join(', ')}`);
+  }
 
     const actual = await sha256File(assetPath);
     const expected = checksums.get(assetName);
@@ -289,10 +291,58 @@ function normalizeHttpsBaseUrl(baseUrl) {
   if (parsed.protocol !== 'https:') {
     fail(`--base-url must use https: ${baseUrl}`);
   }
+  if (isPrivateOrReservedHost(parsed.hostname)) {
+    fail(`--base-url must not target a private network: ${baseUrl}`);
+  }
   if (!parsed.pathname.endsWith('/')) {
     parsed.pathname = `${parsed.pathname}/`;
   }
   return parsed.toString();
+}
+
+function standaloneArchiveName(qwenTarget) {
+  const targetConfig = TARGETS.get(qwenTarget);
+  if (!targetConfig) {
+    fail(`Unknown release target: ${qwenTarget}`);
+  }
+  return `qwen-code-${qwenTarget}.${targetConfig.outputExtension}`;
+}
+
+function isPrivateOrReservedHost(hostname) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (normalized === 'localhost' || normalized.endsWith('.localhost')) {
+    return true;
+  }
+
+  const ipv4Parts = normalized.split('.');
+  if (ipv4Parts.length === 4 && ipv4Parts.every((part) => /^\d+$/.test(part))) {
+    const octets = ipv4Parts.map(Number);
+    if (octets.some((octet) => octet < 0 || octet > 255)) {
+      return false;
+    }
+    const [first, second] = octets;
+    return (
+      first === 0 ||
+      first === 10 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168)
+    );
+  }
+
+  if (!normalized.includes(':')) {
+    return false;
+  }
+
+  return (
+    normalized === '::' ||
+    normalized === '::1' ||
+    normalized === '0:0:0:0:0:0:0:1' ||
+    normalized.startsWith('fc') ||
+    normalized.startsWith('fd') ||
+    normalized.startsWith('fe80:')
+  );
 }
 
 export {

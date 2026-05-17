@@ -127,6 +127,8 @@ describe('installation scripts', () => {
     expect(script).toContain('validate_https_url "${NPM_REGISTRY}"');
     expect(script).toContain('qwen-code/node/bin/node');
     expect(script).toContain('Archive contains symlinks; refusing to install');
+    expect(script).toContain('Archive is empty');
+    expect(script).toContain('archive_contains_symlinks()');
     expect(script).toContain('not a Qwen Code standalone install');
     expect(script).toContain(
       'Return 2 only when a standalone archive is unavailable',
@@ -288,6 +290,13 @@ describe('installation scripts', () => {
     expect(script).toContain('if "!INSTALL_DIR:~1,2!"==":/"');
     expect(script).toContain('if "!INSTALL_BIN_DIR:~1,2!"==":/"');
     expect(script).toContain(':ValidateVersion');
+    expect(script).toContain(
+      'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*[A-Za-z0-9.-]*$"',
+    );
+    expect(script).toContain(
+      'findstr /R /C:"^v[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*[A-Za-z0-9.-]*$"',
+    );
+    expect(script).not.toContain('/C:"^v*[0-9]');
     expect(script).toContain(
       'call :ValidateHttpsUrlVar "NPM_REGISTRY" "--registry"',
     );
@@ -1201,6 +1210,32 @@ describe('standalone release packaging', () => {
       await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
         /Unexpected release asset checksum: qwen-code-extra\.tar\.gz/,
       );
+
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      writeStandaloneReleaseChecksums(
+        tmpDir,
+        EXPECTED_STANDALONE_ARCHIVE_NAMES.slice(1),
+      );
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Missing release asset checksum: qwen-code-/,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects unexpected files in a release directory', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseDirectory } =
+      await import(installationReleaseVerificationScriptUrl);
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-release-verify-'));
+
+    try {
+      writeStandaloneReleaseAssets(tmpDir, EXPECTED_STANDALONE_ARCHIVE_NAMES);
+      writeFileSync(path.join(tmpDir, '.DS_Store'), 'finder metadata\n');
+
+      await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
+        /Unexpected file\(s\) in release directory: \.DS_Store/,
+      );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -1276,6 +1311,56 @@ describe('standalone release packaging', () => {
         },
       }),
     ).rejects.toThrow(/Checksum mismatch for qwen-code-/);
+  });
+
+  it('rejects remote SHA256SUMS responses that are unavailable', async () => {
+    const { verifyReleaseBaseUrl } = await import(
+      installationReleaseVerificationScriptUrl
+    );
+
+    await expect(
+      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+        fetchImpl: async () => new Response('missing', { status: 404 }),
+      }),
+    ).rejects.toThrow(/Failed to download .*SHA256SUMS: 404/);
+  });
+
+  it('rejects remote SHA256SUMS with missing or extra archive entries', async () => {
+    const { EXPECTED_STANDALONE_ARCHIVE_NAMES, verifyReleaseBaseUrl } =
+      await import(installationReleaseVerificationScriptUrl);
+
+    await expect(
+      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+        fetchImpl: async (url) => {
+          if (url.endsWith('/SHA256SUMS')) {
+            return new Response(
+              placeholderChecksumContent(
+                EXPECTED_STANDALONE_ARCHIVE_NAMES.slice(1),
+              ),
+            );
+          }
+          return new Response(null, { status: 200 });
+        },
+      }),
+    ).rejects.toThrow(/Missing release asset checksum: qwen-code-/);
+
+    await expect(
+      verifyReleaseBaseUrl('https://example.com/qwen-code/v0.0.0', {
+        fetchImpl: async (url) => {
+          if (url.endsWith('/SHA256SUMS')) {
+            return new Response(
+              placeholderChecksumContent([
+                ...EXPECTED_STANDALONE_ARCHIVE_NAMES,
+                'qwen-code-extra.tar.gz',
+              ]),
+            );
+          }
+          return new Response(null, { status: 200 });
+        },
+      }),
+    ).rejects.toThrow(
+      /Unexpected release asset checksum: qwen-code-extra\.tar\.gz/,
+    );
   });
 
   it('rejects a release base URL that is not https', async () => {
@@ -2631,6 +2716,64 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
     }
   });
 
+  itOnUnix('rejects archive symlinks before extraction', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = createSymlinkStandaloneArchive(tmpDir);
+      const tarWrapperDir = path.join(tmpDir, 'bin');
+      const marker = path.join(tmpDir, 'tar-extraction-attempted');
+      mkdirSync(tarWrapperDir, { recursive: true });
+      writeFileSync(
+        path.join(tarWrapperDir, 'tar'),
+        [
+          '#!/usr/bin/env bash',
+          'if [[ "$1" == "-xzf" || "$1" == "-xf" ]]; then',
+          '  touch "$QWEN_TAR_EXTRACT_MARKER"',
+          'fi',
+          'exec "$QWEN_REAL_TAR" "$@"',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(path.join(tarWrapperDir, 'tar'), 0o755);
+
+      expect(() =>
+        runUnixInstaller(
+          archive,
+          path.join(tmpDir, 'install'),
+          path.join(tmpDir, 'home'),
+          'standalone',
+          {
+            PATH: `${tarWrapperDir}${path.delimiter}${process.env.PATH}`,
+            QWEN_REAL_TAR: execFileSync('which', ['tar']).toString().trim(),
+            QWEN_TAR_EXTRACT_MARKER: marker,
+          },
+        ),
+      ).toThrow(/Archive contains symlinks/);
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('rejects empty standalone archives with a clear error', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+    try {
+      const archive = createEmptyStandaloneArchive(tmpDir);
+
+      expect(() =>
+        runUnixInstaller(
+          archive,
+          path.join(tmpDir, 'install'),
+          path.join(tmpDir, 'home'),
+        ),
+      ).toThrow(/Archive is empty/);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   itOnUnix(
     'rejects standalone archives containing path traversal entries',
     () => {
@@ -3799,6 +3942,17 @@ function createSymlinkStandaloneArchive(tmpDir) {
       stdio: 'ignore',
     },
   );
+  writeChecksumFile(outDir, path.basename(archive));
+  return archive;
+}
+
+function createEmptyStandaloneArchive(tmpDir) {
+  const outDir = path.join(tmpDir, 'out');
+  mkdirSync(outDir, { recursive: true });
+  const archive = path.join(outDir, 'qwen-code-linux-x64.tar.gz');
+  execFileSync('tar', ['-czf', archive, '-T', '/dev/null'], {
+    stdio: 'ignore',
+  });
   writeChecksumFile(outDir, path.basename(archive));
   return archive;
 }
