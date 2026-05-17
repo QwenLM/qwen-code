@@ -33,6 +33,7 @@ interface ServeArgs {
   'max-connections': number;
   'event-ring-size': number;
   workspace?: string;
+  'require-auth': boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -85,6 +86,17 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Listener-level TCP connection cap (server.maxConnections). Bounds raw ' +
           'sockets — slow/phantom SSE clients get rejected at accept time once full. ' +
           'Set to 0 to disable.',
+      })
+      .option('require-auth', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Refuse to start without a bearer token, even on loopback. ' +
+          'Hardens the loopback developer default for shared dev hosts / CI ' +
+          'runners / multi-tenant workstations where any local user can hit ' +
+          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          'requires Authorization when enabled (no loopback exemption — ' +
+          'k8s/Compose probes must pass the bearer too).',
       })
       .option('event-ring-size', {
         type: 'number',
@@ -140,6 +152,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
+        requireAuth: argv['require-auth'],
       });
     } catch (err) {
       writeStderrLine(
