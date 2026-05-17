@@ -29,10 +29,12 @@ import {
   createIdleWorkspaceSkillsStatus,
   type ServeSessionContextStatus,
   type ServeSessionSupportedCommandsStatus,
+  type ServeWorkspaceEnvStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceProvidersStatus,
   type ServeWorkspaceSkillsStatus,
 } from './status.js';
+import { buildEnvStatusFromProcess } from './envSnapshot.js';
 import type {
   CancelNotification,
   Client,
@@ -353,6 +355,14 @@ export interface HttpAcpBridge {
    * not spawn an ACP child when the daemon is idle.
    */
   getWorkspaceProvidersStatus(): Promise<ServeWorkspaceProvidersStatus>;
+
+  /**
+   * Read the daemon-process environment snapshot for the bound workspace.
+   * Answered entirely from `process.*` state — does not consult ACP. Always
+   * returns `initialized: true`; `acpChannelLive` reports whether a child is
+   * currently up.
+   */
+  getWorkspaceEnvStatus(): Promise<ServeWorkspaceEnvStatus>;
 
   /** Read the current ACP context/config state for a live session. */
   getSessionContextStatus(
@@ -3186,6 +3196,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         SERVE_STATUS_EXT_METHODS.workspaceProviders,
         () => createIdleWorkspaceProvidersStatus(boundWorkspace),
       );
+    },
+
+    async getWorkspaceEnvStatus() {
+      return buildEnvStatusFromProcess(boundWorkspace, !!liveChannelInfo());
     },
 
     async getSessionContextStatus(sessionId) {

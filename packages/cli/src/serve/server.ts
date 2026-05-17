@@ -73,6 +73,7 @@ export interface ServeAppDeps {
  *   - `GET  /workspace/mcp`
  *   - `GET  /workspace/skills`
  *   - `GET  /workspace/providers`
+ *   - `GET  /workspace/env`
  *   - `POST /session`
  *   - `POST /session/:id/load`
  *   - `POST /session/:id/resume`
@@ -285,6 +286,14 @@ export function createServeApp(
       res.status(200).json(await bridge.getWorkspaceProvidersStatus());
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/providers' });
+    }
+  });
+
+  app.get('/workspace/env', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceEnvStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/env' });
     }
   });
 

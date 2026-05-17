@@ -52,6 +52,7 @@ import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionSupportedCommandsStatus,
+  ServeWorkspaceEnvStatus,
   ServeWorkspaceMcpStatus,
   ServeWorkspaceProvidersStatus,
   ServeWorkspaceSkillsStatus,
@@ -94,6 +95,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'workspace_env',
   'session_context',
   'session_supported_commands',
   'session_close',
@@ -149,6 +151,7 @@ interface FakeBridgeOpts {
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
   workspaceSkillsImpl?: () => Promise<ServeWorkspaceSkillsStatus>;
   workspaceProvidersImpl?: () => Promise<ServeWorkspaceProvidersStatus>;
+  workspaceEnvImpl?: () => Promise<ServeWorkspaceEnvStatus>;
   sessionContextImpl?: (
     sessionId: string,
   ) => Promise<ServeSessionContextStatus>;
@@ -211,6 +214,7 @@ interface FakeBridge extends HttpAcpBridge {
   workspaceMcpCalls: number;
   workspaceSkillsCalls: number;
   workspaceProvidersCalls: number;
+  workspaceEnvCalls: number;
   sessionContextCalls: string[];
   sessionSupportedCommandsCalls: string[];
   setModelCalls: Array<{
@@ -252,6 +256,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceMcpCalls = 0;
   let workspaceSkillsCalls = 0;
   let workspaceProvidersCalls = 0;
+  let workspaceEnvCalls = 0;
   const sessionContextCalls: string[] = [];
   const sessionSupportedCommandsCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
@@ -316,6 +321,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceCwd: WS_BOUND,
       initialized: false,
       providers: [],
+    }));
+  const workspaceEnvImpl =
+    opts.workspaceEnvImpl ??
+    (async () => ({
+      v: 1 as const,
+      workspaceCwd: WS_BOUND,
+      initialized: true as const,
+      acpChannelLive: false,
+      cells: [],
     }));
   const sessionContextImpl =
     opts.sessionContextImpl ??
@@ -384,6 +398,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceProvidersCalls() {
       return workspaceProvidersCalls;
+    },
+    get workspaceEnvCalls() {
+      return workspaceEnvCalls;
     },
     get sessionCount() {
       return calls.length;
@@ -465,6 +482,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async getWorkspaceProvidersStatus() {
       workspaceProvidersCalls += 1;
       return workspaceProvidersImpl();
+    },
+    async getWorkspaceEnvStatus() {
+      workspaceEnvCalls += 1;
+      return workspaceEnvImpl();
     },
     async getSessionContextStatus(sessionId) {
       sessionContextCalls.push(sessionId);
@@ -793,6 +814,44 @@ describe('createServeApp', () => {
       expect(providersRes.body).toEqual(providers);
       expect(bridge.workspaceSkillsCalls).toBe(1);
       expect(bridge.workspaceProvidersCalls).toBe(1);
+    });
+
+    it('returns workspace env status from the bridge', async () => {
+      const env: ServeWorkspaceEnvStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          { kind: 'runtime', name: 'node', status: 'ok', value: '22.4.0' },
+          {
+            kind: 'env_var',
+            name: 'OPENAI_API_KEY',
+            status: 'ok',
+            present: true,
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceEnvImpl: async () => env });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/env')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(env);
+      expect(bridge.workspaceEnvCalls).toBe(1);
+      // Strict assertion: env_var cells never carry a value field, even
+      // when the env var is set, to preserve the presence-only contract.
+      const envVarCell = (res.body as ServeWorkspaceEnvStatus).cells.find(
+        (c) => c.kind === 'env_var',
+      );
+      expect(envVarCell).toBeDefined();
+      expect('value' in envVarCell!).toBe(false);
     });
 
     it('returns session context and supported commands from the bridge', async () => {

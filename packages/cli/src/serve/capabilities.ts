@@ -54,6 +54,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
+  workspace_env: { since: 'v1' },
   session_context: { since: 'v1' },
   session_supported_commands: { since: 'v1' },
   session_close: { since: 'v1' },

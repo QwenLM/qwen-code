@@ -458,6 +458,41 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
+  it('answers /workspace/env from process state without consulting ACP, idle or live', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    // Idle path — daemon answers env from `process.*`; no ACP child spawn.
+    const idle = await bridge.getWorkspaceEnvStatus();
+    expect(idle).toMatchObject({
+      v: 1,
+      workspaceCwd: WS_A,
+      initialized: true,
+      acpChannelLive: false,
+    });
+    expect(idle.cells.length).toBeGreaterThan(0);
+    expect(handles).toHaveLength(0);
+
+    // Live path — bridge still answers locally; the ACP child sees no
+    // ext-method invocation for env.
+    await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const live = await bridge.getWorkspaceEnvStatus();
+    expect(live.acpChannelLive).toBe(true);
+    expect(handles).toHaveLength(1);
+    expect(
+      handles[0]?.agent.extMethodCalls.some((c) =>
+        c.method.includes('/workspace/env'),
+      ),
+    ).toBe(false);
+
+    await bridge.shutdown();
+  });
   it('requests session status through the existing ACP channel', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({
