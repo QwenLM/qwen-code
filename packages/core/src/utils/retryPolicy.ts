@@ -61,6 +61,10 @@ export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
 
 /**
  * Extracts Retry-After from common SDK error header shapes.
+ *
+ * This intentionally checks both direct `error.headers` and
+ * `error.response.headers`. Some SDKs surface response headers directly on the
+ * thrown error, and those 429s should honor the provider-specified wait.
  */
 export function getRetryAfterDelayMs(error: unknown): number | null {
   const value =

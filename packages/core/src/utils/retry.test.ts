@@ -1043,6 +1043,25 @@ describe('retryWithBackoff - Retry-After handling in normal mode', () => {
     await assertionPromise;
     expect(fn).toHaveBeenCalledTimes(1);
   });
+
+  it('should reject retry waits immediately when the signal is already aborted', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    const controller = new AbortController();
+    controller.abort();
+    const error = Object.assign(new Error('server busy'), { status: 500 });
+    const fn = vi.fn().mockRejectedValueOnce(error).mockResolvedValue('ok');
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 2,
+      initialDelayMs: 100,
+      maxDelayMs: 1000,
+      signal: controller.signal,
+    });
+
+    await expect(promise).rejects.toThrow('Retry aborted by signal');
+    expect(setTimeoutSpy).not.toHaveBeenCalled();
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('getErrorStatus', () => {
