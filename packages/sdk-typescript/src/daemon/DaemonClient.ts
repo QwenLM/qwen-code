@@ -13,7 +13,9 @@ import type {
   DaemonSession,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
   HeartbeatResult,
@@ -336,6 +338,30 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/providers');
         }
         return (await res.json()) as DaemonWorkspaceProvidersStatus;
+      },
+    );
+  }
+
+  async workspaceEnv(): Promise<DaemonWorkspaceEnvStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/env`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /workspace/env');
+        return (await res.json()) as DaemonWorkspaceEnvStatus;
+      },
+    );
+  }
+
+  async workspacePreflight(): Promise<DaemonWorkspacePreflightStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/preflight`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/preflight');
+        }
+        return (await res.json()) as DaemonWorkspacePreflightStatus;
       },
     );
   }

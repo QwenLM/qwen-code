@@ -208,6 +208,8 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_mcp',
       'workspace_skills',
       'workspace_providers',
+      'workspace_env',
+      'workspace_preflight',
       'session_context',
       'session_supported_commands',
       'session_close',
