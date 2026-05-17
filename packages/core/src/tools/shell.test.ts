@@ -40,6 +40,19 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
+interface ShellToolParameterJsonSchema {
+  properties: {
+    command: {
+      description: string;
+    };
+  };
+}
+
+function getCommandParameterDescription(shellTool: ShellTool): string {
+  return (shellTool.schema.parametersJsonSchema as ShellToolParameterJsonSchema)
+    .properties.command.description;
+}
+
 describe('ShellTool', () => {
   let shellTool: ShellTool;
   let mockConfig: Config;
@@ -95,13 +108,13 @@ describe('ShellTool', () => {
       on: vi.fn(),
     } as unknown as fs.WriteStream);
 
-    shellTool = new ShellTool(mockConfig);
-
     vi.mocked(os.platform).mockReturnValue('linux');
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
     (vi.mocked(crypto.randomBytes) as Mock).mockReturnValue(
       Buffer.from('abcdef', 'hex'),
     );
+
+    shellTool = new ShellTool(mockConfig);
 
     // Capture the output callback to simulate streaming events from the service
     mockShellExecutionService.mockImplementation((_cmd, _cwd, callback) => {
@@ -3954,16 +3967,104 @@ describe('ShellTool', () => {
   });
 
   describe('getDescription', () => {
+    const originalEnv = { ...process.env };
+
+    afterEach(() => {
+      process.env = { ...originalEnv };
+    });
+
     it('should return the windows description when on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('win32');
+      delete process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
+      expect(shellTool.description).toContain(
+        "Use '&' only when you need to run commands sequentially",
+      );
+      expect(shellTool.description).toContain(
+        "DO NOT use ';' or newlines to separate commands in cmd.exe.",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact cmd.exe command to execute as `cmd.exe /d /s /c <command>`',
+      );
     });
 
     it('should return the non-windows description when not on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('linux');
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact bash command to execute as `bash -c <command>`',
+      );
+    });
+
+    it('should describe PowerShell when ComSpec points to powershell.exe', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] =
+        'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain(
+        '`powershell.exe -NoProfile -Command <command>`',
+      );
+      expect(shellTool.description).toContain(
+        'The active shell is PowerShell.',
+      );
+      expect(shellTool.description).toContain(
+        'Do NOT use Bash-only forms such as ANSI-C quoting',
+      );
+      expect(shellTool.description).toContain(
+        "Windows PowerShell does not support '&&'.",
+      );
+      expect(shellTool.description).not.toContain(
+        "use a single run_shell_command call with '&&'",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact PowerShell command to execute as `powershell.exe -NoProfile -Command <command>`',
+      );
+    });
+
+    it('should describe pwsh when ComSpec points to pwsh.exe', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain(
+        '`pwsh.exe -NoProfile -Command <command>`',
+      );
+      expect(shellTool.description).toContain(
+        "use a single run_shell_command call with '&&'",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact PowerShell command to execute as `pwsh.exe -NoProfile -Command <command>`',
+      );
+    });
+
+    it('should describe bash when Windows is running in Git Bash', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] = 'C:\\WINDOWS\\System32\\cmd.exe';
+      process.env['MSYSTEM'] = 'MINGW64';
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain('`bash -c <command>`');
+      expect(shellTool.description).toContain('The active shell is Bash.');
+      expect(shellTool.description).toContain('ANSI-C quoting');
+      expect(shellTool.description).not.toContain(
+        'Command process group can be terminated',
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact bash command to execute as `bash -c <command>`',
+      );
     });
   });
 

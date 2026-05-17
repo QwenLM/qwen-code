@@ -151,6 +151,28 @@ reported on the create/attach HTTP response. Raw `DaemonClient` callers should
 pass `{ lastEventId: 0 }` on their first `subscribeEvents()` call when they use
 `modelServiceId`.
 
+The raw event envelope remains available as `DaemonEvent` with `data: unknown`.
+Adapters that want a v1 typed view can layer the schema helpers on top without
+changing the wire stream:
+
+```typescript
+import {
+  asKnownDaemonEvent,
+  createDaemonSessionViewState,
+  reduceDaemonSessionEvent,
+} from '@qwen-code/sdk';
+
+let view = createDaemonSessionViewState();
+for await (const event of session.events()) {
+  view = reduceDaemonSessionEvent(view, event);
+
+  const known = asKnownDaemonEvent(event);
+  if (known?.type === 'permission_request') {
+    console.log(known.data.requestId);
+  }
+}
+```
+
 ### Message Types
 
 The SDK provides type guards to identify different message types:

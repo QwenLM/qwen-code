@@ -8,6 +8,7 @@ import { parseSseStream } from './sse.js';
 import type {
   DaemonCapabilities,
   DaemonEvent,
+  DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
   PermissionResponse,
@@ -57,6 +58,7 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 
 /**
  * Strip any trailing slashes from a base URL via plain string ops. The
@@ -115,6 +117,14 @@ export interface CreateSessionRequest {
    * `caps.features.session_scope_override` before sending.
    */
   sessionScope?: 'single' | 'thread';
+}
+
+export interface RestoreSessionRequest {
+  /**
+   * Workspace path the daemon must be bound to. Omit to let the daemon use
+   * its advertised bound workspace, mirroring `createOrAttachSession`.
+   */
+  workspaceCwd?: string;
 }
 
 export interface PromptRequest {
@@ -212,9 +222,13 @@ export class DaemonClient {
 
   // -- Plumbing -----------------------------------------------------------
 
-  private headers(extra: Record<string, string> = {}): Record<string, string> {
+  private headers(
+    extra: Record<string, string> = {},
+    clientId?: string,
+  ): Record<string, string> {
     const out: Record<string, string> = { ...extra };
     if (this.token) out['Authorization'] = `Bearer ${this.token}`;
+    if (clientId) out[CLIENT_ID_HEADER] = clientId;
     return out;
   }
 
@@ -274,6 +288,7 @@ export class DaemonClient {
 
   async createOrAttachSession(
     req: CreateSessionRequest,
+    clientId?: string,
   ): Promise<DaemonSession> {
     // Per #3803 §02: omitting `cwd` lets the daemon fall back to its
     // bound workspace. JSON.stringify strips `undefined` values, so
@@ -291,7 +306,7 @@ export class DaemonClient {
       `${this.baseUrl}/session`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
@@ -335,6 +350,51 @@ export class DaemonClient {
     );
   }
 
+  async loadSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('load', sessionId, req, clientId);
+  }
+
+  async resumeSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('resume', sessionId, req, clientId);
+  }
+
+  /**
+   * Shared transport for `loadSession` / `resumeSession`. Both routes
+   * share an identical wire shape (POST /session/:id/{load|resume}
+   * with optional `cwd` body) and identical error envelopes from the
+   * daemon, so they collapse into a single fetch path that only
+   * differs in the URL suffix and the route name reported on errors.
+   */
+  private async restoreSession(
+    action: 'load' | 'resume',
+    sessionId: string,
+    req: RestoreSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/${action}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ cwd: req.workspaceCwd }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, `POST /session/:id/${action}`);
+        }
+        return (await res.json()) as DaemonRestoredSession;
+      },
+    );
+  }
+
   /**
    * Switch the active model for a session. Backed by ACP's currently-unstable
    * `unstable_setSessionModel`; the daemon also publishes a `model_switched`
@@ -343,12 +403,13 @@ export class DaemonClient {
   async setSessionModel(
     sessionId: string,
     modelId: string,
+    clientId?: string,
   ): Promise<SetModelResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/model`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({ modelId }),
       },
       async (res) => {
@@ -374,12 +435,13 @@ export class DaemonClient {
     sessionId: string,
     req: PromptRequest,
     signal?: AbortSignal,
+    clientId?: string,
   ): Promise<PromptResult> {
     const res = await this._fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify(req),
         signal,
       },
@@ -388,12 +450,12 @@ export class DaemonClient {
     return (await res.json()) as PromptResult;
   }
 
-  async cancel(sessionId: string): Promise<void> {
+  async cancel(sessionId: string, clientId?: string): Promise<void> {
     await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: '{}',
       },
       async (res) => {
@@ -503,12 +565,13 @@ export class DaemonClient {
   async respondToPermission(
     requestId: string,
     response: PermissionResponse,
+    clientId?: string,
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/permission/${encodeURIComponent(requestId)}`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify(response),
       },
       async (res) => {

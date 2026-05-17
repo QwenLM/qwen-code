@@ -13,9 +13,11 @@ import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
+  InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
+  RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
@@ -63,6 +65,8 @@ export interface ServeAppDeps {
  *   - `GET  /health`
  *   - `GET  /capabilities`
  *   - `POST /session`
+ *   - `POST /session/:id/load`
+ *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
@@ -290,10 +294,13 @@ export function createServeApp(
       }
       sessionScope = rawSessionScope;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
       const session = await bridge.spawnOrAttach({
         workspaceCwd: cwd,
         modelServiceId,
+        ...(clientId !== undefined ? { clientId } : {}),
         ...(sessionScope !== undefined ? { sessionScope } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
@@ -341,7 +348,7 @@ export function createServeApp(
           // subscribers). Without this, both-coalesced-callers-
           // disconnect leaves an orphan agent child no client knows
           // the id of.
-          bridge.detachClient(session.sessionId).catch(() => {
+          bridge.detachClient(session.sessionId, session.clientId).catch(() => {
             // Best-effort cleanup; channel.exited will eventually reap.
           });
         }
@@ -352,6 +359,70 @@ export function createServeApp(
       sendBridgeError(res, err, { route: 'POST /session' });
     }
   });
+
+  const restoreSessionHandler =
+    (action: 'load' | 'resume') =>
+    async (req: express.Request, res: express.Response) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      const body = safeBody(req);
+      const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
+      if (cwd === undefined) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const session =
+          action === 'load'
+            ? await bridge.loadSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              })
+            : await bridge.resumeSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              });
+        // Mirror the `POST /session` disconnect-cleanup path (see the
+        // long comment above the matching `if (!res.writable)` there
+        // for the rationale around `res.writable` vs `req.aborted` /
+        // `req.destroyed`, plus the BQ9tV `requireZeroAttaches` race
+        // and the tanzhenxin attach-rollback case). Restore needs the
+        // same cleanup because a client that disconnects during a
+        // multi-second `session/load` would otherwise leave a freshly
+        // restored session in `byId` with no client holding its id.
+        if (!res.writable) {
+          if (!session.attached) {
+            bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
+          } else {
+            bridge
+              .detachClient(session.sessionId, session.clientId)
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
+          }
+          return;
+        }
+        res.status(200).json(session);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: `POST /session/:id/${action}`,
+          sessionId,
+        });
+      }
+    };
+
+  app.post('/session/:id/load', restoreSessionHandler('load'));
+  app.post('/session/:id/resume', restoreSessionHandler('resume'));
 
   app.post('/session/:id/prompt', async (req, res) => {
     const sessionId = req.params['id'];
@@ -398,6 +469,11 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      res.off('close', onResClose);
+      return;
+    }
     try {
       // SECURITY NOTE: this `...(body as object)` passthrough is
       // intentional — the bridge / ACP SDK ignores fields it
@@ -418,6 +494,7 @@ export function createServeApp(
           prompt,
         } as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
+        clientId !== undefined ? { clientId } : undefined,
       );
       res.status(200).json(result);
     } catch (err) {
@@ -456,11 +533,17 @@ export function createServeApp(
   app.post('/session/:id/cancel', async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      await bridge.cancelSession(sessionId, {
-        ...(body as object),
+      await bridge.cancelSession(
         sessionId,
-      } as Parameters<HttpAcpBridge['cancelSession']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+        } as Parameters<HttpAcpBridge['cancelSession']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -507,12 +590,18 @@ export function createServeApp(
       });
       return;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      const response = await bridge.setSessionModel(sessionId, {
-        ...(body as object),
+      const response = await bridge.setSessionModel(
         sessionId,
-        modelId,
-      } as Parameters<HttpAcpBridge['setSessionModel']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+          modelId,
+        } as Parameters<HttpAcpBridge['setSessionModel']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(200).json(response);
     } catch (err) {
       sendBridgeError(res, err, {
@@ -533,12 +622,18 @@ export function createServeApp(
       });
       return;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(requestId, {
-        ...(body as object),
-        outcome,
-      } as Parameters<HttpAcpBridge['respondToPermission']>[1]);
+      accepted = bridge.respondToPermission(
+        requestId,
+        {
+          ...(body as object),
+          outcome,
+        } as Parameters<HttpAcpBridge['respondToPermission']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
     } catch (err) {
       // BkwQI: voter's `optionId` wasn't in the option set the agent
       // originally offered (e.g. forging `ProceedAlways*` when the
@@ -553,7 +648,8 @@ export function createServeApp(
         });
         return;
       }
-      throw err;
+      sendBridgeError(res, err, { route: 'POST /permission/:requestId' });
+      return;
     }
     if (!accepted) {
       // Either the requestId never existed or another client already won
@@ -849,6 +945,10 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
   'prototype',
 ]);
 
+const CLIENT_ID_HEADER = 'x-qwen-client-id';
+const MAX_CLIENT_ID_LENGTH = 128;
+const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
+
 /**
  * Coerce `req.body` into a safe `Record<string, unknown>` for route
  * handlers. Replaces the 5-site copy-pasted preamble
@@ -871,6 +971,51 @@ function safeBody(req: import('express').Request): Record<string, unknown> {
     out[key] = value;
   }
   return out;
+}
+
+function parseOptionalWorkspaceCwd(
+  body: Record<string, unknown>,
+  boundWorkspace: string,
+  res: import('express').Response,
+): string | undefined {
+  const hasCwd = 'cwd' in body;
+  if (hasCwd && typeof body['cwd'] !== 'string') {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be a string absolute path when provided' });
+    return undefined;
+  }
+  if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
+    res.status(400).json({
+      error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+    });
+    return undefined;
+  }
+  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
+  if (!path.isAbsolute(cwd)) {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be an absolute path when provided' });
+    return undefined;
+  }
+  return cwd;
+}
+
+function parseClientIdHeader(
+  req: import('express').Request,
+  res: import('express').Response,
+): string | undefined | null {
+  const raw = req.get(CLIENT_ID_HEADER);
+  if (raw === undefined || raw === '') return undefined;
+  if (raw.length > MAX_CLIENT_ID_LENGTH || !CLIENT_ID_RE.test(raw)) {
+    res.status(400).json({
+      error:
+        '`X-Qwen-Client-Id` must be a non-empty token of 128 characters or fewer',
+      code: 'invalid_client_id',
+    });
+    return null;
+  }
+  return raw;
 }
 
 function isValidOutcome(
@@ -964,6 +1109,15 @@ function sendBridgeError(
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
   }
+  if (err instanceof InvalidClientIdError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_client_id',
+      sessionId: err.sessionId,
+      clientId: err.clientId,
+    });
+    return;
+  }
   if (err instanceof WorkspaceMismatchError) {
     // #3803 §02 single-workspace mode: the daemon binds to one
     // workspace at boot; cross-workspace POSTs are rejected here.
@@ -1030,6 +1184,21 @@ function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+    });
+    return;
+  }
+  if (err instanceof RestoreInProgressError) {
+    // Match `SessionLimitExceededError`'s 5s hint (above) — the
+    // underlying restore can take up to `initTimeoutMs` (default
+    // 10s) on the agent side, so a 1s retry hint pushed clients
+    // into tight loops that kept hitting the same 409.
+    res.set('Retry-After', '5');
+    res.status(409).json({
+      error: err.message,
+      code: 'restore_in_progress',
+      sessionId: err.sessionId,
+      activeAction: err.activeAction,
+      requestedAction: err.requestedAction,
     });
     return;
   }
