@@ -37,7 +37,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    *
    * Note: any *.alibaba-inc.com / *.aliyun-inc.com host is treated as a
    * DashScope-compatible endpoint by design. Keep this generic and avoid
-   * embedding business-specific internal hostnames in provider detection.
+   * embedding individual private gateway hostnames in provider detection.
    */
   static isDashScopeProvider(
     contentGeneratorConfig: ContentGeneratorConfig,
