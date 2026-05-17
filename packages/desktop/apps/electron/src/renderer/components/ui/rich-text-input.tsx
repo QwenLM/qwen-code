@@ -185,6 +185,18 @@ function renderBadgeHTML(
 function getTextFromElement(element: HTMLElement): string {
   let text = ''
 
+  const meaningfulChildren = Array.from(element.childNodes).filter((node) => {
+    if (node.nodeType !== Node.TEXT_NODE) return true
+    return (node.textContent || '').replace(/\u200B/g, '') !== ''
+  })
+  const onlyMeaningfulChild = meaningfulChildren[0]
+  if (
+    meaningfulChildren.length === 1 &&
+    (onlyMeaningfulChild as HTMLElement | undefined)?.tagName === 'BR'
+  ) {
+    return ''
+  }
+
   // isTopLevel: true for direct children of the contenteditable root
   function processNode(node: Node, isTopLevel: boolean = false) {
     if (node.nodeType === Node.TEXT_NODE) {
@@ -787,16 +799,21 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       return () => document.removeEventListener('selectionchange', handleSelectionChange)
     }, [])
 
+    // Normalize placeholder to array for RotatingPlaceholder
+    const placeholderArray = React.useMemo(() => {
+      if (placeholder == null) return [t("chatInput.placeholder.typeMessage")]
+      if (Array.isArray(placeholder)) {
+        const entries = placeholder.filter((entry) => entry.trim().length > 0)
+        return entries.length > 0 ? entries : [t("chatInput.placeholder.typeMessage")]
+      }
+      const trimmed = placeholder.trim()
+      return trimmed.length > 0 ? [placeholder] : []
+    }, [placeholder, t])
+
     // Show placeholder when input is empty and not in IME composition
     // (during composition the browser renders composition text natively;
     // hiding the placeholder and keeping text visible lets the user see it)
-    const showPlaceholder = !safeValue && !isComposingState
-
-    // Normalize placeholder to array for RotatingPlaceholder
-    const placeholderArray = React.useMemo(() => {
-      if (!placeholder) return [t("chatInput.placeholder.typeMessage")]
-      return Array.isArray(placeholder) ? placeholder : [placeholder]
-    }, [placeholder])
+    const showPlaceholder = !safeValue && !isComposingState && placeholderArray.length > 0
 
     // Check if value contains any mentions (badges) to adjust line height
     const hasMentions = React.useMemo(() => {

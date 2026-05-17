@@ -656,15 +656,23 @@ export function FreeFormInput({
   // Read panel focus state from context (for multi-panel unfocused styling)
   const appShellContext = useOptionalAppShellContext();
   const isFocusedPanel = appShellContext?.isFocusedPanel ?? true;
+  const [isInputFocused, setIsInputFocused] = React.useState(false);
 
-  // Shuffle placeholder order once per mount so each session feels fresh.
+  // Shuffle placeholder order when the source text changes so draft/new-session
+  // screens do not stay stuck with an initial empty value.
   // In compact mode, suppress desktop-keyboard guidance that is noisy or misleading
   // on narrow/mobile-like layouts.
   const placeholderOptions = React.useMemo(() => {
-    if (!Array.isArray(effectivePlaceholderProp))
+    if (!Array.isArray(effectivePlaceholderProp)) {
       return effectivePlaceholderProp;
-    if (!compactMode) return effectivePlaceholderProp;
-    return effectivePlaceholderProp.filter((entry) => {
+    }
+
+    const nonEmptyOptions = effectivePlaceholderProp.filter(
+      (entry) => entry.trim().length > 0,
+    );
+    if (!compactMode) return nonEmptyOptions;
+
+    const compactOptions = nonEmptyOptions.filter((entry) => {
       const lower = entry.toLowerCase();
       return (
         !lower.includes('shift + tab') &&
@@ -675,17 +683,22 @@ export function FreeFormInput({
         !lower.includes('ctrl')
       );
     });
+
+    return compactOptions.length > 0 ? compactOptions : nonEmptyOptions;
   }, [effectivePlaceholderProp, compactMode]);
 
-  // Hide placeholder entirely when panel is unfocused in multi-panel layout
+  // Hide placeholder entirely when panel is unfocused in multi-panel layout,
+  // unless the input itself has DOM focus. The draft composer can receive focus
+  // before panel focus state catches up.
   const shuffledPlaceholder = React.useMemo(
     () =>
       Array.isArray(placeholderOptions)
         ? shuffleArray(placeholderOptions)
         : placeholderOptions,
-    [], // eslint-disable-line react-hooks/exhaustive-deps -- intentionally shuffle only on mount
+    [placeholderOptions],
   );
-  const effectivePlaceholder = isFocusedPanel ? shuffledPlaceholder : '';
+  const effectivePlaceholder =
+    isFocusedPanel || isInputFocused ? shuffledPlaceholder : '';
 
   // Performance optimization: Always use internal state for typing to avoid parent re-renders
   // Sync FROM parent on mount/change (for restoring drafts)
@@ -2396,9 +2409,11 @@ export function FreeFormInput({
             onPaste={handlePaste}
             onLongTextPaste={handleLongTextPaste}
             onFocus={() => {
+              setIsInputFocused(true);
               onFocusChange?.(true);
             }}
             onBlur={() => {
+              setIsInputFocused(false);
               // Save caret position before losing focus (for restoration via craft:focus-input)
               lastCaretPositionRef.current =
                 richInputRef.current?.selectionStart ?? null;
