@@ -72,6 +72,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_prompt',
   'session_cancel',
   'session_events',
+  'typed_event_schema',
   'session_set_model',
   'client_identity',
   'session_permission_vote',
