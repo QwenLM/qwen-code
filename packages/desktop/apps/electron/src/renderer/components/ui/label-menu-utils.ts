@@ -103,3 +103,36 @@ export function filterItems(items: LabelMenuItem[], filter: string): LabelMenuIt
   scored.sort((a, b) => b.score - a.score || compareLabelMenuItems(a.item, b.item))
   return scored.map(s => s.item)
 }
+
+/**
+ * Filter flat session statuses using the same segment scoring as labels.
+ * `getLabel` lets callers search against localized built-in status labels.
+ */
+export function filterSessionStatuses<T extends { label: string }>(
+  states: T[],
+  filter: string,
+  getLabel: (state: T) => string = (state) => state.label,
+): T[] {
+  if (!filter) return states
+
+  const segments = filter.toLowerCase().split('/').map(s => s.trim()).filter(Boolean)
+  if (segments.length === 0) return states
+
+  const segment = segments[0]
+  const scored: { state: T; score: number }[] = []
+
+  for (const state of states) {
+    const label = getLabel(state)
+    const score = segmentScore(label, segment)
+    if (score > 0) {
+      scored.push({ state, score })
+    }
+  }
+
+  scored.sort((a, b) => {
+    const scoreDelta = b.score - a.score
+    if (scoreDelta !== 0) return scoreDelta
+    return getLabel(a.state).localeCompare(getLabel(b.state))
+  })
+  return scored.map(s => s.state)
+}

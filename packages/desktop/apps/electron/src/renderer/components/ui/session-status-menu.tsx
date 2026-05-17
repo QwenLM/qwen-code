@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils'
 import {
   type SessionStatusId,
   type SessionStatus,
+  getSessionStatusDisplayLabel,
   getStateIcon,
   getStateColor,
   getStatusIconStyle,
@@ -26,11 +27,9 @@ const MENU_ITEM_STYLE = 'flex cursor-pointer select-none items-center gap-3 roun
 // StateItemContent - Shared item rendering
 // ============================================================================
 
-const DEFAULT_STATUS_IDS = new Set(['backlog', 'todo', 'needs-review', 'done', 'cancelled'])
-
 function StateItemContent({ state }: { state: SessionStatus }) {
   const { t } = useTranslation()
-  const label = DEFAULT_STATUS_IDS.has(state.id) ? t(`status.${state.id}`, state.label) : state.label
+  const label = getSessionStatusDisplayLabel(state, t)
   return (
     <>
       <span className="shrink-0 flex items-center" style={getStatusIconStyle(state)}>
@@ -98,14 +97,15 @@ export function SessionStatusMenu({
       </div>
       <CommandPrimitive.List className={MENU_LIST_STYLE}>
         <CommandPrimitive.Empty className="py-3 text-center text-sm text-muted-foreground">
-          No status found
+          {t('status.noStatusFound')}
         </CommandPrimitive.Empty>
         {states.map((state) => {
           const isActive = activeState === state.id
+          const label = getSessionStatusDisplayLabel(state, t)
           return (
             <CommandPrimitive.Item
               key={state.id}
-              value={state.label}
+              value={label}
               onSelect={() => onSelect(state.id)}
               className={cn(
                 MENU_ITEM_STYLE,
@@ -133,7 +133,9 @@ export function SessionStatusMenu({
               <span className="shrink-0 flex items-center opacity-60">
                 {isArchived ? <ArchiveRestore className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
               </span>
-              <div className="flex-1 min-w-0">{isArchived ? 'Unarchive' : 'Archive'}</div>
+              <div className="flex-1 min-w-0">
+                {isArchived ? t('sessionMenu.unarchive') : t('sessionMenu.archive')}
+              </div>
             </CommandPrimitive.Item>
           </>
         )}

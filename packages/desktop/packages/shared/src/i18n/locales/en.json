@@ -1215,6 +1215,7 @@
   "status.done": "Done",
   "status.filterStatuses": "Filter statuses...",
   "status.needs-review": "Needs Review",
+  "status.noStatusFound": "No status found",
   "status.todo": "Todo",
   "table.access": "Access",
   "table.comment": "Comment",

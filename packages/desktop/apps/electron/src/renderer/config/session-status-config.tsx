@@ -39,6 +39,24 @@ export interface SessionStatus extends SessionStatusConfig {
   isDefault?: boolean
 }
 
+const DEFAULT_STATUS_IDS = new Set([
+  'backlog',
+  'todo',
+  'needs-review',
+  'done',
+  'cancelled',
+])
+
+type TranslationFn = (key: string, defaultValue: string) => string
+
+export function getSessionStatusDisplayLabel(
+  state: SessionStatus,
+  t?: TranslationFn,
+): string {
+  if (!t || !DEFAULT_STATUS_IDS.has(state.id)) return state.label
+  return t(`status.${state.id}`, state.label)
+}
+
 // ============================================================================
 // Status → SessionStatus Conversion
 // ============================================================================
