@@ -214,16 +214,19 @@ REM per-tool bin directories plus everything `where qwen` returns.
 call :CreateTempFile "qwen-pre-install"
 if !ERRORLEVEL! NEQ 0 exit /b 1
 set "PRE_INSTALL_QWENS_FILE=!TEMP_FILE!"
-for /f "delims=" %%i in ('where qwen 2^>nul') do call echo %%i>>"!PRE_INSTALL_QWENS_FILE!"
+rem Avoid `call echo` here: `call` triggers an extra parse pass on the
+rem expanded path, so a directory containing &/|/<,>/etc. would be re-evaluated
+rem as command separators. Plain `echo` writes the literal value.
+for /f "delims=" %%i in ('where qwen 2^>nul') do echo %%i>>"!PRE_INSTALL_QWENS_FILE!"
 for %%c in (
     "!USERPROFILE!\.opencode\bin\qwen.cmd"
     "!APPDATA!\npm\qwen.cmd"
     "!USERPROFILE!\.bun\bin\qwen.cmd"
     "!LOCALAPPDATA!\bun\bin\qwen.cmd"
     "!LOCALAPPDATA!\qwen-code\bin\qwen.cmd"
-) do if exist %%c call echo %%~c>>"!PRE_INSTALL_QWENS_FILE!"
+) do if exist %%c echo %%~c>>"!PRE_INSTALL_QWENS_FILE!"
 for /f "delims=" %%i in ('npm prefix -g 2^>nul') do (
-    if exist "%%i\qwen.cmd" call echo %%i\qwen.cmd>>"!PRE_INSTALL_QWENS_FILE!"
+    if exist "%%i\qwen.cmd" echo %%i\qwen.cmd>>"!PRE_INSTALL_QWENS_FILE!"
 )
 set "PRE_INSTALL_QWENS_LIST="
 if exist "!PRE_INSTALL_QWENS_FILE!" (
@@ -318,7 +321,7 @@ echo Installing Qwen Code version: !DISPLAY_VERSION!
 exit /b 0
 
 :ValidateRawEnvironmentOptions
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); $rawNames = @('QWEN_INSTALL_METHOD','QWEN_INSTALL_MIRROR','QWEN_NO_MODIFY_PATH','QWEN_INSTALL_BASE_URL','QWEN_INSTALL_ARCHIVE','QWEN_INSTALL_VERSION','QWEN_NPM_REGISTRY','QWEN_INSTALL_ROOT','QWEN_INSTALL_LIB_DIR','QWEN_INSTALL_BIN_DIR','QWEN_INSTALL_GITHUB_REPO'); foreach ($name in $rawNames) { $value = [Environment]::GetEnvironmentVariable($name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }; exit 0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$unsafe = [char[]](10,13,33,34,37,38,60,62,94,96,124); $rawNames = @('QWEN_INSTALL_METHOD','QWEN_INSTALL_MIRROR','QWEN_NO_MODIFY_PATH','QWEN_INSTALL_BASE_URL','QWEN_INSTALL_ARCHIVE','QWEN_INSTALL_VERSION','QWEN_NPM_REGISTRY','QWEN_INSTALL_ROOT','QWEN_INSTALL_LIB_DIR','QWEN_INSTALL_BIN_DIR','QWEN_INSTALL_GITHUB_REPO','QWEN_INSTALL_CURL_EXE'); foreach ($name in $rawNames) { $value = [Environment]::GetEnvironmentVariable($name); if ($null -ne $value -and $value.IndexOfAny($unsafe) -ge 0) { exit 1 } }; exit 0"
 if %ERRORLEVEL% EQU 0 exit /b 0
 echo ERROR: installer options contain unsafe command characters.
 exit /b 1
@@ -463,12 +466,12 @@ exit /b 1
 :DetectTarget
 set "TARGET="
 rem Keep :DetectTarget in sync with RELEASE_TARGETS in scripts/build-standalone-release.js.
+rem RELEASE_TARGETS currently has no win-arm64 entry, so ARM64 falls through
+rem to the unsupported-architecture branch and the caller can fall back to npm.
 if /i "!PROCESSOR_ARCHITECTURE!"=="AMD64" set "TARGET=win-x64"
 if /i "!PROCESSOR_ARCHITECTURE!"=="X64" set "TARGET=win-x64"
-if /i "!PROCESSOR_ARCHITECTURE!"=="ARM64" set "TARGET=win-arm64"
 if /i "!PROCESSOR_ARCHITEW6432!"=="AMD64" set "TARGET=win-x64"
 if /i "!PROCESSOR_ARCHITEW6432!"=="X64" set "TARGET=win-x64"
-if /i "!PROCESSOR_ARCHITEW6432!"=="ARM64" set "TARGET=win-arm64"
 if "!TARGET!"=="" (
     echo WARNING: Standalone archive is not available for this Windows architecture.
     exit /b 1
@@ -608,7 +611,7 @@ set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
 rem Prefer curl.exe -# for a hash-mark progress bar (Windows 10+ includes it);
 rem fall back to Invoke-WebRequest (which shows its own progress bar).
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 -#fSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 --retry 2 -#fSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -617,7 +620,7 @@ exit /b %PS_STATUS%
 :DownloadFileQuiet
 set "QWEN_DOWNLOAD_URL=%~1"
 set "QWEN_DOWNLOAD_DEST=%~2"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 -fsSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { $ProgressPreference = 'SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; $curl = $env:QWEN_INSTALL_CURL_EXE; if ([string]::IsNullOrEmpty($curl)) { $cmd = Get-Command curl.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $cmd) { $curl = $cmd.Source } }; if (-not [string]::IsNullOrEmpty($curl)) { & $curl --connect-timeout 15 --max-time 300 --retry 2 -fsSLo $env:QWEN_DOWNLOAD_DEST $env:QWEN_DOWNLOAD_URL; if ($LASTEXITCODE -ne 0) { throw ('curl.exe download failed (exit code ' + $LASTEXITCODE + ')') }; exit 0 }; try { $ProgressPreference = 'SilentlyContinue'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 } catch { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 }; Invoke-WebRequest -Uri $env:QWEN_DOWNLOAD_URL -OutFile $env:QWEN_DOWNLOAD_DEST -UseBasicParsing -MaximumRedirection 10 -TimeoutSec 300; exit 0 } catch { [Console]::Error.WriteLine('Download error: ' + $_.Exception.Message); exit 1 }"
 set "PS_STATUS=%ERRORLEVEL%"
 set "QWEN_DOWNLOAD_URL="
 set "QWEN_DOWNLOAD_DEST="
@@ -721,7 +724,7 @@ if "!ACTUAL_HASH!"=="" (
 )
 
 if /i not "!EXPECTED_HASH!"=="!ACTUAL_HASH!" (
-    echo ERROR: Checksum verification failed for !ARCHIVE_NAME!.
+    echo ERROR: Checksum mismatch for !ARCHIVE_NAME!: expected !EXPECTED_HASH!, got !ACTUAL_HASH!.
     exit /b 1
 )
 

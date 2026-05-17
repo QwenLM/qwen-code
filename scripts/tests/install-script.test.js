@@ -193,10 +193,10 @@ describe('installation scripts', () => {
     expect(script).not.toContain('msiexec');
     expect(script).toContain('Invoke-WebRequest');
     expect(script).toContain(
-      '& $curl --connect-timeout 15 --max-time 300 -#fSLo',
+      '& $curl --connect-timeout 15 --max-time 300 --retry 2 -#fSLo',
     );
     expect(script).toContain(
-      '& $curl --connect-timeout 15 --max-time 300 -fsSLo',
+      '& $curl --connect-timeout 15 --max-time 300 --retry 2 -fsSLo',
     );
     expect(script).toContain('-TimeoutSec 300');
     expect(script).toContain('$request.Timeout = 10000');
@@ -281,8 +281,12 @@ describe('installation scripts', () => {
     expect(script).toContain('$curl = $env:QWEN_INSTALL_CURL_EXE');
     expect(script).toContain('QWEN_INSTALL_CURL_EXE');
     expect(script).toContain('Get-Command curl.exe -CommandType Application');
-    expect(script).toContain('--connect-timeout 15 --max-time 300 -#fSLo');
-    expect(script).toContain('--connect-timeout 15 --max-time 300 -fsSLo');
+    expect(script).toContain(
+      '--connect-timeout 15 --max-time 300 --retry 2 -#fSLo',
+    );
+    expect(script).toContain(
+      '--connect-timeout 15 --max-time 300 --retry 2 -fsSLo',
+    );
     expect(script).toContain('Invoke-WebRequest');
     expect(script).toContain('-TimeoutSec 300');
     expect(script).toContain(
@@ -340,7 +344,10 @@ describe('installation scripts', () => {
     );
     expect(script).toContain('set "ARCHIVE_NAME=qwen-code-!TARGET!.zip"');
     expect(script).toContain('Keep :DetectTarget in sync with RELEASE_TARGETS');
-    expect(script).toContain(
+    // ARM64 is intentionally not detected: RELEASE_TARGETS has no win-arm64
+    // entry, so we want :DetectTarget to fall through to the unsupported-arch
+    // branch and let the caller fall back to npm.
+    expect(script).not.toContain(
       'if /i "!PROCESSOR_ARCHITECTURE!"=="ARM64" set "TARGET=win-arm64"',
     );
     expect(script).not.toContain('%RANDOM%');
@@ -776,7 +783,7 @@ describe('standalone release packaging', () => {
     expect(installPowerShellSource).toContain('Invoke-WebRequest');
     expect(installPowerShellSource).toContain('Download-File');
     expect(installPowerShellSource).toContain(
-      'curl.exe --connect-timeout 15 --max-time 300 -sSfLo',
+      'curl.exe --connect-timeout 15 --max-time 300 --retry 2 -sSfLo',
     );
     expect(installPowerShellSource).toContain('-TimeoutSec 300');
     expect(installPowerShellSource).toContain(
@@ -786,7 +793,7 @@ describe('standalone release packaging', () => {
     expect(installPowerShellSource).toContain('--version vX.Y.Z');
     expect(installPowerShellSource).toContain('SHA256SUMS');
     expect(installPowerShellSource).toContain('Get-FileHash');
-    expect(installPowerShellSource).toContain('Checksum verification failed');
+    expect(installPowerShellSource).toContain('Checksum mismatch');
     expect(installPowerShellSource).toContain('@args');
   });
 
@@ -915,9 +922,7 @@ describe('standalone release packaging', () => {
       writeFileSync(installSh, 'tampered');
       await expect(
         assertHostedInstallationAssetChecksums(tmpDir),
-      ).rejects.toThrow(
-        /Checksum verification failed for install-qwen-standalone\.sh/,
-      );
+      ).rejects.toThrow(/Checksum mismatch for install-qwen-standalone\.sh/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -1041,7 +1046,7 @@ describe('standalone release packaging', () => {
       );
       await expect(verifyReleaseDirectory(tmpDir)).rejects.toThrow(
         new RegExp(
-          `Checksum verification failed for ${escapeRegExp(EXPECTED_STANDALONE_ARCHIVE_NAMES[0])}`,
+          `Checksum mismatch for ${escapeRegExp(EXPECTED_STANDALONE_ARCHIVE_NAMES[0])}`,
         ),
       );
     } finally {
@@ -1143,7 +1148,7 @@ describe('standalone release packaging', () => {
           return new Response(`${assetName}\n`);
         },
       }),
-    ).rejects.toThrow(/Checksum verification failed for qwen-code-/);
+    ).rejects.toThrow(/Checksum mismatch for qwen-code-/);
   });
 
   it('rejects a release base URL that is not https', async () => {
@@ -1575,9 +1580,11 @@ describe('standalone release packaging', () => {
     );
     expect(syncStepIndex).toBeGreaterThanOrEqual(0);
     expect(verifyStepIndex).toBeGreaterThan(syncStepIndex);
-    expect(publishLatestStepIndex).toBeGreaterThan(verifyStepIndex);
-    expect(syncHostedStepIndex).toBeGreaterThan(publishLatestStepIndex);
+    expect(syncHostedStepIndex).toBeGreaterThan(verifyStepIndex);
     expect(verifyHostedStepIndex).toBeGreaterThan(syncHostedStepIndex);
+    // Latest VERSION pointer must flip only after every release asset and
+    // hosted installer object is uploaded and verified.
+    expect(publishLatestStepIndex).toBeGreaterThan(verifyHostedStepIndex);
     expect(workflow.slice(syncStepIndex, verifyStepIndex)).not.toContain(
       'releases/qwen-code/latest/VERSION',
     );
@@ -1626,7 +1633,7 @@ describe('standalone release packaging', () => {
     expect(workflow).not.toContain(
       'npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest"',
     );
-    const verifyStep = workflow.slice(verifyStepIndex, publishLatestStepIndex);
+    const verifyStep = workflow.slice(verifyStepIndex, syncHostedStepIndex);
     expect(verifyStep).not.toContain('hosted_tmp_dir');
     const verifyHostedStep = workflow.slice(verifyHostedStepIndex);
     expect(workflow).toContain('hosted_tmp_dir="$(mktemp -d)"');
@@ -2447,7 +2454,7 @@ describe('Linux/macOS installer end-to-end', () => {
           path.join(tmpDir, 'install'),
           path.join(tmpDir, 'home'),
         ),
-      ).toThrow(/Checksum verification failed/);
+      ).toThrow(/Checksum mismatch/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
       restoreMinimalDist(createdDist);
@@ -2571,7 +2578,7 @@ describe('Linux/macOS installer end-to-end', () => {
         failureMessage = error.message;
       }
 
-      expect(failureMessage).toContain('Checksum verification failed');
+      expect(failureMessage).toContain('Checksum mismatch');
       expect(failureMessage).toContain('Standalone install failed');
       expect(failureMessage).not.toContain('Falling back to npm installation');
     } finally {
@@ -2836,7 +2843,7 @@ describe('Windows installer end-to-end', () => {
           path.join(tmpDir, 'install'),
           path.join(tmpDir, 'home'),
         ),
-      ).toThrow(/Checksum verification failed/);
+      ).toThrow(/Checksum mismatch/);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

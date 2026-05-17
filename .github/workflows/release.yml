@@ -511,25 +511,6 @@ jobs:
 
           npm run verify:installation-release -- --base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/${RELEASE_TAG}"
 
-      - name: 'Publish Aliyun OSS Latest VERSION'
-        if: |-
-          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
-        env:
-          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
-          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
-        run: |-
-          set -euo pipefail
-
-          printf '%s\n' "${RELEASE_TAG}" > "${RUNNER_TEMP}/qwen-code-latest-version"
-          ossutil cp "${RUNNER_TEMP}/qwen-code-latest-version" "oss://${ALIYUN_OSS_BUCKET}/releases/qwen-code/latest/VERSION" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
-
-          latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d '[:space:]')"
-          if [[ "${latest_version}" != "${RELEASE_TAG}" ]]; then
-            echo "::error::Aliyun latest VERSION points to ${latest_version}, expected ${RELEASE_TAG}"
-            exit 1
-          fi
-
       - name: 'Sync Hosted Installation Assets to Aliyun OSS'
         if: |-
           ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
@@ -588,6 +569,29 @@ jobs:
           }
           (cd "${hosted_tmp_dir}/versioned" && sha256sum -c SHA256SUMS)
           (cd "${hosted_tmp_dir}/global" && sha256sum -c SHA256SUMS)
+
+      - name: 'Publish Aliyun OSS Latest VERSION'
+        # Run last so the `latest/VERSION` pointer only flips after every
+        # release asset and hosted installer object has been uploaded and
+        # verified. If any earlier step fails, the pointer keeps referring
+        # to the previously-good release.
+        if: |-
+          ${{ needs.prepare.outputs.is_dry_run == 'false' && needs.prepare.outputs.is_nightly == 'false' && needs.prepare.outputs.is_preview == 'false' }}
+        env:
+          ALIYUN_OSS_BUCKET: "${{ vars.ALIYUN_OSS_BUCKET || 'qwen-code-assets' }}"
+          ALIYUN_OSS_PUBLIC_BASE_URL: "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}"
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+        run: |-
+          set -euo pipefail
+
+          printf '%s\n' "${RELEASE_TAG}" > "${RUNNER_TEMP}/qwen-code-latest-version"
+          ossutil cp "${RUNNER_TEMP}/qwen-code-latest-version" "oss://${ALIYUN_OSS_BUCKET}/releases/qwen-code/latest/VERSION" -c "${RUNNER_TEMP}/.ossutilconfig" -f --acl public-read
+
+          latest_version="$(curl -fsSL --connect-timeout 15 --max-time 300 "${ALIYUN_OSS_PUBLIC_BASE_URL}/releases/qwen-code/latest/VERSION" | tr -d '[:space:]')"
+          if [[ "${latest_version}" != "${RELEASE_TAG}" ]]; then
+            echo "::error::Aliyun latest VERSION points to ${latest_version}, expected ${RELEASE_TAG}"
+            exit 1
+          fi
 
       - name: 'Cleanup Aliyun OSS Credentials'
         if: |-

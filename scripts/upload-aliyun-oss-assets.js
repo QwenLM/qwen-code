@@ -134,12 +134,18 @@ function uploadWithRetry(asset, bucket, key, config) {
       console.warn(
         `Upload attempt ${attempt}/${MAX_UPLOAD_ATTEMPTS} failed for ${path.basename(asset)}, retrying in ${delayMs / 1000}s...`,
       );
-      spawnSync('sleep', [String(delayMs / 1000)]);
+      sleepSync(delayMs);
     }
   }
   fail(
     `ossutil failed after ${MAX_UPLOAD_ATTEMPTS} attempts while uploading ${asset}`,
   );
+}
+
+// Cross-platform synchronous sleep. `spawnSync('sleep', ...)` is unavailable
+// on Windows runners; Atomics.wait blocks the current thread without spawning.
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 export { parseUploadArgs, uploadAssets };

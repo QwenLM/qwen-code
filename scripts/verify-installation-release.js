@@ -123,8 +123,11 @@ async function verifyReleaseDirectory(dir, options = {}) {
     }
 
     const actual = await sha256File(assetPath);
-    if (actual !== checksums.get(assetName)) {
-      fail(`Checksum verification failed for ${assetName}`);
+    const expected = checksums.get(assetName);
+    if (actual !== expected) {
+      fail(
+        `Checksum mismatch for ${assetName}: expected ${expected}, got ${actual}`,
+      );
     }
   }
 
@@ -205,7 +208,9 @@ async function assertRemoteAssetChecksums(
       const actual = await fetchSha256(assetUrl, fetchImpl);
       const expected = checksums.get(assetName);
       if (actual !== expected) {
-        fail(`Checksum verification failed for ${assetName}`);
+        fail(
+          `Checksum mismatch for ${assetName}: expected ${expected}, got ${actual}`,
+        );
       }
     } catch (reason) {
       failures.push({

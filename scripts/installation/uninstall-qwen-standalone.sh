@@ -166,6 +166,14 @@ remove_install_wrapper() {
         return 0
     fi
 
+    # Defense in depth: only delete files that look like the installer-generated
+    # wrapper (shebang on first line). A user-authored script that happens to
+    # mention the install path stays untouched.
+    if ! head -n 1 "${wrapper_path}" 2>/dev/null | grep -q '^#!'; then
+        log_warning "${wrapper_path} mentions this install but is not a shell wrapper; skipping."
+        return 0
+    fi
+
     rm -f "${wrapper_path}"
     log_success "Removed ${wrapper_path}"
 }

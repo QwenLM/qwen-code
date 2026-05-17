@@ -5,11 +5,35 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -c "irm https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/uninstall-qwen-standalone.ps1 | iex"
 #
-# Set $env:QWEN_UNINSTALL_PURGE = '1' to also remove the installer source
-# marker at %USERPROFILE%\.qwen\source.json. Other Qwen Code config and auth
-# files are preserved.
+# Set $env:QWEN_UNINSTALL_PURGE = '1' (or pass -Purge) to also remove the
+# installer source marker at %USERPROFILE%\.qwen\source.json. Other Qwen Code
+# config and auth files are preserved.
+
+param(
+    [switch]$Purge,
+    [switch]$Help
+)
 
 $ErrorActionPreference = 'Stop'
+
+if ($Help) {
+    Write-Output @"
+Qwen Code standalone uninstaller.
+
+Usage:
+  uninstall-qwen-standalone.ps1 [-Purge] [-Help]
+
+Options:
+  -Purge   Also remove %USERPROFILE%\.qwen\source.json (same as
+           QWEN_UNINSTALL_PURGE=1).
+  -Help    Show this message and exit.
+"@
+    exit 0
+}
+
+if ($Purge) {
+    $env:QWEN_UNINSTALL_PURGE = '1'
+}
 
 function Write-Info {
     param([string]$Message)

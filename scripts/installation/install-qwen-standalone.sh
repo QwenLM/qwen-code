@@ -852,7 +852,7 @@ verify_checksum() {
     rm -f "${temp_checksum}"
 
     if [[ "${expected}" != "${actual}" ]]; then
-        log_error "Checksum verification failed for ${archive_name}."
+        log_error "Checksum mismatch for ${archive_name}: expected ${expected}, got ${actual}."
         return 1
     fi
 

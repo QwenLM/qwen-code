@@ -263,7 +263,9 @@ async function assertHostedInstallationAssetChecksums(outDir) {
 
     const actual = await sha256File(path.join(outDir, output));
     if (actual !== expected) {
-      fail(`Checksum verification failed for ${output}`);
+      fail(
+        `Checksum mismatch for ${output}: expected ${expected}, got ${actual}`,
+      );
     }
   }
 }
