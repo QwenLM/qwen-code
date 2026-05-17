@@ -204,28 +204,28 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('default ring size is 8000 (#3803 §02 target)', () => {
+  it('default ring size is 8000 (#3803 §02 target)', async () => {
     const bus = new EventBus();
     for (let i = 1; i <= 8001; i++) bus.publish({ type: 'foo', data: i });
-    // After publishing 8001 frames into the default ring, the resume
-    // backlog should hold the most recent 8000 (1 through 8001 with
-    // the oldest dropped). Subscribing with `lastEventId: 0` replays
-    // exactly 8000 frames from the ring.
-    const it = bus
-      .subscribe({ lastEventId: 0, maxQueued: 9000 })
-      [Symbol.asyncIterator]();
-    let count = 0;
-    const drain = (async () => {
-      for (let i = 0; i < 8000; i++) {
-        const { value, done } = await it.next();
-        if (done) break;
-        if (value.type !== 'slow_client_warning' && value.id !== undefined)
-          count++;
-      }
-    })();
-    return drain.then(() => {
-      expect(count).toBe(8000);
+    // After publishing 8001 frames into the default ring, the replay
+    // backlog should hold the most recent 8000 (oldest dropped).
+    // A `lastEventId: 0` resume with a queue cap larger than the ring
+    // collects exactly 8000 live frames; ids start at 2 because id=1
+    // was the one shifted out of the ring.
+    const abort = new AbortController();
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 9000,
+      signal: abort.signal,
     });
+    const events = await collect(iter, 8000);
+    abort.abort();
+    const liveIds = events
+      .filter((e) => e.id !== undefined)
+      .map((e) => e.id as number);
+    expect(liveIds).toHaveLength(8000);
+    expect(liveIds[0]).toBe(2);
+    expect(liveIds[liveIds.length - 1]).toBe(8001);
   });
 
   it('eviction detaches the abort listener from a stalled consumer (BmJT1)', async () => {

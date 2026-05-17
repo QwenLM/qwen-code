@@ -533,9 +533,11 @@ export interface BridgeOptions {
    * `maxSessions`, where silently disabling a backpressure knob on a
    * config typo is worse than failing to start).
    *
-   * Operators tune via `qwen serve --event-ring-size <n>`. Cost is
-   * roughly `ringSize × ~500 B per session` of RAM held until the
-   * session ends.
+   * Operators tune via `qwen serve --event-ring-size <n>`. Cost
+   * scales linearly with `ringSize`; each retained `BridgeEvent` is
+   * an object reference plus its serialized payload (text chunks /
+   * tool-call args / etc.), so the per-session memory ceiling is
+   * `ringSize × average-event-size` held until the session ends.
    */
   eventRingSize?: number;
   /**

@@ -103,10 +103,20 @@ interface InternalSub {
    * checked without rummaging through the queue's private state. */
   maxQueued: number;
   /**
+   * Pre-computed `WARN_THRESHOLD_RATIO * maxQueued` so `publish()`
+   * does one integer compare per subscriber instead of a multiply +
+   * compare. `publish()` is on the per-event hot path; per-sub
+   * caching here collapses to a single field read in the steady
+   * state (after the `!warned` short-circuit).
+   */
+  warnThreshold: number;
+  /** Pre-computed `WARN_RESET_RATIO * maxQueued` — see `warnThreshold`. */
+  warnResetThreshold: number;
+  /**
    * True once `slow_client_warning` has been force-pushed to this
    * subscriber in the current overflow episode. Cleared when the queue
-   * drains below `WARN_RESET_RATIO * maxQueued` (hysteresis), so a
-   * subscriber that recovers and then lags again gets a fresh warning.
+   * drains below `warnResetThreshold` (hysteresis), so a subscriber
+   * that recovers and then lags again gets a fresh warning.
    */
   warned: boolean;
   /**
@@ -253,8 +263,27 @@ export class EventBus {
       // slot the replay ring would otherwise be missing for other
       // healthy subscribers. Force-push so the warning bypasses the
       // exact backlog cap that triggered it.
+      //
+      // Ordering: `forcePush` appends to the queue's back. Pushing to
+      // the FRONT was considered to maximize lead-time, but (a) the
+      // forward-position invariant in `BoundedAsyncQueue.next()`'s
+      // `forcedInBuf` accounting is sized for "replay at front, live
+      // at back" — mid-stream front-insertion would mis-count the
+      // live backlog cap; and (b) when a consumer is actively
+      // `await`ing `next()`, `forcePush`'s `resolvers.shift()`
+      // shortcut delivers the warning immediately without ever
+      // touching `buf`. The back-of-queue case only matters for
+      // stalled consumers — and a stalled consumer can't drain
+      // regardless of warning position, so the ordering is
+      // informational by the time they finally pull it.
+      //
+      // The `warnThreshold` / `warnResetThreshold` are pre-computed
+      // at `subscribe()` time so the per-publish hot path is one
+      // integer compare per subscriber (after the `!warned`
+      // short-circuit collapses warm-state checks to a single
+      // boolean read).
       const liveSize = sub.queue.size;
-      if (!sub.warned && liveSize >= WARN_THRESHOLD_RATIO * sub.maxQueued) {
+      if (!sub.warned && liveSize >= sub.warnThreshold) {
         sub.warned = true;
         const warningFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
@@ -266,7 +295,7 @@ export class EventBus {
           },
         };
         sub.queue.forcePush(warningFrame);
-      } else if (sub.warned && liveSize <= WARN_RESET_RATIO * sub.maxQueued) {
+      } else if (sub.warned && liveSize <= sub.warnResetThreshold) {
         // Hysteresis: subscriber recovered well below the warn line,
         // re-arm so a future lag spike produces a fresh warning.
         sub.warned = false;
@@ -315,6 +344,8 @@ export class EventBus {
       queue,
       evicted: false,
       maxQueued,
+      warnThreshold: WARN_THRESHOLD_RATIO * maxQueued,
+      warnResetThreshold: WARN_RESET_RATIO * maxQueued,
       warned: false,
       dispose: () => {},
     };
