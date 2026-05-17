@@ -658,6 +658,16 @@ describe('createHttpAcpBridge', () => {
     await bridge.shutdown();
   });
 
+  // The `isAcpSessionResourceNotFound` `message`-fallback path can't
+  // be exercised through the FakeAgent end-to-end: the ACP SDK
+  // normalizes non-RequestError throws to `-32603 Internal error`,
+  // so a fake-agent thrown plain Object with `code: -32002` arrives
+  // at the bridge as -32603 with the original message buried under
+  // `data.details`. The fallback covers ACP variants that emit the
+  // URI in `message` directly (without `data.uri`); the primary
+  // `data.uri` path is covered by the test above. The exact-match
+  // tightening (vs. substring) is exercised by inspection.
+
   it('rejects load while a resume for the same session is in flight', async () => {
     let releaseResume: (() => void) | undefined;
     const factory: ChannelFactory = async () =>
@@ -687,6 +697,41 @@ describe('createHttpAcpBridge', () => {
 
     releaseResume?.();
     await resume;
+    await bridge.shutdown();
+  });
+
+  it('rejects resume while a load for the same session is in flight (mirror of load-on-resume)', async () => {
+    let releaseLoad: (() => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = () => resolve({});
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const load = bridge.loadSession({
+      sessionId: 'persisted-mirror',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    // Resume coalescing onto load would silently subscribe the
+    // resume client to history-replay frames it explicitly opted
+    // out of; it must throw instead.
+    await expect(
+      bridge.resumeSession({
+        sessionId: 'persisted-mirror',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toBeInstanceOf(RestoreInProgressError);
+
+    releaseLoad?.();
+    await load;
     await bridge.shutdown();
   });
 
@@ -739,6 +784,84 @@ describe('createHttpAcpBridge', () => {
     });
 
     await bridge.shutdown();
+  });
+
+  it('does not surface an unhandledRejection when the channel exits after a successful restore', async () => {
+    // Regression for the dangling-rejection bug: `transportClosed`
+    // is a fresh `.then(throw)` promise per restore. If `withTimeout`
+    // wins the race, `transportClosed` stays pending and a later
+    // channel exit fires the inner `throw` with no observer attached
+    // — Node 22 logs `unhandledRejection`, and
+    // `--unhandled-rejections=throw` deployments crash the daemon.
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({ loadSessionImpl: () => ({}) });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const restored = await bridge.loadSession({
+        sessionId: 'persisted-leak',
+        workspaceCwd: WS_A,
+      });
+      expect(restored.attached).toBe(false);
+      // Now resolve `channel.exited` AFTER the restore promise has
+      // already settled. `transportClosed` was the race-loser, so
+      // its `.then(throw)` fires now. With the `.catch(() => {})`
+      // suppression in place, no `unhandledRejection` is emitted;
+      // without it, the test would observe one.
+      handles[0]!.crash({ exitCode: null, signalCode: null });
+      // Give the rejection a tick to surface if it were unhandled.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      await bridge.shutdown();
+    }
+  });
+
+  it('shutdown awaits in-flight restores before resolving', async () => {
+    // `shutdown()` adds `inFlightRestoreAwaits` to the wait list so
+    // shutting the daemon down doesn't orphan a half-completed
+    // restore. Verify by racing the restore-settled signal against
+    // the shutdown-resolved signal: if shutdown is awaiting the
+    // restore, the restore MUST settle first (or simultaneously
+    // — `Promise.race` ties go to the earlier-registered handler,
+    // which is the restore here).
+    let releaseLoad: (() => void) | undefined;
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () =>
+          new Promise<LoadSessionResponse>((resolve) => {
+            releaseLoad = () => resolve({});
+          }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const restore = bridge.loadSession({
+      sessionId: 'persisted-shutdown',
+      workspaceCwd: WS_A,
+    });
+    for (let i = 0; i < 50 && !releaseLoad; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(releaseLoad).toBeDefined();
+
+    const restoreFirst = restore
+      .catch(() => undefined)
+      .then(() => 'restore' as const);
+    const shutdownFirst = bridge.shutdown().then(() => 'shutdown' as const);
+    const winner = await Promise.race([restoreFirst, shutdownFirst]);
+    expect(winner).toBe('restore');
+    // Both must have settled cleanly by the end.
+    await Promise.all([restoreFirst, shutdownFirst]);
   });
 
   it('rejects cross-workspace requests with WorkspaceMismatchError (#3803 §02)', async () => {

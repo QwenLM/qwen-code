@@ -1906,6 +1906,33 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('loadSession skips history replay when getResumedSessionData() returns undefined', async () => {
+    // Distinct code path: `createAndStoreSession(config, undefined)`
+    // takes the no-conversation branch, so `replayHistory` must
+    // NOT be called even though the persisted session existed
+    // (covers the case where the on-disk record has a session row
+    // but no resumable conversation, e.g. corrupted / partially
+    // written history).
+    bindRestoreMocks({ sessionExists: true /* no resumedConversation */ });
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    expect(response).toMatchObject({
+      modes: expect.anything(),
+      models: expect.anything(),
+      configOptions: expect.anything(),
+    });
+    expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('unstable_resumeSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });
     const { agent, agentPromise } = await spawnAgent();

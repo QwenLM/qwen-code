@@ -29,6 +29,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   InvalidPermissionOptionError,
+  MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -731,6 +732,51 @@ describe('createServeApp', () => {
           .send({ cwd: 'relative/path' });
 
         expect(res.status).toBe(400);
+        expect(bridge.loadCalls).toHaveLength(0);
+        expect(bridge.resumeCalls).toHaveLength(0);
+      }
+    });
+
+    it('400s a non-string cwd before touching the bridge', async () => {
+      // Mirrors the `POST /session` malformed-`cwd`-shape test: a
+      // client/orchestrator serialization bug (`cwd: null`,
+      // `cwd: 123`, `cwd: {}`) must surface as a typed 400 instead of
+      // silently falling back to the bound workspace.
+      for (const action of ['load', 'resume'] as const) {
+        for (const cwd of [null, 123, {}, []]) {
+          const bridge = fakeBridge();
+          const app = createServeApp(baseOpts, undefined, { bridge });
+          const res = await request(app)
+            .post(`/session/persisted-mal/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({ cwd });
+
+          expect(res.status).toBe(400);
+          expect(bridge.loadCalls).toHaveLength(0);
+          expect(bridge.resumeCalls).toHaveLength(0);
+        }
+      }
+    });
+
+    it('400s a cwd longer than MAX_WORKSPACE_PATH_LENGTH before touching the bridge', async () => {
+      // Same length cap as `POST /session` (matches Linux PATH_MAX
+      // 4096) — defends downstream interpolations from
+      // amplification on the loopback-default-no-token path.
+      const longCwd = `/${'a'.repeat(MAX_WORKSPACE_PATH_LENGTH)}`;
+      for (const action of ['load', 'resume'] as const) {
+        const bridge = fakeBridge();
+        const app = createServeApp(baseOpts, undefined, { bridge });
+        const res = await request(app)
+          .post(`/session/persisted-long/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: longCwd });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(
+          new RegExp(
+            `exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+          ),
+        );
         expect(bridge.loadCalls).toHaveLength(0);
         expect(bridge.resumeCalls).toHaveLength(0);
       }

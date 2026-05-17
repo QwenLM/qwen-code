@@ -345,7 +345,11 @@ class QwenAgent implements Agent {
 
     const config = await this.newSessionConfig(
       params.cwd,
-      params.mcpServers,
+      // `LoadSessionRequest.mcpServers` is required in today's ACP
+      // schema, but mirror `unstable_resumeSession` and tolerate a
+      // future loosening — `newSessionConfig` iterates the list, so
+      // a `null`/`undefined` would otherwise throw `TypeError`.
+      params.mcpServers ?? [],
       params.sessionId,
       true,
     );

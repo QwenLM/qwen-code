@@ -1831,8 +1831,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     ) {
       return true;
     }
+    // Fallback for ACP servers that omit `data.uri` and embed the
+    // URI in the human-readable message. Use exact equality on the
+    // canonical "Resource not found: <uri>" form rather than
+    // `includes(expectedUri)` — a substring match would cause a
+    // sessionId of `"a"` to falsely match a message containing
+    // `"session:abc"`.
     return (
-      typeof maybe.message === 'string' && maybe.message.includes(expectedUri)
+      typeof maybe.message === 'string' &&
+      maybe.message === `Resource not found: ${expectedUri}`
     );
   };
 
@@ -1860,7 +1867,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
     const inFlight = inFlightRestores.get(req.sessionId);
     if (inFlight) {
-      if (action === 'load' && inFlight.action === 'resume') {
+      // Cross-action races BOTH ways must reject. A `resume` arriving
+      // while a `load` is in flight cannot quietly coalesce: the load
+      // is replaying full history through SSE on a shared EventBus,
+      // and `DaemonSessionClient.resume()` seeds `lastEventId: 0`,
+      // which means the resume client would receive every replayed
+      // frame — directly violating resume's "no UI replay" contract.
+      // The mirror direction (`load` onto `resume`) is rejected for
+      // the same reason: a load caller expects history but resume
+      // didn't replay any. Same-action coalescing is unaffected.
+      if (action !== inFlight.action) {
         throw new RestoreInProgressError(
           req.sessionId,
           inFlight.action,
@@ -1928,6 +1944,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const transportClosed = ci.channel.exited.then(() => {
         throw new Error(`agent channel closed during session/${action}`);
       });
+      // Suppress the dangling rejection if `withTimeout` wins the
+      // race below: `transportClosed` then stays pending, and a
+      // later `channel.exited` settle fires the inner `throw` with
+      // no observer attached. Node 22 logs `unhandledRejection`;
+      // under `--unhandled-rejections=throw` (common in container
+      // deployments) the daemon process crashes. The `Promise.race`
+      // path's own consumer below catches the rejection in the
+      // try/catch, so the suppressed rejection here is the
+      // race-loser case only.
+      transportClosed.catch(() => {});
       let state: BridgeSessionState;
       try {
         if (action === 'load') {
