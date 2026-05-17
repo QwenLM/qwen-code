@@ -14,7 +14,7 @@ interface GateResult {
   nextCalled: boolean;
 }
 
-async function invokeGate(handler: RequestHandler): Promise<GateResult> {
+function invokeGate(handler: RequestHandler): GateResult {
   let status: number | undefined;
   let body: unknown;
   let nextCalled = false;
@@ -31,24 +31,24 @@ async function invokeGate(handler: RequestHandler): Promise<GateResult> {
     nextCalled = true;
   };
 
-  await handler({} as Request, response, next);
+  handler({} as Request, response, next);
   return { status, body, nextCalled };
 }
 
-async function invokeGatedRoute(
+function invokeGatedRoute(
   deps: { tokenConfigured: boolean; requireAuth: boolean },
   gateOpts?: { strict?: boolean },
-): Promise<GateResult> {
+): GateResult {
   const gate = createMutationGate(deps);
   return invokeGate(gate(gateOpts));
 }
 
 describe('createMutationGate (#4175 PR 15)', () => {
-  it('passes through when --require-auth is on (global bearerAuth handles enforcement)', async () => {
+  it('passes through when --require-auth is on (global bearerAuth handles enforcement)', () => {
     // `requireAuth: true` is paired with a mandatory token at boot, so
     // the global bearer middleware has already 401'd unauthenticated
     // requests before they reach the gate. The gate is a no-op here.
-    const res = await invokeGatedRoute(
+    const res = invokeGatedRoute(
       { tokenConfigured: true, requireAuth: true },
       { strict: true },
     );
@@ -57,8 +57,8 @@ describe('createMutationGate (#4175 PR 15)', () => {
     expect(res.body).toBeUndefined();
   });
 
-  it('passes through when a token is configured (global bearerAuth handles enforcement)', async () => {
-    const res = await invokeGatedRoute(
+  it('passes through when a token is configured (global bearerAuth handles enforcement)', () => {
+    const res = invokeGatedRoute(
       { tokenConfigured: true, requireAuth: false },
       { strict: true },
     );
@@ -66,11 +66,11 @@ describe('createMutationGate (#4175 PR 15)', () => {
     expect(res.status).toBeUndefined();
   });
 
-  it('passes through on loopback no-token default for non-strict routes', async () => {
+  it('passes through on loopback no-token default for non-strict routes', () => {
     // Backward-compat anchor: existing mutation routes (Wave 1-2) opt
     // in to the gate without `strict`, and must continue to serve
     // unauthenticated callers under the loopback developer default.
-    const res = await invokeGatedRoute(
+    const res = invokeGatedRoute(
       { tokenConfigured: false, requireAuth: false },
       // `strict` omitted = false
     );
@@ -78,11 +78,11 @@ describe('createMutationGate (#4175 PR 15)', () => {
     expect(res.status).toBeUndefined();
   });
 
-  it('refuses strict routes with token_required on loopback no-token default', async () => {
+  it('refuses strict routes with token_required on loopback no-token default', () => {
     // The cell that makes the helper substantive: routes that opt
     // into strictness (Wave 4 file edit / memory CRUD / device-flow
     // auth) refuse to serve until the operator configures a token.
-    const res = await invokeGatedRoute(
+    const res = invokeGatedRoute(
       { tokenConfigured: false, requireAuth: false },
       { strict: true },
     );
