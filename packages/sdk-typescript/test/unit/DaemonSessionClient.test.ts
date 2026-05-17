@@ -98,6 +98,52 @@ describe('DaemonSessionClient', () => {
     });
   });
 
+  it('forwards a persisted client id through create, load, and resume', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-reuse',
+        });
+      }
+      if (
+        req.url.endsWith('/session/s-1/load') ||
+        req.url.endsWith('/session/s-1/resume')
+      ) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-reuse',
+          state: {},
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await DaemonSessionClient.createOrAttach(
+      client,
+      { workspaceCwd: '/work/a' },
+      'client-reuse',
+    );
+    await DaemonSessionClient.load(
+      client,
+      's-1',
+      { workspaceCwd: '/work/a' },
+      'client-reuse',
+    );
+    await DaemonSessionClient.resume(client, 's-1', {}, 'client-reuse');
+
+    expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+      'client-reuse',
+      'client-reuse',
+      'client-reuse',
+    ]);
+  });
+
   it('replays attach-time model switch events on first subscription', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session')) {

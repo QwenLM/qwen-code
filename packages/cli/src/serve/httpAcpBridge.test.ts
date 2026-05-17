@@ -335,6 +335,69 @@ describe('createHttpAcpBridge', () => {
     expect(handles[0]?.killed).toBe(true);
   });
 
+  it('detachClient unregisters only the detached client id', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await bridge.detachClient(second.sessionId, second.clientId);
+
+    await expect(
+      bridge.sendPrompt(
+        first.sessionId,
+        {
+          sessionId: first.sessionId,
+          prompt: [{ type: 'text', text: 'still valid' }],
+        },
+        undefined,
+        { clientId: first.clientId },
+      ),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+    await expect(
+      bridge.sendPrompt(
+        second.sessionId,
+        {
+          sessionId: second.sessionId,
+          prompt: [{ type: 'text', text: 'detached' }],
+        },
+        undefined,
+        { clientId: second.clientId },
+      ),
+    ).rejects.toBeInstanceOf(InvalidClientIdError);
+
+    await bridge.shutdown();
+  });
+
+  it('detachClient preserves an echoed client id owned by an earlier attach', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      clientId: first.clientId,
+    });
+    expect(second.clientId).toBe(first.clientId);
+
+    await bridge.detachClient(second.sessionId, second.clientId);
+
+    await expect(
+      bridge.sendPrompt(
+        first.sessionId,
+        {
+          sessionId: first.sessionId,
+          prompt: [{ type: 'text', text: 'still valid' }],
+        },
+        undefined,
+        { clientId: first.clientId },
+      ),
+    ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+    await bridge.shutdown();
+  });
+
   it('loads an existing ACP session and registers it for daemon routes', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
@@ -2139,6 +2202,34 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
 
+    it('rejects unknown permission votes with unregistered client ids', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.respondToPermission(
+          'does-not-exist',
+          {
+            outcome: { outcome: 'cancelled' },
+          },
+          { clientId: 'client-not-issued' },
+        ),
+      ).toThrow(InvalidClientIdError);
+      expect(
+        bridge.respondToPermission(
+          'does-not-exist',
+          {
+            outcome: { outcome: 'cancelled' },
+          },
+          { clientId: session.clientId },
+        ),
+      ).toBe(false);
+
+      await bridge.shutdown();
+    });
+
     it('cancelSession resolves outstanding permissions as cancelled', async () => {
       const { bridge, session, conn } = await setupForPermission();
 
@@ -3363,6 +3454,22 @@ describe('createHttpAcpBridge', () => {
 
     it('rejects unregistered client ids on session-scoped requests', async () => {
       const { bridge, session } = await setup();
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'hi' }],
+          },
+          undefined,
+          { clientId: 'client-not-issued' },
+        ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.cancelSession(session.sessionId, undefined, {
+          clientId: 'client-not-issued',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
       await expect(
         bridge.setSessionModel(
           session.sessionId,

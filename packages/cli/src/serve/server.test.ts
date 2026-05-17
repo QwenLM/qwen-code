@@ -132,7 +132,7 @@ interface FakeBridge extends HttpAcpBridge {
     sessionId: string;
     opts?: { requireZeroAttaches?: boolean };
   }>;
-  detachCalls: string[];
+  detachCalls: Array<{ sessionId: string; clientId?: string }>;
   permissionVotes: Array<{
     requestId: string;
     response: RequestPermissionResponse;
@@ -157,7 +157,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionId: string;
     opts?: { requireZeroAttaches?: boolean };
   }> = [];
-  const detachCalls: string[] = [];
+  const detachCalls: FakeBridge['detachCalls'] = [];
   const permissionVotes: FakeBridge['permissionVotes'] = [];
   const listCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
@@ -269,8 +269,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
     },
-    async detachClient(sessionId) {
-      detachCalls.push(sessionId);
+    async detachClient(sessionId, clientId) {
+      detachCalls.push({
+        sessionId,
+        ...(clientId !== undefined ? { clientId } : {}),
+      });
     },
     async shutdown() {
       shutdownCalls += 1;
@@ -1313,6 +1316,27 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(bridge.permissionVotes[0]?.context).toEqual({
         clientId: 'client-1',
+      });
+    });
+
+    it('400 invalid_client_id when the bridge rejects permission voter', async () => {
+      const bridge = fakeBridge({
+        respondImpl: () => {
+          throw new InvalidClientIdError('session-A', 'client-unknown');
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/permission/req-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-unknown')
+        .send({ outcome: { outcome: 'selected', optionId: 'allow' } });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-unknown',
       });
     });
 

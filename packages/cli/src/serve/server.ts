@@ -348,7 +348,7 @@ export function createServeApp(
           // subscribers). Without this, both-coalesced-callers-
           // disconnect leaves an orphan agent child no client knows
           // the id of.
-          bridge.detachClient(session.sessionId).catch(() => {
+          bridge.detachClient(session.sessionId, session.clientId).catch(() => {
             // Best-effort cleanup; channel.exited will eventually reap.
           });
         }
@@ -404,9 +404,11 @@ export function createServeApp(
                 // Best-effort cleanup; channel.exited will eventually reap.
               });
           } else {
-            bridge.detachClient(session.sessionId).catch(() => {
-              // Best-effort cleanup; channel.exited will eventually reap.
-            });
+            bridge
+              .detachClient(session.sessionId, session.clientId)
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
           }
           return;
         }
@@ -646,7 +648,8 @@ export function createServeApp(
         });
         return;
       }
-      throw err;
+      sendBridgeError(res, err, { route: 'POST /permission/:requestId' });
+      return;
     }
     if (!accepted) {
       // Either the requestId never existed or another client already won

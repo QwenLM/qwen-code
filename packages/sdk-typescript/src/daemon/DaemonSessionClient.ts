@@ -71,8 +71,9 @@ export class DaemonSessionClient {
   static async createOrAttach(
     client: DaemonClient,
     req: CreateSessionRequest = {},
+    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const session = await client.createOrAttachSession(req);
+    const session = await client.createOrAttachSession(req, clientId);
     // `modelServiceId` switch failures are reported on SSE, not the
     // create/attach HTTP response. Seed the first subscription from the
     // daemon replay ring so create-then-subscribe clients observe attach-time
@@ -90,8 +91,13 @@ export class DaemonSessionClient {
     client: DaemonClient,
     sessionId: string,
     req: RestoreSessionRequest = {},
+    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.loadSession(sessionId, req);
+    const { state, ...session } = await client.loadSession(
+      sessionId,
+      req,
+      clientId,
+    );
     return new DaemonSessionClient({
       client,
       session,
@@ -113,8 +119,13 @@ export class DaemonSessionClient {
     client: DaemonClient,
     sessionId: string,
     req: RestoreSessionRequest = {},
+    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const { state, ...session } = await client.resumeSession(sessionId, req);
+    const { state, ...session } = await client.resumeSession(
+      sessionId,
+      req,
+      clientId,
+    );
     return new DaemonSessionClient({
       client,
       session,

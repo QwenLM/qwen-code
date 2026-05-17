@@ -267,9 +267,12 @@ export interface HttpAcpBridge {
    * spawn-owner's disconnect-reaper would never run again — even if
    * the attacher themselves disconnected (tanzhenxin issue 2). This
    * is the symmetric "I bumped, but my socket died so the bump is
-   * fictitious" cleanup.
+   * fictitious" cleanup. When `clientId` is provided, the daemon-issued
+   * identity reference acquired by that failed attach is released too;
+   * echoed ids are ref-counted so a failed reconnect does not revoke an
+   * older live owner of the same id.
    */
-  detachClient(sessionId: string): Promise<void>;
+  detachClient(sessionId: string, clientId?: string): Promise<void>;
 
   /** Test/inspection hook: number of live sessions. */
   readonly sessionCount: number;
@@ -674,7 +677,7 @@ interface SessionEntry {
    * clients may echo one through `X-Qwen-Client-Id`; the bridge only treats
    * it as trusted originator metadata if it appears in this set.
    */
-  clientIds: Set<string>;
+  clientIds: Map<string, number>;
   /**
    * Originator for the prompt currently running on this session. ACP enforces
    * one active prompt per session, and this bridge FIFO-serializes prompts, so
@@ -1338,11 +1341,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     requestedClientId?: string,
   ): string => {
     if (requestedClientId && entry.clientIds.has(requestedClientId)) {
+      entry.clientIds.set(
+        requestedClientId,
+        (entry.clientIds.get(requestedClientId) ?? 0) + 1,
+      );
       return requestedClientId;
     }
     const clientId = createClientId();
-    entry.clientIds.add(clientId);
+    entry.clientIds.set(clientId, 1);
     return clientId;
+  };
+
+  const unregisterClient = (entry: SessionEntry, clientId?: string): void => {
+    if (clientId === undefined) return;
+    const count = entry.clientIds.get(clientId);
+    if (count === undefined) return;
+    if (count <= 1) {
+      entry.clientIds.delete(clientId);
+    } else {
+      entry.clientIds.set(clientId, count - 1);
+    }
   };
 
   const resolveTrustedClientId = (
@@ -1354,6 +1372,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       throw new InvalidClientIdError(entry.sessionId, clientId);
     }
     return clientId;
+  };
+
+  const resolveAnyTrustedClientId = (clientId: string): string => {
+    for (const entry of byId.values()) {
+      if (entry.clientIds.has(clientId)) return clientId;
+    }
+    throw new InvalidClientIdError('unknown', clientId);
   };
 
   const registerPending = (p: PendingPermission) => {
@@ -1904,7 +1929,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       promptQueue: Promise.resolve(),
       modelChangeQueue: Promise.resolve(),
       pendingPermissionIds: new Set(),
-      clientIds: new Set(),
+      clientIds: new Map(),
       attachCount: 0,
       spawnOwnerWantedKill: false,
     };
@@ -2406,7 +2431,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         if (signal?.aborted) {
           throw new DOMException('Prompt aborted', 'AbortError');
         }
-        const previousOriginator = entry.activePromptOriginatorClientId;
         if (originatorClientId === undefined) {
           delete entry.activePromptOriginatorClientId;
         } else {
@@ -2415,11 +2439,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         const promptPromise = entry.connection
           .prompt(normalized)
           .finally(() => {
-            if (previousOriginator === undefined) {
-              delete entry.activePromptOriginatorClientId;
-            } else {
-              entry.activePromptOriginatorClientId = previousOriginator;
-            }
+            delete entry.activePromptOriginatorClientId;
           });
 
         // Race against channel termination: if the underlying transport
@@ -2503,6 +2523,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
+      // Validation-only: cancellation resolves permissions as system
+      // cancellations, so those generated events intentionally omit an
+      // originator client id.
       // ACP spec: cancelling a prompt MUST resolve outstanding
       // requestPermission calls with outcome.cancelled. Do this *before*
       // forwarding the notification so the agent's wind-down sees the
@@ -2537,10 +2560,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     respondToPermission(requestId, response, context) {
       const pending = pendingPermissions.get(requestId);
       let originatorClientId: string | undefined;
-      if (pending && context?.clientId !== undefined) {
+      if (context?.clientId !== undefined && !pending) {
+        resolveAnyTrustedClientId(context.clientId);
+      } else if (pending && context?.clientId !== undefined) {
         const entry = byId.get(pending.sessionId);
         if (entry) {
           originatorClientId = resolveTrustedClientId(entry, context.clientId);
+        } else {
+          resolveAnyTrustedClientId(context.clientId);
         }
       }
       // BkwQI: validate the voter's optionId against the original
@@ -2765,7 +2792,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       }
     },
 
-    async detachClient(sessionId) {
+    async detachClient(sessionId, clientId) {
       // tanzhenxin issue 2: the BQ9tV `attachCount` race guard is
       // monotonic — once any attach bumps it, the spawn-owner's
       // disconnect-reaper becomes a permanent no-op even if the
@@ -2785,6 +2812,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       const entry = byId.get(sessionId);
       if (!entry) return;
       if (entry.attachCount > 0) entry.attachCount--;
+      unregisterClient(entry, clientId);
       if (
         entry.spawnOwnerWantedKill &&
         entry.attachCount === 0 &&
