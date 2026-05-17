@@ -14,15 +14,23 @@ export {
   type SubscribeOptions,
 } from './DaemonClient.js';
 export {
+  DaemonAuthFlow,
+  type AwaitCompletionOptions,
+  type DaemonAuthFlowHandle,
+} from './DaemonAuthFlow.js';
+export {
   DaemonSessionClient,
   type DaemonSessionClientOptions,
   type DaemonSessionSubscribeOptions,
 } from './DaemonSessionClient.js';
 export {
   asKnownDaemonEvent,
+  createDaemonAuthState,
   createDaemonSessionViewState,
   isDaemonEventType,
   isKnownDaemonEvent,
+  reduceDaemonAuthEvent,
+  reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from './events.js';
@@ -70,6 +78,22 @@ export type {
   DaemonStreamErrorEvent,
   DaemonStreamLifecycleEvent,
   DaemonWorkspaceMutationEvent,
+  DaemonAuthDeviceFlowProviderId,
+  DaemonAuthDeviceFlowStatus,
+  DaemonAuthDeviceFlowErrorKind,
+  DaemonAuthDeviceFlowStartedData,
+  DaemonAuthDeviceFlowStartedEvent,
+  DaemonAuthDeviceFlowThrottledData,
+  DaemonAuthDeviceFlowThrottledEvent,
+  DaemonAuthDeviceFlowAuthorizedData,
+  DaemonAuthDeviceFlowAuthorizedEvent,
+  DaemonAuthDeviceFlowFailedData,
+  DaemonAuthDeviceFlowFailedEvent,
+  DaemonAuthDeviceFlowCancelledData,
+  DaemonAuthDeviceFlowCancelledEvent,
+  DaemonAuthEvent,
+  DaemonDeviceFlowReducerState,
+  DaemonAuthState,
   KnownDaemonEvent,
 } from './events.js';
 export type {
@@ -90,6 +114,13 @@ export type {
   DaemonProtocolVersions,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonAuthProviderId,
+  DaemonAuthDeviceFlowSdkStatus,
+  DaemonAuthDeviceFlowSdkErrorKind,
+  DaemonAuthProviderStatus,
+  DaemonAuthStatusSnapshot,
+  DaemonDeviceFlowStartResult,
+  DaemonDeviceFlowState,
   DaemonSessionContextStatus,
   DaemonSessionState,
   DaemonSessionSummary,

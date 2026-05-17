@@ -7,8 +7,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   asKnownDaemonEvent,
+  createDaemonAuthState,
   createDaemonSessionViewState,
   isDaemonEventType,
+  reduceDaemonAuthEvent,
+  reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from '../../src/daemon/events.js';
@@ -870,5 +873,228 @@ describe('daemon event schema', () => {
       mode: 'replace',
       bytesWritten: 100,
     });
+  });
+});
+
+describe('PR 21 — auth device-flow events', () => {
+  it('narrows the 5 device-flow event types', () => {
+    const types = [
+      'auth_device_flow_started',
+      'auth_device_flow_throttled',
+      'auth_device_flow_authorized',
+      'auth_device_flow_failed',
+      'auth_device_flow_cancelled',
+    ] as const;
+    const datas: Record<(typeof types)[number], unknown> = {
+      auth_device_flow_started: {
+        deviceFlowId: 'flow-1',
+        providerId: 'qwen-oauth',
+        expiresAt: 1_700_000_000_000,
+      },
+      auth_device_flow_throttled: {
+        deviceFlowId: 'flow-1',
+        intervalMs: 10_000,
+      },
+      auth_device_flow_authorized: {
+        deviceFlowId: 'flow-1',
+        providerId: 'qwen-oauth',
+        expiresAt: 1_700_000_900_000,
+        accountAlias: 'user-A',
+      },
+      auth_device_flow_failed: {
+        deviceFlowId: 'flow-1',
+        errorKind: 'access_denied',
+      },
+      auth_device_flow_cancelled: {
+        deviceFlowId: 'flow-1',
+      },
+    };
+    for (const [i, type] of types.entries()) {
+      const event: DaemonEvent = {
+        id: i + 1,
+        v: 1,
+        type,
+        data: datas[type],
+      };
+      expect(isDaemonEventType(event, type)).toBe(true);
+      expect(asKnownDaemonEvent(event)?.type).toBe(type);
+    }
+  });
+
+  it('rejects malformed device-flow data via type guards', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'auth_device_flow_started',
+        data: {
+          deviceFlowId: 'x',
+          providerId: 'qwen-oauth' /* missing expiresAt */,
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'auth_device_flow_failed',
+        data: { deviceFlowId: 'x', errorKind: 'totally-fake' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduceDaemonAuthEvent: started → throttled → authorized projects per-provider state', () => {
+    const events: DaemonEvent[] = [
+      {
+        id: 1,
+        v: 1,
+        type: 'auth_device_flow_started',
+        data: {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          expiresAt: 1_700_000_900_000,
+        },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'auth_device_flow_throttled',
+        data: { deviceFlowId: 'flow-A', intervalMs: 10_000 },
+      },
+      {
+        id: 3,
+        v: 1,
+        type: 'auth_device_flow_authorized',
+        data: {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          expiresAt: 1_700_000_999_000,
+          accountAlias: 'user-A',
+        },
+      },
+    ];
+    const state = reduceDaemonAuthEvents(events);
+    const flow = state.flows['qwen-oauth'];
+    expect(flow).toBeDefined();
+    expect(flow?.status).toBe('authorized');
+    expect(flow?.intervalMs).toBe(10_000);
+    expect(flow?.authorizedExpiresAt).toBe(1_700_000_999_000);
+    expect(flow?.accountAlias).toBe('user-A');
+  });
+
+  it('reduceDaemonAuthEvent: failed event always projects status:error + errorKind (aligned with daemon)', () => {
+    // Issue #4175 PR 21 fold-in 0 P1-10: SDK reducer now mirrors the
+    // daemon's status machine — every `failed` event resolves to
+    // `status: 'error'`, regardless of `errorKind`. The error nature
+    // (expired vs denied vs persist failure) lives in `errorKind`,
+    // not `status`. Earlier drafts collapsed `expired_token` to
+    // `status: 'expired'`, diverging from the daemon's GET response.
+    const expired = reduceDaemonAuthEvent(
+      reduceDaemonAuthEvent(createDaemonAuthState(), {
+        id: 1,
+        v: 1,
+        type: 'auth_device_flow_started',
+        data: {
+          deviceFlowId: 'flow-X',
+          providerId: 'qwen-oauth',
+          expiresAt: 0,
+        },
+      }),
+      {
+        id: 2,
+        v: 1,
+        type: 'auth_device_flow_failed',
+        data: { deviceFlowId: 'flow-X', errorKind: 'expired_token' },
+      },
+    );
+    expect(expired.flows['qwen-oauth']?.status).toBe('error');
+    expect(expired.flows['qwen-oauth']?.errorKind).toBe('expired_token');
+
+    const denied = reduceDaemonAuthEvent(
+      reduceDaemonAuthEvent(createDaemonAuthState(), {
+        id: 3,
+        v: 1,
+        type: 'auth_device_flow_started',
+        data: {
+          deviceFlowId: 'flow-Y',
+          providerId: 'qwen-oauth',
+          expiresAt: 0,
+        },
+      }),
+      {
+        id: 4,
+        v: 1,
+        type: 'auth_device_flow_failed',
+        data: { deviceFlowId: 'flow-Y', errorKind: 'access_denied' },
+      },
+    );
+    expect(denied.flows['qwen-oauth']?.status).toBe('error');
+    expect(denied.flows['qwen-oauth']?.errorKind).toBe('access_denied');
+
+    // P1-10 cousin: new `persist_failed` errorKind also lands as
+    // `status: 'error'`, with the kind preserved.
+    const persistFailed = reduceDaemonAuthEvent(
+      reduceDaemonAuthEvent(createDaemonAuthState(), {
+        id: 5,
+        v: 1,
+        type: 'auth_device_flow_started',
+        data: {
+          deviceFlowId: 'flow-Z',
+          providerId: 'qwen-oauth',
+          expiresAt: 0,
+        },
+      }),
+      {
+        id: 6,
+        v: 1,
+        type: 'auth_device_flow_failed',
+        data: { deviceFlowId: 'flow-Z', errorKind: 'persist_failed' },
+      },
+    );
+    expect(persistFailed.flows['qwen-oauth']?.status).toBe('error');
+    expect(persistFailed.flows['qwen-oauth']?.errorKind).toBe('persist_failed');
+  });
+
+  it('reduceDaemonAuthEvent ignores stale events that do not match the current flow', () => {
+    const seeded = reduceDaemonAuthEvent(createDaemonAuthState(), {
+      id: 1,
+      v: 1,
+      type: 'auth_device_flow_started',
+      data: {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        expiresAt: 100,
+      },
+    });
+    const stale = reduceDaemonAuthEvent(seeded, {
+      id: 2,
+      v: 1,
+      type: 'auth_device_flow_authorized',
+      data: {
+        deviceFlowId: 'flow-OTHER',
+        providerId: 'qwen-oauth',
+        expiresAt: 200,
+      },
+    });
+    expect(stale.flows['qwen-oauth']?.status).toBe('pending');
+  });
+
+  it('reduceDaemonSessionEvent no-ops on auth events (workspace-scoped)', () => {
+    const initial = createDaemonSessionViewState();
+    const next = reduceDaemonSessionEvent(initial, {
+      id: 1,
+      v: 1,
+      type: 'auth_device_flow_started',
+      data: {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        expiresAt: 1_700_000_900_000,
+      },
+    });
+    // Only `lastEventId` advanced; everything else is the seeded zero state.
+    expect(next.lastEventId).toBe(1);
+    expect(next.alive).toBe(true);
+    expect(next.terminalEvent).toBeUndefined();
+    expect(next.unrecognizedKnownEventCount).toBe(0);
   });
 });

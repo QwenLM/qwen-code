@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { DaemonAuthFlow } from './DaemonAuthFlow.js';
 import { parseSseStream } from './sse.js';
 import type {
   DaemonAgentMutationResult,
+  DaemonAuthProviderId,
+  DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
+  DaemonDeviceFlowStartResult,
+  DaemonDeviceFlowState,
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonRestoredSession,
@@ -175,6 +180,21 @@ export class DaemonClient {
   private readonly token: string | undefined;
   private readonly _fetch: typeof globalThis.fetch;
   private readonly fetchTimeoutMs: number;
+  // Lazy singleton so clients that never touch auth pay no allocation cost.
+  // Exposed via the readonly `auth` accessor below.
+  private _authFlow?: DaemonAuthFlow;
+
+  /**
+   * High-level auth helper (issue #4175 PR 21). Wraps the four
+   * `*DeviceFlow*` methods with a `start(...).awaitCompletion()` shape
+   * for the common "log in remotely" UX. Lazy-constructed.
+   */
+  get auth(): DaemonAuthFlow {
+    if (!this._authFlow) {
+      this._authFlow = new DaemonAuthFlow(this);
+    }
+    return this._authFlow;
+  }
 
   constructor(opts: DaemonClientOptions) {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
@@ -1034,6 +1054,108 @@ export class DaemonClient {
           return;
         }
         throw await this.failOnError(res, 'DELETE /session/:id');
+      },
+    );
+  }
+
+  // -- Auth device-flow (issue #4175 PR 21) -------------------------------
+
+  /**
+   * Start an OAuth device-flow login for the given provider. The daemon
+   * polls the IdP in the background and emits typed `auth_device_flow_*`
+   * SSE events; callers can also poll `getDeviceFlow(...)`.
+   *
+   * Per-provider singleton: a repeat call while a flow is already pending
+   * for the same provider is an idempotent take-over and returns the
+   * existing entry rather than starting a fresh IdP request. The
+   * `attached` field on the result distinguishes the two cases.
+   */
+  async startDeviceFlow(opts: {
+    providerId: DaemonAuthProviderId;
+    clientId?: string;
+  }): Promise<DaemonDeviceFlowStartResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/device-flow`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts.clientId,
+        ),
+        body: JSON.stringify({ providerId: opts.providerId }),
+      },
+      async (res) => {
+        if (res.status !== 200 && res.status !== 201) {
+          throw await this.failOnError(res, 'POST /workspace/auth/device-flow');
+        }
+        return (await res.json()) as DaemonDeviceFlowStartResult;
+      },
+    );
+  }
+
+  async getDeviceFlow(
+    deviceFlowId: string,
+    opts: { clientId?: string } = {},
+  ): Promise<DaemonDeviceFlowState> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace/auth/device-flow/:id',
+          );
+        }
+        return (await res.json()) as DaemonDeviceFlowState;
+      },
+    );
+  }
+
+  /**
+   * Cancel a pending device-flow. Idempotent: terminal entries return
+   * 204 (no-op); unknown ids return 404 — both resolve here, matching
+   * the SDK's `closeSession` shape.
+   */
+  async cancelDeviceFlow(
+    deviceFlowId: string,
+    opts: { clientId?: string } = {},
+  ): Promise<void> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts.clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(
+          res,
+          'DELETE /workspace/auth/device-flow/:id',
+        );
+      },
+    );
+  }
+
+  /** Snapshot of persisted auth credentials + currently pending device-flows. */
+  async getAuthStatus(
+    opts: { clientId?: string } = {},
+  ): Promise<DaemonAuthStatusSnapshot> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/auth/status`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/auth/status');
+        }
+        return (await res.json()) as DaemonAuthStatusSnapshot;
       },
     );
   }

@@ -1007,6 +1007,97 @@ Response:
 
 After a successful vote, every connected client sees `permission_resolved` with the same `requestId` and the chosen `outcome`.
 
+### Auth device-flow routes (issue #4175 PR 21)
+
+The daemon brokers an OAuth 2.0 Device Authorization Grant (RFC 8628) so a remote SDK client can trigger a login whose tokens land on the **daemon** filesystem — not on the client. The daemon polls the IdP itself; the client's only job is to display the verification URL + user code and (optionally) subscribe to SSE for completion events.
+
+Capability tag: `auth_device_flow` (always advertised). Supported providers in v1: `qwen-oauth`.
+
+**Runtime locality.** The daemon never spawns a browser — even if it can. The client decides whether to call `open(verificationUri)` locally; on a headless pod (the canonical Mode B deployment) the user opens the URL on whatever device they have a browser on. See `docs/users/qwen-serve.md` for the recommended UX.
+
+**No token leakage in events.** `auth_device_flow_started` carries `{deviceFlowId, providerId, expiresAt}` only. The user code and verification URL come back point-to-point in the POST 201 body and via `GET /workspace/auth/device-flow/:id`; they are never broadcast on SSE.
+
+**Per-provider singleton.** A second `POST` for the same provider while a flow is pending is an idempotent take-over — it returns the existing entry with `attached: true` rather than starting a fresh IdP request.
+
+#### `POST /workspace/auth/device-flow`
+
+Strict mutation gate: requires a bearer token even on token-less loopback defaults (`401 token_required`).
+
+Request:
+
+```json
+{ "providerId": "qwen-oauth" }
+```
+
+Response (`201` fresh start, `200` idempotent take-over):
+
+```json
+{
+  "deviceFlowId": "fa07c61b-…",
+  "providerId": "qwen-oauth",
+  "status": "pending",
+  "userCode": "USER-1",
+  "verificationUri": "https://chat.qwen.ai/api/v1/oauth2/device",
+  "verificationUriComplete": "https://chat.qwen.ai/api/v1/oauth2/device?user_code=USER-1",
+  "expiresAt": 1700000600000,
+  "intervalMs": 5000,
+  "attached": false
+}
+```
+
+Errors:
+
+- `400 unsupported_provider` — unknown `providerId` (response includes `supportedProviders`)
+- `409 too_many_active_flows` — workspace cap (4) reached; cancel one with `DELETE`
+- `401 token_required` — strict gate denied a token-less request
+- `502 upstream_error` — IdP returned an unexpected error
+
+#### `GET /workspace/auth/device-flow/:id`
+
+Read the current state. Pending entries echo `userCode/verificationUri/expiresAt/intervalMs`; terminal entries (5-min grace) drop them and surface `status` + optional `errorKind/hint`.
+
+Returns `404 device_flow_not_found` for unknown ids and post-grace evicted entries.
+
+#### `DELETE /workspace/auth/device-flow/:id`
+
+Idempotent cancel:
+
+- pending entry → `204` + emit `auth_device_flow_cancelled`
+- terminal entry → `204` no-op (no event re-emit)
+- unknown id → `404`
+
+#### `GET /workspace/auth/status`
+
+Snapshot of pending flows + supported providers:
+
+```json
+{
+  "v": 1,
+  "workspaceCwd": "/work/bound",
+  "providers": [],
+  "pendingDeviceFlows": [
+    {
+      "deviceFlowId": "fa07c61b-…",
+      "providerId": "qwen-oauth",
+      "expiresAt": 1700000600000
+    }
+  ],
+  "supportedDeviceFlowProviders": ["qwen-oauth"]
+}
+```
+
+#### Device-flow SSE events
+
+Five typed events (workspace-scoped, fanned out to every active session bus):
+
+- `auth_device_flow_started` `{deviceFlowId, providerId, expiresAt}` — POST succeeded; SDK should subscribe (no userCode here, fetch via GET if needed)
+- `auth_device_flow_throttled` `{deviceFlowId, intervalMs}` — daemon honored upstream `slow_down`; clients polling GET should bump their interval to match
+- `auth_device_flow_authorized` `{deviceFlowId, providerId, expiresAt?, accountAlias?}` — credentials persisted; `accountAlias` is a non-PII label (never email/phone)
+- `auth_device_flow_failed` `{deviceFlowId, errorKind, hint?}` — terminal; `errorKind` is one of `expired_token | access_denied | invalid_grant | upstream_error`
+- `auth_device_flow_cancelled` `{deviceFlowId}` — DELETE succeeded against a pending entry
+
+> **Not MCP-compatible.** The MCP authorization spec (2025-06-18) mandates OAuth 2.1 + PKCE auth-code with a redirect callback, which doesn't work for headless-pod daemons. Mode B's device-flow surface is daemon-private — clients targeting MCP-compliant servers should use a different auth path.
+
 ## Streaming wire format
 
 Events are emitted as standard EventSource frames. The daemon writes one `data:` line per frame (the JSON has no embedded newlines after `JSON.stringify`); the SDK parser at `packages/sdk-typescript/src/daemon/sse.ts` handles both that and the spec-allowed multi-`data:` form on the receive side.

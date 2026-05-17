@@ -14,6 +14,18 @@ import {
   denyBrowserOriginCors,
   hostAllowlist,
 } from './auth.js';
+import {
+  DeviceFlowRegistry,
+  DEVICE_FLOW_SUPPORTED_PROVIDERS,
+  TooManyActiveDeviceFlowsError,
+  UnsupportedDeviceFlowProviderError,
+  UpstreamDeviceFlowError,
+  type DeviceFlowEventSink,
+  type DeviceFlowProvider,
+  type DeviceFlowProviderId,
+  type DeviceFlowPublicView,
+} from './auth/deviceFlow.js';
+import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
@@ -119,6 +131,22 @@ export interface ServeAppDeps {
    * per-session EventBus.
    */
   fsFactory?: WorkspaceFileSystemFactory;
+  /**
+   * Issue #4175 PR 21 — device-flow auth registry. Tests inject a fake
+   * (`now` / `schedule` overrides for deterministic timer control,
+   * stubbed providers, captured event sink). Production callers omit
+   * this and `createServeApp` constructs a default wired to the
+   * shipped Qwen provider, the bridge's `broadcastWorkspaceEvent`,
+   * and a stderr audit sink.
+   */
+  deviceFlowRegistry?: DeviceFlowRegistry;
+  /**
+   * Issue #4175 PR 21 — extra device-flow providers for tests / future
+   * extensions. Production builds register only `QwenOAuthDeviceFlowProvider`;
+   * passing extra entries here registers them in addition to the default
+   * Qwen provider. Used by tests that stub the OAuth flow.
+   */
+  deviceFlowProviders?: DeviceFlowProvider[];
 }
 
 /**
@@ -275,6 +303,62 @@ export function createServeApp(
   // re-resolving. Same canonical form `/capabilities` advertises
   // and the bridge enforces — keeping every layer in agreement.
   (app.locals as { boundWorkspace?: string }).boundWorkspace = boundWorkspace;
+
+  // Issue #4175 PR 21 — wire the device-flow registry. Default builds
+  // a single Qwen provider; tests inject `deps.deviceFlowRegistry`
+  // wholesale (with controlled clock/scheduler) or
+  // `deps.deviceFlowProviders` to stub the OAuth client only.
+  const deviceFlowProviderMap = new Map<
+    DeviceFlowProviderId,
+    DeviceFlowProvider
+  >();
+  for (const provider of deps.deviceFlowProviders ?? []) {
+    deviceFlowProviderMap.set(provider.providerId, provider);
+  }
+  if (!deviceFlowProviderMap.has('qwen-oauth')) {
+    deviceFlowProviderMap.set('qwen-oauth', new QwenOAuthDeviceFlowProvider());
+  }
+  const deviceFlowEventSink: DeviceFlowEventSink = {
+    publish(emission, originatorClientId) {
+      bridge.broadcastWorkspaceEvent({
+        type: `auth_device_flow_${emission.type}`,
+        data: emission.data,
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+    },
+  };
+  const deviceFlowRegistry =
+    deps.deviceFlowRegistry ??
+    new DeviceFlowRegistry({
+      events: deviceFlowEventSink,
+      audit: {
+        record(line) {
+          // Structured stderr breadcrumb; deviceFlowId truncated to first
+          // 8 chars (mirrors PR 16 audit-event-stamp shape) so log
+          // skimmers can follow a flow without retaining full uuids.
+          const id = line.deviceFlowId.slice(0, 8);
+          const parts = [
+            `[serve] auth.device-flow:`,
+            `provider=${line.providerId}`,
+            `deviceFlowId=${id}...`,
+            line.clientId ? `clientId=${line.clientId}` : 'clientId=-',
+            `status=${line.status}`,
+          ];
+          if (line.errorKind) parts.push(`errorKind=${line.errorKind}`);
+          if (line.expiresInMs !== undefined) {
+            parts.push(`expiresInMs=${Math.max(0, line.expiresInMs)}`);
+          }
+          writeStderrLine(parts.join(' '));
+        },
+      },
+      resolveProvider: (providerId) => deviceFlowProviderMap.get(providerId),
+    });
+  // Park the registry on `app.locals` so request handlers can reach it
+  // without closure capture (and so future helper extracts can find it
+  // without threading it through their args). The fold-in 4 typed
+  // accessor (`setDeviceFlowRegistry`) lands in commit 5/5 of this
+  // rebase chain.
+  app.locals['deviceFlowRegistry'] = deviceFlowRegistry;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -506,6 +590,143 @@ export function createServeApp(
   // in PR 20.
   registerWorkspaceFileReadRoutes(app, {
     parseClientId: parseClientIdHeader,
+  });
+
+  // -- Issue #4175 PR 21 — auth device-flow routes ------------------------
+
+  app.post(
+    '/workspace/auth/device-flow',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const body = safeBody(req);
+      const providerIdRaw = body['providerId'];
+      if (typeof providerIdRaw !== 'string' || providerIdRaw.length === 0) {
+        res.status(400).json({
+          error: '`providerId` must be a non-empty string',
+          code: 'unsupported_provider',
+        });
+        return;
+      }
+      if (
+        !DEVICE_FLOW_SUPPORTED_PROVIDERS.includes(
+          providerIdRaw as DeviceFlowProviderId,
+        )
+      ) {
+        res.status(400).json({
+          error: `Unsupported device-flow provider: ${providerIdRaw}`,
+          code: 'unsupported_provider',
+          supportedProviders: [...DEVICE_FLOW_SUPPORTED_PROVIDERS],
+        });
+        return;
+      }
+      const providerId = providerIdRaw as DeviceFlowProviderId;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const { view, attached } = await deviceFlowRegistry.start({
+          providerId,
+          ...(clientId !== undefined ? { initiatorClientId: clientId } : {}),
+        });
+        // Idempotent take-over → 200 with `attached: true`. Fresh start →
+        // 201 + `attached: false`. The registry is the source of truth on
+        // which branch fired (it's the one that decided not to call
+        // `provider.start()` again).
+        res
+          .status(attached ? 200 : 201)
+          .json(toDeviceFlowStartResponseBody(view, attached));
+      } catch (err) {
+        if (err instanceof UnsupportedDeviceFlowProviderError) {
+          res
+            .status(400)
+            .json({ error: err.message, code: 'unsupported_provider' });
+          return;
+        }
+        if (err instanceof TooManyActiveDeviceFlowsError) {
+          res
+            .status(409)
+            .json({ error: err.message, code: 'too_many_active_flows' });
+          return;
+        }
+        if (err instanceof UpstreamDeviceFlowError) {
+          // IdP-side failure (network / parse / non-2xx). 502 distinguishes
+          // "the upstream we depend on misbehaved" from a daemon bug (5xx
+          // generic) so SDK clients can branch on retry strategy.
+          res.status(502).json({ error: err.message, code: 'upstream_error' });
+          return;
+        }
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/auth/device-flow',
+        });
+      }
+    },
+  );
+
+  app.get('/workspace/auth/device-flow/:id', async (req, res) => {
+    const id = req.params['id'];
+    if (!id) {
+      res.status(404).json({
+        error: 'Device-flow id required',
+        code: 'device_flow_not_found',
+      });
+      return;
+    }
+    const view = deviceFlowRegistry.get(id);
+    if (!view) {
+      res.status(404).json({
+        error: `Device-flow ${id} not found`,
+        code: 'device_flow_not_found',
+      });
+      return;
+    }
+    res.status(200).json(toDeviceFlowStateBody(view));
+  });
+
+  app.delete(
+    '/workspace/auth/device-flow/:id',
+    mutate({ strict: true }),
+    (req, res) => {
+      const id = req.params['id'];
+      if (!id) {
+        res.status(404).json({
+          error: 'Device-flow id required',
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      const result = deviceFlowRegistry.cancel(id, clientId);
+      if (result === undefined) {
+        res.status(404).json({
+          error: `Device-flow ${id} not found`,
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      // Both freshly-cancelled and already-terminal are 204 (idempotent).
+      res.status(204).end();
+    },
+  );
+
+  app.get('/workspace/auth/status', (_req, res) => {
+    const pending = deviceFlowRegistry.listPending();
+    res.status(200).json({
+      v: 1,
+      workspaceCwd: boundWorkspace,
+      // GET /workspace/auth/status read-side intentionally minimal in
+      // this PR: a future PR can broaden the per-provider view (e.g.
+      // by reading SharedTokenManager.getCachedSnapshot for an `ok` /
+      // `expired` cell), but landing the additive route shape now
+      // unblocks SDK clients that need to know "is there a flow
+      // running?" without subscribing to SSE.
+      providers: [],
+      pendingDeviceFlows: pending.map((view) => ({
+        deviceFlowId: view.deviceFlowId,
+        providerId: view.providerId,
+        ...(view.expiresAt !== undefined ? { expiresAt: view.expiresAt } : {}),
+      })),
+      supportedDeviceFlowProviders: [...DEVICE_FLOW_SUPPORTED_PROVIDERS],
+    });
   });
 
   app.post('/session', mutate(), async (req, res) => {
@@ -1432,6 +1653,60 @@ function parseOptionalWorkspaceCwd(
     return undefined;
   }
   return cwd;
+}
+
+/**
+ * PR 21 — translate the registry's redacted `DeviceFlowPublicView` into
+ * the wire shape declared by `DaemonDeviceFlowStartResult`. Splitting
+ * "start response" from "state body" preserves the `attached` field
+ * the start route needs without polluting the GET shape.
+ */
+function toDeviceFlowStartResponseBody(
+  view: DeviceFlowPublicView,
+  attached: boolean,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    deviceFlowId: view.deviceFlowId,
+    providerId: view.providerId,
+    status: view.status,
+    userCode: view.userCode ?? '',
+    verificationUri: view.verificationUri ?? '',
+    expiresAt: view.expiresAt ?? 0,
+    intervalMs: view.intervalMs ?? 0,
+    attached,
+  };
+  if (view.verificationUriComplete) {
+    body['verificationUriComplete'] = view.verificationUriComplete;
+  }
+  if (view.initiatorClientId) {
+    body['initiatorClientId'] = view.initiatorClientId;
+  }
+  return body;
+}
+
+function toDeviceFlowStateBody(
+  view: DeviceFlowPublicView,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    deviceFlowId: view.deviceFlowId,
+    providerId: view.providerId,
+    status: view.status,
+    createdAt: view.createdAt,
+  };
+  if (view.errorKind) body['errorKind'] = view.errorKind;
+  if (view.hint) body['hint'] = view.hint;
+  if (view.userCode) body['userCode'] = view.userCode;
+  if (view.verificationUri) body['verificationUri'] = view.verificationUri;
+  if (view.verificationUriComplete) {
+    body['verificationUriComplete'] = view.verificationUriComplete;
+  }
+  if (view.expiresAt !== undefined) body['expiresAt'] = view.expiresAt;
+  if (view.intervalMs !== undefined) body['intervalMs'] = view.intervalMs;
+  if (view.lastPolledAt !== undefined) body['lastPolledAt'] = view.lastPolledAt;
+  if (view.initiatorClientId) {
+    body['initiatorClientId'] = view.initiatorClientId;
+  }
+  return body;
 }
 
 function parseClientIdHeader(

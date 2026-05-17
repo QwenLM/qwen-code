@@ -25,6 +25,15 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // updated" toasts. Read-after-write remains the correctness contract.
   'memory_changed',
   'agent_changed',
+  // Issue #4175 PR 21 — workspace-scoped auth device-flow events.
+  // These are NOT session-keyed; the session reducer no-ops on them
+  // and `reduceDaemonAuthEvent` projects them into a workspace-level
+  // state shape (one entry per provider).
+  'auth_device_flow_started',
+  'auth_device_flow_throttled',
+  'auth_device_flow_authorized',
+  'auth_device_flow_failed',
+  'auth_device_flow_cancelled',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -158,6 +167,66 @@ export interface DaemonAgentChangedData {
   [key: string]: unknown;
 }
 
+/** Issue #4175 PR 21 — auth device-flow event payloads. */
+
+/** Provider id. Open string union for forward-compatible providers; `qwen-oauth`
+ *  is the only value v1 currently emits. */
+export type DaemonAuthDeviceFlowProviderId = 'qwen-oauth' | (string & {});
+
+export type DaemonAuthDeviceFlowStatus =
+  | 'pending'
+  | 'authorized'
+  | 'expired'
+  | 'error'
+  | 'cancelled';
+
+export type DaemonAuthDeviceFlowErrorKind =
+  | 'expired_token'
+  | 'access_denied'
+  | 'invalid_grant'
+  | 'upstream_error'
+  /** Disk-write / `provider.persist()` failure path. The IdP-side token
+   *  exchange succeeded but the daemon couldn't durably store credentials
+   *  (EACCES, EROFS, ENOSPC, etc.). Distinct from `upstream_error`. */
+  | 'persist_failed';
+
+export interface DaemonAuthDeviceFlowStartedData {
+  deviceFlowId: string;
+  providerId: DaemonAuthDeviceFlowProviderId;
+  /** Daemon-clock epoch ms when the flow's `device_code` expires. */
+  expiresAt: number;
+  [key: string]: unknown;
+}
+
+export interface DaemonAuthDeviceFlowThrottledData {
+  deviceFlowId: string;
+  /** Bumped polling interval after the daemon honored an upstream `slow_down`. */
+  intervalMs: number;
+  [key: string]: unknown;
+}
+
+export interface DaemonAuthDeviceFlowAuthorizedData {
+  deviceFlowId: string;
+  providerId: DaemonAuthDeviceFlowProviderId;
+  /** Credential expiry, daemon clock. Undefined when the IdP omitted `expires_in`. */
+  expiresAt?: number;
+  /** Best-effort non-PII account label (nickname / uid hash); never email/phone. */
+  accountAlias?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonAuthDeviceFlowFailedData {
+  deviceFlowId: string;
+  errorKind: DaemonAuthDeviceFlowErrorKind;
+  hint?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonAuthDeviceFlowCancelledData {
+  deviceFlowId: string;
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -215,6 +284,34 @@ export type DaemonAgentChangedEvent = DaemonEventEnvelope<
   DaemonAgentChangedData
 >;
 
+export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
+  'auth_device_flow_started',
+  DaemonAuthDeviceFlowStartedData
+>;
+export type DaemonAuthDeviceFlowThrottledEvent = DaemonEventEnvelope<
+  'auth_device_flow_throttled',
+  DaemonAuthDeviceFlowThrottledData
+>;
+export type DaemonAuthDeviceFlowAuthorizedEvent = DaemonEventEnvelope<
+  'auth_device_flow_authorized',
+  DaemonAuthDeviceFlowAuthorizedData
+>;
+export type DaemonAuthDeviceFlowFailedEvent = DaemonEventEnvelope<
+  'auth_device_flow_failed',
+  DaemonAuthDeviceFlowFailedData
+>;
+export type DaemonAuthDeviceFlowCancelledEvent = DaemonEventEnvelope<
+  'auth_device_flow_cancelled',
+  DaemonAuthDeviceFlowCancelledData
+>;
+
+export type DaemonAuthEvent =
+  | DaemonAuthDeviceFlowStartedEvent
+  | DaemonAuthDeviceFlowThrottledEvent
+  | DaemonAuthDeviceFlowAuthorizedEvent
+  | DaemonAuthDeviceFlowFailedEvent
+  | DaemonAuthDeviceFlowCancelledEvent;
+
 export type DaemonSessionEvent =
   | DaemonSessionUpdateEvent
   | DaemonModelSwitchedEvent
@@ -246,7 +343,8 @@ export type KnownDaemonEvent =
   | DaemonSessionEvent
   | DaemonControlEvent
   | DaemonStreamLifecycleEvent
-  | DaemonWorkspaceMutationEvent;
+  | DaemonWorkspaceMutationEvent
+  | DaemonAuthEvent;
 
 export interface DaemonSessionViewState {
   lastEventId?: number;
@@ -396,6 +494,26 @@ export function asKnownDaemonEvent(
     case 'agent_changed':
       return isAgentChangedData(event.data)
         ? (event as DaemonAgentChangedEvent)
+        : undefined;
+    case 'auth_device_flow_started':
+      return isAuthDeviceFlowStartedData(event.data)
+        ? (event as DaemonAuthDeviceFlowStartedEvent)
+        : undefined;
+    case 'auth_device_flow_throttled':
+      return isAuthDeviceFlowThrottledData(event.data)
+        ? (event as DaemonAuthDeviceFlowThrottledEvent)
+        : undefined;
+    case 'auth_device_flow_authorized':
+      return isAuthDeviceFlowAuthorizedData(event.data)
+        ? (event as DaemonAuthDeviceFlowAuthorizedEvent)
+        : undefined;
+    case 'auth_device_flow_failed':
+      return isAuthDeviceFlowFailedData(event.data)
+        ? (event as DaemonAuthDeviceFlowFailedEvent)
+        : undefined;
+    case 'auth_device_flow_cancelled':
+      return isAuthDeviceFlowCancelledData(event.data)
+        ? (event as DaemonAuthDeviceFlowCancelledEvent)
         : undefined;
     default:
       return undefined;
@@ -551,6 +669,16 @@ export function reduceDaemonSessionEvent(
         lastWorkspaceMutation: event.data,
         lastWorkspaceMutationType: 'agent_changed',
       };
+    // Auth device-flow events are workspace-scoped; the session reducer
+    // is a no-op (consume `lastEventId` via `base` and otherwise pass
+    // state through). Workspace-level state lives in `DaemonAuthState`
+    // and is projected by `reduceDaemonAuthEvent`.
+    case 'auth_device_flow_started':
+    case 'auth_device_flow_throttled':
+    case 'auth_device_flow_authorized':
+    case 'auth_device_flow_failed':
+    case 'auth_device_flow_cancelled':
+      return base;
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -565,6 +693,167 @@ export function reduceDaemonSessionEvents(
   let state = initialState;
   for (const event of events) state = reduceDaemonSessionEvent(state, event);
   return state;
+}
+
+/** Issue #4175 PR 21 — workspace-scoped auth device-flow state. One entry
+ *  per provider; the registry's per-provider singleton constraint is
+ *  reflected here so adapters can render `state.flows[providerId]` without
+ *  worrying about concurrent flows for the same provider. */
+export interface DaemonDeviceFlowReducerState {
+  deviceFlowId: string;
+  status: DaemonAuthDeviceFlowStatus;
+  errorKind?: DaemonAuthDeviceFlowErrorKind;
+  hint?: string;
+  /** Most recent `intervalMs` reported by `auth_device_flow_throttled`. */
+  intervalMs?: number;
+  /** Daemon-clock epoch ms, set on `started` and refreshed when the same
+   *  flow's later events arrive. */
+  lastSeenAt: number;
+  /** Set on `authorized` to the credential's expiry, when known. */
+  authorizedExpiresAt?: number;
+  /** Best-effort non-PII account label echoed from `authorized`. */
+  accountAlias?: string;
+}
+
+export interface DaemonAuthState {
+  flows: Partial<
+    Record<DaemonAuthDeviceFlowProviderId, DaemonDeviceFlowReducerState>
+  >;
+}
+
+export function createDaemonAuthState(
+  seed: Partial<DaemonAuthState> = {},
+): DaemonAuthState {
+  return { flows: { ...(seed.flows ?? {}) } };
+}
+
+/**
+ * Apply a single auth device-flow event to a workspace-scoped auth state.
+ * Non-auth events (sessions, control, lifecycle) pass through unchanged so
+ * adapters can fan one event stream into both `reduceDaemonSessionEvent`
+ * (per session) and `reduceDaemonAuthEvent` (workspace-wide) without
+ * filtering ahead of time.
+ *
+ * Edge cases:
+ *   - `throttled` / `authorized` / `failed` / `cancelled` for a deviceFlowId
+ *     not matching the current `flows[providerId]` are dropped: by the time
+ *     they arrive, that flow's terminal-grace window has already expired or
+ *     the SDK has rebased onto a newer flow. Silently ignoring stale events
+ *     is the correct behavior here (events are non-authoritative; the
+ *     daemon's GET .../device-flow/:id is the source of truth).
+ */
+export function reduceDaemonAuthEvent(
+  state: DaemonAuthState,
+  rawEvent: DaemonEvent,
+): DaemonAuthState {
+  const event = asKnownDaemonEvent(rawEvent);
+  if (!event) return state;
+  switch (event.type) {
+    case 'auth_device_flow_started': {
+      const providerId = event.data.providerId;
+      return {
+        flows: {
+          ...state.flows,
+          [providerId]: {
+            deviceFlowId: event.data.deviceFlowId,
+            status: 'pending',
+            lastSeenAt: rawEvent.id ?? state.flows[providerId]?.lastSeenAt ?? 0,
+          },
+        },
+      };
+    }
+    case 'auth_device_flow_throttled': {
+      const updated = updateMatchingFlow(
+        state,
+        event.data.deviceFlowId,
+        (flow) => ({
+          ...flow,
+          intervalMs: event.data.intervalMs,
+          lastSeenAt: rawEvent.id ?? flow.lastSeenAt,
+        }),
+      );
+      return updated ?? state;
+    }
+    case 'auth_device_flow_authorized': {
+      const providerId = event.data.providerId;
+      const existing = state.flows[providerId];
+      if (!existing || existing.deviceFlowId !== event.data.deviceFlowId) {
+        return state;
+      }
+      const next: DaemonDeviceFlowReducerState = {
+        ...existing,
+        status: 'authorized',
+        authorizedExpiresAt: event.data.expiresAt,
+        accountAlias: event.data.accountAlias,
+        errorKind: undefined,
+        lastSeenAt: rawEvent.id ?? existing.lastSeenAt,
+      };
+      return { flows: { ...state.flows, [providerId]: next } };
+    }
+    case 'auth_device_flow_failed': {
+      // The daemon's status machine reserves 'expired' for the time-based
+      // path (now >= expiresAt). Upstream RFC 8628 errors — including
+      // `expired_token` — go to 'error' with `errorKind` carrying the
+      // distinction. Earlier drafts collapsed `errorKind: 'expired_token'`
+      // to status 'expired', which gave SDK consumers a different
+      // status than the daemon's GET endpoint reported. Code-reviewer
+      // P1-9 / silent-failure D2: align with daemon, surface errorKind
+      // separately.
+      const updated = updateMatchingFlow(
+        state,
+        event.data.deviceFlowId,
+        (flow) => ({
+          ...flow,
+          status: 'error',
+          errorKind: event.data.errorKind,
+          hint: event.data.hint,
+          lastSeenAt: rawEvent.id ?? flow.lastSeenAt,
+        }),
+      );
+      return updated ?? state;
+    }
+    case 'auth_device_flow_cancelled': {
+      const updated = updateMatchingFlow(
+        state,
+        event.data.deviceFlowId,
+        (flow) => ({
+          ...flow,
+          status: 'cancelled',
+          lastSeenAt: rawEvent.id ?? flow.lastSeenAt,
+        }),
+      );
+      return updated ?? state;
+    }
+    default:
+      return state;
+  }
+}
+
+export function reduceDaemonAuthEvents(
+  events: Iterable<DaemonEvent>,
+  initialState: DaemonAuthState = createDaemonAuthState(),
+): DaemonAuthState {
+  let state = initialState;
+  for (const event of events) state = reduceDaemonAuthEvent(state, event);
+  return state;
+}
+
+function updateMatchingFlow(
+  state: DaemonAuthState,
+  deviceFlowId: string,
+  patch: (flow: DaemonDeviceFlowReducerState) => DaemonDeviceFlowReducerState,
+): DaemonAuthState | undefined {
+  const entries = Object.entries(state.flows) as Array<
+    [DaemonAuthDeviceFlowProviderId, DaemonDeviceFlowReducerState | undefined]
+  >;
+  for (const [providerId, flow] of entries) {
+    if (flow && flow.deviceFlowId === deviceFlowId) {
+      return {
+        flows: { ...state.flows, [providerId]: patch(flow) },
+      };
+    }
+  }
+  return undefined;
 }
 
 function isKnownDaemonEventTypeName(
@@ -728,6 +1017,68 @@ function isAgentChangedData(value: unknown): value is DaemonAgentChangedData {
     (change === 'created' || change === 'updated' || change === 'deleted') &&
     isNonEmptyString(value['name']) &&
     (level === 'project' || level === 'user')
+  );
+}
+
+function isAuthDeviceFlowStartedData(
+  value: unknown,
+): value is DaemonAuthDeviceFlowStartedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['deviceFlowId']) &&
+    isNonEmptyString(value['providerId']) &&
+    isFiniteNumber(value['expiresAt'])
+  );
+}
+
+function isAuthDeviceFlowThrottledData(
+  value: unknown,
+): value is DaemonAuthDeviceFlowThrottledData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['deviceFlowId']) &&
+    isFiniteNumber(value['intervalMs'])
+  );
+}
+
+function isAuthDeviceFlowAuthorizedData(
+  value: unknown,
+): value is DaemonAuthDeviceFlowAuthorizedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['deviceFlowId']) &&
+    isNonEmptyString(value['providerId']) &&
+    isOptionalNumber(value['expiresAt']) &&
+    isOptionalStringOrNull(value['accountAlias'])
+  );
+}
+
+function isAuthDeviceFlowFailedData(
+  value: unknown,
+): value is DaemonAuthDeviceFlowFailedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['deviceFlowId']) &&
+    isAuthDeviceFlowErrorKind(value['errorKind']) &&
+    isOptionalStringOrNull(value['hint'])
+  );
+}
+
+function isAuthDeviceFlowCancelledData(
+  value: unknown,
+): value is DaemonAuthDeviceFlowCancelledData {
+  return isRecord(value) && isNonEmptyString(value['deviceFlowId']);
+}
+
+function isAuthDeviceFlowErrorKind(
+  value: unknown,
+): value is DaemonAuthDeviceFlowErrorKind {
+  return (
+    value === 'expired_token' ||
+    value === 'access_denied' ||
+    value === 'invalid_grant' ||
+    value === 'upstream_error' ||
+    value === 'persist_failed'
   );
 }
 

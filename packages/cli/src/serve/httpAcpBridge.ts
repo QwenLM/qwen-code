@@ -487,6 +487,29 @@ export interface HttpAcpBridge {
 
   /** Close all live child processes; called on daemon shutdown. */
   shutdown(): Promise<void>;
+
+  /**
+   * Issue #4175 PR 21 — best-effort fan-out of a workspace-scoped event
+   * (no `sessionId`) to every live session bus. Used by routes that
+   * make workspace-level state changes — e.g. device-flow auth — so SSE
+   * subscribers attached to any session learn about the change.
+   *
+   * **Best-effort semantics:** swallowed bus failures (closed bus,
+   * subscriber overflow) do NOT throw. Workspace events are
+   * authoritative via the GET routes; SSE is the convenience path.
+   *
+   * **Replaces with PR 16:** PR #4249 introduces `publishWorkspaceEvent`
+   * with the same fan-out semantics. Once PR 16 lands, this helper is
+   * a fold-in candidate — collapse to the shared method, drop this
+   * inline copy. Keeping the name distinct (`broadcastWorkspaceEvent`
+   * vs `publishWorkspaceEvent`) avoids a merge conflict and makes the
+   * fold-in PR a search-and-replace.
+   */
+  broadcastWorkspaceEvent(event: {
+    type: string;
+    data: unknown;
+    originatorClientId?: string;
+  }): void;
 }
 
 /**
@@ -2680,6 +2703,30 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
     get pendingPermissionCount() {
       return pendingPermissions.size;
+    },
+
+    broadcastWorkspaceEvent(envelope) {
+      // Snapshot to a list before iterating so a publish-driven mutation
+      // of `byId` (would only happen on a closed-bus terminal frame
+      // racing with the broadcast) doesn't break the loop.
+      const sessions = Array.from(byId.values());
+      for (const entry of sessions) {
+        try {
+          entry.events.publish({
+            type: envelope.type,
+            data: envelope.data,
+            ...(envelope.originatorClientId
+              ? { originatorClientId: envelope.originatorClientId }
+              : {}),
+          });
+        } catch (err) {
+          writeServeDebugLine(
+            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
     },
 
     async loadSession(req) {

@@ -114,17 +114,21 @@ const EXPECTED_STAGE1_FEATURES = [
   // Issue #4175 PR 19. Always-on. Daemon exposes the read-only file
   // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`.
   'workspace_file_read',
+  // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
+  'auth_device_flow',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
 // advertised (only when `--require-auth` is set), so the registry list
-// is a strict superset of the always-on list. Kept as a separate
-// constant rather than appended to `EXPECTED_STAGE1_FEATURES` so the
-// existing "advertised features" assertions stay tight against
-// surprise additions.
+// is a strict superset of the always-on list. The registry's source-of-
+// truth ORDER puts `require_auth` between PR 11 (`session_metadata`)
+// and PR 21 (`auth_device_flow`); reflect that here so the assertion
+// matches the real ordering.
 const EXPECTED_REGISTERED_FEATURES = [
-  ...EXPECTED_STAGE1_FEATURES,
+  // Same order as `SERVE_CAPABILITY_REGISTRY` declaration:
+  ...EXPECTED_STAGE1_FEATURES.filter((f) => f !== 'auth_device_flow'),
   'require_auth',
+  'auth_device_flow',
 ] as const;
 
 interface FakeBridgeOpts {
@@ -581,6 +585,11 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     killAllSync() {
       shutdownCalls += 1;
+    },
+    // Issue #4175 PR 21 — workspace-level event fan-out.
+    broadcastWorkspaceEvent() {
+      // No-op stub for the test fake; tests that need fan-out behavior
+      // construct a real bridge.
     },
   };
 }
@@ -4020,5 +4029,304 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
         m.promises.rm(tmp, { recursive: true, force: true }),
       );
     }
+  });
+});
+
+// -- Issue #4175 PR 21 — auth device-flow integration tests ----------------
+
+describe('auth device-flow routes', () => {
+  // Build a fake provider whose `start` returns deterministic values and
+  // whose `poll` is scripted per-test. Lives at the top of the suite so
+  // every `it()` can compose it with the registry.
+  function makeFakeProvider(): {
+    provider: import('./auth/deviceFlow.js').DeviceFlowProvider;
+    startCount: () => number;
+  } {
+    let starts = 0;
+    return {
+      provider: {
+        providerId: 'qwen-oauth' as const,
+        async start() {
+          starts += 1;
+          return {
+            deviceCode:
+              // Use the brandSecret helper so the secret follows the same
+              // redaction shape the production provider produces.
+              (await import('./auth/deviceFlow.js')).brandSecret(
+                `device-${starts}`,
+              ),
+            pkceVerifier: (await import('./auth/deviceFlow.js')).brandSecret(
+              `pkce-${starts}`,
+            ),
+            userCode: `USER-${starts}`,
+            verificationUri: 'https://idp.example/verify',
+            verificationUriComplete: 'https://idp.example/verify?u=AB12',
+            expiresIn: 600,
+          };
+        },
+        async poll(_state: unknown, _opts: { signal: AbortSignal }) {
+          // Stays pending forever — tests don't need the upstream to
+          // succeed for the route-layer assertions to be meaningful.
+          return { kind: 'pending' as const };
+        },
+      },
+      startCount: () => starts,
+    };
+  }
+
+  function buildApp(
+    overrides: Partial<ServeOptions> = {},
+    fakeProvider = makeFakeProvider(),
+  ) {
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, ...overrides }, undefined, {
+      bridge,
+      deviceFlowProviders: [fakeProvider.provider],
+    });
+    return { app, bridge, fakeProvider };
+  }
+
+  it('POST /workspace/auth/device-flow returns 201 on fresh start with redacted body', async () => {
+    const { app, fakeProvider } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(201);
+    expect(res.body.providerId).toBe('qwen-oauth');
+    expect(res.body.userCode).toBe('USER-1');
+    expect(res.body.attached).toBe(false);
+    expect(typeof res.body.deviceFlowId).toBe('string');
+    // Critical: response body never contains device_code / pkce_verifier.
+    const json = JSON.stringify(res.body);
+    expect(json).not.toContain('device-1');
+    expect(json).not.toContain('pkce-1');
+    expect(fakeProvider.startCount()).toBe(1);
+  });
+
+  it('POST is rejected with 401 token_required on token-less loopback (strict gate)', async () => {
+    const { app } = buildApp({ token: undefined });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+  });
+
+  it('POST with unknown providerId returns 400 unsupported_provider', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'totally-fake' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('unsupported_provider');
+    expect(res.body.supportedProviders).toContain('qwen-oauth');
+  });
+
+  it('POST is idempotent take-over for the same providerId — second POST returns 200 + attached:true', async () => {
+    const { app, fakeProvider } = buildApp({ token: 'tkn' });
+    const first = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(first.status).toBe(201);
+    const second = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(second.status).toBe(200);
+    expect(second.body.attached).toBe(true);
+    expect(second.body.deviceFlowId).toBe(first.body.deviceFlowId);
+    // Critical: provider.start is NOT called twice — the take-over is
+    // a daemon-internal operation, not a re-auth round trip.
+    expect(fakeProvider.startCount()).toBe(1);
+  });
+
+  it('GET /workspace/auth/device-flow/:id returns 200 for known + 404 for unknown', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    const ok = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(ok.status).toBe(200);
+    expect(ok.body.deviceFlowId).toBe(id);
+    expect(ok.body.status).toBe('pending');
+
+    const missing = await request(app)
+      .get('/workspace/auth/device-flow/nonexistent-id')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(missing.status).toBe(404);
+    expect(missing.body.code).toBe('device_flow_not_found');
+  });
+
+  it('DELETE on pending → 204; idempotent on already-cancelled → 204; unknown → 404', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    const first = await request(app)
+      .delete(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(first.status).toBe(204);
+    const second = await request(app)
+      .delete(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    // Idempotent: terminal entries return 204 no-op.
+    expect(second.status).toBe(204);
+    const missing = await request(app)
+      .delete('/workspace/auth/device-flow/nonexistent-id')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(missing.status).toBe(404);
+  });
+
+  it('GET /workspace/auth/status surfaces pending flows and supported providers', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const start = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = start.body.deviceFlowId as string;
+    const status = await request(app)
+      .get('/workspace/auth/status')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(status.status).toBe(200);
+    expect(status.body.v).toBe(1);
+    expect(status.body.supportedDeviceFlowProviders).toContain('qwen-oauth');
+    expect(status.body.pendingDeviceFlows).toHaveLength(1);
+    expect(status.body.pendingDeviceFlows[0].deviceFlowId).toBe(id);
+    // Status payload MUST NOT echo userCode/verificationUri.
+    const json = JSON.stringify(status.body);
+    expect(json).not.toContain('USER-1');
+    expect(json).not.toContain('idp.example');
+  });
+
+  it('capability tag auth_device_flow is advertised unconditionally', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .get('/capabilities')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.body.features).toContain('auth_device_flow');
+  });
+
+  it('upstream provider.start failure → 502 upstream_error, not 500', async () => {
+    // PR 21 fold-in 0 P1-14: provider throwing UpstreamDeviceFlowError
+    // must surface as 502 with code:'upstream_error' instead of falling
+    // through `sendBridgeError`'s generic 500 path. Build a fake
+    // provider whose start always throws.
+    const { UpstreamDeviceFlowError } = await import('./auth/deviceFlow.js');
+    const failingProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+      providerId: 'qwen-oauth',
+      async start() {
+        throw new UpstreamDeviceFlowError('mocked upstream outage');
+      },
+      async poll() {
+        return { kind: 'pending' as const };
+      },
+    };
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      deviceFlowProviders: [failingProvider],
+    });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('upstream_error');
+    expect(res.body.error).toContain('mocked upstream outage');
+  });
+
+  it('sweeper-driven auto-expiry transitions a stale entry to status:error and surfaces over GET', async () => {
+    // PR 21 fold-in 0 P1-13: cover the time-based expiry path via an
+    // injected registry with a controlled clock + manual sweeper trigger.
+    const { DeviceFlowRegistry, brandSecret } = await import(
+      './auth/deviceFlow.js'
+    );
+    const fakeProvider: import('./auth/deviceFlow.js').DeviceFlowProvider = {
+      providerId: 'qwen-oauth',
+      async start() {
+        return {
+          deviceCode: brandSecret('device-1'),
+          pkceVerifier: brandSecret('pkce-1'),
+          userCode: 'USER-1',
+          verificationUri: 'https://idp.example/verify',
+          expiresIn: 60, // 60 seconds
+        };
+      },
+      async poll() {
+        // Stays pending; the sweeper drives terminal state via expiresAt.
+        return { kind: 'pending' as const };
+      },
+    };
+
+    let now = 1_700_000_000_000;
+    const intervalsRegistered: Array<{ cb: () => void }> = [];
+    const registry = new DeviceFlowRegistry({
+      events: { publish: () => {} },
+      resolveProvider: (id) => (id === 'qwen-oauth' ? fakeProvider : undefined),
+      now: () => now,
+      // Run polls forever-deferred; sweeper interval is what we drive.
+      schedule: (_ms, _cb) => ({ cancelled: false }) as never,
+      clearScheduled: () => {},
+      scheduleInterval: (_ms, cb) => {
+        const handle = { cb, cancelled: false };
+        intervalsRegistered.push(handle);
+        return handle as never;
+      },
+      clearScheduledInterval: () => {},
+    });
+
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      deviceFlowRegistry: registry,
+    });
+
+    const startRes = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(startRes.status).toBe(201);
+    const id = startRes.body.deviceFlowId as string;
+
+    // Drive the clock past expiresAt and trigger the sweeper.
+    now += 61_000;
+    for (const interval of intervalsRegistered) interval.cb();
+
+    const stateRes = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(stateRes.status).toBe(200);
+    // Time-based expiry transitions to status='expired' with errorKind='expired_token'.
+    expect(stateRes.body.status).toBe('expired');
+    expect(stateRes.body.errorKind).toBe('expired_token');
+    registry.dispose();
   });
 });

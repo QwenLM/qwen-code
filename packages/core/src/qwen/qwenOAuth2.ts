@@ -973,13 +973,35 @@ async function authWithQwenDeviceFlow(
   }
 }
 
-async function cacheQwenCredentials(credentials: QwenCredentials) {
+// PR 21 (#4175 Wave 4): exported so the `qwen serve` device-flow registry can
+// persist credentials acquired through the daemon's HTTP route. Mode 0o600
+// matches opencode's `auth.json` to keep tokens unreadable by other users on
+// shared hosts. The constant is exported so tests/auditors can assert intent
+// rather than re-deriving it from a raw octal literal.
+export const QWEN_CREDENTIAL_FILE_MODE = 0o600;
+
+export async function cacheQwenCredentials(credentials: QwenCredentials) {
   const filePath = getQwenCachedCredentialPath();
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
 
     const credString = JSON.stringify(credentials, null, 2);
-    await fs.writeFile(filePath, credString);
+    await fs.writeFile(filePath, credString, {
+      mode: QWEN_CREDENTIAL_FILE_MODE,
+    });
+    // SharedTokenManager throttles file checks and serves an in-memory cache;
+    // without an explicit invalidation a follow-up `getValidCredentials` in
+    // the same process can stay on the previous (often empty) cache and
+    // re-trigger device auth despite the just-written file. The original
+    // device-flow site at L820+L829 paired write+clear; folding the clear
+    // here keeps every caller (PR 21 daemon device-flow registry included)
+    // correct without re-pairing the call.
+    try {
+      SharedTokenManager.getInstance().clearCache();
+    } catch {
+      // Best-effort: unit tests sometimes stub SharedTokenManager with a
+      // minimal shape; cache invalidation is non-critical to the write.
+    }
   } catch (error: unknown) {
     // Handle file system errors (e.g., EACCES permission denied)
     const errorMessage = error instanceof Error ? error.message : String(error);
