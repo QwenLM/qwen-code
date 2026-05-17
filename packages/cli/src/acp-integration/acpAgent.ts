@@ -16,6 +16,10 @@ import {
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
   tokenLimit,
+  getMCPDiscoveryState,
+  getMCPServerStatus,
+  MCPDiscoveryState,
+  MCPServerStatus,
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
@@ -69,10 +73,31 @@ import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
-import { Session } from './session/Session.js';
-import { formatAcpModelId } from '../utils/acpModelUtils.js';
+import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  formatAcpModelId,
+  parseAcpBaseModelId,
+} from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import {
+  STATUS_SCHEMA_VERSION,
+  SERVE_STATUS_EXT_METHODS,
+  type ServeMcpDiscoveryState,
+  type ServeMcpServerRuntimeStatus,
+  type ServeMcpTransport,
+  type ServeSessionContextStatus,
+  type ServeSessionSupportedCommandsStatus,
+  type ServeStatus,
+  type ServeStatusCell,
+  type ServeWorkspaceMcpServerStatus,
+  type ServeWorkspaceMcpStatus,
+  type ServeWorkspaceProviderModel,
+  type ServeWorkspaceProviderStatus,
+  type ServeWorkspaceProvidersStatus,
+  type ServeWorkspaceSkillStatus,
+  type ServeWorkspaceSkillsStatus,
+} from '../serve/status.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
 
@@ -530,6 +555,327 @@ class QwenAgent implements Agent {
     await session.cancelPendingPrompt();
   }
 
+  private workspaceCwd(config: Config): string {
+    return config.getTargetDir();
+  }
+
+  private safeWorkspaceCwd(config: Config): string {
+    try {
+      return this.workspaceCwd(config);
+    } catch {
+      return '';
+    }
+  }
+
+  private mcpTransport(server: unknown): ServeMcpTransport {
+    if (
+      server &&
+      typeof server === 'object' &&
+      'type' in server &&
+      (server as { type?: unknown }).type === 'sdk'
+    ) {
+      return 'sdk';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { httpUrl?: unknown }).httpUrl === 'string'
+    ) {
+      return 'http';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { url?: unknown }).url === 'string'
+    ) {
+      return 'sse';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { tcp?: unknown }).tcp === 'string'
+    ) {
+      return 'websocket';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { command?: unknown }).command === 'string'
+    ) {
+      return 'stdio';
+    }
+    return 'unknown';
+  }
+
+  private mcpStatus(status: MCPServerStatus): ServeMcpServerRuntimeStatus {
+    switch (status) {
+      case MCPServerStatus.CONNECTED:
+        return 'connected';
+      case MCPServerStatus.CONNECTING:
+        return 'connecting';
+      case MCPServerStatus.DISCONNECTED:
+      default:
+        return 'disconnected';
+    }
+  }
+
+  private mcpCellStatus(
+    status: MCPServerStatus,
+    disabled: boolean,
+  ): ServeStatus {
+    if (disabled) return 'disabled';
+    switch (status) {
+      case MCPServerStatus.CONNECTED:
+        return 'ok';
+      case MCPServerStatus.CONNECTING:
+        return 'warning';
+      case MCPServerStatus.DISCONNECTED:
+      default:
+        return 'error';
+    }
+  }
+
+  private discoveryState(): ServeMcpDiscoveryState {
+    const state = getMCPDiscoveryState();
+    switch (state) {
+      case MCPDiscoveryState.IN_PROGRESS:
+        return 'in_progress';
+      case MCPDiscoveryState.COMPLETED:
+        return 'completed';
+      case MCPDiscoveryState.NOT_STARTED:
+      default:
+        return 'not_started';
+    }
+  }
+
+  private buildWorkspaceMcpStatus(config: Config): ServeWorkspaceMcpStatus {
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const servers = config.getMcpServers() ?? {};
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        discoveryState: this.discoveryState(),
+        servers: Object.entries(servers).map(([name, server]) => {
+          const disabled = config.isMcpServerDisabled(name);
+          const rawStatus = getMCPServerStatus(name);
+          const out: ServeWorkspaceMcpServerStatus = {
+            kind: 'mcp_server',
+            status: this.mcpCellStatus(rawStatus, disabled),
+            name,
+            mcpStatus: this.mcpStatus(rawStatus),
+            transport: this.mcpTransport(server),
+            disabled,
+          };
+          const description =
+            server && typeof server === 'object'
+              ? (server as { description?: unknown }).description
+              : undefined;
+          const extensionName =
+            server && typeof server === 'object'
+              ? (server as { extensionName?: unknown }).extensionName
+              : undefined;
+          if (typeof description === 'string') {
+            out.description = description;
+          }
+          if (typeof extensionName === 'string') {
+            out.extensionName = extensionName;
+          }
+          return out;
+        }),
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: true,
+        servers: [],
+        errors: [this.errorCell('mcp', error)],
+      };
+    }
+  }
+
+  private errorCell(kind: string, error: unknown): ServeStatusCell {
+    return {
+      kind,
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+
+  private async buildWorkspaceSkillsStatus(
+    config: Config,
+  ): Promise<ServeWorkspaceSkillsStatus> {
+    const skillManager = config.getSkillManager();
+    if (!skillManager) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.workspaceCwd(config),
+        initialized: true,
+        skills: [],
+      };
+    }
+
+    try {
+      const skills = await skillManager.listSkills();
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.workspaceCwd(config),
+        initialized: true,
+        skills: skills.map((skill): ServeWorkspaceSkillStatus => {
+          const modelInvocable = skill.disableModelInvocation !== true;
+          return {
+            kind: 'skill',
+            status: modelInvocable ? 'ok' : 'disabled',
+            name: skill.name,
+            description: skill.description,
+            level: skill.level,
+            modelInvocable,
+            ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+            ...(skill.model ? { model: skill.model } : {}),
+            ...(skill.extensionName
+              ? { extensionName: skill.extensionName }
+              : {}),
+          };
+        }),
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.workspaceCwd(config),
+        initialized: true,
+        skills: [],
+        errors: [this.errorCell('skills', error)],
+      };
+    }
+  }
+
+  private buildWorkspaceProvidersStatus(
+    config: Config,
+  ): ServeWorkspaceProvidersStatus {
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const currentAuthType = config.getAuthType?.();
+      const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
+      const currentModelId = activeRuntimeSnapshot
+        ? activeRuntimeSnapshot.id
+        : (config.getModel() || '').trim();
+      const hasCurrentModel = currentModelId.length > 0;
+      const currentAuth = activeRuntimeSnapshot?.authType ?? currentAuthType;
+      const currentAcpModelId =
+        hasCurrentModel && currentAuth
+          ? formatAcpModelId(currentModelId, currentAuth)
+          : currentModelId || undefined;
+      const providers = new Map<string, ServeWorkspaceProviderStatus>();
+
+      for (const model of config.getAllConfiguredModels()) {
+        const authType = String(model.authType);
+        let provider = providers.get(authType);
+        if (!provider) {
+          provider = {
+            kind: 'model_provider',
+            status: 'ok',
+            authType,
+            current: false,
+            models: [],
+          };
+          providers.set(authType, provider);
+        }
+
+        const effectiveModelId =
+          model.isRuntimeModel && model.runtimeSnapshotId
+            ? model.runtimeSnapshotId
+            : model.id;
+        const modelId = formatAcpModelId(effectiveModelId, model.authType);
+        const isCurrent =
+          currentAuth === model.authType &&
+          hasCurrentModel &&
+          (currentModelId === effectiveModelId ||
+            currentModelId === model.id ||
+            currentAcpModelId === modelId);
+        const providerModel: ServeWorkspaceProviderModel = {
+          modelId,
+          baseModelId: parseAcpBaseModelId(effectiveModelId),
+          name: model.label,
+          ...(model.description !== undefined
+            ? { description: model.description }
+            : {}),
+          contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
+          isCurrent,
+          isRuntime: model.isRuntimeModel === true,
+        };
+        provider.models.push(providerModel);
+        if (isCurrent) provider.current = true;
+      }
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        ...(currentAuth || currentAcpModelId
+          ? {
+              current: {
+                ...(currentAuth ? { authType: String(currentAuth) } : {}),
+                ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
+              },
+            }
+          : {}),
+        providers: [...providers.values()],
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: true,
+        providers: [],
+        errors: [this.errorCell('providers', error)],
+      };
+    }
+  }
+
+  private sessionOrThrow(sessionId: string): Session {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Session not found for id: ${sessionId}`,
+      );
+    }
+    return session;
+  }
+
+  private buildSessionContextStatus(
+    sessionId: string,
+  ): ServeSessionContextStatus {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      state: {
+        models: this.buildAvailableModels(config),
+        modes: this.buildModesData(config),
+        configOptions: this.buildConfigOptions(config),
+      },
+    };
+  }
+
+  private async buildSessionSupportedCommandsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionSupportedCommandsStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const { availableCommands, availableSkills } =
+      await buildAvailableCommandsSnapshot(session.getConfig());
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      availableCommands,
+      availableSkills: availableSkills ?? [],
+    };
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -538,6 +884,44 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case SERVE_STATUS_EXT_METHODS.workspaceMcp:
+        return this.buildWorkspaceMcpStatus(this.config) as unknown as Record<
+          string,
+          unknown
+        >;
+      case SERVE_STATUS_EXT_METHODS.workspaceSkills:
+        return (await this.buildWorkspaceSkillsStatus(
+          this.config,
+        )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspaceProviders:
+        return this.buildWorkspaceProvidersStatus(
+          this.config,
+        ) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.sessionContext: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return this.buildSessionContextStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionSupportedCommands: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionSupportedCommandsStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
+      }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {

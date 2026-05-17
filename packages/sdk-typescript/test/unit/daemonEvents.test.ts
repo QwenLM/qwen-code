@@ -129,6 +129,18 @@ describe('daemon event schema', () => {
         },
       }),
     ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 10,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: {
+          requestId: 'req-1',
+          outcome: { outcome: 'cancelled' },
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it('reduces permission, model, and terminal events into a session view', () => {
@@ -219,6 +231,14 @@ describe('daemon event schema', () => {
 
     expect(state.lastEventId).toBe(11);
     expect(state.currentModelId).toBe('qwen3-next');
+  });
+
+  it('preserves seeded displayName when creating session view state', () => {
+    const state = createDaemonSessionViewState({
+      displayName: 'Investigation',
+    });
+
+    expect(state.displayName).toBe('Investigation');
   });
 
   it('records session updates without replacing a known session id with junk', () => {
@@ -339,6 +359,57 @@ describe('daemon event schema', () => {
     expect(unmatched.lastUnmatchedPermissionResolutionId).toBe('missing-req');
   });
 
+  it('treats permission_already_resolved as an idempotent pending cleanup', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'req-1',
+          sessionId: 's-1',
+          toolCall: { name: 'write_file' },
+          options: [{ optionId: 'allow' }],
+        },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: {
+          requestId: 'req-1',
+          sessionId: 's-1',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      },
+    ]);
+
+    expect(state.sessionId).toBe('s-1');
+    expect(state.pendingPermissions).toEqual({});
+    expect(state.unmatchedPermissionResolutionCount).toBe(0);
+  });
+
+  it('tracks unmatched permission_already_resolved without rewriting session identity', () => {
+    const state = reduceDaemonSessionEvent(
+      createDaemonSessionViewState({ sessionId: 's-current' }),
+      {
+        id: 1,
+        v: 1,
+        type: 'permission_already_resolved',
+        data: {
+          requestId: 'missing-req',
+          sessionId: 's-other',
+          outcome: { outcome: 'cancelled' },
+        },
+      },
+    );
+
+    expect(state.sessionId).toBe('s-current');
+    expect(state.pendingPermissions).toEqual({});
+    expect(state.unmatchedPermissionResolutionCount).toBe(1);
+    expect(state.lastUnmatchedPermissionResolutionId).toBe('missing-req');
+  });
+
   it('caps tracked pending permissions at the daemon session limit', () => {
     const requests: DaemonEvent[] = Array.from({ length: 65 }, (_, index) => ({
       id: index + 1,
@@ -454,5 +525,223 @@ describe('daemon event schema', () => {
 
     expect(upgradedToDeath.terminalEvent?.type).toBe('session_died');
     expect(upgradedToDeath.lastEventId).toBe(3);
+  });
+
+  it('validates session_closed events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_close' },
+      }),
+    ).toBeDefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1' },
+      }),
+    ).toBeUndefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'session_closed',
+        data: { reason: 'client_close' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('validates session_metadata_updated events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', displayName: 'My Session' },
+      }),
+    ).toBeDefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 2,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1' },
+      }),
+    ).toBeDefined();
+
+    expect(
+      asKnownDaemonEvent({
+        id: 3,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {},
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces session_closed as terminal and clears pending permissions', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'req-1',
+          sessionId: 's-1',
+          toolCall: { toolCallId: 'tc-1', title: 'test' },
+          options: [{ optionId: 'allow', name: 'Allow', kind: 'allow_once' }],
+        },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_close' },
+      },
+    ]);
+    expect(state.alive).toBe(false);
+    expect(state.terminalEvent?.type).toBe('session_closed');
+    expect(Object.keys(state.pendingPermissions)).toHaveLength(0);
+  });
+
+  it('session_closed upgrades stream terminal events like session_died', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'stream_error',
+        data: { error: 'subscriber limit reached' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'session_closed',
+        data: { sessionId: 's-1', reason: 'client_close' },
+      },
+    ]);
+    expect(state.terminalEvent?.type).toBe('session_closed');
+  });
+
+  it('reduces session_metadata_updated to set displayName', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', displayName: 'My Session' },
+      },
+    ]);
+    expect(state.displayName).toBe('My Session');
+    expect(state.alive).toBe(true);
+
+    const cleared = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1', displayName: 'My Session' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'session_metadata_updated',
+        data: { sessionId: 's-1' },
+      },
+    ]);
+    expect(cleared.displayName).toBeUndefined();
+  });
+
+  it('recognizes slow_client_warning frames as known events', () => {
+    const warning = {
+      // No `id` on synthetic frames (matches the daemon's emit shape).
+      v: 1,
+      type: 'slow_client_warning',
+      data: { queueSize: 192, maxQueued: 256, lastEventId: 42 },
+    };
+    const known = asKnownDaemonEvent(warning);
+    expect(known?.type).toBe('slow_client_warning');
+
+    // Schema validation: required numeric fields. Missing or wrongly
+    // typed payloads must NOT be recognized as known events.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 'lots', maxQueued: 256, lastEventId: 42 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 192, lastEventId: 42 },
+      }),
+    ).toBeUndefined();
+
+    // NaN / Infinity pass a bare `typeof === 'number'` check but are
+    // schema garbage for a queue-size measurement — finite-number
+    // validation must reject them (sibling predicates do the same).
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: Number.NaN, maxQueued: 256, lastEventId: 42 },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: Number.POSITIVE_INFINITY,
+          lastEventId: 42,
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces slow_client_warning into the view state without ending the stream', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-1', phase: 'prompting' },
+      },
+      // Warning #1.
+      {
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 200, maxQueued: 256, lastEventId: 1 },
+      },
+      // Warning #2 (e.g. after a drain + refill on the daemon side).
+      {
+        v: 1,
+        type: 'slow_client_warning',
+        data: { queueSize: 220, maxQueued: 256, lastEventId: 5 },
+      },
+    ]);
+
+    // Counter increments + most recent snapshot wins.
+    expect(state.slowClientWarningCount).toBe(2);
+    expect(state.lastSlowClientWarning).toEqual({
+      queueSize: 220,
+      maxQueued: 256,
+      lastEventId: 5,
+    });
+    // Warning is non-terminal — stream is still alive, no
+    // terminalEvent recorded.
+    expect(state.alive).toBe(true);
+    expect(state.terminalEvent).toBeUndefined();
+    // Warnings carry no `id`, so `lastEventId` stays at the highest
+    // id observed (the original session_update at id=1).
+    expect(state.lastEventId).toBe(1);
   });
 });

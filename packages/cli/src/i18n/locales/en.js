@@ -1894,6 +1894,8 @@ export default {
 
   // === Core: added from PR #3328 ===
   'Open the memory manager.': 'Open the memory manager.',
+  'Show current process memory diagnostics':
+    'Show current process memory diagnostics',
   'Save a durable memory to the memory system.':
     'Save a durable memory to the memory system.',
   'Ask a quick side question without affecting the main conversation':

@@ -93,12 +93,24 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   clearCachedCredentialFile: vi.fn(),
   QwenOAuth2Event: {},
   qwenOAuth2Events: { on: vi.fn(), off: vi.fn() },
+  MCPDiscoveryState: {
+    NOT_STARTED: 'not_started',
+    IN_PROGRESS: 'in_progress',
+    COMPLETED: 'completed',
+  },
+  MCPServerStatus: {
+    DISCONNECTED: 'disconnected',
+    CONNECTING: 'connecting',
+    CONNECTED: 'connected',
+  },
+  getMCPDiscoveryState: vi.fn().mockReturnValue('completed'),
+  getMCPServerStatus: vi.fn().mockReturnValue('connected'),
   MCPServerConfig: vi.fn().mockImplementation((...args: unknown[]) => ({
     _args: args,
   })),
   SessionService: vi.fn(),
   SESSION_TITLE_MAX_LENGTH: 200,
-  tokenLimit: vi.fn(),
+  tokenLimit: vi.fn().mockReturnValue(128_000),
   SessionStartSource: {
     Startup: 'startup',
     Resume: 'resume',
@@ -131,9 +143,20 @@ vi.mock('../config/settings.js', () => ({
   loadSettings: vi.fn(),
 }));
 vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
-vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
+vi.mock('./session/Session.js', () => ({
+  Session: vi.fn(),
+  buildAvailableCommandsSnapshot: vi.fn().mockResolvedValue({
+    availableCommands: [],
+    availableSkills: [],
+  }),
+}));
 vi.mock('../utils/acpModelUtils.js', () => ({
-  formatAcpModelId: vi.fn(),
+  formatAcpModelId: vi.fn(
+    (modelId: string, authType: string) => `${modelId}(${authType})`,
+  ),
+  parseAcpBaseModelId: vi.fn((modelId: string) =>
+    modelId.replace(/\([^)]+\)$/, ''),
+  ),
 }));
 
 import {
@@ -149,12 +172,18 @@ import {
   SessionEndReason,
   MCPServerConfig,
   SessionService,
+  MCPDiscoveryState,
+  MCPServerStatus,
+  getMCPDiscoveryState,
+  getMCPServerStatus,
+  tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { loadSettings } from '../config/settings.js';
 import { loadCliConfig } from '../config/config.js';
-import { Session } from './session/Session.js';
+import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import { SERVE_STATUS_EXT_METHODS } from '../serve/status.js';
 
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -761,6 +790,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
       getModel: vi.fn().mockReturnValue('m'),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getAvailableModels: vi.fn().mockReturnValue([]),
       getModes: vi.fn().mockReturnValue([]),
@@ -816,6 +846,431 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     return innerConfig;
   }
+
+  it('status ext methods expose workspace snapshots without secrets', async () => {
+    vi.mocked(getMCPDiscoveryState).mockReturnValue(
+      MCPDiscoveryState.COMPLETED,
+    );
+    vi.mocked(getMCPServerStatus).mockImplementation((name: string) =>
+      name === 'disabled'
+        ? MCPServerStatus.DISCONNECTED
+        : MCPServerStatus.CONNECTED,
+    );
+    const listSkills = vi.fn().mockResolvedValue([
+      {
+        name: 'review',
+        description: 'Review code',
+        level: 'project',
+        argumentHint: '[path]',
+        disableModelInvocation: false,
+        body: 'secret skill body',
+        filePath: '/secret/SKILL.md',
+        skillRoot: '/secret',
+        hooks: { pre: ['secret-hook'] },
+      },
+    ]);
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getMcpServers: vi.fn().mockReturnValue({
+        docs: {
+          command: 'node',
+          args: ['server.js'],
+          env: { TOKEN: 'secret-token' },
+          description: 'Docs server',
+          extensionName: 'docs-ext',
+        },
+        remote: {
+          httpUrl: 'https://example.com/mcp',
+          headers: { Authorization: 'Bearer secret' },
+        },
+        disabled: {
+          command: 'node',
+          args: ['disabled.js'],
+        },
+        malformed: {
+          command: 'node',
+          description: 123,
+          extensionName: { name: 'bad-ext' },
+        },
+      }),
+      isMcpServerDisabled: vi
+        .fn()
+        .mockImplementation((name: string) => name === 'disabled'),
+      getSkillManager: vi.fn().mockReturnValue({ listSkills }),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-plus',
+          label: 'Qwen Plus',
+          description: 'General coding model',
+          authType: 'qwen',
+          contextWindowSize: 65_536,
+          baseUrl: 'https://secret.example.com',
+          envKey: 'DASHSCOPE_API_KEY',
+        },
+      ]),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('qwen-plus'),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const mcp = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceMcp,
+      {},
+    );
+    const skills = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceSkills,
+      {},
+    );
+    const providers = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceProviders,
+      {},
+    );
+
+    expect(mcp).toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      discoveryState: 'completed',
+      servers: [
+        {
+          kind: 'mcp_server',
+          status: 'ok',
+          name: 'docs',
+          mcpStatus: 'connected',
+          transport: 'stdio',
+          disabled: false,
+          description: 'Docs server',
+          extensionName: 'docs-ext',
+        },
+        {
+          kind: 'mcp_server',
+          status: 'ok',
+          name: 'remote',
+          mcpStatus: 'connected',
+          transport: 'http',
+          disabled: false,
+        },
+        {
+          kind: 'mcp_server',
+          status: 'disabled',
+          name: 'disabled',
+          mcpStatus: 'disconnected',
+          transport: 'stdio',
+          disabled: true,
+        },
+        {
+          kind: 'mcp_server',
+          status: 'ok',
+          name: 'malformed',
+          mcpStatus: 'connected',
+          transport: 'stdio',
+          disabled: false,
+        },
+      ],
+    });
+    expect(JSON.stringify(mcp)).not.toContain('secret-token');
+    expect(JSON.stringify(mcp)).not.toContain('Authorization');
+    expect(JSON.stringify(mcp)).not.toContain('bad-ext');
+
+    expect(skills).toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      skills: [
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+          argumentHint: '[path]',
+          modelInvocable: true,
+        },
+      ],
+    });
+    expect(JSON.stringify(skills)).not.toContain('secret skill body');
+    expect(JSON.stringify(skills)).not.toContain('/secret');
+    expect(JSON.stringify(skills)).not.toContain('secret-hook');
+
+    expect(providers).toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      current: { authType: 'qwen', modelId: 'qwen-plus(qwen)' },
+      providers: [
+        {
+          kind: 'model_provider',
+          status: 'ok',
+          authType: 'qwen',
+          current: true,
+          models: [
+            {
+              modelId: 'qwen-plus(qwen)',
+              baseModelId: 'qwen-plus',
+              name: 'Qwen Plus',
+              description: 'General coding model',
+              contextLimit: 65_536,
+              isCurrent: true,
+              isRuntime: false,
+            },
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(providers)).not.toContain('secret.example.com');
+    expect(JSON.stringify(providers)).not.toContain('DASHSCOPE_API_KEY');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('status ext methods return error cells when workspace snapshots fail', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getMcpServers: vi.fn(() => {
+        throw new Error('broken mcp config');
+      }),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAllConfiguredModels: vi.fn(() => {
+        throw new Error('broken provider config');
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      servers: [],
+      errors: [{ kind: 'mcp', status: 'error', error: 'broken mcp config' }],
+    });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceProviders, {}),
+    ).resolves.toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      providers: [],
+      errors: [
+        {
+          kind: 'providers',
+          status: 'error',
+          error: 'broken provider config',
+        },
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('provider status marks current only for matching models', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('missing-model'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-plus',
+          label: 'Qwen Plus',
+          authType: 'qwen',
+        },
+      ]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceProviders, {}),
+    ).resolves.toMatchObject({
+      current: { authType: 'qwen', modelId: 'missing-model(qwen)' },
+      providers: [
+        {
+          authType: 'qwen',
+          current: false,
+          models: [
+            {
+              modelId: 'qwen-plus(qwen)',
+              baseModelId: 'qwen-plus',
+              contextLimit: 128_000,
+              isCurrent: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('provider status uses runtime model ids for base id and token limit', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue({
+        id: 'runtime-qwen-plus',
+        authType: 'qwen',
+      }),
+      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-plus',
+          runtimeSnapshotId: 'runtime-qwen-plus',
+          label: 'Runtime Qwen Plus',
+          authType: 'qwen',
+          isRuntimeModel: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceProviders, {}),
+    ).resolves.toMatchObject({
+      current: { authType: 'qwen', modelId: 'runtime-qwen-plus(qwen)' },
+      providers: [
+        {
+          authType: 'qwen',
+          current: true,
+          models: [
+            {
+              modelId: 'runtime-qwen-plus(qwen)',
+              baseModelId: 'runtime-qwen-plus',
+              contextLimit: 128_000,
+              isCurrent: true,
+              isRuntime: true,
+            },
+          ],
+        },
+      ],
+    });
+    expect(vi.mocked(tokenLimit)).toHaveBeenCalledWith('runtime-qwen-plus');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('status ext methods expose live session context and supported commands', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValueOnce({
+      availableCommands: [
+        {
+          name: 'init',
+          description: 'Initialize',
+          input: null,
+        },
+      ],
+      availableSkills: ['review'],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const context = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionContext,
+      { sessionId },
+    );
+    const supportedCommands = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.sessionSupportedCommands,
+      { sessionId },
+    );
+
+    expect(context).toMatchObject({
+      v: 1,
+      sessionId,
+      workspaceCwd: '/tmp',
+      state: {
+        models: { currentModelId: 'm(api-key)', availableModels: [] },
+        modes: { currentModeId: 'default', availableModes: [] },
+      },
+    });
+    expect(supportedCommands).toEqual({
+      v: 1,
+      sessionId,
+      availableCommands: [
+        {
+          name: 'init',
+          description: 'Initialize',
+          input: null,
+        },
+      ],
+      availableSkills: ['review'],
+    });
+    expect(buildAvailableCommandsSnapshot).toHaveBeenCalledWith(innerConfig);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('newSession with SSE MCP server creates MCPServerConfig with url', async () => {
     await setupSessionMocks('session-sse');

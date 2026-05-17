@@ -300,6 +300,17 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
+  plansDirectory: {
+    type: 'string',
+    label: 'Plans Directory',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: undefined as string | undefined,
+    description:
+      'Custom directory for approved Plan Mode files. Relative paths are resolved from the project root, and the resolved path must stay within the project root. Defaults to ~/.qwen/plans.',
+    showInDialog: false,
+  },
+
   // Environment variables fallback
   env: {
     type: 'object',

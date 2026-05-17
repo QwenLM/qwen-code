@@ -68,10 +68,23 @@ const DEFAULT_MAX_QUEUED = 256;
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
  * be exhausted by a moderate turn before the client reconnected;
- * 4000 gives ~30× headroom over a typical-but-busy turn at the cost
- * of a few hundred KB of RAM per session.
+ * 8000 matches the target set in #3803 §02 for chatty Stage 1
+ * sessions, with ~30–60× headroom over a typical-but-busy turn at
+ * the cost of a few hundred KB of RAM per session. Operators can
+ * override per-daemon via `qwen serve --event-ring-size <n>`.
  */
-const DEFAULT_RING_SIZE = 4000;
+export const DEFAULT_RING_SIZE = 8000;
+/**
+ * Fraction of `maxQueued` at which a `slow_client_warning` synthetic
+ * frame is force-pushed to the at-risk subscriber. The warning fires
+ * ONCE per overflow episode (tracked via `sub.warned`); the queue
+ * must drain below `WARN_RESET_RATIO * maxQueued` before another
+ * warning can fire — small hysteresis prevents flap-near-threshold
+ * spam when a subscriber oscillates around 75% full.
+ */
+const WARN_THRESHOLD_RATIO = 0.75;
+/** See `WARN_THRESHOLD_RATIO` doc. */
+const WARN_RESET_RATIO = 0.375;
 /**
  * Per-bus subscriber cap. With per-subscriber `maxQueued` defaulting to
  * 256 frames, 64 concurrent subscribers caps the per-session subscriber
@@ -86,6 +99,26 @@ const DEFAULT_MAX_SUBSCRIBERS = 64;
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
   evicted: boolean;
+  /** Cap remembered per subscriber so the warning ratio + reset can be
+   * checked without rummaging through the queue's private state. */
+  maxQueued: number;
+  /**
+   * Pre-computed `WARN_THRESHOLD_RATIO * maxQueued` so `publish()`
+   * does one integer compare per subscriber instead of a multiply +
+   * compare. `publish()` is on the per-event hot path; per-sub
+   * caching here collapses to a single field read in the steady
+   * state (after the `!warned` short-circuit).
+   */
+  warnThreshold: number;
+  /** Pre-computed `WARN_RESET_RATIO * maxQueued` — see `warnThreshold`. */
+  warnResetThreshold: number;
+  /**
+   * True once `slow_client_warning` has been force-pushed to this
+   * subscriber in the current overflow episode. Cleared when the queue
+   * drains below `warnResetThreshold` (hysteresis), so a subscriber
+   * that recovers and then lags again gets a fresh warning.
+   */
+  warned: boolean;
   /**
    * BmJT1: cleanup hook for the eviction path (overflow → close queue
    * → remove from `subs`). Without this, the abort listener registered
@@ -178,11 +211,13 @@ export class EventBus {
       ...input,
     };
     this.ring.push(event);
-    // Eviction-by-shift is O(n) once the ring is full. With ringSize=4000
-    // and per-publish work measured in hundreds of microseconds even on
-    // chatty sessions, this isn't a real hotspot today. A circular-buffer
-    // refactor would push it to O(1) but adds index bookkeeping; deferred
-    // until profiling actually flags it.
+    // Eviction-by-shift is O(n) once the ring is full. At the current
+    // default `ringSize=8000` (#3803 §02) the per-publish shift work
+    // measures in low milliseconds on chatty sessions — still well
+    // below per-frame latency budgets. A circular-buffer refactor
+    // would push it to O(1) but adds index bookkeeping; deferred until
+    // profiling actually flags it, or the operator bumps
+    // `--event-ring-size` to an order of magnitude larger.
     if (this.ring.length > this.ringSize) this.ring.shift();
     // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
     // (the new immediate-eviction cleanup below) doesn't mutate the
@@ -219,6 +254,56 @@ export class EventBus {
         // Under attack (thousands of stalled SSE clients) this
         // amplified into significant heap retention.
         sub.dispose();
+        continue;
+      }
+      // Backpressure warning: synthetic `slow_client_warning` frame to
+      // the at-risk subscriber when its live backlog crosses
+      // `WARN_THRESHOLD_RATIO`. Fires ONCE per overflow episode (the
+      // `warned` flag clears only after `WARN_RESET_RATIO` hysteresis
+      // drain). Like `client_evicted` the frame carries no `id` — it
+      // is private to this subscriber and must not burn a sequence
+      // slot the replay ring would otherwise be missing for other
+      // healthy subscribers. Force-push so the warning bypasses the
+      // exact backlog cap that triggered it.
+      //
+      // Ordering: `forcePush` appends to the queue's back. Pushing to
+      // the FRONT was considered to maximize lead-time, but (a) the
+      // forward-position invariant in `BoundedAsyncQueue.next()`'s
+      // `forcedInBuf` accounting is sized for "replay at front, live
+      // at back" — mid-stream front-insertion would mis-count the
+      // live backlog cap; and (b) when a consumer is actively
+      // `await`ing `next()`, `forcePush`'s `resolvers.shift()`
+      // shortcut delivers the warning immediately without ever
+      // touching `buf`. The back-of-queue case only matters for
+      // stalled consumers — and a stalled consumer can't drain
+      // regardless of warning position, so the ordering is
+      // informational by the time they finally pull it.
+      //
+      // The `warnThreshold` / `warnResetThreshold` are pre-computed
+      // at `subscribe()` time so the per-publish hot path is one
+      // integer compare per subscriber (after the `!warned`
+      // short-circuit collapses warm-state checks to a single
+      // boolean read).
+      const liveSize = sub.queue.size;
+      if (!sub.warned && liveSize >= sub.warnThreshold) {
+        sub.warned = true;
+        const warningFrame: BridgeEvent = {
+          v: EVENT_SCHEMA_VERSION,
+          type: 'slow_client_warning',
+          data: {
+            queueSize: liveSize,
+            maxQueued: sub.maxQueued,
+            // `event.id` is always defined here — the just-published
+            // `event` is constructed at the top of `publish()` with
+            // `id: this.nextId++`. No `??` fallback needed.
+            lastEventId: event.id as number,
+          },
+        };
+        sub.queue.forcePush(warningFrame);
+      } else if (sub.warned && liveSize <= sub.warnResetThreshold) {
+        // Hysteresis: subscriber recovered well below the warn line,
+        // re-arm so a future lag spike produces a fresh warning.
+        sub.warned = false;
       }
     }
     return event;
@@ -253,15 +338,22 @@ export class EventBus {
     if (this.subs.size >= this.maxSubscribers) {
       throw new SubscriberLimitExceededError(this.maxSubscribers);
     }
-    const queue = new BoundedAsyncQueue<BridgeEvent>(
-      opts.maxQueued ?? DEFAULT_MAX_QUEUED,
-    );
+    const maxQueued = opts.maxQueued ?? DEFAULT_MAX_QUEUED;
+    const queue = new BoundedAsyncQueue<BridgeEvent>(maxQueued);
 
     // `dispose` is assigned below (mutable so the closure can reference
     // `sub.dispose`); placeholder no-op covers the brief window between
     // `subs.add(sub)` and the real assignment so an absurdly fast
     // `publish() → forcePush → close → dispose()` race can't crash.
-    const sub: InternalSub = { queue, evicted: false, dispose: () => {} };
+    const sub: InternalSub = {
+      queue,
+      evicted: false,
+      maxQueued,
+      warnThreshold: WARN_THRESHOLD_RATIO * maxQueued,
+      warnResetThreshold: WARN_RESET_RATIO * maxQueued,
+      warned: false,
+      dispose: () => {},
+    };
     this.subs.add(sub);
 
     if (opts.lastEventId !== undefined) {
@@ -359,39 +451,54 @@ function emptyAsyncIterable<T>(): AsyncIterable<T> {
  * that signal to evict slow subscribers.
  *
  * The cap (`maxSize`) applies only to LIVE items pushed via `push()`. Items
- * inserted via `forcePush()` (the `Last-Event-ID` replay path on subscribe
- * and the terminal `client_evicted` frame) are tracked separately and don't
+ * inserted via `forcePush()` (the `Last-Event-ID` replay path on subscribe,
+ * the terminal `client_evicted` frame, and the mid-stream
+ * `slow_client_warning` frame) carry a `forced` tag per entry and never
  * count toward the cap. Without this split, a reconnect with a large
  * backlog would force-push ~ringSize entries into `buf`, push `buf.length`
  * past `maxSize`, and the very next live publish would evict the
  * just-resumed subscriber — defeating the resume contract.
+ *
+ * Previously this class tracked `forcedInBuf` as a count, which was
+ * correct only when forced frames stayed contiguous at the FRONT of the
+ * buffer (subscribe-time replay). The `slow_client_warning` path
+ * force-pushes mid-stream to the BACK of the queue, so the count-based
+ * approach drifted: a live shift would decrement `forcedInBuf`, then a
+ * later cap check on a live push would under-count the live backlog and
+ * warn/evict the client before there were actually `maxSize` live
+ * items. The per-entry `forced` tag below is the position-independent
+ * fix.
  */
+interface BoundedQueueEntry<T> {
+  value: T;
+  /** True for replay / eviction / slow_client_warning frames (don't count toward cap). */
+  forced: boolean;
+}
+
 class BoundedAsyncQueue<T> {
-  private readonly buf: T[] = [];
+  private readonly buf: Array<BoundedQueueEntry<T>> = [];
   private readonly resolvers: Array<(v: IteratorResult<T>) => void> = [];
   private closed = false;
   /**
-   * Number of force-pushed items still in `buf`. The cap check in
-   * `push()` only applies to LIVE items; this counter tells us how
-   * many slots in `buf` are replay-injected and shouldn't count.
-   *
-   * Position invariant: under the bus's two callers,
-   *   1. subscribe-time replay (`Last-Event-ID` resume) — forcePush
-   *      fires BEFORE any live `push()`, so replay items are at the
-   *      front of `buf`;
-   *   2. eviction terminal frame — forcePush fires AFTER `push()`
-   *      rejection, then `close()` is called immediately, so the
-   *      eviction frame is at the BACK of `buf`.
-   *
-   * `next()` decrements `forcedInBuf` whenever the counter is > 0 on
-   * shift, which is correct for case (1). For case (2) it slightly
-   * misaccounts (decrements on the first live shift), but that's
-   * harmless: the queue is closed so no `push()` runs the cap check
-   * again. The counter only matters for live cap enforcement.
+   * O(1) snapshot of how many LIVE (non-forced) entries are in `buf`.
+   * Maintained directly by `push()`/`next()`: any time a forced entry
+   * is added or removed `liveCount` is untouched; any time a live entry
+   * is added or removed `liveCount` moves with it. Replaces the
+   * position-dependent `forcedInBuf` heuristic — `liveCount` is correct
+   * no matter where in the queue the forced entries are.
    */
-  private forcedInBuf = 0;
+  private liveCount = 0;
 
   constructor(private readonly maxSize: number) {}
+
+  /**
+   * Number of LIVE (non-force-pushed) items currently waiting in the
+   * buffer. Backpressure decisions in `EventBus.publish()` (the
+   * `slow_client_warning` threshold) read this value.
+   */
+  get size(): number {
+    return this.liveCount;
+  }
 
   /** Returns true if accepted, false if dropped due to overflow. */
   push(value: T): boolean {
@@ -402,12 +509,14 @@ class BoundedAsyncQueue<T> {
       return true;
     }
     // Cap is on the LIVE backlog only.
-    if (this.buf.length - this.forcedInBuf >= this.maxSize) return false;
-    this.buf.push(value);
+    if (this.liveCount >= this.maxSize) return false;
+    this.buf.push({ value, forced: false });
+    this.liveCount += 1;
     return true;
   }
 
-  /** Bypasses the size cap. Used for replay frames and terminal eviction. */
+  /** Bypasses the size cap. Used for replay frames, eviction terminal,
+   * and slow-client warnings. */
   forcePush(value: T): void {
     if (this.closed) return;
     const r = this.resolvers.shift();
@@ -415,8 +524,7 @@ class BoundedAsyncQueue<T> {
       r({ value, done: false });
       return;
     }
-    this.buf.push(value);
-    this.forcedInBuf += 1;
+    this.buf.push({ value, forced: true });
   }
 
   /**
@@ -440,7 +548,7 @@ class BoundedAsyncQueue<T> {
       // Truncate the buffer so subsequent `next()` calls see the
       // closed sentinel immediately.
       this.buf.length = 0;
-      this.forcedInBuf = 0;
+      this.liveCount = 0;
     }
     while (this.resolvers.length > 0) {
       this.resolvers.shift()!({
@@ -455,12 +563,9 @@ class BoundedAsyncQueue<T> {
     // queue whose element type legitimately includes `undefined`. The bus
     // never pushes undefined today, but the queue is generic.
     if (this.buf.length > 0) {
-      const value = this.buf.shift() as T;
-      // Force-pushed entries are FIFO at the front of `buf` (forcePush
-      // only happens at subscribe time, before any live push). So as long
-      // as `forcedInBuf > 0` the shifted item is a replay frame.
-      if (this.forcedInBuf > 0) this.forcedInBuf -= 1;
-      return Promise.resolve({ value, done: false });
+      const entry = this.buf.shift() as BoundedQueueEntry<T>;
+      if (!entry.forced) this.liveCount -= 1;
+      return Promise.resolve({ value: entry.value, done: false });
     }
     if (this.closed) {
       return Promise.resolve({

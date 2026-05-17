@@ -645,6 +645,12 @@ export const useSlashCommandProcessor = (
                       content: result.content,
                       timestamp: new Date(),
                     });
+                  } else if (result.messageType === 'warning') {
+                    addMessage({
+                      type: MessageType.WARNING,
+                      content: result.content,
+                      timestamp: new Date(),
+                    });
                   } else {
                     addMessage({
                       type: MessageType.ERROR,
