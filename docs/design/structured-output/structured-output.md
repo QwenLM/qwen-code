@@ -275,10 +275,14 @@ is set; adding it to the allowlist machinery would mean
 contract.
 
 Explicit `permissions.deny` rules and `--exclude-tools` settings still
-apply via `PermissionManager.evaluate` → `isToolEnabled`. If the user
-denies the tool, the run hits `maxSessionTurns` and the
-`--json-schema` hint in `handleMaxTurnsExceededError` tells them where
-to look.
+apply via `PermissionManager.evaluate` → `isToolEnabled`. Both use
+the same deny mechanism and both prevent registration — the tool
+declaration is stripped from the registry, so the model never sees
+the tool. The typical outcome is that the model answers in plain text
+(exit 1). If the model loops through other tools without producing
+text, it eventually hits `maxSessionTurns` (exit 53) and the
+`--json-schema` hint in `handleMaxTurnsExceededError` tells the user
+where to look.
 
 **`--bare` interaction.** Bare mode short-circuits the settings → CLI
 config bridge: `packages/cli/src/config/config.ts` builds

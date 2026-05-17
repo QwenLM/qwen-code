@@ -264,17 +264,12 @@ the tool only exists when `--json-schema` is set, so excluding it
 would leave the run with no terminal contract.
 
 Explicit `permissions.deny` rules and `--exclude-tools` settings DO
-take effect, but they fail differently:
-
-- If `structured_output` is **denied at call time** (settings-level
-  `permissions.deny`), the tool declaration is still visible to the
-  model, so it keeps trying and eventually hits `maxSessionTurns`
-  (exit 53).
-- If the tool declaration is **removed entirely** (`--exclude-tools
-structured_output`), the model doesn't know the tool exists,
-  answers in plain text, and the run exits with code 1.
-
-In both cases the `--json-schema` hint in the error message tells you
+take effect — both use the same deny mechanism and both prevent
+`structured_output` from being registered, so the model never sees
+the tool declaration. The typical result is that the model answers in
+plain text (exit 1). If the model loops through other tools without
+ever producing text, it will eventually hit `maxSessionTurns`
+(exit 53) and the `--json-schema` hint in the error message tells you
 where to look.
 
 > **`--bare` caveat.** Bare mode ignores most settings-derived inputs,
