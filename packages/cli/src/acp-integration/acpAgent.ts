@@ -12,6 +12,7 @@ import {
   createDebugLogger,
   QwenOAuth2Event,
   qwenOAuth2Events,
+  MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
@@ -751,11 +752,23 @@ class QwenAgent implements Agent {
         ...(budgetMode !== undefined ? { budgetMode } : {}),
         ...(budgetMode !== undefined
           ? {
+              // PR 14 fix (review #4247 wenshao R2-#6): filter out
+              // servers that are now config-disabled so the
+              // workspace cell matches the per-server cell
+              // precedence (`effectivelyRefused = refusedByBudget
+              // && !disabled` above). Pre-fix a server disabled
+              // after being refused would render `disabled` on its
+              // per-server row but `error: budget_exhausted` on the
+              // workspace row — confusing for dashboards. Use
+              // `Array.from(refusedSet).filter(...)` to apply the
+              // same disabled gate the per-server loop applies.
               budgets: this.buildBudgetCells(
                 clientCount ?? 0,
                 clientBudget,
                 budgetMode,
-                refusedSet.size,
+                Array.from(refusedSet).filter(
+                  (n) => !config.isMcpServerDisabled(n),
+                ).length,
               ),
             }
           : {}),
@@ -810,10 +823,12 @@ class QwenAgent implements Agent {
     } else if (
       budget !== undefined &&
       budget > 0 &&
-      liveCount >= 0.75 * budget
+      liveCount >= MCP_BUDGET_WARN_FRACTION * budget
     ) {
       status = 'warning';
-      hint = 'Live MCP clients are above 75% of the configured budget.';
+      hint = `Live MCP clients are above ${Math.round(
+        MCP_BUDGET_WARN_FRACTION * 100,
+      )}% of the configured budget.`;
     }
     const cell: ServeMcpBudgetStatusCell = {
       kind: 'mcp_budget',

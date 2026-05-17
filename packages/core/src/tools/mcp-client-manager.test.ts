@@ -1509,4 +1509,70 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // Downgraded — not 'enforce' — because enforce requires a budget.
     expect(manager.getMcpBudgetMode()).toBe('off');
   });
+
+  // Round 3 review fixes (PR #4247 wenshao second pass).
+  it('readResource rejects disabled servers before checking budget (wenshao R3 #5)', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    // Pre-fix the lazy spawn path bypassed `isMcpServerDisabled`,
+    // so a disabled server could be resurrected by a resource read.
+    const config = configWithServers(
+      {
+        a: { command: 'node' },
+      },
+      {
+        isMcpServerDisabled: ((name: string) =>
+          name === 'a') as Config['isMcpServerDisabled'],
+      },
+    );
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
+      /'a' is disabled/,
+    );
+  });
+
+  it('readResource disabled gate fires BEFORE budget gate (wenshao R3 #5 precedence)', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    // Set up a budget-exhausted scenario + disable the target. The
+    // disabled error must win over the budget error (matches the
+    // per-server cell precedence: disabled wins).
+    const config = configWithServers(
+      {
+        a: { command: 'node' },
+        b: { command: 'node' },
+      },
+      {
+        isMcpServerDisabled: ((name: string) =>
+          name === 'b') as Config['isMcpServerDisabled'],
+      },
+    );
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    // Even though `b` would be budget-refused if not disabled, the
+    // disabled gate must trip first.
+    await expect(manager.readResource('b', 'file:///x')).rejects.toThrow(
+      /'b' is disabled/,
+    );
+  });
+
+  it('exports MCP_BUDGET_WARN_FRACTION constant (wenshao R3 #7)', async () => {
+    const { MCP_BUDGET_WARN_FRACTION } = await import(
+      './mcp-client-manager.js'
+    );
+    // Pinned to 0.75 to match PR 10's slow_client_warning hysteresis
+    // primer (eventBus.ts WARN_THRESHOLD_RATIO). PR 14b will introduce
+    // the matching reset fraction (0.375) to complete the dual-threshold
+    // pair; this test is a tripwire against accidental fraction drift.
+    expect(MCP_BUDGET_WARN_FRACTION).toBe(0.75);
+  });
 });

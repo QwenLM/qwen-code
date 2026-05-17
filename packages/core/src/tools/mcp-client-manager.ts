@@ -46,6 +46,21 @@ const DEFAULT_HEALTH_CONFIG: MCPHealthMonitorConfig = {
 };
 
 /**
+ * Single-threshold warning fraction for the snapshot-based budget cell
+ * (PR 14 v1). When `liveCount >= MCP_BUDGET_WARN_FRACTION * budget` the
+ * `budgets[0].status` flips to `'warning'`. Exported and consumed by
+ * (a) `acpAgent.buildBudgetCells` (snapshot status) and (b)
+ * `commands/serve.ts` (stderr boot breadcrumb) — pre-extract these
+ * shared so PR 14b can swap to a dual-threshold hysteresis pair
+ * (`armed` boolean per opencode `cli/heap.ts`) by editing one file.
+ *
+ * Picked 0.75 to mirror PR 10's `slow_client_warning`
+ * (`eventBus.ts:WARN_THRESHOLD_RATIO`) — same rationale: "warning"
+ * fires before "error" with enough headroom for the operator to act.
+ */
+export const MCP_BUDGET_WARN_FRACTION = 0.75 as const;
+
+/**
  * Budget enforcement mode for MCP client guardrails (issue #4175 PR 14).
  *
  * `off` — no accounting-driven enforcement (default when no budget is
@@ -132,9 +147,21 @@ export class BudgetExhaustedError extends Error {
 }
 
 /**
- * Map an `MCPServerConfig` to its transport family. Mirrors the
- * detection order in `mcp-client.ts:createTransport` so the snapshot's
- * transport tag matches the actual wire protocol the client uses.
+ * Map an `MCPServerConfig` to its transport family. Aligned with the
+ * detection order in `mcp-client.ts:createTransport` (sdk → httpUrl
+ * → url → command) with ONE forward-looking exception: `tcp` is
+ * mapped here to `websocket` matching the field's declared intent on
+ * `MCPServerConfig`, but `createTransport` does NOT yet construct a
+ * websocket transport. A config carrying both `tcp` and `command`
+ * is labeled `websocket` in the accounting snapshot while the real
+ * connection fires through the `command` path as `stdio`. The
+ * `subprocessCount = stdio + websocket` arithmetic is therefore
+ * accurate-by-vacancy today (no real websocket subprocesses exist
+ * yet) and will need revisiting if a websocket transport ships.
+ * Tracked: PR 14b / future core decision (see PR #4247 thread for
+ * Copilot finding #8 + wenshao P2 line 147 — defer pending direction
+ * on (a) implement WS in createTransport vs (b) drop `tcp` from
+ * `MCPServerConfig` + both mappers).
  *
  * `sdk` is checked first because `SDK_MCP_SERVER_FIELDS` may coexist
  * with a placeholder `command` — without the sdk-first order, an
@@ -426,6 +453,19 @@ export class McpClientManager {
           // state, blocking other servers in `enforce` mode until a
           // full discovery restart. Release both so the budget cap
           // reflects actual usable capacity.
+          //
+          // Note (wenshao R2 P3 follow-up): release-here is correct
+          // for the LEGACY BULK PATH because `discoverAllMcpTools`
+          // begins with `await this.stop()` (line ~320) which clears
+          // all slots — `stop()` owns the lifecycle, this catch is
+          // defense-in-depth for any caller that bypasses stop. The
+          // LONG-LIVED per-server reconnect path in
+          // `discoverMcpToolsForServerInternal` intentionally does
+          // NOT release on connect failure: the client stays in
+          // `this.clients` with `DISCONNECTED` status so the health
+          // monitor + next incremental pass can retry without
+          // needing to re-reserve. Different lifecycle, different
+          // contract.
           this.reservedSlots.delete(name);
           this.clients.delete(name);
           this.eventEmitter?.emit('mcp-client-update', this.clients);
@@ -550,6 +590,19 @@ export class McpClientManager {
       await client.discover(cliConfig);
     } catch (error) {
       // Log the error but don't throw: callers expect best-effort discovery.
+      //
+      // PR 14 design intent (wenshao R2 P3 line 390): this catch
+      // INTENTIONALLY does NOT release the budget slot or remove the
+      // client entry. Rationale: the operator declared this server in
+      // `mcpServers` config — that IS the budget-slot intent. A
+      // failed connect leaves the client in `DISCONNECTED` state so
+      // the health monitor (started in `finally` below) and the next
+      // `discoverAllMcpToolsIncremental` pass can retry without
+      // needing to re-reserve. Releasing here would race with
+      // health-monitor reconnect AND let a transient connect failure
+      // permanently demote the server to "no slot". The bulk path
+      // `discoverAllMcpTools` releases on catch because `stop()`
+      // owns its lifecycle — different contract, see comment there.
       debugLogger.error(
         `Error during discovery for server '${serverName}': ${getErrorMessage(
           error,
@@ -1142,6 +1195,19 @@ export class McpClientManager {
     // CONNECTED client (`client !== undefined` branch).
     let weReservedSlot = false;
     if (!client) {
+      // PR 14 invariant (wenshao R2 P3 line 501): the lookup→
+      // disabled-check→budget-reserve→client-create sequence below
+      // runs synchronously — no `await` until `client.connect()`.
+      // `cliConfig.getMcpServers()` returns the current Map snapshot,
+      // and `cliConfig` is mutated only between discovery passes (via
+      // settings reload) or via `removeServer` (which releases its
+      // own slot). So the TOCTOU window between `serverConfig`
+      // lookup and `tryReserveSlot` is closed by Node's single-
+      // threaded execution model. If the manager ever grows an
+      // `await`-containing branch in this section, wrap from line
+      // below through `clients.set` in `try { ... } catch {
+      // this.reservedSlots.delete(serverName); throw; }` to close
+      // a real race.
       const servers = populateMcpServerCommand(
         this.cliConfig.getMcpServers() || {},
         this.cliConfig.getMcpServerCommand(),
@@ -1149,6 +1215,18 @@ export class McpClientManager {
       const serverConfig = servers[serverName];
       if (!serverConfig) {
         throw new Error(`MCP server '${serverName}' is not configured.`);
+      }
+
+      // PR 14 fix (review #4247 wenshao R2-#5): the lazy-spawn path
+      // previously bypassed `isMcpServerDisabled`. A server the
+      // operator disabled via `mcpServers.<name>.disabled: true` or
+      // `/mcp disable <name>` could be resurrected by any resource
+      // read call. Now matches the disabled-check pattern in
+      // `discoverAllMcpTools` and `discoverAllMcpToolsIncremental`.
+      // Placed BEFORE the budget gate so a disabled server reports
+      // its actual reason rather than a misleading budget refusal.
+      if (this.cliConfig.isMcpServerDisabled(serverName)) {
+        throw new Error(`MCP server '${serverName}' is disabled.`);
       }
 
       // Budget gate (PR 14): a lazy `readResource` against a server

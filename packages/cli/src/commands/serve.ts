@@ -12,6 +12,7 @@ import type { Argv, CommandModule } from 'yargs';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
+import { MCP_BUDGET_WARN_FRACTION } from '@qwen-code/qwen-code-core';
 
 /**
  * Pause the current async function indefinitely. Used after the daemon
@@ -197,7 +198,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           (resolvedMcpMode === 'enforce'
             ? ' (servers past the cap will be refused at discovery)'
             : resolvedMcpMode === 'warn'
-              ? ` (warnings at >=${Math.ceil(mcpClientBudget * 0.75)}, no refusal)`
+              ? ` (warnings at >=${Math.ceil(mcpClientBudget * MCP_BUDGET_WARN_FRACTION)}, no refusal)`
               : ''),
       );
     }
