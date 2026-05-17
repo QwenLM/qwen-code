@@ -10,6 +10,7 @@ import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
 import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
+import { classifyRetryError } from './retryErrorClassification.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
@@ -233,6 +234,10 @@ export async function retryWithBackoff<T>(
         );
       }
 
+      // Classification is diagnostic-only in this PR; retry control still
+      // follows shouldRetryOnError and the persistent retry policy below.
+      const retryClassification = classifyRetryError(error, { authType });
+
       // Determine if this error qualifies for persistent retry.
       // Persistent mode still respects shouldRetryOnError — callers can force
       // fast-fail even for transient errors if they explicitly return false.
@@ -274,6 +279,7 @@ export async function retryWithBackoff<T>(
         debugLogger.warn(
           `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
             `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
+          retryClassification,
           error,
         );
 
@@ -298,6 +304,7 @@ export async function retryWithBackoff<T>(
         if (retryAfterMs !== null && retryAfterMs > 0) {
           debugLogger.warn(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
+            retryClassification,
             error,
           );
           // Normal HTTP retries intentionally preserve provider-directed
@@ -307,7 +314,7 @@ export async function retryWithBackoff<T>(
           await delay(retryAfterMs, signal);
           currentDelay = initialDelayMs;
         } else {
-          logRetryAttempt(attempt, error, errorStatus);
+          logRetryAttempt(attempt, error, retryClassification, errorStatus);
           const delayMs = getRetryDelayMs({
             attempt: 1,
             initialDelayMs: currentDelay,
@@ -334,6 +341,7 @@ export async function retryWithBackoff<T>(
 function logRetryAttempt(
   attempt: number,
   error: unknown,
+  retryClassification: ReturnType<typeof classifyRetryError>,
   errorStatus?: number,
 ): void {
   const message = errorStatus
@@ -341,10 +349,10 @@ function logRetryAttempt(
     : `Attempt ${attempt} failed. Retrying with backoff...`;
 
   if (errorStatus === 429) {
-    debugLogger.warn(message, error);
+    debugLogger.warn(message, retryClassification, error);
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    debugLogger.error(message, error);
+    debugLogger.error(message, retryClassification, error);
   } else {
-    debugLogger.warn(message, error);
+    debugLogger.warn(message, retryClassification, error);
   }
 }

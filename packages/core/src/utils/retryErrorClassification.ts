@@ -1,0 +1,264 @@
+/**
+ * @license
+ * Copyright 2025 Google LLC
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { AuthType } from '../core/contentGenerator.js';
+import { isAbortError } from './errors.js';
+import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
+import { getRateLimitErrorDetails, isRateLimitError } from './rateLimit.js';
+
+export type RetryErrorKind =
+  | 'http'
+  | 'sse-provider'
+  | 'provider'
+  | 'transport'
+  | 'abort'
+  | 'provider-business'
+  | 'unknown';
+
+export type RetryErrorDiagnosis =
+  | 'retryable'
+  | 'fail-fast'
+  | 'fallback-eligible'
+  | 'unknown';
+
+export interface RetryErrorClassificationContext {
+  authType?: AuthType | string;
+}
+
+export interface RetryErrorClassification {
+  kind: RetryErrorKind;
+  diagnosis: RetryErrorDiagnosis;
+  reason: string;
+  statusCode?: number;
+  providerCode?: string;
+  providerMessage?: string;
+  requestId?: string;
+  transportCode?: string;
+}
+
+/**
+ * Classifies retry-related failures for diagnostics.
+ *
+ * The result is intentionally conservative: it labels the observed error shape
+ * without performing or driving retry control.
+ */
+export function classifyRetryError(
+  error: unknown,
+  context: RetryErrorClassificationContext = {},
+): RetryErrorClassification {
+  if (isRetryAbortError(error)) {
+    return {
+      kind: 'abort',
+      diagnosis: 'fail-fast',
+      reason: 'aborted',
+    };
+  }
+
+  const details = getRateLimitErrorDetails(error);
+  const statusCode = details.statusCode;
+  const providerFields = getProviderFields(error);
+  const providerCode = details.providerCode ?? providerFields.providerCode;
+  const providerMessage =
+    details.providerMessage ?? providerFields.providerMessage;
+  const requestId = details.requestId ?? providerFields.requestId;
+  const common = {
+    ...(statusCode !== undefined ? { statusCode } : {}),
+    ...(providerCode !== undefined ? { providerCode } : {}),
+    ...(providerMessage !== undefined ? { providerMessage } : {}),
+    ...(requestId !== undefined ? { requestId } : {}),
+  };
+
+  if (
+    context.authType === AuthType.QWEN_OAUTH &&
+    isQwenQuotaExceededError(error)
+  ) {
+    return {
+      kind: 'provider-business',
+      diagnosis: 'fail-fast',
+      reason: 'qwen-oauth-free-tier-quota',
+      ...common,
+    };
+  }
+
+  if (isAllocatedQuotaExceeded(providerCode)) {
+    return {
+      kind: 'provider-business',
+      diagnosis: 'fail-fast',
+      reason: 'allocated-quota-exceeded',
+      ...common,
+    };
+  }
+
+  if (isRateLimitError(error)) {
+    const kind: RetryErrorKind =
+      details.transport === 'sse'
+        ? 'sse-provider'
+        : statusCode !== undefined
+          ? 'http'
+          : 'provider';
+    return {
+      kind,
+      diagnosis: 'retryable',
+      reason: 'rate-limit',
+      ...common,
+    };
+  }
+
+  if (statusCode !== undefined) {
+    const kind: RetryErrorKind =
+      details.transport === 'sse' ? 'sse-provider' : 'http';
+
+    if (statusCode === 529) {
+      return {
+        kind,
+        diagnosis: 'fallback-eligible',
+        reason: 'capacity-overload',
+        ...common,
+      };
+    }
+
+    if (statusCode === 401 || statusCode === 403) {
+      return {
+        kind,
+        diagnosis: 'fail-fast',
+        reason: 'auth-error',
+        ...common,
+      };
+    }
+
+    if (statusCode >= 400 && statusCode < 500) {
+      return {
+        kind,
+        diagnosis: 'fail-fast',
+        reason: 'client-error',
+        ...common,
+      };
+    }
+
+    if (statusCode >= 500 && statusCode < 600) {
+      return {
+        kind,
+        diagnosis: 'retryable',
+        reason: 'server-error',
+        ...common,
+      };
+    }
+
+    return {
+      kind,
+      diagnosis: 'unknown',
+      reason: 'http-status',
+      ...common,
+    };
+  }
+
+  const transportCode = getTransportCode(error);
+  if (transportCode !== undefined) {
+    return {
+      kind: 'transport',
+      diagnosis: 'retryable',
+      reason: 'transport-error',
+      transportCode,
+    };
+  }
+
+  return {
+    kind: 'unknown',
+    diagnosis: 'unknown',
+    reason: 'unclassified',
+    ...common,
+  };
+}
+
+function isRetryAbortError(error: unknown): boolean {
+  if (isAbortError(error)) {
+    return true;
+  }
+
+  return error instanceof Error && error.name === 'CanceledError';
+}
+
+function getTransportCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+
+  const directCode = (error as { code?: unknown }).code;
+  if (typeof directCode === 'string' && isTransportCode(directCode)) {
+    return directCode;
+  }
+
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (typeof cause === 'object' && cause !== null) {
+    const causeCode = (cause as { code?: unknown }).code;
+    if (typeof causeCode === 'string' && isTransportCode(causeCode)) {
+      return causeCode;
+    }
+  }
+
+  return undefined;
+}
+
+function isTransportCode(code: string): boolean {
+  return TRANSPORT_ERROR_CODES.has(code);
+}
+
+const TRANSPORT_ERROR_CODES = new Set([
+  'EAI_AGAIN',
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'EPIPE',
+  'ETIMEDOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+function isAllocatedQuotaExceeded(providerCode?: string): boolean {
+  return providerCode === 'Throttling.AllocationQuota';
+}
+
+interface ProviderFields {
+  providerCode?: string;
+  providerMessage?: string;
+  requestId?: string;
+}
+
+function getProviderFields(error: unknown): ProviderFields {
+  if (typeof error !== 'object' || error === null) {
+    return {};
+  }
+
+  if (error instanceof Error) {
+    return {};
+  }
+
+  const source = error as {
+    code?: unknown;
+    message?: unknown;
+    request_id?: unknown;
+    requestId?: unknown;
+  };
+
+  return {
+    ...(typeof source.code === 'string' || typeof source.code === 'number'
+      ? { providerCode: String(source.code) }
+      : {}),
+    ...(typeof source.message === 'string'
+      ? { providerMessage: source.message }
+      : {}),
+    ...(typeof source.request_id === 'string'
+      ? { requestId: source.request_id }
+      : typeof source.requestId === 'string'
+        ? { requestId: source.requestId }
+        : {}),
+  };
+}

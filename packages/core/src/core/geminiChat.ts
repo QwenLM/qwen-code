@@ -28,6 +28,7 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
+import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
@@ -791,50 +792,63 @@ export class GeminiChat {
             // from the pipeline, containing the throttling message in the content.
             // Covers TPM throttling, GLM rate limits, and other provider throttling.
             const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
-            if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
-              rateLimitRetryCount++;
-              const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
-                ...RATE_LIMIT_RETRY_OPTIONS,
-                error,
-              });
-              const message = parseAndFormatApiError(
-                error instanceof Error ? error.message : String(error),
-              );
+            if (isRateLimit) {
               const details = getRateLimitErrorDetails(error);
-              debugLogger.warn('Rate limit retry scheduled', {
-                retryPath: 'stream',
-                retryDecision: 'retry',
-                attempt: rateLimitRetryCount,
-                maxRetries: maxRateLimitRetries,
-                retryDelayMs: delayMs,
-                ...details,
+              const classification = classifyRetryError(error, {
+                authType: cgConfig?.authType,
               });
-              const { promise: delayPromise, skip } = delay(
-                delayMs,
-                params.config?.abortSignal,
-              );
-              yield {
-                type: StreamEventType.RETRY,
-                retryInfo: {
-                  message,
+              // The classifier is observation-only here; stream retry control
+              // remains governed by isRateLimitError and the retry budget.
+              const diagnosticFields = {
+                classificationDiagnosis: classification.diagnosis,
+                errorKind: classification.kind,
+                classificationReason: classification.reason,
+                ...details,
+              };
+
+              if (rateLimitRetryCount < maxRateLimitRetries) {
+                rateLimitRetryCount++;
+                const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+                  ...RATE_LIMIT_RETRY_OPTIONS,
+                  error,
+                });
+                const message = parseAndFormatApiError(
+                  error instanceof Error ? error.message : String(error),
+                );
+                debugLogger.warn('Rate limit retry scheduled', {
+                  retryPath: 'stream',
+                  retryDecision: 'retry',
                   attempt: rateLimitRetryCount,
                   maxRetries: maxRateLimitRetries,
+                  retryDelayMs: delayMs,
+                  ...diagnosticFields,
+                });
+                const { promise: delayPromise, skip } = delay(
                   delayMs,
-                  skipDelay: skip,
-                },
-              };
-              // Don't count rate-limit retries against the content retry limit
-              attempt--;
-              await delayPromise;
-              continue;
-            }
-            if (isRateLimit) {
+                  params.config?.abortSignal,
+                );
+                yield {
+                  type: StreamEventType.RETRY,
+                  retryInfo: {
+                    message,
+                    attempt: rateLimitRetryCount,
+                    maxRetries: maxRateLimitRetries,
+                    delayMs,
+                    skipDelay: skip,
+                  },
+                };
+                // Don't count rate-limit retries against the content retry limit
+                attempt--;
+                await delayPromise;
+                continue;
+              }
+
               debugLogger.warn('Rate limit retry exhausted', {
                 retryPath: 'stream',
                 retryDecision: 'exhausted',
                 attempts: rateLimitRetryCount,
                 maxRetries: maxRateLimitRetries,
-                ...getRateLimitErrorDetails(error),
+                ...diagnosticFields,
               });
             }
 
