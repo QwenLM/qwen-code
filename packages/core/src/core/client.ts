@@ -104,6 +104,7 @@ import {
 } from '../confirmation-bus/types.js';
 import { partToString } from '../utils/partUtils.js';
 import { createHookOutput, SessionStartSource } from '../hooks/types.js';
+import fsPromises from 'node:fs/promises';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
@@ -1206,18 +1207,51 @@ export class GeminiClient {
           this.config.getClearContextOnIdle(),
         );
         if (mcResult.meta) {
-          this.getChat().setHistory(mcResult.history);
-          // Microcompaction replaces old compactable tool outputs
-          // (including read_file) with a placeholder, but the
-          // FileReadCache still records the prior full Reads as "seen in
-          // this conversation". A follow-up Read of an unchanged file
-          // would then return the file_unchanged placeholder pointing at
-          // bytes the model can no longer retrieve from history. Drop the
-          // cache so post-microcompaction Reads re-emit the bytes,
-          // mirroring the post-compaction clear in tryCompressChat.
-          debugLogger.debug('[FILE_READ_CACHE] clear after microcompaction');
-          this.config.getFileReadCache().clear();
           const m = mcResult.meta;
+          this.getChat().setHistory(mcResult.history);
+          // Disarm only the blanked files' fast-path, keeping
+          // read-before-write state intact (issue #4239; rationale on
+          // FileReadEntry.readResidentInHistory). Any blanked read we
+          // can't disarm surgically forces the old blanket wipe so a
+          // later Read can't get a dangling file_unchanged placeholder.
+          const fileReadCache = this.config.getFileReadCache();
+          if (m.unresolvedEvictedReads > 0) {
+            debugLogger.debug(
+              `[FILE_READ_CACHE] clear after microcompaction ` +
+                `(${m.unresolvedEvictedReads} unresolved blanked read(s))`,
+            );
+            fileReadCache.clear();
+          } else {
+            // Concurrent stats — don't serialize N FS round-trips
+            // before the next turn.
+            const statResults = await Promise.all(
+              m.evictedReadPaths.map((p) =>
+                fsPromises.stat(p).catch(() => undefined),
+              ),
+            );
+            // A path is surgically disarmed only if it stats AND its
+            // inode matches the recorded entry. A failed stat or inode
+            // miss could leave a stale entry armed, so fall back to the
+            // blanket wipe if any path is unresolvable.
+            let fullyDisarmed = true;
+            for (const stats of statResults) {
+              if (!stats || !fileReadCache.markReadEvictedFromHistory(stats)) {
+                fullyDisarmed = false;
+              }
+            }
+            if (fullyDisarmed) {
+              debugLogger.debug(
+                `[FILE_READ_CACHE] disarmed fast-path for ` +
+                  `${m.evictedReadPaths.length} file(s) after microcompaction`,
+              );
+            } else {
+              debugLogger.debug(
+                '[FILE_READ_CACHE] clear after microcompaction ' +
+                  '(an evicted path was unresolvable)',
+              );
+              fileReadCache.clear();
+            }
+          }
           debugLogger.debug(
             `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
               `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +

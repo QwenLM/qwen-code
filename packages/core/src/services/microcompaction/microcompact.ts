@@ -23,6 +23,46 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.WRITE_FILE,
 ]);
 
+/**
+ * Tools whose blanked output drops a file's bytes from history. We
+ * report their path so the caller can disarm just that file's
+ * fast-path (issue #4239) instead of wiping the whole cache. All three
+ * take the target as a `file_path` arg.
+ */
+const FILE_PATH_TOOLS = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.EDIT,
+  ToolNames.WRITE_FILE,
+]);
+
+/**
+ * Build a `callId → file_path` map for every file-tool call. The path
+ * lives on the request-side `functionCall.args`, not on the
+ * `functionResponse` microcompaction blanks, so this is the only way
+ * to recover which file a cleared result referred to. Calls missing an
+ * id or file_path are absent (the caller treats that as unresolvable).
+ */
+function buildCallIdToFilePath(history: Content[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const content of history) {
+    // functionCall parts are always model-role; skip user/system turns
+    // (mirrors collectCompactablePartRefs' role short-circuit).
+    if (content.role !== 'model' || !content.parts) continue;
+    for (const part of content.parts) {
+      const call = part.functionCall;
+      if (!call?.id || !call.name || !FILE_PATH_TOOLS.has(call.name)) {
+        continue;
+      }
+      const filePath = (call.args as { file_path?: unknown } | undefined)
+        ?.file_path;
+      if (typeof filePath === 'string' && filePath.length > 0) {
+        map.set(call.id, filePath);
+      }
+    }
+  }
+  return map;
+}
+
 // --- Trigger evaluation ---
 
 /**
@@ -200,6 +240,15 @@ export interface MicrocompactMeta {
   mediaKept: number;
   keepRecent: number;
   tokensSaved: number;
+  /** Recovered paths of files whose read/edit/write result was blanked; the caller disarms their fast-path (issue #4239). */
+  evictedReadPaths: string[];
+  /**
+   * Count of blanked file results whose path could NOT be recovered
+   * (e.g. provider didn't populate `functionCall.id`). Non-zero means
+   * the caller MUST fall back to the blanket wipe — an unrecovered
+   * armed entry would serve a dangling placeholder.
+   */
+  unresolvedEvictedReads: number;
 }
 
 /**
@@ -261,6 +310,10 @@ export function microcompactHistory(
     parts.set(ref.partIndex, ref.kind);
   }
 
+  const callIdToFilePath = buildCallIdToFilePath(history);
+  const evictedReadPaths = new Set<string>();
+  let unresolvedEvictedReads = 0;
+
   let tokensSaved = 0;
   let toolsCleared = 0;
   let mediaCleared = 0;
@@ -284,6 +337,19 @@ export function microcompactHistory(
         tokensSaved += estimatePartTokens(part);
         toolsCleared++;
         touched = true;
+        // Record the blanked file's path so the caller disarms its
+        // fast-path; if unrecoverable, count it so the caller falls
+        // back to the blanket wipe (issue #4239).
+        if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
+          const filePath = part.functionResponse.id
+            ? callIdToFilePath.get(part.functionResponse.id)
+            : undefined;
+          if (filePath) {
+            evictedReadPaths.add(filePath);
+          } else {
+            unresolvedEvictedReads++;
+          }
+        }
         return {
           functionResponse: {
             ...stripNestedMedia(part.functionResponse),
@@ -346,6 +412,8 @@ export function microcompactHistory(
       mediaKept,
       keepRecent,
       tokensSaved,
+      evictedReadPaths: [...evictedReadPaths],
+      unresolvedEvictedReads,
     },
   };
 }
