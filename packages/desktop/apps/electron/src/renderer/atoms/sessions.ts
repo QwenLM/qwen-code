@@ -87,6 +87,10 @@ type SessionOrderFields = {
   createdAt?: number
 }
 
+type SessionFlagFields = {
+  isFlagged?: boolean
+}
+
 export function getSessionOrderTime(session: SessionOrderFields): number {
   return session.lastMessageAt ?? session.lastUsedAt ?? session.createdAt ?? 0
 }
@@ -99,6 +103,28 @@ export function compareSessionsByActivityDesc(a: SessionOrderFields, b: SessionO
   if (byCreatedAt !== 0) return byCreatedAt
 
   return a.id.localeCompare(b.id)
+}
+
+export function compareSessionsByFlaggedThenActivityDesc<T extends SessionOrderFields & SessionFlagFields>(a: T, b: T): number {
+  const byFlagged = Number(Boolean(b.isFlagged)) - Number(Boolean(a.isFlagged))
+  if (byFlagged !== 0) return byFlagged
+
+  return compareSessionsByActivityDesc(a, b)
+}
+
+export function prioritizeFlaggedSessions<T extends SessionFlagFields>(sessions: T[]): T[] {
+  const flagged: T[] = []
+  const unflagged: T[] = []
+
+  for (const session of sessions) {
+    if (session.isFlagged) {
+      flagged.push(session)
+    } else {
+      unflagged.push(session)
+    }
+  }
+
+  return [...flagged, ...unflagged]
 }
 
 export function mergeStableSessionMetaList(previous: SessionMeta[] | undefined, incoming: SessionMeta[]): SessionMeta[] {
@@ -259,7 +285,7 @@ export function getWorkspaceSessionMetas(
     .filter(session => !orderedIds.has(session.id))
     .sort(compareSessionsByActivityDesc)
 
-  return [...ordered, ...missingOrderedSessions]
+  return prioritizeFlaggedSessions([...ordered, ...missingOrderedSessions])
 }
 
 function workspaceStateFromMetas(

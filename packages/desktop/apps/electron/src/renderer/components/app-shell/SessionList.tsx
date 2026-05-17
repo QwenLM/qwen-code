@@ -27,7 +27,7 @@ import { useFocusZone } from "@/hooks/keyboard"
 import { useEscapeInterrupt } from "@/context/EscapeInterruptContext"
 import { useNavigation, useNavigationState, routes, isSessionsNavigation } from "@/contexts/NavigationContext"
 import { useFocusContext } from "@/context/FocusContext"
-import { compareSessionsByActivityDesc, getSessionOrderTime, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
+import { compareSessionsByFlaggedThenActivityDesc, getSessionOrderTime, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import type { ViewConfig } from "@craft-agent/shared/views"
 import type { SessionStatusId, SessionStatus } from "@/config/session-status-config"
 import { buildCollapsedGroupsScopeSuffix } from "@/utils/session-list-collapse"
@@ -317,7 +317,7 @@ export function SessionList({
       for (const [key, { rows: groupRows, statusId }] of groupsByKey) {
         const state = sessionStatuses.find(s => s.id === statusId)
         if (!state) continue
-        groupRows.sort((a, b) => compareSessionsByActivityDesc(a.item, b.item))
+        groupRows.sort((a, b) => compareSessionsByFlaggedThenActivityDesc(a.item, b.item))
         const collapsedMeta = collapsedGroupsMeta.find(m => m.key === key)
         orderedGroups.push({
           key,

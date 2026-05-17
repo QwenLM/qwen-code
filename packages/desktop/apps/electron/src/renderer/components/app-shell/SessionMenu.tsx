@@ -54,7 +54,7 @@ import { MessagingSessionMenuItem } from '@/components/messaging/MessagingSessio
 export interface SessionMenuProps {
   /** Session data — display state is derived from this */
   item: SessionMeta
-  /** Hide metadata actions for context menus while keeping other menu entrypoints intact. */
+  /** Hide heavier metadata entrypoints for context menus while keeping core actions intact. */
   hideMetadataActions?: boolean
   /** Available todo states */
   sessionStatuses: SessionStatus[]
@@ -261,18 +261,16 @@ export function SessionMenu({
       )}
 
       {/* Flag/Unflag */}
-      {!hideMetadataActions && (
-        !isFlagged ? (
-          <MenuItem onClick={onFlag}>
-            <Flag className="h-3.5 w-3.5 text-info" />
-            <span className="flex-1">{t("sessionMenu.flag")}</span>
-          </MenuItem>
-        ) : (
-          <MenuItem onClick={onUnflag}>
-            <FlagOff className="h-3.5 w-3.5" />
-            <span className="flex-1">{t("sessionMenu.unflag")}</span>
-          </MenuItem>
-        )
+      {!isFlagged ? (
+        <MenuItem onClick={onFlag}>
+          <Flag className="h-3.5 w-3.5 text-info" />
+          <span className="flex-1">{t("sessionMenu.flag")}</span>
+        </MenuItem>
+      ) : (
+        <MenuItem onClick={onUnflag}>
+          <FlagOff className="h-3.5 w-3.5" />
+          <span className="flex-1">{t("sessionMenu.unflag")}</span>
+        </MenuItem>
       )}
 
       {/* Archive/Unarchive */}
@@ -289,7 +287,7 @@ export function SessionMenu({
       )}
 
       {/* Mark as Unread - only show if session has been read */}
-      {!hideMetadataActions && !_hasUnread && _hasMessages && (
+      {!_hasUnread && _hasMessages && (
         <MenuItem onClick={onMarkUnread}>
           <MailOpen className="h-3.5 w-3.5" />
           <span className="flex-1">{t("sessionMenu.markAsUnread")}</span>

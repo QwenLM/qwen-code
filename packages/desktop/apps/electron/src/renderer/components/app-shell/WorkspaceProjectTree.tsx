@@ -4,12 +4,12 @@ import { formatDistanceToNowStrict } from "date-fns"
 import type { Locale } from "date-fns"
 import { AnimatePresence } from "motion/react"
 import { useSetAtom } from "jotai"
-import { ChevronDown, ChevronRight, Cloud, ExternalLink, Folder, FolderPlus, MessageSquare, Pencil, Pin, PinOff, Trash2 } from "lucide-react"
+import { ChevronDown, ChevronRight, Cloud, ExternalLink, Flag, Folder, FolderPlus, MessageSquare, Pencil, Pin, PinOff, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { cn } from "@/lib/utils"
 import { fullscreenOverlayOpenAtom } from "@/atoms/overlay"
-import { sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
+import { prioritizeFlaggedSessions, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import type { Workspace } from "../../../shared/types"
 import type { ViewRoute } from "../../../shared/routes"
 import { CrossfadeAvatar } from "@/components/ui/avatar"
@@ -139,7 +139,7 @@ function WorkspaceHeader({
           "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
           isActive && "text-foreground",
           !isActive && "text-foreground/62",
-          isProtected && "cursor-pointer active:cursor-pointer",
+          (isProtected || isConversation) && "cursor-default active:cursor-default",
         )}
       >
         {isCollapsed ? (
@@ -293,12 +293,17 @@ function ProjectSessionRow({
       type="button"
       onClick={onSelect}
       className={cn(
-        "group/session ml-7 mr-2 grid h-8 min-w-0 grid-cols-[minmax(0,1fr)_2.5rem_0.375rem] items-center gap-2 rounded-[6px] px-2 text-left transition-colors",
+        "group/session relative ml-7 mr-2 grid h-8 min-w-0 grid-cols-[minmax(0,1fr)_2.5rem_0.375rem] items-center gap-2 rounded-[6px] px-2 text-left transition-colors",
         "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
         isSelected ? "bg-foreground/[0.055] text-foreground" : "text-foreground/78",
       )}
       data-session-id={session.id}
     >
+      {session.isFlagged && (
+        <span className="pointer-events-none absolute left-[-1.15rem] top-1/2 flex h-4 w-4 -translate-y-1/2 items-center justify-center">
+          <Flag className="h-3 w-3 text-info" />
+        </span>
+      )}
       <span className="flex min-w-0 items-center gap-1.5">
         {session.isProcessing && <Spinner className="text-[10px] text-muted-foreground" />}
         <span className={cn(
@@ -697,7 +702,7 @@ export function WorkspaceProjectTree({
     const conversationWorkspace = isConversationWorkspace(workspace)
     const isCollapsed = collapsedWorkspaceIds.has(workspace.id)
     const isSessionListExpanded = expandedWorkspaceSessionIds.has(workspace.id)
-    const sessions = [...(workspaceSessions.get(workspace.id) ?? [])]
+    const sessions = prioritizeFlaggedSessions([...(workspaceSessions.get(workspace.id) ?? [])])
       .filter(session => !session.hidden && !session.isArchived)
     const isLoadingSessions = loadingWorkspaceSessionIds?.has(workspace.id) ?? false
     const visibleSessions = isSessionListExpanded ? sessions : sessions.slice(0, PROJECT_SESSION_PREVIEW_LIMIT)
