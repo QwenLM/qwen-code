@@ -97,24 +97,6 @@ describe('getRetryDelayMs', () => {
     ).toBe(300_000);
   });
 
-  it('should prefer Retry-After for HTTP request retry policy', () => {
-    const error = Object.assign(new Error('Too many requests'), {
-      status: 429,
-      headers: { 'retry-after': '180' },
-    });
-
-    expect(
-      getRetryDelayMs({
-        attempt: 3,
-        initialDelayMs: 60_000,
-        maxDelayMs: 300_000,
-        retryAfterMode: 'prefer',
-        retryAfterMaxDelayMs: 300_000,
-        error,
-      }),
-    ).toBe(180_000);
-  });
-
   it('should not apply jitter when Retry-After is honored', () => {
     const error = Object.assign(new Error('Too many requests'), {
       status: 429,
@@ -126,7 +108,7 @@ describe('getRetryDelayMs', () => {
         attempt: 1,
         initialDelayMs: 60_000,
         maxDelayMs: 300_000,
-        retryAfterMode: 'prefer',
+        retryAfterMode: 'minimum',
         retryAfterMaxDelayMs: 300_000,
         jitterRatio: 0.3,
         random: () => 1,

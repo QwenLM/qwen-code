@@ -300,6 +300,10 @@ export async function retryWithBackoff<T>(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
             error,
           );
+          // Normal HTTP retries intentionally preserve provider-directed
+          // Retry-After waits instead of clamping to the exponential
+          // maxDelayMs. The wait remains abort-aware so cancelled requests do
+          // not stay parked for the full provider delay.
           await delay(retryAfterMs, signal);
           currentDelay = initialDelayMs;
         } else {
