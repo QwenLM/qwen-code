@@ -1696,7 +1696,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // owned by the foreground stream, which by promote-time has
         // already terminated.
         //
-        // PR-2.5 wave-4 (gpt-5.5 T4): strip ANSI before writing so
+        // PR-2.5 wave-4: strip ANSI before writing so
         // the post-promote tail of `bg_xxx.output` matches the format
         // of the snapshot above (which is rendered terminal text, not
         // raw escape sequences) AND matches the regular
@@ -2248,7 +2248,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let outputStream: fs.WriteStream | null = null;
     try {
       outputStream = fs.createWriteStream(outputPath, { flags: 'w' });
-      // PR-2.5 wave-2 (gpt-5.5 C1): `createWriteStream` reports common
+      // PR-2.5 wave-2: `createWriteStream` reports common
       // failures (ENOENT / EACCES / ENOSPC during the async libuv
       // `open`) via an `'error'` event AFTER this synchronous call
       // returns — they do NOT throw. Without latching the failure
@@ -2282,7 +2282,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Initial snapshot first, so it always precedes post-promote
       // bytes in the file (write ordering is FIFO on a single stream).
       outputStream.write(result.output);
-      // PR-2.5 wave-4 (gpt-5.5 T2): assign the stream BEFORE draining
+      // PR-2.5 wave-4: assign the stream BEFORE draining
       // the buffer, not after. The drain + assign block is synchronous
       // today (single-tick JS, so a service-side `onData` callback
       // cannot fire between drain-end and assign), but the assign-
@@ -2316,7 +2316,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // (the drain path only runs when `stream` becomes non-null,
       // which never happens after this branch).
       promoteArtifacts.streamFailed = true;
-      // PR-2.5 wave-3 (deepseek-v4-pro T3): record how many pre-
+      // PR-2.5 wave-3: record how many pre-
       // finalizer post-promote chunks are being dropped. Without
       // this an oncall engineer reading a truncated `bg_xxx.output`
       // has no signal that the truncation is due to stream-open
@@ -2496,7 +2496,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     //   the right terminal status even if the registry transition is
     //   still in flight.
     //
-    // PR-2.5 wave-2 (gpt-5.5 C3): originally the model-facing copy
+    // PR-2.5 wave-2: originally the model-facing copy
     // checked a `postPromoteAlreadySettled` flag that was only flipped
     // AFTER the registry transition fired (post-flush). A fast-exited
     // promoted command could therefore land "Status: running" +
@@ -2526,7 +2526,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           status: 'failed',
           failMsg: `Terminated by signal ${info.signal}`,
         };
-      // PR-2.5 wave-3 (deepseek-v4-pro T5): this branch is meant to
+      // PR-2.5 wave-3: this branch is meant to
       // be unreachable — the service always populates one of
       // `error` / `exitCode` / `signal`. Hitting it means the
       // service emitted a defective settle info object, which is a
@@ -2568,7 +2568,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // `completed`/`failed` and read the output file BEFORE the
       // trailing bytes are on disk, producing truncated logs.
       const stream = promoteArtifacts.stream;
-      // PR-2.5 wave-3 (deepseek-v4-pro T2): drain the pre-settle
+      // PR-2.5 wave-3: drain the pre-settle
       // buffer to the stream BEFORE nulling the shared slot. Service-
       // side `onData` callbacks that race the foreground finalizer
       // can land chunks in the buffer between when the wire fires

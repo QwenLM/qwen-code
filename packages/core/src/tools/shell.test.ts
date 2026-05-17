@@ -4441,6 +4441,108 @@ describe('ShellTool', () => {
         );
       });
 
+      it('stream open async error writes diagnostic marker via appendFileSync', async () => {
+        const errorListeners: Array<(err: Error) => void> = [];
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn((event: string, handler: (err: Error) => void) => {
+            if (event === 'error') errorListeners.push(handler);
+          }),
+          once: vi.fn(),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 99998,
+        });
+        await promise;
+
+        errorListeners[0](
+          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
+        );
+
+        expect(fs.appendFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('bg_'),
+          expect.stringContaining('[WARNING: post-promote output lost'),
+        );
+      });
+
+      it('flush timeout transitions registry when stream.finish never fires', async () => {
+        vi.useFakeTimers();
+        try {
+          const writeStreamMock = {
+            write: vi.fn(),
+            end: vi.fn(),
+            on: vi.fn(),
+            once: vi.fn(),
+          };
+          vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+            writeStreamMock as unknown as fs.WriteStream,
+          );
+          const registry = mockConfig.getBackgroundShellRegistry();
+
+          const invocation = shellTool.build({
+            command: 'sleep 1',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 99997,
+          });
+          await promise;
+
+          const serviceCall = mockShellExecutionService.mock.calls[0];
+          const onSettle = (
+            serviceCall[6] as {
+              postPromote: {
+                onSettle: (info: {
+                  exitCode: number | null;
+                  signal: number | null;
+                  error?: Error;
+                  endTime: number;
+                }) => void;
+              };
+            }
+          ).postPromote.onSettle;
+
+          onSettle({ exitCode: 0, signal: null, endTime: 1700000222222 });
+
+          // stream.once('finish') was NOT fired — registry should
+          // NOT have transitioned yet.
+          expect(registry.complete).not.toHaveBeenCalled();
+
+          // Advance past the 10s flush timeout.
+          vi.advanceTimersByTime(10_001);
+
+          const entry = (registry.register as Mock).mock.calls[0][0];
+          expect(registry.complete).toHaveBeenCalledWith(
+            entry.shellId,
+            0,
+            1700000222222,
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamFailed so post-end chunks drop instead of leaking the buffer', async () => {
         // Regression for the buffer-drain race: previously
         // `onSettleWired` set `promoteArtifacts.stream = null` BEFORE

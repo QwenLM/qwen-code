@@ -775,7 +775,7 @@ export class ShellExecutionService {
           // settle the registry entry on natural child exit. When
           // postPromote is undefined we fall back to the PR-2 detach-
           // everything contract: no listeners re-attach.
-          // PR-2.5 wave-4 (gpt-5.5 T5): preserve the detected encoding
+          // PR-2.5 wave-4: preserve the detected encoding
           // from the foreground decoders so a non-UTF-8 child (e.g.
           // GBK on a Chinese Windows shell) doesn't snapshot correctly
           // and then mojibake the post-promote tail. The foreground
@@ -798,7 +798,7 @@ export class ShellExecutionService {
           // child has fully closed so any trailing multibyte bytes
           // surface instead of being silently dropped.
           //
-          // PR-2.5 wave-4 (gpt-5.5 T3): allocate decoders whenever
+          // PR-2.5 wave-4: allocate decoders whenever
           // `onData` is set (not gated on close-handler installation),
           // because the close handler now ALWAYS installs when any
           // postPromote handler is present (T6 + T7) and needs to
@@ -846,7 +846,7 @@ export class ShellExecutionService {
               );
             }
           } else if (postPromote) {
-            // PR-2.5 wave-4 (gpt-5.5 T7): caller asked for `onSettle`
+            // PR-2.5 wave-4: caller asked for `onSettle`
             // (or any other future postPromote handler) without
             // `onData`. The foreground stdout/stderr listeners were
             // detached above; without ANY data listener the Readable
@@ -865,14 +865,14 @@ export class ShellExecutionService {
               );
             }
           }
-          // PR-2.5 wave-4 (gpt-5.5 T1): single-fire latch shared by
+          // PR-2.5 wave-4: single-fire latch shared by
           // 'close' and 'error' (both branches funnel through here).
           // Without it the child_process path could fire onSettle
           // twice — once from `error`, then again from the `close`
           // that immediately follows — violating the exactly-once
           // settle contract and racing the caller's `transitionRegistry`.
           //
-          // PR-2.5 wave-4 (gpt-5.5 T3): the helper also performs the
+          // PR-2.5 wave-4: the helper also performs the
           // decoder flush so any caller with `onData` set gets the
           // trailing multibyte bytes surfaced — independent of
           // whether `onSettle` is also set.
@@ -919,7 +919,7 @@ export class ShellExecutionService {
               );
             }
           };
-          // PR-2.5 wave-4 (gpt-5.5 T6 + T7): install 'close' and
+          // PR-2.5 wave-4: install 'close' and
           // 'error' listeners whenever ANY postPromote handler is
           // present, not just when `onSettle` is set. Two reasons:
           //
@@ -1514,7 +1514,7 @@ export class ShellExecutionService {
           // improvement; without this they'd be dropped on the way to
           // the snapshot anyway.
           //
-          // PR-2.5 wave-3 (deepseek-v4-pro T6): capture the IDisposable
+          // PR-2.5 wave-3: capture the IDisposable
           // returned by `onData` / `onExit` and the listener function
           // we register on `'error'`, then dispose them all when
           // settle fires. node-pty's `ptyProcess` outlives the
@@ -1607,7 +1607,7 @@ export class ShellExecutionService {
               );
             }
           }
-          if (postPromote?.onSettle) {
+          if (postPromote) {
             try {
               postPromoteExitDisposable = ptyProcess.onExit(
                 ({
@@ -1629,8 +1629,6 @@ export class ShellExecutionService {
                 `re-attaching post-promote exit listener threw: ${e instanceof Error ? e.message : String(e)}`,
               );
             }
-          }
-          if (postPromote) {
             try {
               postPromoteErrorListener = (err: NodeJS.ErrnoException) => {
                 if (isExpectedPtyReadExitError(err)) {
