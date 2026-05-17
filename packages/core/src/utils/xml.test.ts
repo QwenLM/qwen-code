@@ -70,6 +70,19 @@ describe('xml utils', () => {
       expect(escapeSystemReminderTags(input)).toBe(input);
     });
 
+    it('still detects a closing tag preceded by a stray "<"', () => {
+      expect(escapeSystemReminderTags('foo < </system-reminder>')).toBe(
+        'foo < <\\/system-reminder>',
+      );
+    });
+
+    it('handles adversarial whitespace/"<" runs without catastrophic backtracking', () => {
+      const input = `<${'\t'.repeat(50000)}${'<'.repeat(50000)}`;
+      const start = Date.now();
+      expect(escapeSystemReminderTags(input)).toBe(input);
+      expect(Date.now() - start).toBeLessThan(1000);
+    });
+
     it('does not rewrite large HTML/JSX content that lacks system-reminder tags', () => {
       const repeated =
         '<section><Component prop="value">content</Component></section>';

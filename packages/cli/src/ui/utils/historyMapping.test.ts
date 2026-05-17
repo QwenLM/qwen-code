@@ -8,7 +8,10 @@ import { describe, it, expect } from 'vitest';
 import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
-import { SYSTEM_REMINDER_OPEN } from '@qwen-code/qwen-code-core';
+import {
+  SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
+} from '@qwen-code/qwen-code-core';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,7 +37,9 @@ function functionResponseContent(): Content {
 }
 
 function startupEntry(): Content {
-  return userContent(`${SYSTEM_REMINDER_OPEN}\nEnvironment context...`);
+  return userContent(
+    `${SYSTEM_REMINDER_OPEN}\nEnvironment context...\n${SYSTEM_REMINDER_CLOSE}`,
+  );
 }
 
 function userItem(id: number, text = `prompt ${id}`): HistoryItem {

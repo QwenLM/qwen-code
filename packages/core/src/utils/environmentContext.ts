@@ -15,7 +15,7 @@ import { getFolderStructure } from './getFolderStructure.js';
 import { escapeSystemReminderTags } from './xml.js';
 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
-const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
+export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
 
 /**

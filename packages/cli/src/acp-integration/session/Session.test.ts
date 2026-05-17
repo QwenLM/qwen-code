@@ -15,6 +15,7 @@ import {
   ApprovalMode,
   AuthType,
   SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
 import * as core from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
@@ -253,7 +254,11 @@ describe('Session', () => {
       const history: Content[] = [
         {
           role: 'user',
-          parts: [{ text: `${SYSTEM_REMINDER_OPEN}\nstartup context` }],
+          parts: [
+            {
+              text: `${SYSTEM_REMINDER_OPEN}\nstartup context\n${SYSTEM_REMINDER_CLOSE}`,
+            },
+          ],
         },
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },

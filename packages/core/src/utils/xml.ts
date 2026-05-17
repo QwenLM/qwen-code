@@ -28,7 +28,15 @@ export function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
-const XML_TAG_CANDIDATE_RE = /<[^>]*>/g;
+// Excludes '<' from the tag body so a run of '<' characters cannot trigger
+// quadratic re-scanning (js/polynomial-redos). This also tightens detection:
+// `foo < </system-reminder>` now yields the real `</system-reminder>`
+// candidate instead of being swallowed by a non-matching `< ...>` span.
+const XML_TAG_CANDIDATE_RE = /<[^<>]*>/g;
+
+function isXmlWhitespace(char: string | undefined): boolean {
+  return char !== undefined && /\s/.test(char);
+}
 
 function isSystemReminderTagIgnorable(char: string): boolean {
   const codePoint = char.codePointAt(0);
@@ -62,13 +70,49 @@ function getSystemReminderTagKind(
   // Zero-width obfuscated variants would bypass a literal substring check,
   // which is exactly the injection vector normalization is designed to catch.
   const normalized = normalizeSystemReminderCandidateTag(tag);
-  const match = /^<\s*(\/?)\s*system-reminder(?:\s+[^>]*)?\s*(\/?)\s*>$/.exec(
-    normalized,
-  );
-  if (!match) {
+
+  // Linear, backtracking-free reimplementation of the former matcher
+  // /^<\s*(\/?)\s*system-reminder(?:\s+[^>]*)?\s*(\/?)\s*>$/. The regex form
+  // had adjacent ambiguous whitespace quantifiers and was flagged as a
+  // polynomial ReDoS (js/polynomial-redos) since it runs on untrusted,
+  // model-facing content of unbounded length.
+  const len = normalized.length;
+  if (len < 2 || normalized[0] !== '<' || normalized[len - 1] !== '>') {
     return undefined;
   }
-  return match[1] ? 'closing' : 'other';
+
+  let i = 1;
+  while (i < len && isXmlWhitespace(normalized[i])) i++;
+
+  let closing = false;
+  if (normalized[i] === '/') {
+    closing = true;
+    i++;
+  }
+  while (i < len && isXmlWhitespace(normalized[i])) i++;
+
+  const TAG_NAME = 'system-reminder';
+  if (normalized.slice(i, i + TAG_NAME.length) !== TAG_NAME) {
+    return undefined;
+  }
+  i += TAG_NAME.length;
+
+  // Optional attribute span: original `(?:\s+[^>]*)?`. The candidate tag was
+  // produced by /<[^<>]*>/, so `normalized` (minus the final '>') contains no
+  // '>'; consuming to the terminator is a single linear scan.
+  if (i < len - 1 && isXmlWhitespace(normalized[i])) {
+    while (i < len && isXmlWhitespace(normalized[i])) i++;
+    while (i < len && normalized[i] !== '>') i++;
+  }
+
+  while (i < len && isXmlWhitespace(normalized[i])) i++;
+  if (normalized[i] === '/') i++;
+  while (i < len && isXmlWhitespace(normalized[i])) i++;
+
+  if (i !== len - 1 || normalized[i] !== '>') {
+    return undefined;
+  }
+  return closing ? 'closing' : 'other';
 }
 
 function escapeSystemReminderTag(tag: string): string {
