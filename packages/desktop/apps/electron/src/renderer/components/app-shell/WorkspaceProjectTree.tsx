@@ -42,6 +42,7 @@ interface WorkspaceProjectTreeProps {
   workspaceSessions: Map<string, SessionMeta[]>
   loadingWorkspaceSessionIds?: Set<string>
   workspaceUnreadMap?: Record<string, boolean>
+  revealRequest?: WorkspaceSessionRevealRequest | null
   onSelectWorkspace: (workspaceId: string, openInNewWindow?: boolean, options?: { route?: ViewRoute; suppressSessionListLoading?: boolean }) => void | Promise<void>
   onSelectSession: (workspaceId: string, sessionId: string) => void | Promise<void>
   onNewSession: (workspaceId: string) => void | Promise<void>
@@ -58,6 +59,12 @@ interface WorkspaceProjectTreeProps {
   onSessionStatusChange: (sessionId: string, state: SessionStatusId) => void
   onRenameSession: (sessionId: string, name: string) => void
   onSessionLabelsChange?: (sessionId: string, labels: string[]) => void
+}
+
+interface WorkspaceSessionRevealRequest {
+  workspaceId: string
+  sessionId: string
+  nonce: number
 }
 
 interface ProjectSessionMenuConfig {
@@ -352,6 +359,7 @@ export function WorkspaceProjectTree({
   selectedSessionId,
   workspaceSessions,
   loadingWorkspaceSessionIds,
+  revealRequest,
   onSelectWorkspace,
   onSelectSession,
   onNewSession,
@@ -597,6 +605,29 @@ export function WorkspaceProjectTree({
       return next
     })
   }, [])
+
+  React.useEffect(() => {
+    if (!revealRequest) return
+
+    setCollapsedWorkspaceIds(prev => {
+      if (!prev.has(revealRequest.workspaceId)) return prev
+      const next = new Set(prev)
+      next.delete(revealRequest.workspaceId)
+      return next
+    })
+
+    const sessions = [...(workspaceSessions.get(revealRequest.workspaceId) ?? [])]
+      .filter(session => !session.hidden && !session.isArchived)
+    const sessionIndex = sessions.findIndex(session => session.id === revealRequest.sessionId)
+    if (sessionIndex >= PROJECT_SESSION_PREVIEW_LIMIT) {
+      setExpandedWorkspaceSessionIds(prev => {
+        if (prev.has(revealRequest.workspaceId)) return prev
+        const next = new Set(prev)
+        next.add(revealRequest.workspaceId)
+        return next
+      })
+    }
+  }, [revealRequest, workspaceSessions])
 
   const handleWorkspaceGroupReorder = React.useCallback((group: "pinned" | "unpinned", reorderedGroup: Workspace[]) => {
     const pinnedIds = pinnedWorkspaces.map(workspace => workspace.id)

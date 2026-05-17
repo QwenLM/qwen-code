@@ -83,6 +83,7 @@ import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSourc
 import { PERMISSION_MODE_ORDER } from '@craft-agent/shared/agent/mode-types'
 import {
   areSessionMetaListsEquivalent,
+  compareSessionsByActivityDesc,
   getWorkspaceSessionMetas,
   mergeStableSessionMetaList,
   sessionMetaMapAtom,
@@ -126,7 +127,7 @@ import { SkillsListPanel } from "./SkillsListPanel"
 import { AutomationsListPanel } from "../automations/AutomationsListPanel"
 import { APP_EVENTS, AGENT_EVENTS, type AutomationFilterKind, AUTOMATION_TYPE_TO_FILTER_KIND } from "../automations/types"
 import { useAutomations } from "@/hooks/useAutomations"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogTrigger } from "@/components/ui/dialog"
 import { PanelHeader } from "./PanelHeader"
 import { SendToWorkspaceDialog } from "./SendToWorkspaceDialog"
 import { MessagingDialogHost } from "@/components/messaging/MessagingDialogHost"
@@ -147,6 +148,7 @@ import { getNextPermissionMode } from "@/lib/permission-mode-cycle"
 import { clearSourceIconCaches } from "@/lib/icon-cache"
 import { dispatchFocusInputEvent } from "./input/focus-input-events"
 import { resolveEffectiveConnectionSlug } from "@config/llm-connections"
+import { getWorkspaceDisplayName } from "@/utils/workspace"
 
 /**
  * AppShellProps - Minimal props interface for AppShell component
@@ -172,6 +174,193 @@ interface AppShellProps {
   isSessionListLoading?: boolean
   /** Reports when the project tree's cross-workspace session snapshots are ready. */
   onProjectSessionSnapshotsReadyChange?: (ready: boolean) => void
+}
+
+interface ProjectSessionRevealRequest {
+  workspaceId: string
+  sessionId: string
+  nonce: number
+}
+
+interface SessionSearchResult {
+  session: SessionMeta
+  workspace: Workspace
+  workspaceName: string
+}
+
+function SidebarSessionSearch({
+  workspaces,
+  workspaceSessions,
+  activeWorkspaceId,
+  selectedSessionId,
+  onSelectSession,
+  onRevealSession,
+}: {
+  workspaces: Workspace[]
+  workspaceSessions: Map<string, SessionMeta[]>
+  activeWorkspaceId: string | null
+  selectedSessionId?: string | null
+  onSelectSession: (workspaceId: string, sessionId: string) => void | Promise<void>
+  onRevealSession: (workspaceId: string, sessionId: string) => void
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = React.useState(false)
+  const [query, setQuery] = React.useState("")
+  const inputRef = React.useRef<HTMLInputElement>(null)
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  const workspacesById = React.useMemo(
+    () => new Map(workspaces.map(workspace => [workspace.id, workspace])),
+    [workspaces],
+  )
+
+  const results = React.useMemo<SessionSearchResult[]>(() => {
+    const matches: SessionSearchResult[] = []
+
+    for (const [workspaceId, sessions] of workspaceSessions) {
+      const workspace = workspacesById.get(workspaceId)
+      if (!workspace) continue
+
+      const workspaceName = getWorkspaceDisplayName(workspace, t)
+      for (const session of sessions) {
+        if (session.hidden || session.isArchived) continue
+        const title = getSessionTitle(session)
+        if (
+          normalizedQuery &&
+          !title.toLocaleLowerCase().includes(normalizedQuery)
+        ) {
+          continue
+        }
+
+        matches.push({ session, workspace, workspaceName })
+      }
+    }
+
+    return matches
+      .sort((a, b) => compareSessionsByActivityDesc(a.session, b.session))
+      .slice(0, 12)
+  }, [normalizedQuery, t, workspaceSessions, workspacesById])
+
+  React.useEffect(() => {
+    if (!open) return
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }, [open])
+
+  const handleOpenChange = React.useCallback((nextOpen: boolean) => {
+    setOpen(nextOpen)
+    if (!nextOpen) setQuery("")
+  }, [])
+
+  const handleSelectResult = React.useCallback((result: SessionSearchResult) => {
+    onRevealSession(result.workspace.id, result.session.id)
+    setOpen(false)
+    setQuery("")
+    void onSelectSession(result.workspace.id, result.session.id)
+  }, [onRevealSession, onSelectSession])
+
+  return (
+    <Dialog open={open} onOpenChange={handleOpenChange}>
+      <DialogTrigger asChild>
+        <button
+          type="button"
+          className={cn(
+            "group flex w-full items-center gap-2 rounded-[6px] px-2 py-[5px]",
+            "text-[13px] font-normal select-none outline-none titlebar-no-drag",
+            "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover",
+            "focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring",
+          )}
+        >
+          <Search
+            className="h-3.5 w-3.5 shrink-0"
+            style={{
+              color: 'color-mix(in oklch, var(--foreground) 60%, transparent)',
+            }}
+          />
+          <span className="min-w-0 flex-1 truncate text-left">
+            {t("sidebar.search")}
+          </span>
+        </button>
+      </DialogTrigger>
+      <DialogContent
+        showCloseButton={false}
+        overlayClassName="bg-black/25"
+        className={cn(
+          "titlebar-no-drag w-[440px] max-w-[calc(100vw-32px)] overflow-hidden p-0 gap-0",
+          "border border-foreground/10 bg-popover/92 text-popover-foreground shadow-modal-small backdrop-blur-xl",
+        )}
+        onOpenAutoFocus={(event) => {
+          event.preventDefault()
+          inputRef.current?.focus()
+        }}
+      >
+        <DialogTitle className="sr-only">
+          {t("sidebar.search")}
+        </DialogTitle>
+        <div className="border-b border-foreground/8 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <input
+              ref={inputRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t("session.searchSessionsPlaceholder")}
+              className="h-7 min-w-0 flex-1 bg-transparent text-[14px] font-medium text-foreground outline-none placeholder:text-muted-foreground"
+            />
+          </div>
+        </div>
+        <div className="px-2 py-2">
+          <div className="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground/70">
+            {normalizedQuery
+              ? t("session.results", { count: results.length })
+              : t("session.recentSessions")}
+          </div>
+          <div className="max-h-[360px] overflow-y-auto pr-1">
+            {results.length > 0 ? (
+              <div className="grid gap-0.5">
+                {results.map((result) => {
+                  const title = getSessionTitle(result.session)
+                  const isActive =
+                    result.workspace.id === activeWorkspaceId &&
+                    result.session.id === selectedSessionId
+
+                  return (
+                    <button
+                      type="button"
+                      key={`${result.workspace.id}:${result.session.id}`}
+                      onClick={() => handleSelectResult(result)}
+                      className={cn(
+                        "grid h-9 min-w-0 grid-cols-[1rem_minmax(0,1fr)_auto] items-center gap-2 rounded-[7px] px-2 text-left",
+                        "text-[13px] text-foreground/86 transition-colors hover:bg-foreground/[0.055]",
+                        "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                        isActive && "bg-foreground/[0.07] text-foreground",
+                      )}
+                    >
+                      <span
+                        aria-hidden="true"
+                        className={cn(
+                          "h-2.5 w-2.5 rounded-full border border-foreground/35",
+                          result.session.isProcessing && "border-accent/80 bg-accent/20",
+                        )}
+                      />
+                      <span className="min-w-0 truncate font-medium">
+                        {title}
+                      </span>
+                      <span className="min-w-0 max-w-[8rem] truncate text-[12px] text-muted-foreground">
+                        {result.workspaceName}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="flex h-24 items-center justify-center rounded-[8px] text-[13px] font-medium text-muted-foreground">
+                {t("session.noSessionsFound")}
+              </div>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 /** Filter mode for tri-state filtering: include shows only matching, exclude hides matching */
@@ -1523,6 +1712,16 @@ function AppShellContent({
     }
     return next
   }, [projectDraftTargetWorkspaceId, workspaceSessionSnapshotLoadingIds])
+  const [projectSessionRevealRequest, setProjectSessionRevealRequest] =
+    React.useState<ProjectSessionRevealRequest | null>(null)
+
+  const handleRevealProjectSession = useCallback((workspaceId: string, sessionId: string) => {
+    setProjectSessionRevealRequest({
+      workspaceId,
+      sessionId,
+      nonce: Date.now(),
+    })
+  }, [])
 
   // Active sessions exclude archived - use this for all counts and filters except archived view
   const activeSessionMetas = useMemo(() => {
@@ -2351,7 +2550,7 @@ function AppShellContent({
               {/* Sidebar Top Section */}
               <div className="flex-1 flex flex-col min-h-0">
                 {/* New Session Button - matches sidebar rows, with context menu for "Open in New Window" */}
-                <div className="px-2 pb-0 shrink-0">
+                <div className="px-2 pb-0 shrink-0 grid gap-0.5">
                   <ContextMenu modal={true}>
                     <ContextMenuTrigger asChild>
                       <button
@@ -2392,10 +2591,19 @@ function AppShellContent({
                       </ContextMenuProvider>
                     </StyledContextMenuContent>
                   </ContextMenu>
+                  <SidebarSessionSearch
+                    workspaces={workspaces}
+                    workspaceSessions={projectTreeWorkspaceSessions}
+                    activeWorkspaceId={activeWorkspaceId}
+                    selectedSessionId={effectiveSessionId}
+                    onSelectSession={handleSelectProjectSession}
+                    onRevealSession={handleRevealProjectSession}
+                  />
                 </div>
-                <div className="shrink-0 border-b border-foreground/5 py-2">
+                <div className="shrink-0 border-b border-foreground/5 pt-0 pb-2">
                   <LeftSidebar
                     isCollapsed={false}
+                    className="py-0 mt-0.5"
                     getItemProps={getSidebarItemProps}
                     focusedItemId={focusedSidebarItemId}
                     links={[
@@ -2472,6 +2680,7 @@ function AppShellContent({
                   workspaceSessions={projectTreeWorkspaceSessions}
                   loadingWorkspaceSessionIds={projectTreeLoadingWorkspaceSessionIds}
                   workspaceUnreadMap={workspaceUnreadMap}
+                  revealRequest={projectSessionRevealRequest}
                   onSelectWorkspace={onSelectWorkspace}
                   onSelectSession={handleSelectProjectSession}
                   onNewSession={handleNewProjectSession}
