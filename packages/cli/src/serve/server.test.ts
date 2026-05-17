@@ -35,6 +35,8 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
+  type BridgeHeartbeatResult,
+  type BridgeHeartbeatState,
   type BridgeRestoredSession,
   type BridgeClientRequestContext,
   type BridgeRestoreSessionRequest,
@@ -75,6 +77,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'typed_event_schema',
   'session_set_model',
   'client_identity',
+  'client_heartbeat',
   'session_permission_vote',
   'permission_vote',
 ] as const;
@@ -119,6 +122,11 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  heartbeatImpl?: (
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ) => BridgeHeartbeatResult;
+  heartbeatStateImpl?: (sessionId: string) => BridgeHeartbeatState | undefined;
 }
 
 interface FakeBridge extends HttpAcpBridge {
@@ -158,6 +166,11 @@ interface FakeBridge extends HttpAcpBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  heartbeatCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  heartbeatStateCalls: string[];
   shutdownCalls: number;
 }
 
@@ -176,6 +189,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
+  const heartbeatStateCalls: string[] = [];
   let shutdownCalls = 0;
   const spawnImpl =
     opts.spawnImpl ??
@@ -210,6 +225,21 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
   const listImpl = opts.listImpl ?? (() => []);
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const heartbeatImpl =
+    opts.heartbeatImpl ??
+    ((sessionId, context) => ({
+      sessionId,
+      ...(context?.clientId !== undefined
+        ? { clientId: context.clientId }
+        : {}),
+      lastSeenAt: 1_700_000_000_000,
+    }));
+  const heartbeatStateImpl =
+    opts.heartbeatStateImpl ??
+    (() => ({
+      sessionLastSeenAt: 1_700_000_000_000,
+      clientLastSeenAt: new Map<string, number>(),
+    }));
   return {
     calls,
     loadCalls,
@@ -222,6 +252,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionPermissionVotes,
     listCalls,
     setModelCalls,
+    heartbeatCalls,
+    heartbeatStateCalls,
     get shutdownCalls() {
       return shutdownCalls;
     },
@@ -297,6 +329,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    recordHeartbeat(sessionId, context) {
+      heartbeatCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return heartbeatImpl(sessionId, context);
+    },
+    getHeartbeatState(sessionId) {
+      heartbeatStateCalls.push(sessionId);
+      return heartbeatStateImpl(sessionId);
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
@@ -1628,6 +1671,99 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, { bridge });
       const res = await request(app)
         .post('/session/missing/cancel')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/heartbeat', () => {
+    it('200 with the bridge result and forwards the routing id', async () => {
+      const bridge = fakeBridge({
+        heartbeatImpl: (sessionId) => ({
+          sessionId,
+          lastSeenAt: 1_700_000_000_001,
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/heartbeat')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        lastSeenAt: 1_700_000_000_001,
+      });
+      expect(bridge.heartbeatCalls).toEqual([{ sessionId: 'session-A' }]);
+    });
+
+    it('forwards X-Qwen-Client-Id into the bridge context and echoes it back', async () => {
+      const bridge = fakeBridge({
+        heartbeatImpl: (sessionId, context) => ({
+          sessionId,
+          ...(context?.clientId !== undefined
+            ? { clientId: context.clientId }
+            : {}),
+          lastSeenAt: 1_700_000_000_002,
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/heartbeat')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-1');
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        clientId: 'client-1',
+        lastSeenAt: 1_700_000_000_002,
+      });
+      expect(bridge.heartbeatCalls).toEqual([
+        { sessionId: 'session-A', context: { clientId: 'client-1' } },
+      ]);
+    });
+
+    it('400 invalid_client_id when the header is malformed', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/heartbeat')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'bad client id');
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'invalid_client_id' });
+      expect(bridge.heartbeatCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_client_id when the bridge rejects an unknown client', async () => {
+      const bridge = fakeBridge({
+        heartbeatImpl: (sessionId, context) => {
+          throw new InvalidClientIdError(sessionId, context!.clientId!);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/heartbeat')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'client-unknown');
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        sessionId: 'session-A',
+        clientId: 'client-unknown',
+      });
+    });
+
+    it('404 when the bridge reports an unknown session', async () => {
+      const bridge = fakeBridge({
+        heartbeatImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/missing/heartbeat')
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');

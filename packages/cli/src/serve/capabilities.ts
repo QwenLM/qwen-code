@@ -43,6 +43,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   typed_event_schema: { since: 'v1' },
   session_set_model: { since: 'v1' },
   client_identity: { since: 'v1' },
+  client_heartbeat: { since: 'v1' },
   session_permission_vote: { since: 'v1' },
   permission_vote: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;

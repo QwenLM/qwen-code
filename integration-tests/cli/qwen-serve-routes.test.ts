@@ -201,6 +201,7 @@ describe('qwen serve — capabilities envelope', () => {
       'typed_event_schema',
       'session_set_model',
       'client_identity',
+      'client_heartbeat',
       'session_permission_vote',
       'permission_vote',
     ]);
