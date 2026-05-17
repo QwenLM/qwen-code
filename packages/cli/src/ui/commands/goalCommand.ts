@@ -52,17 +52,29 @@ const goalInstructionPrompt = (condition: string): string =>
 
 const formatTurns = (n: number) => `${n} ${n === 1 ? 'turn' : 'turns'}`;
 
+function assertNeverGoalKind(kind: never): never {
+  throw new Error(`Unexpected terminal goal kind: ${kind}`);
+}
+
+function terminalGoalTitle(kind: GoalTerminalEvent['kind']): string {
+  switch (kind) {
+    case 'achieved':
+      return 'Goal achieved';
+    case 'failed':
+      return 'Goal could not be achieved';
+    case 'aborted':
+      return 'Goal aborted';
+    default:
+      return assertNeverGoalKind(kind);
+  }
+}
+
 function formatTerminalSummary(event: GoalTerminalEvent): string {
   // Mirrors GoalStatusMessage: empty-`/goal` after completion surfaces the
   // most recent terminal event, including the judge's `lastReason` (when
   // present) so this view matches the inline terminal
   // history card.
-  const title =
-    event.kind === 'achieved'
-      ? 'Goal achieved'
-      : event.kind === 'failed'
-        ? 'Goal could not be achieved'
-        : 'Goal aborted';
+  const title = terminalGoalTitle(event.kind);
   const stats: string[] = [];
   if (event.iterations > 0) stats.push(formatTurns(event.iterations));
   if (typeof event.durationMs === 'number')

@@ -39,8 +39,9 @@ export const GOAL_HOOK_TIMEOUT_SECONDS = 30;
 export const GOAL_HOOK_TIMEOUT_MS = GOAL_HOOK_TIMEOUT_SECONDS * 1000;
 /**
  * Minimum /goal iteration count before accepting an `impossible` judge verdict.
- * This gives the model at least one continuation turn after the first
- * evaluation, reducing premature failure from a single bad-judgment turn.
+ * Gives the model at least one continuation turn after the judge first flags
+ * impossibility, reducing premature failure from a single bad-judgment turn.
+ * The goal can terminate as failed on the second impossible verdict.
  */
 export const MIN_IMPOSSIBLE_GOAL_ITERATIONS = 2;
 
@@ -194,6 +195,10 @@ export function createGoalStopHookCallback(args: {
       verdict.impossible &&
       latest.iterations >= MIN_IMPOSSIBLE_GOAL_ITERATIONS
     ) {
+      debugLogger.debug('Goal judge ruled impossible; clearing goal.', {
+        reason: verdict.reason,
+        iterations: latest.iterations,
+      });
       finishGoal(config, sessionId, latest, {
         kind: 'failed',
         condition: latest.condition,
@@ -232,6 +237,10 @@ export function createGoalStopHookCallback(args: {
     }
 
     recordGoalIteration(sessionId, verdict.reason);
+    // Keep the judge's free-form diagnostic in goal state/UI only. The Stop
+    // hook reason is fed back to the model as the next continuation prompt, so
+    // it must be fixed text derived from the original goal rather than
+    // untrusted transcript-derived judge text.
     return {
       decision: 'block',
       reason: continuationReasonForGoal(condition),

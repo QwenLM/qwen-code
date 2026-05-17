@@ -51,6 +51,11 @@ const userJudgementPrompt = (condition: string): string =>
 export interface JudgeResult {
   ok: boolean;
   reason: string;
+  /**
+   * Whether the goal is genuinely impossible in this session.
+   * Only meaningful when `ok` is false. If `ok` is true, this field is always
+   * absent from the parsed verdict.
+   */
   impossible?: boolean;
 }
 
@@ -68,11 +73,16 @@ type SchemaCoversJudgeResult =
     ? true
     : never;
 
-export const JUDGE_RESULT_SCHEMA_COVERS_INTERFACE: SchemaCoversJudgeResult = true;
+// Compile-time only: fails if JudgeResult grows a key that the response schema
+// key list does not include.
+const JUDGE_RESULT_SCHEMA_COVERS_INTERFACE: SchemaCoversJudgeResult = true;
+void JUDGE_RESULT_SCHEMA_COVERS_INTERFACE;
 
 const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
   // Schema typing in @google/genai uses an enum-like Type, but accepts the
   // lower-cased literals at runtime for the upstream JSON-schema payload.
+  // `additionalProperties` is also accepted by the API but absent from the SDK
+  // type, so we keep the local intersection explicit.
   type: 'OBJECT' as unknown as Schema['type'],
   properties: {
     ok: { type: 'BOOLEAN' as unknown as Schema['type'] },

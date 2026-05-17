@@ -13,8 +13,12 @@ import {
   type GoalTerminalEvent,
   type GoalTerminalKind,
 } from '@qwen-code/qwen-code-core';
-import type { HistoryItem, HistoryItemGoalStatus } from '../types.js';
-import { MessageType } from '../types.js';
+import {
+  isTerminalGoalStatusKind,
+  MessageType,
+  type HistoryItem,
+  type HistoryItemGoalStatus,
+} from '../types.js';
 
 /**
  * Finds the most recent `goal_status` history item. Returns the active
@@ -49,12 +53,7 @@ export function findLastTerminalGoal(
     const item = history[i];
     if (item?.type !== MessageType.GOAL_STATUS) continue;
     const goal = item as HistoryItemGoalStatus;
-    if (
-      goal.kind !== 'achieved' &&
-      goal.kind !== 'aborted' &&
-      goal.kind !== 'failed'
-    )
-      continue;
+    if (!isTerminalGoalStatusKind(goal.kind)) continue;
     return {
       kind: goal.kind as GoalTerminalKind,
       condition: goal.condition,

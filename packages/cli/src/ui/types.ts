@@ -509,6 +509,20 @@ export type GoalStatusKind =
   | 'aborted'
   | 'checking';
 
+export const TERMINAL_GOAL_STATUS_KINDS = [
+  'achieved',
+  'aborted',
+  'failed',
+] as const satisfies readonly GoalStatusKind[];
+
+export function isTerminalGoalStatusKind(
+  kind: GoalStatusKind,
+): kind is (typeof TERMINAL_GOAL_STATUS_KINDS)[number] {
+  return TERMINAL_GOAL_STATUS_KINDS.includes(
+    kind as (typeof TERMINAL_GOAL_STATUS_KINDS)[number],
+  );
+}
+
 export type HistoryItemGoalStatus = HistoryItemBase & {
   type: 'goal_status';
   kind: GoalStatusKind;

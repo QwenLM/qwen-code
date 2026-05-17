@@ -8,7 +8,7 @@ import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration } from '../../utils/formatters.js';
-import type { GoalStatusKind } from '../../types.js';
+import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
 interface GoalStatusMessageProps {
   kind: GoalStatusKind;
@@ -19,6 +19,10 @@ interface GoalStatusMessageProps {
 }
 
 const pluralTurns = (n: number) => (n === 1 ? 'turn' : 'turns');
+
+function assertNeverGoalStatusKind(kind: never): never {
+  throw new Error(`Unexpected goal status kind: ${kind}`);
+}
 
 export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
   kind,
@@ -88,12 +92,13 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
           title: 'Goal could not be achieved',
         };
       case 'aborted':
-      default:
         return {
           prefix: '!',
           prefixColor: theme.status.warning,
           title: 'Goal aborted',
         };
+      default:
+        return assertNeverGoalStatusKind(kind);
     }
   })();
 
@@ -143,8 +148,7 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
             flex-row variant hangs the continuation at the value column's
             left edge (≈12 cols of empty space, easily mistaken for a blank
             line). One Text + natural wrap keeps the continuation flush. */}
-        {(kind === 'achieved' || kind === 'aborted' || kind === 'failed') &&
-        lastReason?.trim() ? (
+        {isTerminalGoalStatusKind(kind) && lastReason?.trim() ? (
           <Text color={theme.text.secondary} wrap="wrap">
             Last check: {lastReason.trim()}
           </Text>
