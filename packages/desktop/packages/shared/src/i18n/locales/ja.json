@@ -251,6 +251,7 @@
   "chatInput.placeholder.typeMessage": "メッセージを入力...",
   "chatInput.placeholder.workOn": "何に取り組みますか？",
   "commands.searchCommands": "コマンドを検索...",
+  "commands.title": "コマンド",
   "common.back": "戻る",
   "common.backToList": "リストに戻る",
   "common.browse": "参照",

@@ -44,6 +44,7 @@ export interface SlashFolderItem {
 export interface SlashSection {
   id: string
   label: string
+  labelKey?: string
   items: (SlashCommand | SlashFolderItem)[]
 }
 
@@ -195,19 +196,14 @@ export function createQwenSlashSections({
     })
   }
 
+  const qwenItems = [...commandItems, ...skillItems]
   const sections: SlashSection[] = []
-  if (commandItems.length > 0) {
+  if (qwenItems.length > 0) {
     sections.push({
       id: 'qwen-commands',
-      label: 'Qwen Code',
-      items: commandItems,
-    })
-  }
-  if (skillItems.length > 0) {
-    sections.push({
-      id: 'qwen-skills',
-      label: 'Skills',
-      items: skillItems,
+      label: 'Commands',
+      labelKey: 'commands.title',
+      items: qwenItems,
     })
   }
 
@@ -474,6 +470,7 @@ export function InlineSlashCommand({
   position,
   className,
 }: InlineSlashCommandProps) {
+  const { t } = useTranslation()
   const menuRef = React.useRef<HTMLDivElement>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
   const [selectedIndex, setSelectedIndex] = React.useState(0)
@@ -583,7 +580,7 @@ export function InlineSlashCommand({
           <React.Fragment key={section.id}>
             {/* Section header */}
             <div className={MENU_SECTION_HEADER}>
-              {section.label}
+              {section.labelKey ? t(section.labelKey) : section.label}
             </div>
 
             {/* Section items */}
@@ -674,6 +671,52 @@ function getFolderName(path: string): string {
   return path.split('/').pop() || path
 }
 
+export function createInlineSlashSections({
+  availableCommands = EMPTY_AVAILABLE_COMMANDS,
+  availableSkills = EMPTY_AVAILABLE_SKILLS,
+  enableQwenCommands = false,
+  recentFolders = EMPTY_RECENT_FOLDERS,
+  homeDir,
+}: {
+  availableCommands?: AvailableSlashCommand[]
+  availableSkills?: string[]
+  enableQwenCommands?: boolean
+  recentFolders?: string[]
+  homeDir?: string
+}): SlashSection[] {
+  const result: SlashSection[] = []
+
+  result.push(...createQwenSlashSections({
+    availableCommands,
+    availableSkills,
+    enabled: enableQwenCommands,
+  }))
+
+  // Recent folders section - sorted alphabetically by folder name, show all
+  if (recentFolders.length > 0) {
+    const sortedFolders = [...recentFolders]
+      .sort((a, b) => {
+        const nameA = getFolderName(a).toLowerCase()
+        const nameB = getFolderName(b).toLowerCase()
+        return nameA.localeCompare(nameB)
+      })
+
+    result.push({
+      id: 'folders',
+      label: 'Recent Working Directories',
+      items: sortedFolders.map(path => ({
+        id: path,
+        type: 'folder' as const,
+        label: getFolderName(path),
+        description: formatPathForDisplay(path, homeDir),
+        path,
+      })),
+    })
+  }
+
+  return result
+}
+
 export interface UseInlineSlashCommandOptions {
   /** Ref to input element (textarea or RichTextInput handle) */
   inputRef: React.RefObject<SlashCommandInputElement | null>
@@ -740,51 +783,13 @@ export function useInlineSlashCommand({
 
   // Build sections from commands and folders
   const sections = React.useMemo((): SlashSection[] => {
-    const result: SlashSection[] = []
-
-    result.push(...createQwenSlashSections({
+    return createInlineSlashSections({
       availableCommands,
       availableSkills,
-      enabled: enableQwenCommands,
-    }))
-
-    // Modes section
-    result.push({
-      id: 'modes',
-      label: 'Modes',
-      items: permissionModeCommands,
+      enableQwenCommands,
+      recentFolders,
+      homeDir,
     })
-
-    // Commands section
-    result.push({
-      id: 'commands',
-      label: 'Commands',
-      items: [compactCommand],
-    })
-
-    // Recent folders section - sorted alphabetically by folder name, show all
-    if (recentFolders.length > 0) {
-      const sortedFolders = [...recentFolders]
-        .sort((a, b) => {
-          const nameA = getFolderName(a).toLowerCase()
-          const nameB = getFolderName(b).toLowerCase()
-          return nameA.localeCompare(nameB)
-        })
-
-      result.push({
-        id: 'folders',
-        label: 'Recent Working Directories',
-        items: sortedFolders.map(path => ({
-          id: path,
-          type: 'folder' as const,
-          label: getFolderName(path),
-          description: formatPathForDisplay(path, homeDir),
-          path,
-        })),
-      })
-    }
-
-    return result
   }, [availableCommands, availableSkills, enableQwenCommands, recentFolders, homeDir])
 
   const handleInputChange = React.useCallback((value: string, cursorPosition: number) => {
