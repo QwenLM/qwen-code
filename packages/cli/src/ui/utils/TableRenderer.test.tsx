@@ -4,13 +4,40 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import stringWidth from 'string-width';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
+import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<TableRenderer />', () => {
+  // Force OSC 8 detection off for every test in this file so cell rendering
+  // is deterministic regardless of the developer's terminal. Without this,
+  // running the suite from iTerm2 / WezTerm / Kitty leaks escape bytes into
+  // table output and any future strict assertion would flake.
+  const savedEnv = { ...process.env };
+  const savedIsTTY = process.stdout.isTTY;
+
+  beforeEach(() => {
+    process.env = { ...savedEnv };
+    for (const key of HYPERLINK_ENV_KEYS) {
+      delete process.env[key];
+    }
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = { ...savedEnv };
+    Object.defineProperty(process.stdout, 'isTTY', {
+      configurable: true,
+      value: savedIsTTY,
+    });
+  });
+
   const renderTable = (
     headers: string[],
     rows: string[][],
@@ -41,6 +68,85 @@ describe('<TableRenderer />', () => {
     expect(new Set(widths).size).toBe(1);
   };
 
+  const foregroundAtText = (
+    output: string,
+    text: string,
+  ): string | undefined => {
+    const line = output
+      .split('\n')
+      .find((candidate) => stripAnsi(candidate).includes(text));
+    expect(line, `Expected rendered output to contain "${text}"`).toBeDefined();
+
+    const textIndex = line!.indexOf(text);
+    expect(textIndex).toBeGreaterThanOrEqual(0);
+
+    let foreground: string | undefined;
+    let searchIndex = 0;
+    while (searchIndex < textIndex) {
+      const sgrStart = line!.indexOf('\u001b[', searchIndex);
+      if (sgrStart === -1 || sgrStart >= textIndex) {
+        break;
+      }
+      const sgrEnd = line!.indexOf('m', sgrStart + 2);
+      if (sgrEnd === -1 || sgrEnd >= textIndex) {
+        break;
+      }
+      const paramsText = line!.slice(sgrStart + 2, sgrEnd);
+      if (!/^[0-9;]*$/.test(paramsText)) {
+        searchIndex = sgrStart + 1;
+        continue;
+      }
+      const params =
+        paramsText.length > 0
+          ? paramsText.split(';').map((param) => Number(param))
+          : [0];
+
+      for (let index = 0; index < params.length; index++) {
+        const code = params[index];
+        if (code === 0 || code === 39) {
+          foreground = undefined;
+        } else if (
+          typeof code === 'number' &&
+          ((code >= 30 && code <= 37) || (code >= 90 && code <= 97))
+        ) {
+          foreground = String(code);
+        } else if (code === 38) {
+          const mode = params[index + 1];
+          if (mode === 5 && Number.isFinite(params[index + 2])) {
+            foreground = `38;5;${params[index + 2]}`;
+            index += 2;
+          } else if (
+            mode === 2 &&
+            Number.isFinite(params[index + 2]) &&
+            Number.isFinite(params[index + 3]) &&
+            Number.isFinite(params[index + 4])
+          ) {
+            foreground = `38;2;${params[index + 2]};${params[index + 3]};${params[index + 4]}`;
+            index += 4;
+          }
+        }
+      }
+      searchIndex = sgrEnd + 1;
+    }
+
+    return foreground;
+  };
+
+  const expectWrappedContinuation = (
+    output: string,
+    wholeText: string,
+    continuationText: string,
+  ) => {
+    expect(stripAnsi(output)).not.toContain(wholeText);
+    const continuationLine = output
+      .split('\n')
+      .find((candidate) => stripAnsi(candidate).includes(continuationText));
+    expect(
+      continuationLine,
+      `Expected rendered output to wrap before "${continuationText}"`,
+    ).toBeDefined();
+  };
+
   it('renders a basic table with borders', () => {
     const output = renderTable(['Name', 'Value'], [['foo', 'bar']]);
 
@@ -61,7 +167,7 @@ describe('<TableRenderer />', () => {
     const output = renderTable(
       ['项目', 'ANSI', 'Markdown'],
       [['中文内容', '\u001b[31mRed\u001b[0m Blue', '**bold** and `code`']],
-      42,
+      80,
       ['left', 'center', 'right'],
     );
     expectAllLinesToHaveSameVisibleWidth(output);
@@ -110,19 +216,27 @@ describe('<TableRenderer />', () => {
     expect(output).toContain('wrap');
   });
 
+  // Alignment tests use contentWidth ≥ 60 so horizontal mode is exercised
+  // (vertical mode renders key:value pairs and bypasses pad alignment).
+
   it('respects left alignment', () => {
-    const output = renderTable(['Header'], [['left']], 30, ['left']);
+    const output = renderTable(['Header'], [['left']], 60, ['left']);
     expect(output).toContain('left');
+    // Horizontal-mode guard so this test fails loudly if the threshold
+    // is bumped back above 60 and the test silently degrades to vertical.
+    expect(output).toContain('┌');
   });
 
   it('respects center alignment', () => {
-    const output = renderTable(['Header'], [['center']], 30, ['center']);
+    const output = renderTable(['Header'], [['center']], 60, ['center']);
     expect(output).toContain('center');
+    expect(output).toContain('┌');
   });
 
   it('respects right alignment', () => {
-    const output = renderTable(['Header'], [['right']], 30, ['right']);
+    const output = renderTable(['Header'], [['right']], 60, ['right']);
     expect(output).toContain('right');
+    expect(output).toContain('┌');
   });
 
   it('handles multiple columns with mixed alignment', () => {
@@ -308,6 +422,61 @@ describe('<TableRenderer />', () => {
     expectAllLinesToHaveSameVisibleWidth(output);
   });
 
+  it('preserves truecolor inline-code foreground across wrapped lines', () => {
+    const tableName =
+      'deleted_t_spark_odps_sql_type_system2_test_view_more_times_expand_view_f44c82c06096_244650615';
+    const output = renderTable(['表名'], [[`\`${tableName}\``]], 64);
+
+    expect(output).toContain('244650615');
+    expectWrappedContinuation(output, tableName, '244650615');
+    expect(foregroundAtText(output, '244650615')).toMatch(/^38;2;/);
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
+  it('preserves 256-color foreground across wrapped lines', () => {
+    const output = renderTable(
+      ['Color'],
+      [['\u001b[38;5;45mabcdefghijklmnopqrstuvwxyz0123456789\u001b[39m']],
+      24,
+    );
+
+    expectWrappedContinuation(
+      output,
+      'abcdefghijklmnopqrstuvwxyz0123456789',
+      'qrstuvwxyz012345',
+    );
+    expect(foregroundAtText(output, 'qrstuvwxyz012345')).toBe('38;5;45');
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
+  it('does not preserve foreground after an explicit reset', () => {
+    const output = renderTable(
+      ['Color'],
+      [['\u001b[38;5;45mcolored\u001b[0m reset']],
+      18,
+    );
+
+    expect(foregroundAtText(output, 'reset')).toBeUndefined();
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
+  // TODO: re-enable after ink 7 re-upgrade. The `[39m` (foreground-only
+  // reset) variant added in #4050 only wraps "colored reset" at width=18 under
+  // ink 7's <Text> wrapping; ink 6 keeps it on a single line. The functional
+  // assertions (foreground cleared, equal widths) still pass — only the
+  // wrap-position assertion is ink-7-specific.
+  it.skip('does not preserve foreground after an explicit foreground reset', () => {
+    const output = renderTable(
+      ['Color'],
+      [['\u001b[38;5;45mcolored\u001b[39m reset']],
+      18,
+    );
+
+    expectWrappedContinuation(output, 'colored reset', 'reset');
+    expect(foregroundAtText(output, 'reset')).toBeUndefined();
+    expectAllLinesToHaveSameVisibleWidth(output);
+  });
+
   it('handles ANSI + CJK mixed width without losing content', () => {
     const green = '\u001b[32m中文ABC\u001b[0m';
     const output = renderTable(['列1', '列2'], [[green, '普通文本']], 40);
@@ -456,6 +625,169 @@ describe('<TableRenderer />', () => {
     );
     expect(output).toContain('字段一');
     expect(output).toContain('很长的值一');
+  });
+
+  describe('OSC 8 markdown links in cells', () => {
+    function enableHyperlinks() {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        configurable: true,
+        value: true,
+      });
+      process.env['TERM_PROGRAM'] = 'iTerm.app';
+      process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+    }
+
+    it('wraps a markdown link in a cell with an OSC 8 envelope', () => {
+      enableHyperlinks();
+      const url = 'https://example.com/long/path';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['Docs', `[here](${url})`]],
+        80,
+      );
+      expect(output).toContain(`\x1b]8;;${url}\x07`);
+      expect(output).toContain('\x1b]8;;\x07');
+      expect(output).toContain('here');
+      // Long URL must NOT be repeated as visible text inside the cell.
+      expect(output).not.toContain(`(${url})`);
+      // Column width math must strip the OSC 8 envelope (otherwise alignment
+      // breaks); the rendered table should still have uniform line widths.
+      expectAllLinesToHaveSameVisibleWidth(output);
+    });
+
+    it('falls back to legacy `label (url)` in cells on unsupported terminals', () => {
+      // isTTY=false from the suite-wide beforeEach disables hyperlinks.
+      const url = 'https://example.com/page';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['Docs', `[here](${url})`]],
+        80,
+      );
+      expect(output).not.toContain('\x1b]8');
+      expect(output).toContain('here');
+      expect(output).toContain(`(${url})`);
+    });
+
+    it('does not wrap dangerous schemes in cells', () => {
+      enableHyperlinks();
+      const url = 'javascript:alert(1)';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['Bad', `[click](${url})`]],
+        80,
+      );
+      expect(output).not.toContain('\x1b]8');
+      // The unsafe URL stays visible so the user can read what they would click.
+      expect(stripAnsi(output).replace(/\s+/g, ' ')).toContain(url);
+    });
+
+    it('keeps `(url)` suffix in cells when label looks like a mismatched URL', () => {
+      enableHyperlinks();
+      const target = 'https://attacker.com/phish';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['x', `[https://google.com](${target})`]],
+        80,
+      );
+      expect(output).toContain(`\x1b]8;;${target}\x07`);
+      // Real target stays visible next to the clickable label.
+      expect(stripAnsi(output)).toContain(`(${target})`);
+    });
+
+    it('sanitizes bidi controls in a cell label', () => {
+      enableHyperlinks();
+      const url = 'https://example.com/page';
+      const output = renderTable(
+        ['Name', 'Link'],
+        [['x', `[safe.com\u202emoc.live](${url})`]],
+        80,
+      );
+      expect(output).toContain(`\x1b]8;;${url}\x07`);
+      expect(output).not.toContain('\u202e');
+    });
+  });
+
+  // ─── Narrow-terminal vertical fallback ───
+  describe('horizontal/vertical mode threshold', () => {
+    it('uses horizontal mode at ample width (60 cols, 2 short cols)', () => {
+      const output = renderTable(['A', 'B'], [['x', 'y']], 60);
+      // Horizontal markers must be present.
+      expect(output).toContain('┌');
+      expect(output).toContain('└');
+      expect(output).toContain('│');
+    });
+
+    it('falls back to vertical below the absolute floor (≤24 cols)', () => {
+      // ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH is 24.
+      const output = renderTable(['A', 'B'], [['x', 'y']], 20);
+      // No horizontal table border characters in vertical mode.
+      expect(output).not.toContain('┌');
+      expect(output).not.toContain('└');
+      // Vertical mode renders "label:" pairs.
+      expect(output).toContain('A:');
+      expect(output).toContain('B:');
+      expect(output).toContain('x');
+      expect(output).toContain('y');
+    });
+
+    it('promotes to horizontal once column-budget threshold is met (2 cols, ~30 cols)', () => {
+      // borderOverhead = 1 + 2*3 = 7; minHorizontal = max(24, 2*3 + 7 + 4) = 24
+      // so 30 cols comfortably fits horizontal.
+      const output = renderTable(['A', 'B'], [['x', 'y']], 30);
+      expect(output).toContain('┌');
+    });
+
+    // Boundary equality tests: the comparator is strict `<`, so the threshold
+    // value itself must still render horizontally. Without these, a future
+    // off-by-one change from `<` to `<=` would slip through the < / > pair.
+    it('renders horizontal at exact absolute floor (2 cols, contentWidth=24)', () => {
+      // ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH is 24. With strict `<`, equality
+      // means horizontal mode is selected.
+      const output = renderTable(['A', 'B'], [['x', 'y']], 24);
+      expect(output).toContain('┌');
+      expect(output).toContain('└');
+    });
+
+    it('falls back to vertical one below absolute floor (2 cols, contentWidth=23)', () => {
+      const output = renderTable(['A', 'B'], [['x', 'y']], 23);
+      expect(output).not.toContain('┌');
+      expect(output).toContain('A:');
+    });
+
+    it('renders horizontal at exact column-budget threshold (5 cols, contentWidth=35)', () => {
+      // 5 cols → minHorizontal = 5*3 + (1+5*3) + 4 = 35. Equality must still
+      // render horizontally under the strict `<` comparator.
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        35,
+      );
+      expect(output).toContain('┌');
+    });
+
+    it('falls back to vertical one below column-budget threshold (5 cols, contentWidth=34)', () => {
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        34,
+      );
+      expect(output).not.toContain('┌');
+      expect(output).toContain('A:');
+    });
+
+    it('forces vertical for many-column tables on narrow terminals', () => {
+      // 5 cols → minHorizontal = 5*3 + (1+5*3) + 4 = 35; 30 cols is below that.
+      const output = renderTable(
+        ['A', 'B', 'C', 'D', 'E'],
+        [['1', '2', '3', '4', '5']],
+        30,
+      );
+      expect(output).not.toContain('┌');
+      // Should still surface the data.
+      expect(output).toContain('A:');
+      expect(output).toContain('1');
+      expect(output).toContain('5');
+    });
   });
 
   it('stays stable across multiple content widths', () => {

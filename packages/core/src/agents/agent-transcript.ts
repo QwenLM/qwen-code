@@ -39,7 +39,7 @@ import type { FunctionDeclaration, Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
-function sanitizeFilenameComponent(value: string): string {
+export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
@@ -360,11 +360,15 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
-  const recordUserMessage = (text: string) => {
+  const recordUserMessage = (
+    text: string,
+    externalInputKind?: AgentExternalMessageEvent['kind'],
+  ) => {
     if (!text) return;
     append({
       ...baseFields('user'),
       message: { role: 'user', parts: [{ text }] },
+      ...(externalInputKind ? { externalInputKind } : {}),
     });
   };
 
@@ -380,7 +384,7 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onExternalMessage = (event: AgentExternalMessageEvent) => {
-    recordUserMessage(event.text);
+    recordUserMessage(event.text, event.kind ?? 'message');
   };
 
   const hasBootstrapPayload =

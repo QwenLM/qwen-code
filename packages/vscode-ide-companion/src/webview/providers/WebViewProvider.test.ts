@@ -31,6 +31,7 @@ const {
   mockShowInformationMessage,
   mockWindowState,
   mockQwenAgentManagerInstances,
+  mockClipboardWriteText,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
     (event: { affectsConfiguration: (section: string) => boolean }) => unknown
@@ -109,6 +110,7 @@ const {
     cancelCurrentPrompt: ReturnType<typeof vi.fn>;
     disconnect: ReturnType<typeof vi.fn>;
   }>,
+  mockClipboardWriteText: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -135,6 +137,9 @@ vi.mock('vscode', () => ({
   },
   env: {
     openExternal: mockOpenExternal,
+    clipboard: {
+      writeText: mockClipboardWriteText,
+    },
   },
   window: {
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
@@ -395,6 +400,8 @@ beforeEach(() => {
   mockWindowState.focused = true;
   mockShowInformationMessage.mockReset();
   mockShowInformationMessage.mockReturnValue(Promise.resolve(undefined));
+  mockClipboardWriteText.mockReset();
+  mockClipboardWriteText.mockResolvedValue(undefined);
 });
 
 describe('WebViewProvider.attachToView', () => {
@@ -496,6 +503,40 @@ describe('WebViewProvider.attachToView', () => {
         ],
         requestId: 7,
       },
+    });
+  });
+
+  it('reports clipboard copy success back to the requesting webview', async () => {
+    const { messageHandler, postMessage } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    await messageHandler?.({
+      type: 'copyToClipboard',
+      data: { text: 'copy me', requestId: 'copy-1' },
+    });
+
+    expect(mockClipboardWriteText).toHaveBeenCalledWith('copy me');
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboardResult',
+      data: { requestId: 'copy-1', success: true },
+    });
+  });
+
+  it('reports clipboard copy failures back to the requesting webview', async () => {
+    mockClipboardWriteText.mockRejectedValueOnce(new Error('denied'));
+    const { messageHandler, postMessage } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    await messageHandler?.({
+      type: 'copyToClipboard',
+      data: { text: 'copy me', requestId: 'copy-1' },
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'copyToClipboardResult',
+      data: { requestId: 'copy-1', success: false, error: 'denied' },
     });
   });
 

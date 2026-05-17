@@ -92,8 +92,11 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     contents,
     schema: RESPONSE_SCHEMA,
     abortSignal: callerAbortSignal
-      ? AbortSignal.any([AbortSignal.timeout(2_000), callerAbortSignal])
-      : AbortSignal.timeout(2_000),
+      ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
+      : AbortSignal.timeout(1_000),
+
+    // Uses runSideQuery's default side-query model policy: fast model first,
+    // then main session model when no fast model is configured.
     systemInstruction: SELECT_MEMORIES_SYSTEM_PROMPT,
     config: {
       temperature: 0,

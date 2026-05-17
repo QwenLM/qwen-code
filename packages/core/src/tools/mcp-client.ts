@@ -165,34 +165,62 @@ export class McpClient {
 
   /**
    * Discovers tools and prompts from the MCP server.
+   *
+   * On error, the client's status is flipped to DISCONNECTED before the
+   * error is re-thrown. Without this, a server that connects successfully
+   * but then crashes (or returns no tools, or whose `tools/list` call
+   * rejects) would remain `CONNECTED` in the global status registry, and
+   * `Config.getFailedMcpServerNames()` — which filters by
+   * `status !== CONNECTED` — would silently omit it from the
+   * non-interactive failure banner. The caller (manager) still catches
+   * and logs; we just need the status registry to reflect reality.
    */
   async discover(cliConfig: Config): Promise<void> {
     if (this.status !== MCPServerStatus.CONNECTED) {
       throw new Error('Client is not connected.');
     }
 
-    const prompts = await this.discoverPrompts();
-    const tools = await this.discoverTools(cliConfig);
+    try {
+      const prompts = await this.discoverPrompts();
+      const tools = await this.discoverTools(cliConfig);
 
-    if (prompts.length === 0 && tools.length === 0) {
-      throw new Error('No prompts or tools found on the server.');
-    }
+      if (prompts.length === 0 && tools.length === 0) {
+        throw new Error('No prompts or tools found on the server.');
+      }
 
-    for (const tool of tools) {
-      this.toolRegistry.registerTool(tool);
+      for (const tool of tools) {
+        this.toolRegistry.registerTool(tool);
+      }
+    } catch (error) {
+      this.updateStatus(MCPServerStatus.DISCONNECTED);
+      throw error;
     }
   }
 
   /**
    * Disconnects from the MCP server.
+   *
+   * The intentional DISCONNECTED status update must reach the global
+   * registry — `getFailedMcpServerNames()` filters on `status !== CONNECTED`
+   * and the Footer's MCP health pill subscribes to the registry. Going
+   * through `updateStatus()` would have it swallowed by the
+   * `isDisconnecting` guard whose only purpose is to suppress LATE writes
+   * from a stale `connect()` catch. We therefore write the local field and
+   * the global registry directly, then flip `isDisconnecting = true` to
+   * shut down propagation from any in-flight `connect()` / `discover()`
+   * whose catch will fire after the transport has been torn down.
    */
   async disconnect(): Promise<void> {
+    // Set the local status BEFORE flipping `isDisconnecting`. A concurrent
+    // `discover()` reading `this.status` would otherwise see the stale
+    // CONNECTED value and try to register tools that we're about to drop.
+    this.status = MCPServerStatus.DISCONNECTED;
+    updateMCPServerStatus(this.serverName, MCPServerStatus.DISCONNECTED);
     this.isDisconnecting = true;
     if (this.transport) {
       await this.transport.close();
     }
     this.client.close();
-    this.updateStatus(MCPServerStatus.DISCONNECTED);
   }
 
   /**
@@ -224,6 +252,14 @@ export class McpClient {
 
   private updateStatus(status: MCPServerStatus): void {
     this.status = status;
+    // Once disconnect has begun, don't propagate further status changes to
+    // the global registry. An in-flight `connect()` whose catch block fires
+    // after `disableMcpServer` has already removed the entry would otherwise
+    // silently resurrect the server and the Footer's MCP health pill would
+    // continue to count it as offline.
+    if (this.isDisconnecting) {
+      return;
+    }
     updateMCPServerStatus(this.serverName, status);
   }
 
@@ -266,11 +302,14 @@ let mcpDiscoveryState: MCPDiscoveryState = MCPDiscoveryState.NOT_STARTED;
 export const mcpServerRequiresOAuth: Map<string, boolean> = new Map();
 
 /**
- * Event listeners for MCP server status changes
+ * Event listeners for MCP server status changes.
+ * `status` is `undefined` when the server has been removed from the registry
+ * (e.g. disabled via `/mcp`), so consumers can drop it from their snapshots
+ * rather than continue to count it as `DISCONNECTED`.
  */
 type StatusChangeListener = (
   serverName: string,
-  status: MCPServerStatus,
+  status: MCPServerStatus | undefined,
 ) => void;
 const statusChangeListeners: StatusChangeListener[] = [];
 
@@ -303,9 +342,26 @@ export function updateMCPServerStatus(
   status: MCPServerStatus,
 ): void {
   serverStatuses.set(serverName, status);
-  // Notify all listeners
-  for (const listener of statusChangeListeners) {
+  // Snapshot the listener list so a listener that detaches itself (or
+  // attaches a new one) during dispatch doesn't mutate the array we're
+  // iterating.
+  for (const listener of [...statusChangeListeners]) {
     listener(serverName, status);
+  }
+}
+
+/**
+ * Remove an MCP server from the status registry and notify listeners.
+ * Used when a server is disabled or removed from configuration so it no
+ * longer shows up in the Footer's MCP health pill as offline.
+ */
+export function removeMCPServerStatus(serverName: string): void {
+  if (!serverStatuses.has(serverName)) {
+    return;
+  }
+  serverStatuses.delete(serverName);
+  for (const listener of [...statusChangeListeners]) {
+    listener(serverName, undefined);
   }
 }
 

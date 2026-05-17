@@ -7,6 +7,7 @@
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -33,24 +34,33 @@ import {
   createContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { getRuntimeContentGenerator } from '../agents/runtime/agent-context.js';
 
 // Services
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { FileHistoryService } from '../services/fileHistoryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { GitWorktreeService } from '../services/gitWorktreeService.js';
+import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
-import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
+import {
+  MCPServerStatus,
+  getMCPServerStatus,
+  type SendSdkMcpMessage,
+} from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { LspClient } from '../lsp/types.js';
+import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -65,12 +75,14 @@ import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
   isTelemetrySdkInitialized,
   initializeTelemetry,
   shutdownTelemetry,
+  refreshSessionContext,
   logStartSession,
   logRipgrepFallback,
   RipgrepFallbackEvent,
@@ -116,6 +128,10 @@ import { DEFAULT_QWEN_EMBEDDING_MODEL } from './models.js';
 import { Storage } from './storage.js';
 import { ChatRecordingService } from '../services/chatRecordingService.js';
 import {
+  clearRuntimeStatus,
+  writeRuntimeStatus,
+} from '../utils/runtimeStatus.js';
+import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
@@ -130,6 +146,9 @@ import {
 import { getAutoMemoryRoot } from '../memory/paths.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { MemoryManager } from '../memory/manager.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
+
+const gitCoAuthorLogger = createDebugLogger('GIT_CO_AUTHOR');
 
 import {
   ModelsConfig,
@@ -137,6 +156,7 @@ import {
   type AvailableModel,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
+import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 // Re-export types
@@ -202,6 +222,14 @@ export interface BugCommandSettings {
 
 export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
+  /**
+   * Estimated tokens for a single inline image / document part when
+   * apportioning chars across history in `findCompressSplitPoint`.
+   * Also used as the placeholder budget when stripping inline media
+   * out of the side-query compaction prompt. Default 1600.
+   * Env override: `QWEN_IMAGE_TOKEN_ESTIMATE`.
+   */
+  imageTokenEstimate?: number;
 }
 
 /**
@@ -227,8 +255,8 @@ export interface TelemetrySettings {
   /** Per-signal endpoint override for metrics (HTTP only). Used as-is without path appending. */
   otlpMetricsEndpoint?: string;
   logPrompts?: boolean;
+  includeSensitiveSpanAttributes?: boolean;
   outfile?: string;
-  useCollector?: boolean;
 }
 
 export interface OutputSettings {
@@ -236,9 +264,70 @@ export interface OutputSettings {
 }
 
 export interface GitCoAuthorSettings {
-  enabled?: boolean;
+  commit: boolean;
+  pr: boolean;
   name?: string;
   email?: string;
+}
+
+/**
+ * Shape accepted by the Config constructor for the `gitCoAuthor` param.
+ *
+ * A plain `boolean` is accepted for backward compatibility: older settings
+ * (shipped before commit and PR attribution were split) stored this field as
+ * a single boolean, and we treat that as applying to both sub-toggles so
+ * nobody's stored preference silently flips.
+ */
+export type GitCoAuthorParam = boolean | { commit?: boolean; pr?: boolean };
+
+function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
+  commit: boolean;
+  pr: boolean;
+} {
+  if (typeof value === 'boolean') {
+    return { commit: value, pr: value };
+  }
+  // Default to `true` (the schema default) ONLY when the sub-field
+  // is genuinely absent. For PRESENT-but-non-boolean values, honor
+  // common string forms (`"true"`/`"yes"`/`"on"`/`"1"` → true,
+  // `"false"`/`"no"`/`"off"`/`"0"`/`""` → false) and treat anything
+  // else as opt-out. settings.json is user-editable, and the previous
+  // "default-to-true on mismatch" policy meant a hand-edited
+  // `{ "commit": "false" }` silently activated attribution against
+  // the user's clear intent. Safer-by-default: ambiguous values
+  // disable rather than enable.
+  const pickBool = (v: unknown, fieldName: string): boolean => {
+    if (v === undefined) return true;
+    if (typeof v === 'boolean') return v;
+    if (typeof v === 'string') {
+      const lowered = v.trim().toLowerCase();
+      if (
+        lowered === 'true' ||
+        lowered === 'yes' ||
+        lowered === 'on' ||
+        lowered === '1'
+      ) {
+        return true;
+      }
+      // Known disable-intent forms — silent (matches user intent).
+      const knownDisable = ['false', 'no', 'off', '0', 'disabled', ''];
+      if (!knownDisable.includes(lowered)) {
+        // Unrecognised string — disable (safer-by-default) but log
+        // so a user wondering "why is my setting being ignored?"
+        // can see the actual coercion in QWEN_DEBUG_LOG_FILE.
+        gitCoAuthorLogger.warn(
+          `Unrecognized string value for general.gitCoAuthor.${fieldName}: ${JSON.stringify(v)}; treating as false. Accepted forms: true/yes/on/1, false/no/off/0/empty.`,
+        );
+      }
+      return false;
+    }
+    if (typeof v === 'number') return v === 1;
+    return false;
+  };
+  return {
+    commit: pickBool(value?.commit, 'commit'),
+    pr: pickBool(value?.pr, 'pr'),
+  };
 }
 
 export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
@@ -291,6 +380,16 @@ export class MCPServerConfig {
     readonly targetServiceAccount?: string,
     // SDK MCP server type - 'sdk' indicates server runs in SDK process
     readonly type?: 'sdk',
+    /**
+     * Per-server cap on the discovery handshake (`connect` + `tools/list` +
+     * `prompts/list` + `resources/list`). Defaults: 30s for stdio servers,
+     * 5s for remote HTTP/SSE. Tool-call timeout (`timeout` above) is
+     * unaffected — a long-running tool invocation is not a startup
+     * pathology. Appended at the end of the parameter list to avoid
+     * shifting positional arguments at the many `new MCPServerConfig(...)`
+     * call sites.
+     */
+    readonly discoveryTimeoutMs?: number,
   ) {}
 }
 
@@ -374,7 +473,7 @@ export interface ConfigParameters {
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
-  gitCoAuthor?: boolean;
+  gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
   /**
    * If true, disables the per-session FileReadCache short-circuit
@@ -391,6 +490,7 @@ export interface ConfigParameters {
     enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
+  fileCheckpointingEnabled?: boolean;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -459,6 +559,13 @@ export interface ConfigParameters {
    */
   jsonFile?: string;
   /**
+   * JSON Schema that the model's final output must conform to. When set, a
+   * synthetic `structured_output` tool is registered and the non-interactive
+   * CLI ends the session the first time the model calls it with valid args.
+   * Only meaningful in headless mode (`qwen -p`).
+   */
+  jsonSchema?: Record<string, unknown>;
+  /**
    * File path for receiving remote input commands (bidirectional sync mode).
    * An external process writes JSONL commands to this file, and the TUI
    * watches it to process messages as if the user typed them.
@@ -472,6 +579,8 @@ export interface ConfigParameters {
   enableManagedAutoMemory?: boolean;
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
+  /** Enable automatic project skill review after tool-heavy sessions. Defaults to false. */
+  enableAutoSkill?: boolean;
   /**
    * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
    * When set and valid for the current auth type, forked agents use this model instead of
@@ -486,6 +595,11 @@ export interface ConfigParameters {
    * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
    */
   disableAllHooks?: boolean;
+  /**
+   * Maximum consecutive blocking Stop/SubagentStop hook decisions before the
+   * runtime overrides the hook loop and allows the turn to end.
+   */
+  stopHookBlockingCap?: number;
   /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
@@ -549,6 +663,11 @@ export interface ConfigInitializeOptions {
    * Required for SDK MCP server support in SDK mode.
    */
   sendSdkMcpMessage?: SendSdkMcpMessage;
+  /**
+   * Skip Gemini client chat initialization. Useful for bootstrap paths that
+   * need config services (hooks, tools, MCP) before a real session exists.
+   */
+  skipGeminiInitialization?: boolean;
 }
 
 const DEFAULT_BARE_CORE_TOOLS = [
@@ -613,6 +732,7 @@ export class Config {
   private mcpServers: Record<string, MCPServerConfig> | undefined;
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
+  private lspInitializationError?: string;
   private readonly allowedMcpServers?: string[];
   private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
@@ -642,6 +762,8 @@ export class Config {
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
   private readonly checkpointing: boolean;
+  private readonly fileCheckpointingEnabled: boolean;
+  private fileHistoryService: FileHistoryService | undefined;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
@@ -659,6 +781,7 @@ export class Config {
   private readonly overrideExtensions?: string[];
 
   private readonly cliVersion?: string;
+  private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
   private readonly emitToolUseSummaries: boolean = true;
@@ -698,12 +821,15 @@ export class Config {
   private readonly channel: string | undefined;
   private readonly jsonFd: number | undefined;
   private readonly jsonFile: string | undefined;
+  private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
+  private readonly enableAutoSkill: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
   private readonly userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -774,11 +900,12 @@ export class Config {
       otlpLogsEndpoint: params.telemetry?.otlpLogsEndpoint,
       otlpMetricsEndpoint: params.telemetry?.otlpMetricsEndpoint,
       logPrompts: params.telemetry?.logPrompts ?? true,
+      includeSensitiveSpanAttributes:
+        params.telemetry?.includeSensitiveSpanAttributes ?? false,
       outfile: params.telemetry?.outfile,
-      useCollector: params.telemetry?.useCollector,
     };
     this.gitCoAuthor = {
-      enabled: params.gitCoAuthor ?? true,
+      ...normalizeGitCoAuthor(params.gitCoAuthor),
       name: 'Qwen-Coder',
       email: 'qwen-coder@alibabacloud.com',
     };
@@ -794,6 +921,9 @@ export class Config {
       enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
     this.checkpointing = params.checkpointing ?? false;
+    this.fileCheckpointingEnabled =
+      params.fileCheckpointingEnabled ??
+      (!params.sdkMode && (params.interactive ?? false));
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
@@ -854,6 +984,7 @@ export class Config {
     this.channel = params.channel;
     this.jsonFd = params.jsonFd;
     this.jsonFile = params.jsonFile;
+    this.jsonSchema = params.jsonSchema;
     this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
@@ -901,8 +1032,12 @@ export class Config {
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
+    this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    this.stopHookBlockingCap = resolveStopHookBlockingCap(
+      params.stopHookBlockingCap,
+    );
     // Store user and project hooks separately for proper source attribution
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
@@ -1131,16 +1266,35 @@ export class Config {
     await this.refreshHierarchicalMemory();
     this.debugLogger.debug('Hierarchical memory loaded');
 
+    // Progressive MCP availability: skip MCP discovery in the synchronous
+    // tool-registry construction path and kick it off in the background
+    // after the registry exists. This lets `Config.initialize()` (and the
+    // cli's `input_enabled` checkpoint) resolve without waiting on MCP
+    // server response time. Users can opt back into the legacy synchronous
+    // behavior with `QWEN_CODE_LEGACY_MCP_BLOCKING=1` — kept ≥ 1 release as
+    // an escape hatch.
+    const legacyBlockingMcp =
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
+    const skipInlineMcpDiscovery = this.getBareMode() || !legacyBlockingMcp;
+
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
-      this.getBareMode() ? { skipDiscovery: true } : undefined,
+      skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
     );
+    recordStartupEvent('tool_registry_created', {
+      toolCount: this.toolRegistry.getAllToolNames().length,
+      mcpInline: !skipInlineMcpDiscovery,
+    });
     this.debugLogger.info(
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
-    await this.geminiClient.initialize();
-    this.debugLogger.info('Gemini client initialized');
+    if (!options?.skipGeminiInitialization) {
+      await this.geminiClient.initialize();
+      this.debugLogger.info('Gemini client initialized');
+    } else {
+      this.debugLogger.info('Gemini client initialization skipped');
+    }
 
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
@@ -1149,8 +1303,220 @@ export class Config {
     // Use strict mode so a broken built-in tool surfaces immediately at startup.
     await this.toolRegistry.warmAll({ strict: true });
 
+    // Fire-and-forget MCP discovery. Each server's tools land in the
+    // registry as it becomes ready; the cli's AppContainer debounces
+    // `setTools()` (~16ms / one frame) so the model sees the new tools
+    // shortly after each server settles. See `AppContainer.tsx`'s
+    // `mcp-client-update` subscriber.
+    if (skipInlineMcpDiscovery && !this.getBareMode()) {
+      this.startMcpDiscoveryInBackground();
+    }
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
+
+    // Fire-and-forget sweep of stale ephemeral worktrees left behind by
+    // earlier `agent` runs that exited before their cleanup helper ran
+    // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
+    // `agent-<7hex>` slugs, skips anything newer than 30 days, and
+    // is fail-closed against tracked changes or unpushed commits — so
+    // running it on every startup cannot destroy user work. We do not
+    // await this: it is a hygiene task that must never delay the
+    // first model turn.
+    //
+    // Anchor the sweep at the repo top-level so it scans the same
+    // directory the worktree creators (`enter_worktree` and
+    // `agent isolation:'worktree'`) write to. Using `this.targetDir`
+    // directly would cause launches from a monorepo subdirectory to
+    // scan `<subdir>/.qwen/worktrees/` — which never exists — and the
+    // sweep would silently be a no-op forever.
+    if (!this.getBareMode()) {
+      void (async () => {
+        try {
+          // Resolve the repo top-level FIRST. The previous code bailed
+          // on `fs.access(<targetDir>/.qwen/worktrees)` before resolving,
+          // so a monorepo subdir launch (where `targetDir` is the
+          // subdir, not the repo root) always early-returned and the
+          // sweep was permanently a no-op. Fast-bail still happens, just
+          // against the *correct* directory.
+          const probe = new GitWorktreeService(this.targetDir);
+          const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
+          const worktreesDir = path.join(root, '.qwen', 'worktrees');
+          try {
+            await fsPromises.access(worktreesDir);
+          } catch {
+            // Skipped (no worktrees dir) is the common-case happy
+            // path on every CLI start for ~99% of users. `debug` so
+            // operators can opt in via `--debug` when they actually
+            // want to confirm the sweep is wired up — `info` would
+            // be log noise.
+            this.debugLogger.debug(
+              `Stale worktree sweep skipped: ${worktreesDir} does not exist`,
+            );
+            return;
+          }
+          const removed = await cleanupStaleAgentWorktrees(root);
+          if (removed > 0) {
+            // Only the "actually removed something" path warrants
+            // `info` — that's the signal an operator chasing a leak
+            // would grep for. The "ran, found nothing" path is
+            // reconstructable at `debug` and is otherwise noise:
+            // every CLI start that has any worktree dir would emit
+            // it, drowning the actually-actionable message.
+            this.debugLogger.info(
+              `Stale worktree sweep removed ${removed} ephemeral worktree(s) under ${root}`,
+            );
+          } else {
+            this.debugLogger.debug(
+              `Stale worktree sweep ran under ${root}: nothing to remove`,
+            );
+          }
+        } catch (error: unknown) {
+          // Promote sweep errors to `warn` for the same reason: a
+          // permission failure / disk full / repo-corruption case
+          // should leave a visible breadcrumb instead of being
+          // invisible at the default log level.
+          this.debugLogger.warn(
+            `Stale worktree sweep failed (non-fatal): ${error}`,
+          );
+        }
+      })();
+    }
+  }
+
+  /**
+   * In-flight background MCP discovery promise. Captured so non-interactive
+   * code paths can await it before invoking the model (see
+   * {@link waitForMcpReady}). Undefined when MCP discovery was skipped
+   * entirely (bare mode, legacy blocking mode, or no MCP servers).
+   */
+  private mcpDiscoveryPromise?: Promise<void>;
+
+  /**
+   * Kicks off MCP server discovery in the background after the synchronous
+   * portion of {@link initialize} returns. Errors are logged, never thrown:
+   * a broken MCP server must not bring down the cli, and per-server
+   * connect/discover failures are already surfaced through the
+   * `mcp-client-update` event stream the UI subscribes to.
+   *
+   * Defensive against partially-stubbed `ToolRegistry` in some tests, where
+   * the manager getter is unavailable — we'd rather log-and-skip than crash
+   * the init path in tests that don't exercise MCP at all.
+   */
+  private startMcpDiscoveryInBackground(): void {
+    // `getMcpClientManager` is a public method on `ToolRegistry`. The
+    // cast below is NOT defensive against the production type — it
+    // exists only because some tests (e.g. those using
+    // `createMockToolRegistry`) stub `ToolRegistry` as a plain object
+    // that doesn't implement the method. The optional-chaining call
+    // (`?.()`) means the stubbed path resolves to `undefined` instead
+    // of crashing `initialize()` for tests that never exercise MCP.
+    //
+    // Crucially, the inner shape is `ReturnType<ToolRegistry['getMcpClientManager']>`
+    // — not a hand-rolled `{ discoverAllMcpToolsIncremental: ... }` — so
+    // a future rename of `getMcpClientManager` on `ToolRegistry` still
+    // surfaces here as a type error rather than silently falling
+    // through to the `if (!manager) return` branch.
+    const manager = (
+      this.toolRegistry as ToolRegistry & {
+        getMcpClientManager?: () => ReturnType<
+          ToolRegistry['getMcpClientManager']
+        >;
+      }
+    ).getMcpClientManager?.();
+    if (!manager) {
+      this.debugLogger.debug(
+        'Skipping background MCP discovery: ToolRegistry has no MCP client manager',
+      );
+      return;
+    }
+    this.mcpDiscoveryPromise = manager
+      .discoverAllMcpToolsIncremental(this)
+      .then(async () => {
+        // After background discovery completes, push the newly-registered
+        // MCP tools into the active GeminiChat so the next model request
+        // sees them. Interactive mode also calls setTools() via
+        // AppContainer's batch-flush effect — this trailing call is
+        // idempotent there, but it's the ONLY path that updates
+        // `chat.tools` for non-interactive runs (no AppContainer).
+        // Without this, `chat.tools` would be frozen at the built-in-only
+        // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
+        // and `runNonInteractive` / stream-json / ACP would silently lose
+        // every MCP tool — a regression vs the legacy synchronous path.
+        try {
+          await this.geminiClient?.setTools();
+        } catch (err) {
+          this.debugLogger.error(
+            `setTools() after background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      })
+      .catch((err: unknown) => {
+        this.debugLogger.error(
+          `Background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
+  }
+
+  /**
+   * Resolves when background MCP discovery has settled (all servers ready,
+   * failed, or timed out). Non-interactive code paths (`runNonInteractive`,
+   * stream-json, ACP) MUST await this before invoking the model so the
+   * first model request sees the same tool surface the legacy
+   * synchronous-MCP path produced.
+   *
+   * Interactive code paths should NOT call this — `AppContainer`'s
+   * `mcp-client-update` subscriber handles `setTools()` refreshes
+   * progressively without blocking the UI.
+   *
+   * Resolves immediately when:
+   * - bare mode is on (no MCP discovery is started),
+   * - `QWEN_CODE_LEGACY_MCP_BLOCKING=1` is set (MCP already discovered
+   *   synchronously inside {@link initialize}), or
+   * - no MCP servers are configured.
+   */
+  async waitForMcpReady(): Promise<void> {
+    if (this.mcpDiscoveryPromise) {
+      await this.mcpDiscoveryPromise;
+    }
+  }
+
+  /**
+   * Returns the names of configured (non-disabled) MCP servers whose
+   * discovery did NOT end in a CONNECTED state. Intended to be called by
+   * non-interactive entry points AFTER {@link waitForMcpReady} resolves,
+   * so they can surface a single user-visible warning summarizing which
+   * servers failed.
+   *
+   * The legacy synchronous MCP path surfaced these failures visibly
+   * during `config.initialize()` (because they happened on the main
+   * thread and per-server errors logged to stderr). Under PR-A's
+   * progressive discovery, per-server errors are caught inside
+   * `McpClientManager.discoverAllMcpToolsIncremental` and routed to
+   * profiler events + `mcp-client-update` notifications — both of which
+   * are invisible to a non-interactive run with only built-in stderr.
+   * This helper closes that gap WITHOUT re-introducing the blocking
+   * behavior.
+   *
+   * Returns an empty array when MCP discovery was skipped (bare mode /
+   * legacy blocking / no servers configured) or when every configured
+   * server settled successfully.
+   */
+  getFailedMcpServerNames(): string[] {
+    const servers = this.getMcpServers();
+    if (!servers) {
+      return [];
+    }
+    const failed: string[] = [];
+    for (const name of Object.keys(servers)) {
+      if (this.isMcpServerDisabled(name)) {
+        continue;
+      }
+      if (getMCPServerStatus(name) !== MCPServerStatus.CONNECTED) {
+        failed.push(name);
+      }
+    }
+    return failed;
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
@@ -1218,7 +1584,9 @@ export class Config {
   }
 
   getContentGenerator(): ContentGenerator {
-    return this.contentGenerator;
+    return (
+      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
+    );
   }
 
   /**
@@ -1359,6 +1727,7 @@ export class Config {
       // Best-effort — don't block session switch
     }
 
+    const previousSessionId = this.sessionId;
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
     setDebugLogSession(this);
@@ -1376,10 +1745,65 @@ export class Config {
     // constructed via Object.create — those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
+    this.fileHistoryService = undefined;
+    refreshSessionContext(this.sessionId);
+    // The commit-attribution singleton accumulates per-file AI edits
+    // and a session-scoped prompt counter — both stop being meaningful
+    // when the session resets. Without this, pending attributions
+    // from the previous session could attach to a commit in the new
+    // one, and the "N-shotted" PR label would span sessions.
+    CommitAttributionService.resetInstance();
     if (this.initialized) {
       logStartSession(this, new StartSessionEvent(this));
     }
+
+    // Refresh the runtime.json sidecar so external observers (terminal
+    // multiplexers, IDE integrations, status daemons) see the new
+    // session id rather than a stale claim against a still-live PID.
+    // /clear, /reset, /new, and /resume all flow through this method,
+    // so handling the swap centrally covers every same-PID session
+    // transition. Best-effort: must never block /clear or /resume.
+    //
+    // Only refresh when THIS process established its own sidecar at
+    // startup (interactive UI). A non-interactive `/clear` (e.g.
+    // qwen --prompt-interactive) must not delete a sibling shell's
+    // sidecar that happens to share the outgoing session id —
+    // mirrors kimi-cli PR #2082's "write only when a session is
+    // established for this process" rule.
+    if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
+      const oldPath = this.storage.getRuntimeStatusPath(previousSessionId);
+      const newPath = this.storage.getRuntimeStatusPath(this.sessionId);
+      const cliVersion = this.cliVersion ?? null;
+      const workDir = this.targetDir;
+      const newSessionId = this.sessionId;
+      void (async () => {
+        try {
+          await clearRuntimeStatus(oldPath);
+          await writeRuntimeStatus(newPath, {
+            sessionId: newSessionId,
+            workDir,
+            qwenVersion: cliVersion,
+          });
+        } catch {
+          // ignored: best-effort cleanup
+        }
+      })();
+    }
+
     return this.sessionId;
+  }
+
+  /**
+   * Marks this Config as the owner of a runtime.json sidecar for the
+   * current PID. Call once after the initial sidecar write succeeds
+   * (typically from the interactive UI bootstrap). When set, subsequent
+   * startNewSession() calls will refresh the sidecar on session swap;
+   * when unset, startNewSession() leaves sibling sidecars alone so a
+   * short-lived non-interactive process can't trample a concurrent
+   * shell's sidecar that happens to share the outgoing session id.
+   */
+  markRuntimeStatusEnabled(): void {
+    this.runtimeStatusEnabled = true;
   }
 
   /**
@@ -1398,7 +1822,10 @@ export class Config {
   }
 
   getContentGeneratorConfig(): ContentGeneratorConfig {
-    return this.contentGeneratorConfig;
+    return (
+      getRuntimeContentGenerator()?.contentGeneratorConfig ??
+      this.contentGeneratorConfig
+    );
   }
 
   getContentGeneratorConfigSources(): ContentGeneratorConfigSources {
@@ -1414,7 +1841,9 @@ export class Config {
   }
 
   getModel(): string {
-    return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
+    return (
+      this.getContentGeneratorConfig()?.model || this.modelsConfig.getModel()
+    );
   }
 
   onModelChange(listener: (model: string) => void): () => void {
@@ -1432,18 +1861,55 @@ export class Config {
   }
 
   /**
-   * Returns the fast model if one is configured and valid for the current auth type,
-   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
-   * use this as a cheaper alternative to the main session model.
+   * Returns the fast model if one is configured and valid for the current auth
+   * type, otherwise returns undefined. Direct runtime paths use this as a
+   * cheaper alternative to the main session model, so it intentionally stays
+   * current-auth-only.
    */
   getFastModel(): string | undefined {
-    if (!this.fastModel) return undefined;
-    const authType = this.contentGeneratorConfig?.authType;
+    const authType =
+      this.contentGeneratorConfig?.authType ??
+      this.modelsConfig.getCurrentAuthType();
     if (!authType) return undefined;
-    const available = this.getAvailableModelsForAuthType(authType);
-    return available.some((m) => m.id === this.fastModel)
-      ? this.fastModel
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+    if (selector.authType && selector.authType !== authType) return undefined;
+
+    const available = this.getAllConfiguredModels([authType]);
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
       : undefined;
+  }
+
+  /**
+   * Returns the fast model for side-query paths. Unlike {@link getFastModel},
+   * this can return an authType-qualified selector because BaseLlmClient can
+   * route a single request through a provider different from the main session.
+   */
+  getFastModelForSideQuery(): string | undefined {
+    const selector = this.resolveFastModelSelector();
+    if (!selector) return undefined;
+
+    if (selector.authType) {
+      const available = this.getAllConfiguredModels([selector.authType]);
+      return available.some((m) => m.id === selector.modelId)
+        ? `${selector.authType}:${selector.modelId}`
+        : undefined;
+    }
+
+    const available = this.getAllConfiguredModels();
+    return available.some((m) => m.id === selector.modelId)
+      ? selector.modelId
+      : undefined;
+  }
+
+  private resolveFastModelSelector() {
+    if (!this.fastModel) return undefined;
+    try {
+      return resolveModelId(this.fastModel);
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1586,7 +2052,7 @@ export class Config {
   async switchModel(
     authType: AuthType,
     modelId: string,
-    options?: { requireCachedCredentials?: boolean },
+    options?: { requireCachedCredentials?: boolean; baseUrl?: string },
   ): Promise<void> {
     await this.modelsConfig.switchModel(authType, modelId, options);
     this.notifyModelChangeListeners();
@@ -1842,6 +2308,50 @@ export class Config {
     return this.lspClient;
   }
 
+  getLspStatusSnapshot(): LspStatusSnapshot {
+    if (!this.isLspEnabled()) {
+      return this.createLspStatusSnapshot(false);
+    }
+
+    const clientSnapshot = this.lspClient?.getStatusSnapshot?.();
+    if (clientSnapshot) {
+      return {
+        ...clientSnapshot,
+        enabled: true,
+        initializationError:
+          this.lspInitializationError ?? clientSnapshot.initializationError,
+      };
+    }
+
+    if (this.lspClient) {
+      return {
+        ...this.createLspStatusSnapshot(true),
+        statusUnavailable: true,
+      };
+    }
+
+    return this.createLspStatusSnapshot(
+      true,
+      this.lspInitializationError ?? 'LSP client is not initialized',
+    );
+  }
+
+  private createLspStatusSnapshot(
+    enabled: boolean,
+    initializationError?: string,
+  ): LspStatusSnapshot {
+    return {
+      enabled,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      ...(initializationError ? { initializationError } : {}),
+    };
+  }
+
   /**
    * Allows wiring an LSP client after Config construction but before initialize().
    */
@@ -1850,6 +2360,14 @@ export class Config {
       throw new Error('Cannot set LSP client after initialization');
     }
     this.lspClient = client;
+  }
+
+  setLspInitializationError(error: Error | string | undefined): void {
+    if (this.initialized) {
+      throw new Error('Cannot set LSP status after initialization');
+    }
+    this.lspInitializationError =
+      error instanceof Error ? error.message : error;
   }
 
   getSessionSubagents(): SubagentConfig[] {
@@ -2022,6 +2540,10 @@ export class Config {
     return this.telemetrySettings.logPrompts ?? true;
   }
 
+  getTelemetryIncludeSensitiveSpanAttributes(): boolean {
+    return this.telemetrySettings.includeSensitiveSpanAttributes ?? false;
+  }
+
   getTelemetryOtlpEndpoint(): string | undefined {
     return this.telemetrySettings.otlpEndpoint ?? DEFAULT_OTLP_ENDPOINT;
   }
@@ -2052,10 +2574,6 @@ export class Config {
 
   getGitCoAuthor(): GitCoAuthorSettings {
     return this.gitCoAuthor;
-  }
-
-  getTelemetryUseCollector(): boolean {
-    return this.telemetrySettings.useCollector ?? false;
   }
 
   getGeminiClient(): GeminiClient {
@@ -2132,6 +2650,21 @@ export class Config {
     return this.checkpointing;
   }
 
+  getFileCheckpointingEnabled(): boolean {
+    return this.fileCheckpointingEnabled;
+  }
+
+  getFileHistoryService(): FileHistoryService {
+    if (!this.fileHistoryService) {
+      this.fileHistoryService = new FileHistoryService(
+        this.sessionId,
+        this.fileCheckpointingEnabled,
+        this.cwd,
+      );
+    }
+    return this.fileHistoryService;
+  }
+
   getProxy(): string | undefined {
     return normalizeProxyUrl(this.proxy);
   }
@@ -2190,8 +2723,13 @@ export class Config {
    * registered hooks for the given event name.  Callers can use this to skip
    * expensive MessageBus round-trips when no hooks are configured.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    return (
+      this.hookSystem?.hasHooksForEvent(
+        eventName,
+        sessionId ?? this.getSessionId(),
+      ) ?? false
+    );
   }
 
   /**
@@ -2201,12 +2739,20 @@ export class Config {
     return this.disableAllHooks || this.getBareMode();
   }
 
+  getStopHookBlockingCap(): number {
+    return this.stopHookBlockingCap;
+  }
+
   getManagedAutoMemoryEnabled(): boolean {
     return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
     return this.enableManagedAutoDream && !this.getBareMode();
+  }
+
+  getAutoSkillEnabled(): boolean {
+    return this.enableAutoSkill && !this.getBareMode();
   }
 
   /**
@@ -2378,7 +2924,7 @@ export class Config {
   }
 
   getAuthType(): AuthType | undefined {
-    return this.contentGeneratorConfig?.authType;
+    return this.getContentGeneratorConfig()?.authType;
   }
 
   getCliVersion(): string | undefined {
@@ -2403,6 +2949,15 @@ export class Config {
    */
   getJsonFile(): string | undefined {
     return this.jsonFile;
+  }
+
+  /**
+   * Get the JSON Schema the model's final output must conform to.
+   * When set, the non-interactive CLI registers a synthetic
+   * `structured_output` tool and ends the session on a valid call.
+   */
+  getJsonSchema(): Record<string, unknown> | undefined {
+    return this.jsonSchema;
   }
 
   /**
@@ -2583,9 +3138,7 @@ export class Config {
 
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
-  ): Promise<
-    ReadonlyArray<import('../agents/background-tasks.js').BackgroundTaskEntry>
-  > {
+  ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
     return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
       sessionId,
     );
@@ -2594,9 +3147,7 @@ export class Config {
   async resumeBackgroundAgent(
     agentId: string,
     initialMessage?: string,
-  ): Promise<
-    import('../agents/background-tasks.js').BackgroundTaskEntry | undefined
-  > {
+  ): Promise<import('../agents/background-tasks.js').AgentTask | undefined> {
     return this.getBackgroundAgentResumeService().resumeBackgroundAgent(
       agentId,
       initialMessage,
@@ -2730,7 +3281,7 @@ export class Config {
 
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
-    options?: { skipDiscovery?: boolean },
+    options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -2764,6 +3315,37 @@ export class Config {
       }
     };
 
+    // The synthetic structured_output tool is the terminal contract for
+    // --json-schema runs. It must be registered in BOTH the bare-mode
+    // branch and the regular branch — without it the model can't finish
+    // a structured run, so omitting either branch causes
+    // `qwen [--bare] --json-schema X -p "..."` to loop until
+    // maxSessionTurns and exit via the "plain text" failure path. Hoisted
+    // out of the two branches so the dynamic-import factory shape stays
+    // in sync between them.
+    //
+    // Skipped when building a subagent-context registry. `this.jsonSchema`
+    // propagates to subagent overrides via prototype delegation
+    // (`Object.create(base)` in `createApprovalModeOverride` /
+    // `buildSubagentContextOverride`), but only `runNonInteractive`'s main
+    // and drain loops detect a successful structured_output call as
+    // terminal. A subagent that called the tool would receive the
+    // "Session will end now" llmContent, then keep running because its
+    // own loop has no termination handler — wasted tokens with no
+    // structured payload surfacing on stdout. Strip the registration in
+    // those contexts.
+    const registerStructuredOutputIfRequested = async (): Promise<void> => {
+      if (!this.jsonSchema) return;
+      if (options?.forSubAgent) return;
+      const schema = this.jsonSchema;
+      await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
+        const { SyntheticOutputTool } = await import(
+          '../tools/syntheticOutput.js'
+        );
+        return new SyntheticOutputTool(schema);
+      });
+    };
+
     if (this.getBareMode()) {
       await registerLazy(ToolNames.READ_FILE, async () => {
         const { ReadFileTool } = await import('../tools/read-file.js');
@@ -2777,6 +3359,7 @@ export class Config {
         const { ShellTool } = await import('../tools/shell.js');
         return new ShellTool(this);
       });
+      await registerStructuredOutputIfRequested();
       this.debugLogger.debug(
         `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
       );
@@ -2784,6 +3367,10 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    await registerLazy(ToolNames.TOOL_SEARCH, async () => {
+      const { ToolSearchTool } = await import('../tools/tool-search.js');
+      return new ToolSearchTool(this);
+    });
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
@@ -2876,6 +3463,14 @@ export class Config {
         return new ExitPlanModeTool(this);
       });
     }
+    await registerLazy(ToolNames.ENTER_WORKTREE, async () => {
+      const { EnterWorktreeTool } = await import('../tools/enter-worktree.js');
+      return new EnterWorktreeTool(this);
+    });
+    await registerLazy(ToolNames.EXIT_WORKTREE, async () => {
+      const { ExitWorktreeTool } = await import('../tools/exit-worktree.js');
+      return new ExitWorktreeTool(this);
+    });
     await registerLazy(ToolNames.WEB_FETCH, async () => {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
@@ -2886,6 +3481,13 @@ export class Config {
         return new LspTool(this);
       });
     }
+
+    // Register synthetic structured-output tool when --json-schema is set.
+    // The tool's parameter schema IS the user-supplied JSON Schema, so the
+    // model's arguments must match it (Ajv-validated in BaseDeclarativeTool).
+    // Same helper as the bare-mode branch above to keep the registration
+    // shape and permission gating in sync between the two paths.
+    await registerStructuredOutputIfRequested();
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {

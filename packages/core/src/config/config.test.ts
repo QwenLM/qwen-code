@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
-import { Config, ApprovalMode } from './config.js';
+import { Config, ApprovalMode, MCPServerConfig } from './config.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
@@ -17,6 +17,7 @@ import {
   QwenLogger,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
+  refreshSessionContext,
 } from '../telemetry/index.js';
 import type {
   ContentGenerator,
@@ -152,7 +153,6 @@ vi.mock('../memory/const.js', () => ({
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
-  QWEN_CONFIG_DIR: '.qwen',
 }));
 vi.mock('../tools/memory-config', () => ({
   setGeminiMdFilename: vi.fn(),
@@ -160,7 +160,6 @@ vi.mock('../tools/memory-config', () => ({
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   AGENT_CONTEXT_FILENAME: 'AGENTS.md',
-  QWEN_CONFIG_DIR: '.qwen',
   MEMORY_SECTION_HEADER: '## Qwen Added Memories',
 }));
 
@@ -181,6 +180,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
     initializeTelemetry: vi.fn(),
     isTelemetrySdkInitialized: vi.fn(() => false),
     shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
+    refreshSessionContext: vi.fn(),
     uiTelemetryService: {
       getLastPromptTokenCount: vi.fn(),
     },
@@ -396,6 +396,122 @@ describe('Server Config (config.ts)', () => {
       config.startNewSession();
       expect(cache.size()).toBe(0);
     });
+
+    it('refreshes the telemetry session context with the new session ID', () => {
+      const config = new Config(baseParams);
+      vi.mocked(refreshSessionContext).mockClear();
+
+      const newSessionId = config.startNewSession();
+
+      expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
+    });
+  });
+
+  it('should expose LSP status from the configured client', () => {
+    const getStatusSnapshot = vi.fn().mockReturnValue({
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 1,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'clangd',
+          status: 'READY',
+          languages: ['cpp'],
+          transport: 'stdio',
+        },
+      ],
+    });
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        getStatusSnapshot,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    expect(config.getLspStatusSnapshot()).toEqual({
+      enabled: true,
+      configuredServers: 1,
+      readyServers: 1,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [
+        {
+          name: 'clangd',
+          status: 'READY',
+          languages: ['cpp'],
+          transport: 'stdio',
+        },
+      ],
+    });
+    expect(getStatusSnapshot).toHaveBeenCalledTimes(1);
+  });
+
+  it('should report unavailable LSP status when client lacks a status snapshot API', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {} as unknown as ConfigParameters['lspClient'],
+    });
+
+    expect(config.getLspStatusSnapshot()).toEqual({
+      enabled: true,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      statusUnavailable: true,
+    });
+  });
+
+  it('should merge initialization errors into the client LSP status snapshot', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        getStatusSnapshot: vi.fn().mockReturnValue({
+          enabled: true,
+          configuredServers: 1,
+          readyServers: 0,
+          failedServers: 1,
+          inProgressServers: 0,
+          notStartedServers: 0,
+          servers: [],
+          initializationError: 'client failed',
+        }),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    config.setLspInitializationError('discovery failed');
+
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      enabled: true,
+      initializationError: 'discovery failed',
+    });
+  });
+
+  it('should report an initialization error when LSP is enabled without a client', () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+    });
+
+    expect(config.getLspStatusSnapshot()).toEqual({
+      enabled: true,
+      configuredServers: 0,
+      readyServers: 0,
+      failedServers: 0,
+      inProgressServers: 0,
+      notStartedServers: 0,
+      servers: [],
+      initializationError: 'LSP client is not initialized',
+    });
   });
 
   describe('initialize', () => {
@@ -458,6 +574,69 @@ describe('Server Config (config.ts)', () => {
           (call) => call[0],
         ),
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+    });
+
+    it('skips inline MCP discovery by default (progressive availability)', async () => {
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+
+      // Default path passes `skipDiscovery: true` to createToolRegistry,
+      // so the synchronous tool-registry construction must NOT invoke
+      // discoverAllTools. MCP is started in the background instead.
+      expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_CODE_LEGACY_MCP_BLOCKING=1 by running MCP discovery inline', async () => {
+      const originalLegacy = process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+      process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = '1';
+      try {
+        const config = new Config({ ...baseParams, checkpointing: false });
+        await config.initialize();
+
+        // Legacy escape hatch must call back into the synchronous discover
+        // path the cli relied on prior to PR-A.
+        expect(ToolRegistry.prototype.discoverAllTools).toHaveBeenCalledTimes(
+          1,
+        );
+      } finally {
+        if (originalLegacy === undefined) {
+          delete process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'];
+        } else {
+          process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] = originalLegacy;
+        }
+      }
+    });
+
+    it('waitForMcpReady resolves immediately when no MCP discovery was started', async () => {
+      // No MCP servers + non-bare + default mode: startMcpDiscoveryInBackground
+      // is called but the registry mock returns no manager, so the discovery
+      // promise stays undefined and waitForMcpReady is a no-op.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      await config.initialize();
+      await expect(config.waitForMcpReady()).resolves.toBeUndefined();
+    });
+
+    it('getFailedMcpServerNames returns an empty array when no MCP servers are configured', () => {
+      // The helper underpins the non-interactive "Warning: MCP server(s)
+      // failed to start" emission. Must be a no-op when there's nothing
+      // to warn about, otherwise --prompt runs with no MCP config would
+      // emit a spurious warning every time.
+      const config = new Config({ ...baseParams, checkpointing: false });
+      expect(config.getFailedMcpServerNames()).toEqual([]);
+    });
+
+    it('getFailedMcpServerNames skips disabled servers', () => {
+      // A user-disabled server is not "failed" — the user explicitly
+      // turned it off. Treating it as failed would generate noise on
+      // every non-interactive run. Disablement is tracked via
+      // `excludedMcpServers` (see `isMcpServerDisabled`).
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        mcpServers: { off: new MCPServerConfig() },
+        excludedMcpServers: ['off'],
+      } as ConfigParameters);
+      expect(config.getFailedMcpServerNames()).toEqual([]);
     });
   });
 
@@ -688,6 +867,190 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
+    it('keeps getFastModel current-auth-only for direct runtime callers', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'deepseek-v4-flash',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBe('deepseek-v4-flash');
+    });
+
+    it('returns an authType-qualified fast model selector for side queries', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'shared-model',
+        fastModel: 'openai:shared-model',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'shared-model',
+              name: 'OpenAI shared model',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'shared-model',
+              name: 'Anthropic shared model',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBe('openai:shared-model');
+    });
+
+    it('returns a bare fast model for getFastModel when authType-qualified selector matches the current auth type', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+        fastModel: 'openai:deepseek-v4-flash',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBe('deepseek-v4-flash');
+      expect(config.getFastModelForSideQuery()).toBe(
+        'openai:deepseek-v4-flash',
+      );
+    });
+
+    it('accepts runtime fast models for authType-qualified selectors', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_OPENAI,
+        model: 'runtime-fast-model',
+        fastModel: 'openai:runtime-fast-model',
+        generationConfig: {
+          apiKey: 'sk-runtime-key',
+          baseUrl: 'https://runtime.example.com/v1',
+        },
+        generationConfigSources: {
+          model: { kind: 'programmatic', detail: 'test' },
+          apiKey: { kind: 'programmatic', detail: 'test' },
+          baseUrl: { kind: 'programmatic', detail: 'test' },
+        },
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'registry-model',
+              name: 'Registry Model',
+              baseUrl: 'https://api.openai.com/v1',
+              envKey: 'OPENAI_API_KEY',
+            },
+          ],
+        },
+      });
+      config.getModelsConfig().detectAndCaptureRuntimeModel();
+
+      expect(config.getFastModel()).toBe('runtime-fast-model');
+      expect(config.getFastModelForSideQuery()).toBe(
+        'openai:runtime-fast-model',
+      );
+    });
+
+    it('returns undefined when the fast model is not configured for any auth type', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'missing-fast-model',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
+    it('returns undefined when the fast model selector is malformed', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'openai:',
+        modelProvidersConfig: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'deepseek-v4-flash',
+              name: 'deepseek-v4-flash',
+              baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+              envKey: 'DASHSCOPE_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
+    it('returns undefined when fastModel points back to the fast selector', () => {
+      const config = new Config({
+        ...baseParams,
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+        fastModel: 'fast',
+        modelProvidersConfig: {
+          [AuthType.USE_ANTHROPIC]: [
+            {
+              id: 'claude-opus-4-7',
+              name: 'claude-opus-4-7',
+              baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+              envKey: 'IDEALAB_OPUS_API_KEY',
+            },
+          ],
+        },
+      });
+
+      expect(config.getFastModel()).toBeUndefined();
+      expect(config.getFastModelForSideQuery()).toBeUndefined();
+    });
+
     it('should refresh auth when switching to model with different envKey', async () => {
       // This test verifies the fix for switching between modelProvider models
       // with different envKeys (e.g., deepseek-chat with DEEPSEEK_API_KEY)
@@ -965,33 +1328,6 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTelemetryEnabled()).toBe(TELEMETRY_SETTINGS.enabled);
   });
 
-  it('Config constructor should set telemetry useCollector to true when provided', () => {
-    const paramsWithTelemetry: ConfigParameters = {
-      ...baseParams,
-      telemetry: { enabled: true, useCollector: true },
-    };
-    const config = new Config(paramsWithTelemetry);
-    expect(config.getTelemetryUseCollector()).toBe(true);
-  });
-
-  it('Config constructor should set telemetry useCollector to false when provided', () => {
-    const paramsWithTelemetry: ConfigParameters = {
-      ...baseParams,
-      telemetry: { enabled: true, useCollector: false },
-    };
-    const config = new Config(paramsWithTelemetry);
-    expect(config.getTelemetryUseCollector()).toBe(false);
-  });
-
-  it('Config constructor should default telemetry useCollector to false if not provided', () => {
-    const paramsWithTelemetry: ConfigParameters = {
-      ...baseParams,
-      telemetry: { enabled: true },
-    };
-    const config = new Config(paramsWithTelemetry);
-    expect(config.getTelemetryUseCollector()).toBe(false);
-  });
-
   it('should have a getFileService method that returns FileDiscoveryService', () => {
     const config = new Config(baseParams);
     const fileService = config.getFileService();
@@ -1027,6 +1363,95 @@ describe('Server Config (config.ts)', () => {
       await config.initialize();
 
       expect(QwenLogger.prototype.logStartSessionEvent).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('GitCoAuthor Settings', () => {
+    it('defaults both commit and pr to true when not specified', () => {
+      const config = new Config({ ...baseParams, gitCoAuthor: undefined });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
+    });
+
+    it('accepts an object with independent commit and pr toggles', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: { commit: true, pr: false },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(false);
+    });
+
+    // Legacy shape: before commit and PR attribution were split, this
+    // setting was a single boolean. Treat it as governing both toggles so
+    // existing users' preferences carry over.
+    it.each([true, false])(
+      'coerces legacy boolean %s to { commit, pr } with the same value',
+      (value) => {
+        const config = new Config({ ...baseParams, gitCoAuthor: value });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(value);
+        expect(settings.pr).toBe(value);
+      },
+    );
+
+    // settings.json is hand-editable; without intent-aware string
+    // parsing a hand-edited `{ commit: "false" }` would silently
+    // inflate to `commit: true` (the previous "default-to-true on
+    // mismatch" policy). Honor common string disable-intent forms
+    // and fall through to disabled on genuinely unrecognisable
+    // input — safer-by-default than turning attribution on against
+    // the user's clear opt-out.
+    it.each([
+      // Disable-intent strings.
+      ['string "false"', 'false', false],
+      ['string "FALSE"', 'FALSE', false],
+      ['string "no"', 'no', false],
+      ['string "off"', 'off', false],
+      ['string "0"', '0', false],
+      ['empty string', '', false],
+      // Enable-intent strings.
+      ['string "true"', 'true', true],
+      ['string "yes"', 'yes', true],
+      ['string "on"', 'on', true],
+      ['string "1"', '1', true],
+      // Numbers.
+      ['number 1', 1, true],
+      ['number 0', 0, false],
+      ['number 42', 42, false],
+      // Other types fall through to disabled.
+      ['null', null, false],
+      ['object', {}, false],
+      ['array', [], false],
+      // Unknown strings → disabled (don't quietly enable).
+      ['unknown string', 'maybe', false],
+    ])(
+      'parses %s as %s for both commit and pr',
+      (_label, badValue, expected) => {
+        const config = new Config({
+          ...baseParams,
+          gitCoAuthor: {
+            commit: badValue as unknown as boolean,
+            pr: badValue as unknown as boolean,
+          },
+        });
+        const settings = config.getGitCoAuthor();
+        expect(settings.commit).toBe(expected);
+        expect(settings.pr).toBe(expected);
+      },
+    );
+
+    // A genuinely-absent sub-field still defaults to true (schema default).
+    it('defaults absent commit/pr to true', () => {
+      const config = new Config({
+        ...baseParams,
+        gitCoAuthor: {} as { commit?: boolean; pr?: boolean },
+      });
+      const settings = config.getGitCoAuthor();
+      expect(settings.commit).toBe(true);
+      expect(settings.pr).toBe(true);
     });
   });
 
@@ -1082,6 +1507,32 @@ describe('Server Config (config.ts)', () => {
       delete paramsWithoutTelemetry.telemetry;
       const config = new Config(paramsWithoutTelemetry);
       expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
+    });
+
+    it('should return provided includeSensitiveSpanAttributes setting', () => {
+      const params: ConfigParameters = {
+        ...baseParams,
+        telemetry: { enabled: true, includeSensitiveSpanAttributes: true },
+      };
+      const config = new Config(params);
+      expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+    });
+
+    it('should default includeSensitiveSpanAttributes to false', () => {
+      const configWithTelemetry = new Config({
+        ...baseParams,
+        telemetry: { enabled: true },
+      });
+      expect(
+        configWithTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
+      ).toBe(false);
+
+      const paramsWithoutTelemetry: ConfigParameters = { ...baseParams };
+      delete paramsWithoutTelemetry.telemetry;
+      const configWithoutTelemetry = new Config(paramsWithoutTelemetry);
+      expect(
+        configWithoutTelemetry.getTelemetryIncludeSensitiveSpanAttributes(),
+      ).toBe(false);
     });
 
     it('should return default telemetry target if telemetry object is not provided', () => {
@@ -1250,6 +1701,82 @@ describe('Server Config (config.ts)', () => {
       expect(
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
       ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+    });
+
+    it('registers structured_output in bare mode when jsonSchema is set', async () => {
+      // Bare mode strips the toolset to READ_FILE/EDIT/SHELL, but the
+      // synthetic structured_output tool is the terminal contract for
+      // --json-schema runs. Without it the model loops until
+      // maxSessionTurns and exits via the "plain text" failure path —
+      // expensive in tokens for what's almost always a CI use case. The
+      // synthetic tool must be registered alongside the bare three.
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+        ToolNames.STRUCTURED_OUTPUT,
+      ]);
+    });
+
+    it('does NOT register structured_output when createToolRegistry is called with forSubAgent=true', async () => {
+      // Subagent overrides reuse the parent Config via prototype
+      // delegation (createApprovalModeOverride / buildSubagentContextOverride
+      // → Object.create(base)) and rebuild the tool registry with
+      // `forSubAgent: true`. Even though `this.jsonSchema` propagates
+      // through the prototype chain, the synthetic tool MUST NOT register
+      // in the subagent registry: only runNonInteractive's main / drain
+      // loops detect a successful structured_output call as terminal, so
+      // a subagent calling the tool would receive "Session will end now"
+      // and then keep running because its own loop has no terminator —
+      // wasted tokens and no structured payload on stdout.
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        jsonSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      // Initial bare init registers READ_FILE / EDIT / SHELL /
+      // STRUCTURED_OUTPUT (asserted by the test above). Reset so we can
+      // observe ONLY the forSubAgent rebuild's calls.
+      (registerToolMock as Mock).mockClear();
+
+      // Rebuild registry as if for a subagent override.
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
+      // The bare three still register so the subagent has its toolset.
+      expect(registeredNames).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+      ]);
     });
 
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
@@ -2066,7 +2593,10 @@ describe('Model Switching and Config Updates', () => {
       config['hookSystem'] = mockHookSystem;
 
       expect(config.hasHooksForEvent('UserPromptSubmit')).toBe(true);
-      expect(mockHasHooksForEvent).toHaveBeenCalledWith('UserPromptSubmit');
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith(
+        'UserPromptSubmit',
+        expect.any(String),
+      );
     });
 
     it('should return false when hookSystem has no hooks for the event', () => {
@@ -2079,7 +2609,108 @@ describe('Model Switching and Config Updates', () => {
       config['hookSystem'] = mockHookSystem;
 
       expect(config.hasHooksForEvent('Stop')).toBe(false);
-      expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith(
+        'Stop',
+        expect.any(String),
+      );
+    });
+  });
+
+  describe('runtime ContentGenerator view (AsyncLocalStorage)', () => {
+    // The Config getters consult the per-run ALS view published by the
+    // agent runtime when a sub-agent runs on a different model than the
+    // parent. These tests pin that integration: tools that captured the
+    // parent Config at construction must still resolve to the agent's
+    // values when called inside the agent's runtime frame.
+    function setInstanceFields(
+      config: Config,
+      contentGenerator: ContentGenerator,
+      generatorConfig: ContentGeneratorConfig,
+    ): void {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (config as any).contentGenerator = contentGenerator;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (config as any).contentGeneratorConfig = generatorConfig;
+    }
+
+    it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = new Config(baseParams);
+      const parentGenerator = {
+        generateContentStream: vi.fn(),
+      } as unknown as ContentGenerator;
+      const parentGeneratorConfig: ContentGeneratorConfig = {
+        model: 'parent-model',
+        authType: AuthType.QWEN_OAUTH,
+        apiKey: 'parent-key',
+      };
+      setInstanceFields(config, parentGenerator, parentGeneratorConfig);
+
+      const agentGenerator = {
+        generateContentStream: vi.fn(),
+      } as unknown as ContentGenerator;
+      const agentGeneratorConfig: ContentGeneratorConfig = {
+        model: 'agent-model',
+        authType: AuthType.USE_OPENAI,
+        apiKey: 'agent-key',
+      };
+
+      // Outside the frame, getters resolve to the parent's instance fields.
+      expect(config.getContentGenerator()).toBe(parentGenerator);
+      expect(config.getContentGeneratorConfig()).toBe(parentGeneratorConfig);
+      expect(config.getModel()).toBe('parent-model');
+      expect(config.getAuthType()).toBe(AuthType.QWEN_OAUTH);
+
+      // Inside the frame, every getter resolves to the agent's view.
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: agentGenerator,
+          contentGeneratorConfig: agentGeneratorConfig,
+        },
+        async () => {
+          expect(config.getContentGenerator()).toBe(agentGenerator);
+          expect(config.getContentGeneratorConfig()).toBe(agentGeneratorConfig);
+          expect(config.getModel()).toBe('agent-model');
+          expect(config.getAuthType()).toBe(AuthType.USE_OPENAI);
+        },
+      );
+
+      // Frame exit restores resolution to the parent's instance fields.
+      expect(config.getContentGenerator()).toBe(parentGenerator);
+      expect(config.getModel()).toBe('parent-model');
+    });
+
+    it('falls back to the parent model id when the runtime view config has no model', async () => {
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
+      const config = new Config(baseParams);
+      setInstanceFields(
+        config,
+        { generateContentStream: vi.fn() } as unknown as ContentGenerator,
+        {
+          model: 'parent-model',
+          authType: AuthType.QWEN_OAUTH,
+        } as ContentGeneratorConfig,
+      );
+
+      await runWithRuntimeContentGenerator(
+        {
+          contentGenerator: {
+            generateContentStream: vi.fn(),
+          } as unknown as ContentGenerator,
+          contentGeneratorConfig: {
+            model: '',
+            authType: AuthType.USE_OPENAI,
+          } as ContentGeneratorConfig,
+        },
+        async () => {
+          // Empty model on the runtime view falls through to modelsConfig.
+          expect(config.getModel()).toBe(baseParams.model);
+        },
+      );
     });
   });
 });

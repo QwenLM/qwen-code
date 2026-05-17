@@ -29,7 +29,19 @@ vi.mock('../index.js', async (importOriginal) => {
 
 // Mock GitWorktreeService to avoid real git operations.
 // The class mock includes static methods used by ArenaManager.
-vi.mock('../../services/gitWorktreeService.js', () => {
+//
+// Preserve every other export via `importActual` so unrelated
+// consumers of the module (e.g. `worktreeCleanup.ts` →
+// `AGENT_WORKTREE_SLUG_PATTERN`, `worktreeBranchForSlug`,
+// `generateAgentWorktreeSlug`, `WORKTREE_BRANCH_PREFIX`,
+// session-marker helpers) keep working. Without this, vitest replaces
+// the entire module surface and any static import of those constants
+// elsewhere in the dependency graph blows up at load time.
+vi.mock('../../services/gitWorktreeService.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../services/gitWorktreeService.js')
+    >();
   const MockClass = vi.fn().mockImplementation(() => ({
     checkGitAvailable: vi.fn().mockResolvedValue({ available: true }),
     isGitRepository: vi.fn().mockResolvedValue(true),
@@ -47,7 +59,7 @@ vi.mock('../../services/gitWorktreeService.js', () => {
   (MockClass as unknown as Record<string, unknown>)['getWorktreesDir'] = (
     sessionId: string,
   ) => path.join(os.tmpdir(), 'arena-mock', sessionId, 'worktrees');
-  return { GitWorktreeService: MockClass };
+  return { ...actual, GitWorktreeService: MockClass };
 });
 
 // Mock the Config class
@@ -438,42 +450,25 @@ index 111..222 100644
       );
     });
 
-    it('uses each in-process agent generator for semantic approach summaries', async () => {
-      const mainGenerateContent = vi.fn();
-      const model1GenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [
-                {
-                  text: JSON.stringify({
-                    summary: 'Model 1 used a strategy pattern.',
-                  }),
-                },
-              ],
-            },
-          },
-        ],
-      });
-      const model2GenerateContent = vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            content: {
-              parts: [
-                {
-                  text: JSON.stringify({
-                    summary: 'Model 2 made inline edits.',
-                  }),
-                },
-              ],
-            },
-          },
-        ],
-      });
+    it('routes all approach summaries through the chokepoint, not per-agent generators', async () => {
+      const summaryGenerateText = vi
+        .fn()
+        .mockResolvedValueOnce({
+          text: JSON.stringify({
+            summary: 'Model 1 used a strategy pattern.',
+          }),
+          usage: undefined,
+        })
+        .mockResolvedValueOnce({
+          text: JSON.stringify({
+            summary: 'Model 2 made inline edits.',
+          }),
+          usage: undefined,
+        });
       const config = {
         ...mockConfig,
-        getContentGenerator: () => ({
-          generateContent: mainGenerateContent,
+        getBaseLlmClient: () => ({
+          generateText: summaryGenerateText,
         }),
       };
       mockBackend.type = 'in-process';
@@ -484,12 +479,6 @@ index 111..222 100644
       >();
       mockBackend.getAgent.mockImplementation((agentId: string) =>
         agentInteractives.get(agentId),
-      );
-      mockBackend.getAgentContentGenerator.mockImplementation(
-        (agentId: string) =>
-          agentId === 'model-1'
-            ? { generateContent: model1GenerateContent }
-            : { generateContent: model2GenerateContent },
       );
       mockBackend.spawnAgent.mockImplementation(
         async (config: { agentId: string }) => {
@@ -503,20 +492,21 @@ index 111..222 100644
 
       const result = await manager.start(createValidStartOptions());
 
-      expect(mainGenerateContent).not.toHaveBeenCalled();
-      expect(model1GenerateContent).toHaveBeenCalledTimes(1);
-      expect(model2GenerateContent).toHaveBeenCalledTimes(1);
-      expect(model1GenerateContent.mock.calls[0]?.[0].model).toBe('model-1');
-      expect(model2GenerateContent.mock.calls[0]?.[0].model).toBe('model-2');
+      // Both summaries should hit the single chokepoint generator.
+      expect(summaryGenerateText).toHaveBeenCalledTimes(2);
 
-      const model1Prompt = model1GenerateContent.mock.calls[0]?.[0].contents[0]
-        .parts[0].text as string;
-      const model2Prompt = model2GenerateContent.mock.calls[0]?.[0].contents[0]
-        .parts[0].text as string;
-      expect(model1Prompt).toContain('"agentId": "model-1"');
-      expect(model1Prompt).not.toContain('"agentId": "model-2"');
-      expect(model2Prompt).toContain('"agentId": "model-2"');
-      expect(model2Prompt).not.toContain('"agentId": "model-1"');
+      const callPrompts = summaryGenerateText.mock.calls.map(
+        (call: unknown[]) => {
+          const options = call[0] as {
+            contents: Array<{ parts: Array<{ text: string }> }>;
+          };
+          return options.contents[0]?.parts[0]?.text ?? '';
+        },
+      );
+      const allPrompts = callPrompts.join('\n');
+      expect(allPrompts).toContain('"agentId": "model-1"');
+      expect(allPrompts).toContain('"agentId": "model-2"');
+
       expect(result.agents[0]?.approachSummary).toBe(
         'Model 1 used a strategy pattern.',
       );
@@ -613,7 +603,6 @@ function createMockBackend() {
     resizeAll: vi.fn(),
     getAttachHint: vi.fn().mockReturnValue(null),
     getAgent: vi.fn().mockReturnValue(undefined),
-    getAgentContentGenerator: vi.fn().mockReturnValue(undefined),
     /** Disable automatic agent exit for tests that need to control timing. */
     setAutoExit(value: boolean) {
       autoExit = value;

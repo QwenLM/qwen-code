@@ -1,8 +1,8 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.15.6",
+  "version": "0.15.11",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "type": "module",
   "workspaces": [
@@ -18,7 +18,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.15.6"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.15.11"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -65,6 +65,8 @@
     "preflight": "npm run clean && npm ci && npm run format && npm run lint:ci && npm run build && npm run typecheck && npm run test:ci",
     "prepare": "husky && npm run build && npm run bundle",
     "prepare:package": "node scripts/prepare-package.js",
+    "package:standalone": "node scripts/create-standalone-package.js",
+    "package:standalone:release": "node scripts/build-standalone-release.js",
     "release:version": "node scripts/version.js",
     "telemetry": "node scripts/telemetry.js",
     "check:lockfile": "node scripts/check-lockfile.js",
@@ -72,13 +74,16 @@
     "pre-commit": "node scripts/pre-commit.js"
   },
   "overrides": {
-    "wrap-ansi": "9.0.2",
     "ansi-regex": "6.2.2",
     "cliui": {
       "wrap-ansi": "7.0.0"
     },
     "baseline-browser-mapping": "^2.9.19",
-    "normalize-package-data": "^7.0.1"
+    "normalize-package-data": "^7.0.1",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
   },
   "bin": {
     "qwen": "dist/cli.js"
@@ -119,7 +124,7 @@
     "msw": "^2.10.4",
     "npm-run-all": "^4.1.5",
     "prettier": "^3.5.3",
-    "react-devtools-core": "^4.28.5",
+    "react-devtools-core": "^6.1.5",
     "semver": "^7.7.2",
     "strip-ansi": "^7.1.2",
     "tsx": "^4.20.3",
@@ -129,6 +134,7 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
+    "ink": "^7.0.3",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {

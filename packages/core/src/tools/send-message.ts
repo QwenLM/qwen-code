@@ -129,6 +129,11 @@ export class SendMessageTool extends BaseDeclarativeTool<
         required: ['task_id', 'message'],
         additionalProperties: false,
       },
+      true, // isOutputMarkdown
+      false, // canUpdateOutput
+      true, // shouldDefer — sending messages to tasks is infrequent
+      false, // alwaysLoad
+      'send message task communicate notify',
     );
   }
 

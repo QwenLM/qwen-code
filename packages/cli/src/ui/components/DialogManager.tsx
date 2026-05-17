@@ -11,10 +11,12 @@ import { LoopDetectionConfirmation } from './LoopDetectionConfirmation.js';
 import { FolderTrustDialog } from './FolderTrustDialog.js';
 import { ShellConfirmationDialog } from './ShellConfirmationDialog.js';
 import { ConsentPrompt } from './ConsentPrompt.js';
+import { ProviderUpdatePrompt } from './ProviderUpdatePrompt.js';
 import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
+import { StatusLineDialog } from './StatusLineDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { ExternalAuthProgress } from './ExternalAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
@@ -47,6 +49,7 @@ import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { RewindSelector } from './RewindSelector.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { Help } from './Help.js';
 import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.js';
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
@@ -137,12 +140,11 @@ export const DialogManager = ({
       />
     );
   }
-  if (uiState.codingPlanUpdateRequest) {
+  if (uiState.providerUpdateRequest) {
     return (
-      <ConsentPrompt
-        prompt={uiState.codingPlanUpdateRequest.prompt}
-        onConfirm={uiState.codingPlanUpdateRequest.onConfirm}
-        terminalWidth={terminalWidth}
+      <ProviderUpdatePrompt
+        entries={uiState.providerUpdateRequest.entries}
+        onConfirm={uiState.providerUpdateRequest.onConfirm}
       />
     );
   }
@@ -253,8 +255,33 @@ export const DialogManager = ({
       </Box>
     );
   }
+  if (uiState.isStatusLineDialogOpen) {
+    return (
+      <StatusLineDialog
+        settings={settings}
+        config={config}
+        uiState={uiState}
+        addItem={addItem}
+        onSaved={uiActions.notifyStatusLineSettingsChanged}
+        onClose={uiActions.closeStatusLineDialog}
+        availableTerminalHeight={terminalHeight - staticExtraHeight}
+      />
+    );
+  }
   if (uiState.isMemoryDialogOpen) {
     return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
+  }
+  if (uiState.isHelpDialogOpen) {
+    return (
+      <Help
+        commands={uiState.slashCommands}
+        width={mainAreaWidth}
+        activeTab={uiState.activeHelpTab}
+        onTabChange={uiActions.setHelpTab}
+        onClose={uiActions.closeHelpDialog}
+        isInteractive
+      />
+    );
   }
   if (uiState.isApprovalModeDialogOpen) {
     const currentMode = config.getApprovalMode();
@@ -314,7 +341,7 @@ export const DialogManager = ({
     }
   }
 
-  if (uiState.isAuthDialogOpen || uiState.authError) {
+  if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
         <AuthDialog />
@@ -322,19 +349,19 @@ export const DialogManager = ({
     );
   }
 
-  if (uiState.isAuthenticating) {
+  if (uiState.auth.isAuthenticating) {
     if (
-      uiState.pendingAuthType === AuthType.USE_OPENAI &&
-      uiState.externalAuthState
+      uiState.auth.pendingAuthType === AuthType.USE_OPENAI &&
+      uiState.auth.externalAuthState
     ) {
       return (
         <ExternalAuthProgress
-          title={uiState.externalAuthState.title}
-          message={uiState.externalAuthState.message}
-          detail={uiState.externalAuthState.detail}
+          title={uiState.auth.externalAuthState.title}
+          message={uiState.auth.externalAuthState.message}
+          detail={uiState.auth.externalAuthState.detail}
           onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
         />
       );
@@ -342,20 +369,20 @@ export const DialogManager = ({
 
     // OpenAI authentication now handled through AuthDialog with coding-plan/custom sub-modes
     // Qwen OAuth remains as a separate flow
-    if (uiState.pendingAuthType === AuthType.QWEN_OAUTH) {
+    if (uiState.auth.pendingAuthType === AuthType.QWEN_OAUTH) {
       return (
         <QwenOAuthProgress
-          deviceAuth={uiState.qwenAuthState.deviceAuth || undefined}
-          authStatus={uiState.qwenAuthState.authStatus}
-          authMessage={uiState.qwenAuthState.authMessage}
+          deviceAuth={uiState.auth.qwenAuthState.deviceAuth || undefined}
+          authStatus={uiState.auth.qwenAuthState.authStatus}
+          authMessage={uiState.auth.qwenAuthState.authMessage}
           onTimeout={() => {
-            uiActions.onAuthError('Qwen OAuth authentication timed out.');
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.onAuthError('Qwen OAuth authentication timed out.');
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
           onCancel={() => {
-            uiActions.cancelAuthentication();
-            uiActions.setAuthState(AuthState.Updating);
+            uiActions.auth.cancelAuthentication();
+            uiActions.auth.setAuthState(AuthState.Updating);
           }}
         />
       );
@@ -418,6 +445,7 @@ export const DialogManager = ({
   }
 
   if (uiState.isDeleteDialogOpen) {
+    const currentSessionId = config.getSessionId();
     return (
       <SessionPicker
         sessionService={config.getSessionService()}
@@ -425,6 +453,9 @@ export const DialogManager = ({
         onSelect={uiActions.handleDelete}
         onCancel={uiActions.closeDeleteDialog}
         title={t('Delete Session')}
+        enableMultiSelect
+        onConfirmMulti={uiActions.handleDeleteMany}
+        disabledIds={currentSessionId ? [currentSessionId] : undefined}
       />
     );
   }
@@ -435,6 +466,8 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        fileHistoryService={config.getFileHistoryService()}
       />
     );
   }

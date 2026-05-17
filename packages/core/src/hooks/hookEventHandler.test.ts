@@ -17,6 +17,7 @@ import {
   PreCompactTrigger,
   PostCompactTrigger,
   NotificationType,
+  HookPhase,
 } from './types.js';
 import type { StopFailureErrorType } from './types.js';
 import type { Config } from '../config/config.js';
@@ -941,6 +942,116 @@ describe('HookEventHandler', () => {
       expect(result.success).toBe(false);
       expect(result.errors).toHaveLength(1);
       expect(result.errors[0].message).toBe('PreToolUse planner error');
+      expect(result.finalOutput).toBeUndefined();
+    });
+  });
+
+  describe('todo hook fail-closed behavior', () => {
+    it('should block TodoCreated when hook execution setup fails', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('TodoCreated planner error');
+      });
+
+      const result = await hookEventHandler.fireTodoCreatedEvent(
+        'todo-1',
+        'secret token: abc123',
+        'pending',
+        [{ id: 'todo-1', content: 'secret token: abc123', status: 'pending' }],
+        HookPhase.Validation,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('TodoCreated planner error');
+      expect(result.finalOutput).toEqual({
+        decision: 'block',
+        reason:
+          'Hook system failed while processing TodoCreated: TodoCreated planner error',
+      });
+    });
+
+    it('should block TodoCompleted when hook execution setup fails', async () => {
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockImplementation(() => {
+        throw new Error('TodoCompleted planner error');
+      });
+
+      const result = await hookEventHandler.fireTodoCompletedEvent(
+        'todo-1',
+        'internal host: db.internal',
+        'in_progress',
+        [
+          {
+            id: 'todo-1',
+            content: 'internal host: db.internal',
+            status: 'completed',
+          },
+        ],
+        HookPhase.Validation,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0].message).toBe('TodoCompleted planner error');
+      expect(result.finalOutput).toEqual({
+        decision: 'block',
+        reason:
+          'Hook system failed while processing TodoCompleted: TodoCompleted planner error',
+      });
+    });
+
+    it('should redact sensitive todo fields from hook telemetry', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([
+        {
+          hookConfig: {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+          eventName: HookEventName.TodoCreated,
+          success: true,
+          output: undefined,
+          duration: 12,
+          exitCode: 0,
+          stdout: '',
+          stderr: '',
+        },
+      ]);
+      vi.mocked(mockHookAggregator.aggregateResults).mockReturnValue(
+        createMockAggregatedResult(true),
+      );
+
+      await hookEventHandler.fireTodoCreatedEvent(
+        'todo-1',
+        'api_key=super-secret',
+        'pending',
+        [
+          {
+            id: 'todo-1',
+            content: 'api_key=super-secret',
+            status: 'pending',
+          },
+        ],
+        HookPhase.PostWrite,
+      );
+
+      expect(logHookCall).toHaveBeenCalledTimes(1);
+      const hookCallEvent = vi.mocked(logHookCall).mock.calls[0]?.[1];
+      expect(hookCallEvent?.hook_input).toMatchObject({
+        hook_event_name: HookEventName.TodoCreated,
+        todo_id: 'todo-1',
+        todo_status: 'pending',
+        phase: HookPhase.PostWrite,
+      });
+      expect(hookCallEvent?.hook_input).not.toHaveProperty('todo_content');
+      expect(hookCallEvent?.hook_input).not.toHaveProperty('all_todos');
     });
   });
 

@@ -126,6 +126,7 @@ import { MonitorTool, sanitizeMonitorLine } from './monitor.js';
 import type { Config } from '../config/config.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
 import type { ToolCallConfirmationDetails } from './tools.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 /**
  * Create a mock child process with controllable stdout/stderr/events.
@@ -193,10 +194,12 @@ describe('MonitorTool', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({
         isPathWithinWorkspace: mockIsPathWithinWorkspace,
       }),
+      getSessionId: vi.fn().mockReturnValue('test-session-id'),
       storage: {
         getUserSkillsDirs: vi
           .fn()
           .mockReturnValue(['/home/user/.claude/skills']),
+        getProjectDir: vi.fn().mockReturnValue('/test/project/.qwen'),
       },
     } as unknown as Config;
 
@@ -735,6 +738,21 @@ describe('MonitorTool', () => {
       expect(running).toHaveLength(1);
       expect(running[0].command).toBe('tail -f log');
       expect(running[0].pid).toBe(12345);
+      expect(running[0].ownerAgentId).toBeUndefined();
+    });
+
+    it('records the current agent as owner when monitor is started by a subagent', async () => {
+      const invocation = createInvocation({
+        command: 'tail -f log',
+      });
+
+      await runWithAgentContext('agent-123', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      const running = monitorRegistry.getRunning();
+      expect(running).toHaveLength(1);
+      expect(running[0].ownerAgentId).toBe('agent-123');
     });
 
     it('kills the spawned child if registry registration fails', async () => {
@@ -820,7 +838,10 @@ describe('MonitorTool', () => {
         .spyOn(monitorRegistry, 'register')
         .mockImplementation((entry) => {
           entry.abortController.abort();
-          MonitorRegistry.prototype.register.call(monitorRegistry, entry);
+          return MonitorRegistry.prototype.register.call(
+            monitorRegistry,
+            entry,
+          );
         });
 
       try {

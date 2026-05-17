@@ -54,10 +54,15 @@ import {
   getPlanModeSystemReminder,
   getSubagentSystemReminder,
   getArenaSystemReminder,
+  STARTUP_CONTEXT_MODEL_ACK,
   evaluatePermissionFlow,
   needsConfirmation,
   isPlanModeBlocked,
+  abortGoalForStopHookCap,
+  formatStopHookBlockingCapWarning,
 } from '@qwen-code/qwen-code-core';
+import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
+import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -88,6 +93,7 @@ import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 // Import modular session components
 import type {
@@ -203,6 +209,116 @@ export class Session implements SessionContext {
    */
   async replayHistory(records: ChatRecord[]): Promise<void> {
     await this.historyReplayer.replay(records);
+  }
+
+  rewindToTurn(targetTurnIndex: number): {
+    targetTurnIndex: number;
+    apiTruncateIndex: number;
+  } {
+    if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        'targetTurnIndex must be a non-negative integer',
+      );
+    }
+
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind while a prompt is running',
+      );
+    }
+
+    const chat = this.config.getGeminiClient()!.getChat();
+    const apiHistory = chat.getHistory();
+    const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
+      apiHistory,
+      targetTurnIndex,
+    );
+
+    if (apiTruncateIndex < 0) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind to the requested turn. It may have been compressed or does not exist.',
+      );
+    }
+
+    chat.truncateHistory(apiTruncateIndex);
+    chat.stripThoughtsFromHistory();
+
+    this.config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+      truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex),
+    });
+
+    return { targetTurnIndex, apiTruncateIndex };
+  }
+
+  captureHistorySnapshot(): Content[] {
+    return this.config.getGeminiClient()!.getChat().getHistory();
+  }
+
+  restoreHistory(history: Content[]): void {
+    if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot restore history while a prompt is running',
+      );
+    }
+
+    this.config
+      .getGeminiClient()!
+      .getChat()
+      .setHistory(structuredClone(history));
+  }
+
+  #computeApiTruncationIndexForUserTurn(
+    apiHistory: Content[],
+    targetTurnIndex: number,
+  ): number {
+    const startIndex = this.#hasStartupContext(apiHistory) ? 2 : 0;
+
+    if (targetTurnIndex === 0) {
+      return startIndex;
+    }
+
+    let realUserPromptCount = 0;
+    for (let i = startIndex; i < apiHistory.length; i++) {
+      if (!this.#isUserTextContent(apiHistory[i]!)) {
+        continue;
+      }
+
+      if (realUserPromptCount === targetTurnIndex) {
+        return i;
+      }
+
+      realUserPromptCount += 1;
+    }
+
+    return -1;
+  }
+
+  #hasStartupContext(apiHistory: Content[]): boolean {
+    if (apiHistory.length < 2) return false;
+    const first = apiHistory[0];
+    const second = apiHistory[1];
+    if (first?.role !== 'user' || second?.role !== 'model') return false;
+    return (
+      second.parts?.some(
+        (part) => 'text' in part && part.text === STARTUP_CONTEXT_MODEL_ACK,
+      ) ?? false
+    );
+  }
+
+  #isUserTextContent(content: Content): boolean {
+    if (content.role !== 'user') return false;
+    if (!content.parts || content.parts.length === 0) return false;
+
+    const hasFunctionResponse = content.parts.some(
+      (part) => 'functionResponse' in part,
+    );
+    if (hasFunctionResponse) return false;
+
+    return content.parts.some((part) => 'text' in part && part.text);
   }
 
   async cancelPendingPrompt(): Promise<void> {
@@ -579,11 +695,11 @@ export class Session implements SessionContext {
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
-    const MAX_STOP_HOOK_ITERATIONS = 100;
+    const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
 
-    while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
+    while (stopHookIterationCount < stopHookBlockingCap) {
       if (
         !hooksEnabled ||
         !messageBus ||
@@ -647,7 +763,21 @@ export class Session implements SessionContext {
         stopHookIterationCount++;
         stopHookReasons = [...stopHookReasons, continueReason];
 
-        // Emit StopHookLoop event for iterations after the first one
+        if (stopHookIterationCount >= stopHookBlockingCap) {
+          const warning = formatStopHookBlockingCapWarning(
+            'Stop',
+            stopHookBlockingCap,
+          );
+          abortGoalForStopHookCap(
+            this.config,
+            this.config.getSessionId(),
+            warning,
+          );
+          await this.messageEmitter.emitAgentMessage(warning);
+          debugLogger.warn(warning);
+          return { stopReason: 'end_turn' };
+        }
+
         if (stopHookIterationCount > 1) {
           await this.messageEmitter.emitStopHookLoop(
             stopHookIterationCount,
@@ -788,13 +918,6 @@ export class Session implements SessionContext {
 
       // Stop hook allowed stopping, exit the loop
       break;
-    }
-
-    // If we exceeded max iterations, log a warning but still end gracefully
-    if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
-      debugLogger.warn(
-        `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
-      );
     }
 
     return { stopReason: 'end_turn' };
@@ -1270,6 +1393,14 @@ export class Session implements SessionContext {
           name: cmd.name,
           description: cmd.description,
           input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+          _meta: {
+            argumentHint: cmd.argumentHint,
+            source: cmd.source,
+            sourceLabel: cmd.sourceLabel,
+            supportedModes: getEffectiveSupportedModes(cmd),
+            subcommands: getCommandSubcommandNames(cmd),
+            modelInvocable: cmd.modelInvocable === true,
+          },
         };
       });
 
@@ -1337,6 +1468,7 @@ export class Session implements SessionContext {
    */
   async setModel(
     params: SetSessionModelRequest,
+    options: { persistDefault?: boolean } = {},
   ): Promise<SetSessionModelResponse | void> {
     const rawModelId = params.modelId.trim();
 
@@ -1363,6 +1495,16 @@ export class Session implements SessionContext {
         ? { requireCachedCredentials: true }
         : undefined,
     );
+
+    if (options.persistDefault ?? true) {
+      const persistScope = getPersistScopeForModelSelection(this.settings);
+      this.settings.setValue(persistScope, 'model.name', parsed.modelId);
+      this.settings.setValue(
+        persistScope,
+        'security.auth.selectedType',
+        selectedAuthType,
+      );
+    }
   }
 
   /**

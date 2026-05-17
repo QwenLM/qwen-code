@@ -13,8 +13,10 @@ import {
   QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
   SessionService,
+  setStartupEventSink,
   type Config,
   createDebugLogger,
+  writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
@@ -30,6 +32,7 @@ import {
   createMinimalSettings,
   getSettingsWarnings,
   loadSettings,
+  preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import {
   initializeApp,
@@ -62,7 +65,10 @@ import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
   profileCheckpoint,
+  recordStartupEvent,
+  setInteractiveMode,
   finalizeStartupProfile,
+  isStartupProfilerEnabled,
 } from './utils/startupProfiler.js';
 import {
   relaunchAppInChildProcess,
@@ -215,6 +221,27 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+
+  // Write a small runtime.json sidecar next to the chat log so external
+  // tools (terminal multiplexers, IDE integrations, status daemons) can
+  // map the running PID back to its session id and work directory.
+  // Best-effort: a read-only filesystem must not prevent the UI from
+  // starting up. Marking the runtime status as enabled is what arms the
+  // session-swap refresh in `Config.refreshSessionId()` — without this
+  // call, the sidecar would never update on `/clear` or `/resume`.
+  try {
+    const sessionId = config.getSessionId();
+    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
+    await writeRuntimeStatus(runtimeStatusPath, {
+      sessionId,
+      workDir: config.getTargetDir(),
+      qwenVersion: version,
+    });
+    config.markRuntimeStatusEnabled();
+  } catch {
+    // ignored: best-effort, never block UI startup.
+  }
+
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()
       ? installTerminalRedrawOptimizer(process.stdout)
@@ -326,6 +353,15 @@ export async function startInteractiveUI(
       isScreenReaderEnabled: config.getScreenReader(),
     },
   );
+  // Records the moment Ink's `render()` call has returned, which is
+  // synchronous and happens before React reconciliation actually pushes
+  // bytes to the terminal. We intentionally keep the legacy name
+  // `first_paint` for backward compatibility with previously-collected
+  // profile files; the value is best read as "render call returned"
+  // rather than literal pixel paint. AppContainer's mount effect runs
+  // after this — it carries the `config_initialize_*` and
+  // `input_enabled` checkpoints that complete the first-screen picture.
+  profileCheckpoint('first_paint');
 
   // Check for updates only if enableAutoUpdate is not explicitly disabled.
   // Using !== false ensures updates are enabled by default when undefined.
@@ -355,11 +391,25 @@ export async function startInteractiveUI(
 
 export async function main() {
   profileCheckpoint('main_entry');
+  // Bridge core-package startup events (Config.initialize, MCP discovery,
+  // GeminiClient.setTools) into the cli's startup profiler. Gated on
+  // `isStartupProfilerEnabled()` so that when QWEN_CODE_PROFILE_STARTUP is
+  // unset (the common case) every core-side `recordStartupEvent()` call
+  // sees a null sink and short-circuits at the first comparison, instead
+  // of going through this arrow wrapper and the profiler's own enabled
+  // check.
+  if (isStartupProfilerEnabled()) {
+    setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
+  }
   setupUnhandledRejectionHandler();
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
+
+  // Run before yargs parses subcommands — handlers like `channel status`/`stop`
+  // call `process.exit` before `loadSettings()` would otherwise bootstrap.
+  preResolveHomeEnvOverrides();
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
@@ -485,7 +535,40 @@ export async function main() {
         return finalArgs;
       };
 
-      const sandboxArgs = injectStdinIntoArgs(process.argv, stdinData);
+      const injectSandboxSessionIdIntoArgs = (
+        args: string[],
+        sessionId: string,
+      ): string[] => {
+        const separatorIndex = args.indexOf('--');
+        const cliArgs =
+          separatorIndex < 0 ? args : args.slice(0, separatorIndex);
+        const hasArg = (names: string[]) =>
+          cliArgs.some((arg) =>
+            names.some((name) => arg === name || arg.startsWith(`${name}=`)),
+          );
+        if (
+          hasArg(['--session-id', '--sandbox-session-id']) ||
+          hasArg(['--continue', '-c']) ||
+          hasArg(['--resume', '-r'])
+        ) {
+          return args;
+        }
+
+        const sessionArgs = ['--sandbox-session-id', sessionId];
+        if (separatorIndex < 0) {
+          return [...args, ...sessionArgs];
+        }
+
+        return [...cliArgs, ...sessionArgs, ...args.slice(separatorIndex)];
+      };
+
+      const sessionId = partialConfig.getSessionId();
+      const sandboxArgs = sessionId
+        ? injectSandboxSessionIdIntoArgs(
+            injectStdinIntoArgs(process.argv, stdinData),
+            sessionId,
+          )
+        : injectStdinIntoArgs(process.argv, stdinData);
 
       await relaunchOnExitCode(() =>
         start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
@@ -680,9 +763,31 @@ export async function main() {
 
     // Render UI, passing necessary config values. Check that there is no command line question.
     profileCheckpoint('before_render');
-    finalizeStartupProfile(config.getSessionId());
 
     if (config.isInteractive()) {
+      // --json-schema is a headless-only contract: the synthetic
+      // structured_output tool only terminates the run inside
+      // runNonInteractive's main/drain loops. In TUI mode the same call
+      // would just emit "Structured output accepted." and keep the chat
+      // alive, which silently strands the user's run. Parse-time gating
+      // can't catch this case (`qwen --json-schema '...'` on a TTY with
+      // no prompt routes to interactive only after stdin TTY detection),
+      // so reject here before the UI launches.
+      if (config.getJsonSchema?.()) {
+        writeStderrLine(
+          'Error: --json-schema is a headless-only flag. Provide a one-shot prompt via -p / --prompt or pipe one in via stdin.',
+        );
+        // Run cleanup so MCP subprocesses + telemetry exporters that the
+        // earlier initializeApp() / loadCliConfig() registered get shut
+        // down — process.exit() doesn't drain them on its own.
+        await runExitCleanup();
+        process.exit(1);
+      }
+      // For the interactive path, the profile is finalized by AppContainer
+      // after `config.initialize()` and `input_enabled` are recorded — that's
+      // the only way `first_paint`, `config_initialize_*`, `input_enabled`,
+      // and the MCP events are captured. See AppContainer's mount effect.
+      setInteractiveMode(true);
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
       // Drain the auto-theme probe before render so the OSC 11 response is
@@ -700,6 +805,10 @@ export async function main() {
       return;
     }
 
+    // Non-interactive: defer finalize until after `config.initialize()` runs
+    // so MCP discovery events (mcp_first_tool_registered, mcp_all_servers_settled,
+    // gemini_tools_updated) are captured in the profile.
+
     // Print debug mode notice to stderr for non-interactive mode
     if (config.getDebugMode()) {
       writeStderrLine('Debug mode enabled');
@@ -713,9 +822,57 @@ export async function main() {
       }
     }
 
-    // For non-stream-json mode, initialize config here
+    // For non-stream-json mode, initialize config here. Stream-json defers
+    // `config.initialize()` to inside `Session.ensureConfigInitialized`
+    // because the initial control_request may register SDK MCP servers
+    // that must be in place before discovery runs (see session.ts).
     if (inputFormat !== InputFormat.STREAM_JSON) {
+      profileCheckpoint('config_initialize_start');
       await config.initialize();
+      profileCheckpoint('config_initialize_end');
+      // Non-interactive paths feed a prompt to the model immediately after
+      // init. Under PR-A's progressive MCP availability,
+      // `config.initialize()` returns BEFORE MCP servers settle, so
+      // without this wait the first sendMessage would see only built-in
+      // tools — a silent regression versus the legacy synchronous
+      // behavior. Interactive paths skip this (AppContainer's batch-flush
+      // subscriber updates the tool list as MCP servers come online).
+      await config.waitForMcpReady();
+      // Surface MCP server failures on stderr so non-interactive runs
+      // (--prompt / piped stdin / scripts) don't silently regress to
+      // built-in-tools-only when a server cannot connect. The legacy
+      // synchronous MCP path was visibly noisy on failures because
+      // per-server errors logged to stderr during the blocking
+      // `discoverAllMcpTools` call; PR-A moves discovery to a
+      // background promise whose per-server errors are caught inside
+      // `discoverAllMcpToolsIncremental` and never reach a TTY. This
+      // helper closes that gap without re-introducing blocking.
+      // Defensive against tests that pass a stubbed Config without
+      // `getFailedMcpServerNames` — the warning is best-effort visibility
+      // and never gates startup.
+      const failedMcpServers =
+        typeof config.getFailedMcpServerNames === 'function'
+          ? config.getFailedMcpServerNames()
+          : [];
+      if (failedMcpServers.length > 0) {
+        writeStderrLine(
+          `Warning: MCP server(s) failed to start: ${failedMcpServers.join(', ')}. ` +
+            `Continuing with built-in tools and any servers that did connect. ` +
+            `Re-run with QWEN_CODE_DEBUG=1 to see per-server reasons.`,
+        );
+      }
+      // Finalize the non-interactive startup profile here so MCP events
+      // emitted during initialize() / waitForMcpReady() are captured.
+      // Subsequent stdin reads / auth checks / prompt execution are not
+      // part of the "first-screen" budget.
+      //
+      // For stream-json we deliberately do NOT finalize here: the profile
+      // is finalized inside Session.ensureConfigInitialized() after MCP
+      // settles, so its `config_initialize_*` and MCP events make it into
+      // the file. Finalizing here would write an empty profile and the
+      // module-level `finalized` guard would suppress every subsequent
+      // event.
+      finalizeStartupProfile(config.getSessionId());
     }
 
     // Only read stdin if NOT in stream-json mode
@@ -742,9 +899,19 @@ export async function main() {
       await runNonInteractiveStreamJson(
         nonInteractiveConfig,
         trimmedInput.length > 0 ? trimmedInput : '',
+        settings,
       );
       await runExitCleanup();
-      process.exit(0);
+      // `runNonInteractiveStreamJson` doesn't return an explicit exit
+      // code yet, so a cleanup task that mutates `process.exitCode`
+      // could clobber a non-zero failure signal. This is currently safe
+      // because `--json-schema` is rejected at parse time when combined
+      // with `--input-format stream-json` (see the yargs `.check` in
+      // resolveCliGenerationConfig), so structured-output failures
+      // never reach this branch. If a future stream-json equivalent of
+      // structured output is added, plumb the exit code through the
+      // function's return value the way `runNonInteractive` below does.
+      process.exit(process.exitCode ?? 0);
     }
 
     if (!input) {
@@ -765,10 +932,19 @@ export async function main() {
 
     debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
-    await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
-    // Call cleanup before process.exit, which causes cleanup to not run
+    const exitCode = await runNonInteractive(
+      nonInteractiveConfig,
+      settings,
+      input,
+      prompt_id,
+    );
+    // Call cleanup before process.exit, which causes cleanup to not run.
+    // Capture the exit code BEFORE cleanup so any cleanup task that
+    // mutates process.exitCode can't silently turn a structured-output
+    // failure (or other explicit non-zero return from runNonInteractive)
+    // into a zero exit.
     await runExitCleanup();
-    process.exit(0);
+    process.exit(exitCode);
   }
 }
 

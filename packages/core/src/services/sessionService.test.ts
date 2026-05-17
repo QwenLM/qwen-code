@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import {
   afterEach,
   beforeEach,
@@ -60,9 +61,13 @@ describe('SessionService', () => {
       .spyOn(fs, 'unlinkSync')
       .mockImplementation(() => undefined);
 
-    // Mock jsonl-utils
+    // Mock jsonl-utils. `parseLineTolerant` defaults to a no-op so any code
+    // path that streams lines through it (e.g. countSessionMessages,
+    // readLastRecordUuid) does not crash on the auto-mocked `undefined`
+    // return; tests that need recovery semantics override this explicitly.
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
   });
 
   afterEach(() => {
@@ -185,6 +190,28 @@ describe('SessionService', () => {
 
       expect(result.items[0].prompt).toBe('hello session a');
       expect(result.items[0].gitBranch).toBe('main');
+    });
+
+    it('should NOT populate messageCount during listing', async () => {
+      // Listing must avoid the full-file readline that counting requires
+      // — message counts are now lazy and provided by
+      // `countSessionMessages(sessionId)` only when a UI surface (e.g.
+      // a session preview) is about to display them. Pinning this
+      // contract here so future refactors can't quietly re-introduce
+      // the per-file scan that used to dominate /resume open time.
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].messageCount).toBeUndefined();
     });
 
     it('should truncate long prompts', async () => {
@@ -553,6 +580,193 @@ describe('SessionService', () => {
     });
   });
 
+  describe('removeSessions', () => {
+    it('should remove multiple sessions and report each outcome', async () => {
+      // recordA1 belongs to current project; recordB1 also; the third id
+      // never has a backing record (notFound).
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdB,
+        sessionIdC,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdA, sessionIdB]);
+      expect(result.notFound).toEqual([sessionIdC]);
+      expect(result.errors).toEqual([]);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should de-duplicate input ids', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdA,
+        sessionIdA,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdA]);
+      expect(result.notFound).toEqual([]);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should keep going when one removal fails', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const failure = new Error('boom');
+      unlinkSyncSpy.mockImplementation((p: fs.PathLike) => {
+        if (p.toString().includes(sessionIdA)) {
+          throw failure;
+        }
+      });
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdB,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdB]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: failure },
+      ]);
+    });
+
+    it('should return empty results when given an empty list', async () => {
+      const result = await sessionService.removeSessions([]);
+
+      expect(result.removed).toEqual([]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('countSessionMessages', () => {
+    // The lazy counter that replaces the per-file readline scan from
+    // listSessions. Four contracts to pin: it actually counts what it
+    // promises, it short-circuits on bad input without touching the disk,
+    // it returns 0 on any read failure (caller must not see an exception
+    // bubble up — the picker treats 0 as "unknown"), and it scopes to
+    // the current project (mirroring deleteSession/renameSession's
+    // first-record cwd check).
+
+    const stubCreateReadStream = (
+      lines: string[],
+    ): MockInstance<typeof fs.createReadStream> =>
+      vi
+        .spyOn(fs, 'createReadStream')
+        .mockImplementation(
+          () => Readable.from([lines.join('\n')]) as unknown as fs.ReadStream,
+        );
+
+    it('should count unique user/assistant uuids and ignore other record types', async () => {
+      // Project scoping reads the first record before the count stream;
+      // give it a record from this project so the count proceeds.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      // Real countSessionMessagesFromPath routes each line through
+      // parseLineTolerant. The default mock is a no-op; for this test we
+      // need it to actually decode the JSON so the uuid set is populated.
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return Array.isArray(parsed) ? parsed : [parsed];
+        } catch {
+          return [];
+        }
+      });
+      const lines = [
+        // Two user records sharing a uuid — should be counted once
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'a1', type: 'assistant' }),
+        // System / summary records aren't messages
+        JSON.stringify({ uuid: 's1', type: 'system' }),
+        JSON.stringify({ uuid: 'sum1', type: 'summary' }),
+        // Empty and malformed lines must not throw
+        '',
+        '   ',
+        'not-json',
+        JSON.stringify({ uuid: 'u2', type: 'user' }),
+      ];
+      const createReadStreamSpy = stubCreateReadStream(lines);
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(3); // u1, a1, u2
+      expect(createReadStreamSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should return 0 for invalid sessionId without touching the filesystem', async () => {
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages('not-a-uuid');
+
+      expect(count).toBe(0);
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 when the session file is missing (ENOENT)', async () => {
+      // The first-record read fires before the count stream, so simulate
+      // ENOENT there too — readLines surfaces it as a thrown error.
+      vi.mocked(jsonl.readLines).mockRejectedValue(
+        Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+      );
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+    });
+
+    it('should return 0 when the session belongs to a different project', async () => {
+      // A valid session ID can exist in the shared chats directory while
+      // its first-record cwd hashes to a different project. Lazy-count
+      // callers must not bypass project scoping.
+      const otherProjectRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/some/other/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([otherProjectRecord]);
+      // Make the projectHash mock context-sensitive so the cwd check
+      // actually distinguishes projects.
+      vi.mocked(getProjectHash).mockImplementation((cwd) =>
+        cwd === '/test/project/root' ? 'test-project-hash' : 'other-hash',
+      );
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+      // No streaming pass should have started — the project check
+      // short-circuits before the expensive part.
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 when the session file has no records (empty file)', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([]);
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();
@@ -679,6 +893,21 @@ describe('SessionService', () => {
           makeConversation([compressionRecord, assistant]),
         ),
       ).toBe(450);
+    });
+
+    it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: { promptTokenCount: 200, totalTokenCount: 450 },
+      };
+      expect(
+        getResumePromptTokenCount(
+          makeConversation([compressionRecord, assistant]),
+        ),
+      ).toBe(200);
     });
 
     it('should fall back to compression when latest assistant has zero usage', () => {
@@ -903,6 +1132,388 @@ describe('SessionService', () => {
         { text: 'deep thinking', thought: true },
         { text: 'final answer' },
       ]);
+    });
+  });
+
+  describe('forkSession', () => {
+    // forkSession uses real disk I/O through `jsonl.read` and `fs.*`.
+    // The outer describe hoist-mocks `node:path`, `../utils/paths.js`, and
+    // `../utils/jsonl-utils.js`; restore the real implementations inside this
+    // describe's setup so the fork actually reads/writes tmp files.
+    let realTmpDir: string;
+    let realOs: typeof import('node:os');
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      // Storage.resolveRuntimeBaseDir uses isAbsolute and resolve; both are
+      // auto-mocked to return undefined, which silently falls back to
+      // `~/.qwen` and makes the fork write outside the tmp sandbox.
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      // Storage.getProjectDir calls sanitizeCwd via a non-spied namespace import;
+      // restore it module-globally so getChatsDir() returns a real path.
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+
+      // Restore any fs spies installed by the outer beforeEach.
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'fork-session-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const seedSession = (sessionId: string) => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'u1',
+          sessionId,
+          type: 'assistant',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'model', parts: [{ text: 'hi' }] },
+        },
+      ];
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return { file, lines };
+    };
+
+    it('rewrites sessionId, rebuilds parentUuid, and stamps forkedFrom on every record', async () => {
+      const oldId = '11111111-1111-1111-1111-111111111111';
+      const newId = '22222222-2222-2222-2222-222222222222';
+      const { file: srcPath } = seedSession(oldId);
+
+      const result = await service.forkSession(oldId, newId);
+      expect(result.copiedCount).toBe(2);
+      expect(result.filePath).toContain(`${newId}.jsonl`);
+
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+
+      expect(written).toHaveLength(2);
+      expect(written[0]).toMatchObject({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId: newId,
+        forkedFrom: { sessionId: oldId, messageUuid: 'u1' },
+      });
+      expect(written[1]).toMatchObject({
+        uuid: 'u2',
+        parentUuid: 'u1', // rebuilt in write order
+        sessionId: newId,
+        forkedFrom: { sessionId: oldId, messageUuid: 'u2' },
+      });
+      // Source file is untouched.
+      expect(fs.existsSync(srcPath)).toBe(true);
+      const srcLines = fs
+        .readFileSync(srcPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(srcLines.every((r) => r.sessionId === oldId)).toBe(true);
+      expect(srcLines.every((r) => !r.forkedFrom)).toBe(true);
+    });
+
+    it('throws when the source session does not exist', async () => {
+      const oldId = '33333333-3333-3333-3333-333333333333';
+      const newId = '44444444-4444-4444-4444-444444444444';
+      await expect(service.forkSession(oldId, newId)).rejects.toThrow();
+    });
+
+    it('throws when the target session file already exists', async () => {
+      const oldId = '55555555-5555-5555-5555-555555555555';
+      const newId = '66666666-6666-6666-6666-666666666666';
+      seedSession(oldId);
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.writeFileSync(realPath.join(chatsDir, `${newId}.jsonl`), 'x');
+
+      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+        /already exists/,
+      );
+    });
+
+    it('throws when the source session belongs to a different project', async () => {
+      // Defensive guard: a file can physically sit in this project's chats
+      // dir but carry a record whose cwd hashes to a different project
+      // (manual file move, corrupted state). Fork must refuse rather than
+      // silently cross project boundaries.
+      const oldId = '77777777-7777-7777-7777-777777777777';
+      const newId = '88888888-8888-8888-8888-888888888888';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      fs.writeFileSync(
+        realPath.join(chatsDir, `${oldId}.jsonl`),
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: oldId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd: '/some/other/project',
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hi' }] },
+        }) + '\n',
+      );
+
+      await expect(service.forkSession(oldId, newId)).rejects.toThrow(
+        /does not belong to current project/,
+      );
+    });
+
+    it('rejects invalid sessionId patterns before touching disk', async () => {
+      const valid = '99999999-9999-9999-9999-999999999999';
+      await expect(service.forkSession('bogus', valid)).rejects.toThrow(
+        /Invalid source sessionId/,
+      );
+      await expect(service.forkSession(valid, 'bogus')).rejects.toThrow(
+        /Invalid new sessionId/,
+      );
+    });
+  });
+
+  describe('findSessionTitlesByPrefix', () => {
+    // Uses real disk like forkSession — readSessionTitleInfoFromFile reads
+    // the file tail for the custom_title record, so mocks would defeat the
+    // method. Mirrors the forkSession describe's setup verbatim so the tmp
+    // sandbox + un-mocked path/jsonl utilities are in place.
+    let realTmpDir: string;
+    let realPath: typeof import('node:path');
+    let service: SessionService;
+    let cwd: string;
+
+    beforeEach(async () => {
+      const realOs = await import('node:os');
+      realPath = await vi.importActual<typeof import('node:path')>('node:path');
+      const actualPaths =
+        await vi.importActual<typeof import('../utils/paths.js')>(
+          '../utils/paths.js',
+        );
+      const actualJsonl = await vi.importActual<
+        typeof import('../utils/jsonl-utils.js')
+      >('../utils/jsonl-utils.js');
+
+      vi.mocked(path.join).mockImplementation(
+        realPath.join as unknown as typeof path.join,
+      );
+      vi.mocked(path.dirname).mockImplementation(
+        realPath.dirname as unknown as typeof path.dirname,
+      );
+      vi.mocked(path.isAbsolute).mockImplementation(
+        realPath.isAbsolute as unknown as typeof path.isAbsolute,
+      );
+      vi.mocked(path.resolve).mockImplementation(
+        realPath.resolve as unknown as typeof path.resolve,
+      );
+      vi.mocked(getProjectHash).mockImplementation(actualPaths.getProjectHash);
+      const mockedPaths = (await import('../utils/paths.js')) as unknown as {
+        sanitizeCwd: (cwd: string) => string;
+      };
+      mockedPaths.sanitizeCwd = actualPaths.sanitizeCwd;
+      vi.mocked(jsonl.read).mockImplementation(actualJsonl.read);
+      vi.mocked(jsonl.readLines).mockImplementation(actualJsonl.readLines);
+
+      vi.mocked(readdirSyncSpy).mockRestore?.();
+      vi.mocked(statSyncSpy).mockRestore?.();
+      vi.mocked(unlinkSyncSpy).mockRestore?.();
+
+      realTmpDir = fs.mkdtempSync(
+        realPath.join(realOs.tmpdir(), 'find-titles-prefix-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = realTmpDir;
+      cwd = process.cwd();
+      service = new SessionService(cwd);
+    });
+
+    afterEach(() => {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      try {
+        fs.rmSync(realTmpDir, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    });
+
+    const seedSessionWithTitle = (
+      sessionId: string,
+      title: string,
+      sessionCwd: string = cwd,
+    ) => {
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
+      const lines = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd: sessionCwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'u1',
+          sessionId,
+          type: 'system',
+          subtype: 'custom_title',
+          timestamp: '2026-04-22T00:00:01.000Z',
+          cwd: sessionCwd,
+          version: 'test',
+          systemPayload: { customTitle: title, titleSource: 'manual' },
+        },
+      ];
+      fs.writeFileSync(
+        file,
+        lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
+      );
+      return file;
+    };
+
+    it('returns titles whose custom_title starts with the prefix (case-insensitive)', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'my-branch (Branch)',
+      );
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'My-Branch (Branch 2)',
+      );
+      seedSessionWithTitle(
+        '33333333-3333-3333-3333-333333333333',
+        'unrelated session',
+      );
+
+      const titles =
+        await service.findSessionTitlesByPrefix('my-branch (Branch');
+
+      expect(new Set(titles)).toEqual(
+        new Set(['my-branch (Branch)', 'My-Branch (Branch 2)']),
+      );
+    });
+
+    it('returns empty when chats directory does not exist', async () => {
+      const titles = await service.findSessionTitlesByPrefix('anything');
+      expect(titles).toEqual([]);
+    });
+
+    it('skips sessions from other projects (collisions are project-scoped)', async () => {
+      seedSessionWithTitle(
+        '11111111-1111-1111-1111-111111111111',
+        'shared (Branch)',
+        cwd,
+      );
+      // Same chats dir (sessions are stored under projectHash anyway), but
+      // the record's cwd belongs to another project → must be skipped.
+      seedSessionWithTitle(
+        '22222222-2222-2222-2222-222222222222',
+        'shared (Branch 2)',
+        '/some/other/project',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('shared (Branch');
+      expect(titles).toEqual(['shared (Branch)']);
+    });
+
+    it('skips files without a custom_title record', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          type: 'user',
+          timestamp: '2026-04-22T00:00:00.000Z',
+          cwd,
+          version: 'test',
+          message: { role: 'user', parts: [{ text: 'hi' }] },
+        }) + '\n',
+      );
+
+      const titles = await service.findSessionTitlesByPrefix('anything');
+      expect(titles).toEqual([]);
     });
   });
 });

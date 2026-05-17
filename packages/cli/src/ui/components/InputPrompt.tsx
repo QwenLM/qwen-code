@@ -8,6 +8,7 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
@@ -75,6 +76,7 @@ export interface InputPromptProps {
   config: Config;
   slashCommands: readonly SlashCommand[];
   commandContext: CommandContext;
+  recentSlashCommands?: RecentSlashCommands;
   placeholder?: string;
   focus?: boolean;
   inputWidth: number;
@@ -109,6 +111,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   config,
   slashCommands,
   commandContext,
+  recentSlashCommands,
   placeholder,
   focus = true,
   suggestionsWidth,
@@ -140,6 +143,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Includes terminal entries — the pill stays open so users can reopen
   // the dialog to inspect final state after the last agent finishes.
   const hasBgAgents = bgEntries.length > 0;
+  const hasActiveToolConfirmation = useMemo(
+    () =>
+      Boolean(uiState.confirmationRequest) ||
+      (uiState.pendingGeminiHistoryItems ?? []).some(
+        (item) =>
+          item.type === 'tool_group' &&
+          item.tools.some((tool) => tool.confirmationDetails),
+      ),
+    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+  );
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
@@ -204,6 +217,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     config,
     // Suppress completion when history navigation just occurred
     !justNavigatedHistory,
+    recentSlashCommands,
   );
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
@@ -780,7 +794,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Prevent up/down from falling through to regular history navigation
         if (
           keyMatchers[Command.NAVIGATION_UP](key) ||
-          keyMatchers[Command.NAVIGATION_DOWN](key)
+          keyMatchers[Command.NAVIGATION_DOWN](key) ||
+          keyMatchers[Command.HISTORY_UP](key) ||
+          keyMatchers[Command.HISTORY_DOWN](key)
         ) {
           return true;
         }
@@ -951,6 +967,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        if (
+          hasActiveToolConfirmation &&
+          (keyMatchers[Command.HISTORY_UP](key) ||
+            keyMatchers[Command.HISTORY_DOWN](key) ||
+            keyMatchers[Command.NAVIGATION_UP](key) ||
+            keyMatchers[Command.NAVIGATION_DOWN](key))
+        ) {
+          return true;
+        }
+
         // Pop all queued messages into input when pressing Up arrow at top of input
         if (
           !isAttachmentMode &&
@@ -964,11 +990,52 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {
-          inputHistory.navigateUp();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on first visual row → move cursor up one row
+          // 2. Else if cursor not at col 0 → snap to col 0 (no history change)
+          // 3. Else → navigate to older history; cursor lands at offset 0
+          const onFirstRow =
+            buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0;
+          if (!onFirstRow) {
+            buffer.move('up');
+            return true;
+          }
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (keyMatchers[Command.HISTORY_DOWN](key)) {
-          inputHistory.navigateDown();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on last visual row → move cursor down one row
+          // 2. Else if cursor not at end of line → snap to end (no history change)
+          // 3. Else → navigate to newer history; cursor lands at end (setText default)
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const onLastRow = buffer.visualCursor[0] === lastRowIdx;
+          if (!onLastRow) {
+            buffer.move('down');
+            return true;
+          }
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
+          if (inputHistory.navigateDown()) {
+            return true;
+          }
+          if (hasAgents) {
+            setAgentTabBarFocused(true);
+            return true;
+          }
+          if (hasBgAgents) {
+            setBgPillFocused(true);
+            return true;
+          }
           return true;
         }
         // Handle arrow-up/down for history on single-line or at edges
@@ -977,7 +1044,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          inputHistory.navigateUp();
+          // Two-step edge transition: snap cursor to col 0 before triggering history
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (
@@ -985,6 +1059,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
+          // Two-step edge transition: snap cursor to end of line before triggering history
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
           if (inputHistory.navigateDown()) {
             return true;
           }
@@ -1194,6 +1275,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgPillFocused,
       hasAgents,
       hasBgAgents,
+      hasActiveToolConfirmation,
       setAgentTabBarFocused,
       setBgPillFocused,
       followup,
@@ -1215,7 +1297,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       const mapEntry = buf.visualToLogicalMap[absoluteVisualIndex];
       const [logicalLineIdx, logicalStartCol] = mapEntry;
       const logicalLine = buf.lines[logicalLineIdx] || '';
-      const tokens = parseInputForHighlighting(logicalLine, logicalLineIdx);
+      const tokens = parseInputForHighlighting(
+        logicalLine,
+        logicalLineIdx,
+        slashCommands,
+      );
 
       const visualStart = logicalStartCol;
       const visualEnd = logicalStartCol + cpLen(lineText);
@@ -1307,7 +1393,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       return <Text>{renderedLine}</Text>;
     },
-    [],
+    [slashCommands],
   );
 
   const getActiveCompletion = () => {

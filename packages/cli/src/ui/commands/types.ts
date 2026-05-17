@@ -90,7 +90,7 @@ export interface CommandContext {
     loadHistory: UseHistoryManagerReturn['loadHistory'];
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
-    reloadCommands: () => void;
+    reloadCommands: () => void | Promise<void>;
     setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
     dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
@@ -160,6 +160,9 @@ export interface OpenDialogActionReturn {
   /** Pre-filtered sessions for the picker (e.g., multiple title matches from /resume <title>). */
   matchedSessions?: SessionListItem[];
 
+  /** Optional session name for /branch — passed through to handleBranch. */
+  name?: string;
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -170,6 +173,7 @@ export interface OpenDialogActionReturn {
     | 'theme'
     | 'editor'
     | 'settings'
+    | 'statusline'
     | 'memory'
     | 'model'
     | 'fast-model'
@@ -181,6 +185,7 @@ export interface OpenDialogActionReturn {
     | 'approval-mode'
     | 'resume'
     | 'delete'
+    | 'branch'
     | 'extensions_manage'
     | 'hooks'
     | 'mcp'
@@ -276,6 +281,13 @@ export type CommandSource =
 // | 'plugin-skill'
 // | 'dynamic-skill'
 
+export type CommandSourceDetail =
+  | 'user'
+  | 'project'
+  | 'custom'
+  | 'extension'
+  | 'plugin';
+
 export interface CommandCompletionItem {
   value: string;
   label?: string;
@@ -314,6 +326,12 @@ export interface SlashCommand {
    */
   sourceLabel?: string;
 
+  /**
+   * Stable, non-localized source detail for semantic routing and badges.
+   * `sourceLabel` is user-visible display text and may be localized.
+   */
+  sourceDetail?: CommandSourceDetail;
+
   // ── Phase 1: mode capability ───────────────────────────────────────────
   /**
    * Which execution modes this command is available in.
@@ -349,6 +367,12 @@ export interface SlashCommand {
    * description for modelInvocable commands.
    */
   whenToUse?: string;
+
+  /**
+   * Non-localized description reserved for model-visible metadata. Stays stable
+   * across UI locale changes; `description` is what the UI surface renders.
+   */
+  modelDescription?: string;
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];

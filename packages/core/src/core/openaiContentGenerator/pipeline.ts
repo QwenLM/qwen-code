@@ -13,9 +13,11 @@ import {
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { OpenAIContentConverter } from './converter.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import { TaggedThinkingParser } from './taggedThinkingParser.js';
 import type { PipelineConfig, RequestContext } from './types.js';
+import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 
 /**
  * The OpenAI SDK adds an abort listener for every `chat.completions.create`
@@ -217,7 +219,7 @@ export class ContentGenerationPipeline {
       // Re-throw StreamContentError directly so it can be handled by
       // the caller's retry logic (e.g., TPM throttling retry in sendMessageStream)
       if (error instanceof StreamContentError) {
-        throw error;
+        throw redactProxyError(error);
       }
 
       // Use shared error handling logic
@@ -509,6 +511,11 @@ export class ContentGenerationPipeline {
         isStreaming,
       );
 
+      // Position is load-bearing: capture must run after buildRequest (post
+      // provider enhancement, post disable-reasoning) and before the SDK call
+      // so the logger sees the exact bytes sent on the wire.
+      openaiRequestCaptureContext.getStore()?.(openaiRequest);
+
       const result = await executor(openaiRequest, context);
       return result;
     } catch (error) {
@@ -526,7 +533,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     request: GenerateContentParameters,
   ): Promise<never> {
-    this.config.errorHandler.handle(error, context, request);
+    this.config.errorHandler.handle(redactProxyError(error), context, request);
   }
 
   /**

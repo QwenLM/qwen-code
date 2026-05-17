@@ -24,12 +24,15 @@ const DEFAULT_ENV_KEYS: Record<string, string> = {
 };
 
 /**
- * Find model configuration from modelProviders by authType and modelId
+ * Find model configuration from modelProviders by authType and modelId.
+ * When multiple models share the same id (different baseUrls), returns the
+ * first match. Callers that need an exact match should also compare baseUrl.
  */
 function findModelConfig(
   modelProviders: ModelProvidersConfig | undefined,
   authType: string,
   modelId: string | undefined,
+  baseUrl?: string,
 ): ProviderModelConfig | undefined {
   if (!modelProviders || !modelId) {
     return undefined;
@@ -40,6 +43,9 @@ function findModelConfig(
     return undefined;
   }
 
+  if (baseUrl) {
+    return models.find((m) => m.id === modelId && m.baseUrl === baseUrl);
+  }
   return models.find((m) => m.id === modelId);
 }
 

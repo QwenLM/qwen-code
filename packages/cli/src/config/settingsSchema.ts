@@ -14,6 +14,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_STOP_HOOK_BLOCK_CAP,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
 } from '@qwen-code/qwen-code-core';
@@ -78,6 +79,27 @@ export interface SettingDefinition {
   options?: readonly SettingEnumOption[];
   /** Schema for array items when type is 'array' */
   items?: SettingItemDefinition;
+  /**
+   * Primitive shapes a field accepted before it was expanded to its current
+   * type. The exported JSON Schema wraps the field in `anyOf` so values from
+   * those older shapes don't trip the IDE validator while the runtime
+   * migration is still pending. Has no runtime effect — it's purely a
+   * compatibility hint for editors.
+   *
+   * Narrowed to the subset our generator can faithfully emit as a
+   * one-liner `{ type: <legacyType> }` schema fragment. `'enum'` is
+   * not a valid JSON Schema `type` value at all (enum constraints
+   * use the `enum` keyword, not `type: 'enum'`), so allowing it here
+   * would silently produce an invalid `settings.schema.json`.
+   * `'object'` IS a valid JSON Schema type, but a bare
+   * `{ type: 'object' }` legacy entry would accept ANY object value
+   * — most likely not what the field's pre-expansion shape actually
+   * permitted. Future legacy shapes that need `enum` / structured-
+   * object compatibility should land their own branch in
+   * `convertSettingToJsonSchema` (with proper `enum:` / `properties:`
+   * companions) instead of widening this set.
+   */
+  legacyTypes?: ReadonlyArray<'boolean' | 'string' | 'number' | 'array'>;
   /**
    * Escape hatch for the JSON Schema generator: when set, this object is
    * emitted verbatim under the setting's properties entry instead of the
@@ -278,29 +300,6 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.REPLACE,
   },
 
-  // Coding Plan configuration
-  codingPlan: {
-    type: 'object',
-    label: 'Coding Plan',
-    category: 'Model',
-    requiresRestart: false,
-    default: {},
-    description: 'Coding Plan template version tracking and configuration.',
-    showInDialog: false,
-    properties: {
-      version: {
-        type: 'string',
-        label: 'Coding Plan Template Version',
-        category: 'Model',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          'SHA256 hash of the Coding Plan template. Used to detect template updates.',
-        showInDialog: false,
-      },
-    },
-  },
-
   // Environment variables fallback
   env: {
     type: 'object',
@@ -387,14 +386,47 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
       },
       gitCoAuthor: {
-        type: 'boolean',
-        label: 'Attribution: commit',
+        type: 'object',
+        label: 'Attribution',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        // Match `normalizeGitCoAuthor`'s runtime defaults so the IDE
+        // schema publishes the same "enabled by default" hint users see
+        // at runtime. The empty-object form here would silently lose
+        // editor-surfaced defaults.
+        default: { commit: true, pr: true },
         description:
-          'Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.',
-        showInDialog: true,
+          'Attribution added to git commits and pull requests created through Qwen Code.',
+        showInDialog: false,
+        // Pre-V4 settings stored this as a single boolean. The V3→V4
+        // migration rewrites those on first launch, but the IDE schema
+        // validator runs before that — accept the boolean shape so users
+        // editing settings.json in VS Code don't see a spurious warning
+        // until they run qwen once. Config.normalizeGitCoAuthor handles
+        // the boolean at runtime.
+        legacyTypes: ['boolean'],
+        properties: {
+          commit: {
+            type: 'boolean',
+            label: 'Attribution: commit',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.',
+            showInDialog: true,
+          },
+          pr: {
+            type: 'boolean',
+            label: 'Attribution: PR',
+            category: 'General',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.',
+            showInDialog: true,
+          },
+        },
       },
       checkpointing: {
         type: 'object',
@@ -447,6 +479,17 @@ const SETTINGS_SCHEMA = {
         description:
           'The language for LLM output. Use "auto" to detect from system settings, ' +
           'or set a specific language.',
+        showInDialog: true,
+      },
+      dynamicCommandTranslation: {
+        type: 'boolean',
+        label: 'Language: Dynamic Command Translation',
+        category: 'General',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable AI translation for dynamic slash command descriptions. ' +
+          'When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.',
         showInDialog: true,
       },
       terminalBell: {
@@ -572,14 +615,21 @@ const SETTINGS_SCHEMA = {
         category: 'UI',
         requiresRestart: false,
         default: undefined as
-          | {
-              type: 'command';
-              command: string;
-              refreshInterval?: number;
-            }
+          | (
+              | {
+                  type: 'command';
+                  command: string;
+                  refreshInterval?: number;
+                }
+              | {
+                  type: 'preset';
+                  items: string[];
+                  useThemeColors?: boolean;
+                }
+            )
           | undefined,
         description:
-          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
+          'Status line display configuration. Use `type: "preset"` with built-in item ids, or `type: "command"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
         showInDialog: false,
       },
       customThemes: {
@@ -627,6 +677,20 @@ const SETTINGS_SCHEMA = {
         default: true,
         description: 'Show line numbers in the code output.',
         showInDialog: true,
+      },
+      renderMode: {
+        type: 'enum',
+        label: 'Markdown Render Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: 'render',
+        description:
+          'Default Markdown display mode. Use "render" for rich visual previews, or "raw" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M; on macOS the terminal must send Option as Meta.',
+        showInDialog: true,
+        options: [
+          { value: 'render', label: 'Render visual previews' },
+          { value: 'raw', label: 'Show raw source' },
+        ],
       },
       showCitations: {
         type: 'boolean',
@@ -908,6 +972,18 @@ const SETTINGS_SCHEMA = {
     default: undefined as TelemetrySettings | undefined,
     description: 'Telemetry configuration.',
     showInDialog: false,
+    jsonSchemaOverride: {
+      type: 'object',
+      properties: {
+        includeSensitiveSpanAttributes: {
+          description:
+            'When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.',
+          type: 'boolean',
+          default: false,
+        },
+      },
+      additionalProperties: true,
+    },
   },
 
   fastModel: {
@@ -1272,6 +1348,16 @@ const SETTINGS_SCHEMA = {
           'Enable automatic consolidation (dream) of collected memories.',
         showInDialog: false,
       },
+      enableAutoSkill: {
+        type: 'boolean',
+        label: 'Enable Auto Skill',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable background review for reusable project skills after tool-heavy sessions.',
+        showInDialog: false,
+      },
     },
   },
 
@@ -1382,6 +1468,27 @@ const SETTINGS_SCHEMA = {
         description:
           'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
         showInDialog: false,
+      },
+      toolSearch: {
+        type: 'object',
+        label: 'Tool Search',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description: 'Settings for the ToolSearch discovery mechanism.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable ToolSearch',
+            category: 'Tools',
+            requiresRestart: true,
+            default: true,
+            description:
+              'When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.',
+            showInDialog: true,
+          },
+        },
       },
       shell: {
         type: 'object',
@@ -1736,7 +1843,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as string | undefined,
         description:
           'Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). ' +
-          'Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.',
+          'Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.',
         showInDialog: false,
       },
     },
@@ -1849,6 +1956,19 @@ const SETTINGS_SCHEMA = {
     default: false,
     description:
       'Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).',
+    showInDialog: false,
+  },
+
+  stopHookBlockingCap: {
+    type: 'number',
+    label: 'Stop Hook Blocking Cap',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: DEFAULT_STOP_HOOK_BLOCK_CAP,
+    description:
+      'Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.',
+    // This is an advanced safety valve for runaway hook loops, not a common
+    // interactive preference.
     showInDialog: false,
   },
 

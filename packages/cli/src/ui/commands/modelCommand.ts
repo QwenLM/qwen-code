@@ -13,6 +13,89 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  AuthType,
+  type AvailableModel,
+  type Config,
+  resolveModelId,
+} from '@qwen-code/qwen-code-core';
+import type { LoadedSettings } from '../../config/settings.js';
+import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+
+function persistSetting(
+  settings: LoadedSettings,
+  path: string,
+  value: unknown,
+): void {
+  settings.setValue(getPersistScopeForModelSelection(settings), path, value);
+}
+
+async function switchMainModel(
+  config: Config,
+  settings: LoadedSettings,
+  currentAuthType: AuthType,
+  modelArg: string,
+): Promise<string> {
+  const parsed = parseAcpModelOption(modelArg);
+
+  if (parsed.authType) {
+    await config.switchModel(
+      parsed.authType,
+      parsed.modelId,
+      parsed.authType !== currentAuthType &&
+        parsed.authType === AuthType.QWEN_OAUTH
+        ? { requireCachedCredentials: true }
+        : undefined,
+    );
+    persistSetting(settings, 'security.auth.selectedType', parsed.authType);
+    persistSetting(settings, 'model.name', parsed.modelId);
+    return parsed.modelId;
+  }
+
+  await config.switchModel(currentAuthType, modelArg, undefined);
+  persistSetting(settings, 'model.name', modelArg);
+  return modelArg;
+}
+
+function formatUnavailableModelMessage(
+  kind: 'Model' | 'Fast model',
+  modelName: string,
+  authType: AuthType,
+  availableModels: AvailableModel[],
+): string {
+  const availableModelIds = Array.from(
+    new Set(availableModels.map((model) => model.id)),
+  );
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? `No models are configured for auth type '${authType}'.`
+      : `Available models for '${authType}': ${availableModelIds.join(', ')}.`;
+
+  return (
+    `${kind} '${modelName}' is not available for auth type '${authType}'.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders or run /model to select an available model.'
+  );
+}
+
+function formatUnavailableFastModelMessage(
+  modelName: string,
+  availableModels: AvailableModel[],
+): string {
+  const availableModelIds = Array.from(
+    new Set(availableModels.map((model) => model.id)),
+  );
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+
+  return (
+    `Fast model '${modelName}' is not configured for any auth type.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders or run /model to select an available model.'
+  );
+}
 
 // Get an array of the available model IDs as strings
 function getAvailableModelIds(context: CommandContext) {
@@ -34,6 +117,7 @@ export const modelCommand: SlashCommand = {
       'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
     );
   },
+  argumentHint: '[--fast] [<model-id>]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -57,6 +141,7 @@ export const modelCommand: SlashCommand = {
   },
   action: async (
     context: CommandContext,
+    actionArgs: string,
   ): Promise<OpenDialogActionReturn | MessageActionReturn> => {
     const { services } = context;
     const { config, settings } = services;
@@ -70,8 +155,9 @@ export const modelCommand: SlashCommand = {
     }
 
     // Handle --fast flag: /model --fast <modelName>
-    const args = context.invocation?.args?.trim() ?? '';
-    if (args.startsWith('--fast')) {
+    const args = context.invocation?.args?.trim() || actionArgs.trim();
+    const isFastModelCommand = args === '--fast' || args.startsWith('--fast ');
+    if (isFastModelCommand) {
       const modelName = args.replace('--fast', '').trim();
       if (!modelName) {
         // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
@@ -97,11 +183,51 @@ export const modelCommand: SlashCommand = {
           content: t('Settings service not available.'),
         };
       }
-      settings.setValue(
-        getPersistScopeForModelSelection(settings),
-        'fastModel',
-        modelName,
-      );
+
+      const contentGeneratorConfig = config.getContentGeneratorConfig();
+      const authType = contentGeneratorConfig?.authType;
+      if (!authType) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Authentication type not available.'),
+        };
+      }
+
+      const selector = (() => {
+        try {
+          return resolveModelId(modelName);
+        } catch {
+          return undefined;
+        }
+      })();
+      if (!selector) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableFastModelMessage(modelName, []),
+        };
+      }
+
+      const availableModels = selector.authType
+        ? config.getAvailableModelsForAuthType(selector.authType)
+        : config.getAllConfiguredModels();
+      if (!availableModels.some((model) => model.id === selector.modelId)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: selector.authType
+            ? formatUnavailableModelMessage(
+                'Fast model',
+                selector.modelId,
+                selector.authType,
+                availableModels,
+              )
+            : formatUnavailableFastModelMessage(modelName, availableModels),
+        };
+      }
+
+      persistSetting(settings, 'fastModel', modelName);
       // Sync the runtime Config so forked agents pick up the change immediately
       // without requiring a restart.
       config.setFastModel(modelName);
@@ -130,67 +256,46 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    // Handle modelName argument: immediately switch to the provided model
-    if (args !== '' && context.executionMode === 'interactive') {
-      const modelName = args.trim().split(' ')[0];
-      if (modelName) {
-        // Use first argument only, avoids later syntax confusion and/or use of model names with spaces
-        // Ignore argument if it is empty, e.g. to avoid confusion with trailing whitespace
-        if (!settings) {
-          return {
-            type: 'message',
-            messageType: 'error',
-            content: t('Settings service not available.'),
-          };
-        }
-        await config.setModel(modelName);
-        settings.setValue(
-          getPersistScopeForModelSelection(settings),
-          'model.name',
-          modelName,
-        );
-
-        if (config.getModelsConfig().hasModel(authType, modelName)) {
-          return {
-            type: 'message',
-            messageType: 'info',
-            content: t('Model') + ': ' + modelName,
-          };
-        } else {
-          return {
-            type: 'message',
-            messageType: 'info',
-            content:
-              t('Model') + ': ' + modelName + t(' (not in model registry)'),
-          };
-        }
+    const modelName = args.trim().split(/\s+/)[0] ?? '';
+    if (modelName) {
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
       }
+      const parsed = parseAcpModelOption(modelName);
+      const targetAuthType = parsed.authType ?? authType;
+      const availableModels =
+        config.getAvailableModelsForAuthType(targetAuthType);
+      if (!availableModels.some((model) => model.id === parsed.modelId)) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatUnavailableModelMessage(
+            'Model',
+            parsed.modelId,
+            targetAuthType,
+            availableModels,
+          ),
+        };
+      }
+      const effectiveModelName = await switchMainModel(
+        config,
+        settings,
+        authType,
+        modelName,
+      );
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Model') + ': ' + effectiveModelName,
+      };
     }
 
     // Non-interactive/ACP: set model if an arg was provided, otherwise show current model
     if (context.executionMode !== 'interactive') {
-      const modelName = args.trim().split(' ')[0];
-      if (modelName.trim()) {
-        // /model <model-id> — set the main model
-        if (!settings) {
-          return {
-            type: 'message',
-            messageType: 'error',
-            content: t('Settings service not available.'),
-          };
-        }
-        await config.setModel(modelName);
-        settings.setValue(
-          getPersistScopeForModelSelection(settings),
-          'model.name',
-          modelName,
-        );
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: t('Model') + ': ' + modelName,
-        };
-      }
       // /model with no args — show current model
       const currentModel = config.getModel() ?? 'unknown';
       return {
