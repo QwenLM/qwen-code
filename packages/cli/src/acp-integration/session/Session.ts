@@ -204,10 +204,11 @@ export async function buildAvailableCommandsSnapshot(
 
   const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
     const acceptsInput =
-      cmd.kind !== CommandKind.BUILT_IN ||
-      cmd.completion != null ||
-      cmd.argumentHint != null ||
-      (cmd.subCommands != null && cmd.subCommands.length > 0);
+      cmd.acceptsInput ??
+      (cmd.kind !== CommandKind.BUILT_IN ||
+        cmd.completion != null ||
+        cmd.argumentHint != null ||
+        (cmd.subCommands != null && cmd.subCommands.length > 0));
     return {
       name: cmd.name,
       description: cmd.description,

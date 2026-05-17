@@ -650,6 +650,71 @@ describe('Session', () => {
       });
     });
 
+    it('honors explicit no-input override for built-in commands with subCommands', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'doctor',
+          description: 'Run installation and environment diagnostics',
+          kind: 'built-in',
+          acceptsInput: false,
+          subCommands: [
+            {
+              name: 'memory',
+              description: 'Show current process memory diagnostics',
+              kind: 'built-in',
+            },
+          ],
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: expect.arrayContaining([
+              expect.objectContaining({
+                name: 'doctor',
+                description: 'Run installation and environment diagnostics',
+                input: null,
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it('honors explicit input override for built-in commands without input metadata', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'diagnostics',
+          description: 'Run diagnostics',
+          kind: 'built-in',
+          acceptsInput: true,
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: expect.arrayContaining([
+              expect.objectContaining({
+                name: 'diagnostics',
+                description: 'Run diagnostics',
+                input: { hint: '' },
+              }),
+            ]),
+          }),
+        }),
+      );
+    });
+
     it('attaches available skills to available_commands_update metadata', async () => {
       getAvailableCommandsSpy.mockResolvedValueOnce([
         {
