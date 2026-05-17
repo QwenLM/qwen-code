@@ -764,7 +764,7 @@ describe('createServeApp', () => {
         budgets: [
           {
             kind: 'mcp_budget',
-            scope: 'workspace',
+            scope: 'session',
             status: 'error',
             errorKind: 'budget_exhausted',
             hint: 'Raise --mcp-client-budget or remove servers.',
@@ -819,7 +819,7 @@ describe('createServeApp', () => {
       expect(res.body.budgets).toHaveLength(1);
       expect(res.body.budgets[0]).toMatchObject({
         kind: 'mcp_budget',
-        scope: 'workspace',
+        scope: 'session',
         status: 'error',
         errorKind: 'budget_exhausted',
         refusedCount: 1,

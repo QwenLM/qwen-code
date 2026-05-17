@@ -785,11 +785,14 @@ class QwenAgent implements Agent {
   }
 
   /**
-   * Build the workspace-level budget status cells exposed on
-   * `GET /workspace/mcp` (PR 14). One cell today (`scope: 'workspace'`);
-   * Wave 5 PR 23 will add a `scope: 'pool'` cell alongside. Consumers
-   * MUST tolerate additional entries with unrecognized scope values
-   * (drop, don't fail).
+   * Build the MCP budget status cells exposed on `GET /workspace/mcp`
+   * (PR 14). v1 emits one cell with `scope: 'session'` — each ACP
+   * session has its own `McpClientManager`, so the budget enforces
+   * per-session (snapshot reflects the bootstrap session's view).
+   * Wave 5 PR 23 (shared MCP pool) will add `scope: 'workspace'`
+   * for true per-workspace aggregation. Consumers MUST tolerate
+   * additional entries with unrecognized scope values (drop, don't
+   * fail).
    *
    * Cell `status` semantics:
    *   - `error`   — refusals happened this pass (only possible in enforce mode)
@@ -832,7 +835,12 @@ class QwenAgent implements Agent {
     }
     const cell: ServeMcpBudgetStatusCell = {
       kind: 'mcp_budget',
-      scope: 'workspace',
+      // PR 14 v1: per-session, not per-workspace. Each ACP session has
+      // its own `Config`/`McpClientManager` (via `newSessionConfig`)
+      // and reads `QWEN_SERVE_MCP_CLIENT_BUDGET` independently.
+      // Snapshot shows the bootstrap session's view. Wave 5 PR 23
+      // shared MCP pool will graduate this to `'workspace'`.
+      scope: 'session',
       status,
       liveCount,
       mode,

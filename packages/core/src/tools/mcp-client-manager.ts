@@ -549,6 +549,23 @@ export class McpClientManager {
       );
       return;
     }
+    // PR 14 fix (review #4247 wenshao R3-R4): track whether THIS call
+    // freshly reserved the slot. Used in the connect-failure catch
+    // below — only the fresh-reserve case releases the slot; a true
+    // reconnect (`'already_held'`) keeps its existing reservation so
+    // health-monitor retry doesn't have to compete for capacity.
+    //
+    // The `reservedSlots.has(serverName)` guard distinguishes a real
+    // reservation from an `off`-mode no-op: in `off` mode
+    // `tryReserveSlot` returns `'reserved'` WITHOUT adding to the
+    // set (no enforcement), so we don't want to fire cleanup for
+    // a slot we never actually took — that would unnecessarily
+    // remove the failed client entry and break the
+    // health-monitor-driven retry loop (regression test:
+    // "should restore health checks after failed server
+    // rediscovery").
+    const weReservedSlot =
+      reservation === 'reserved' && this.reservedSlots.has(serverName);
 
     this.stopHealthCheck(serverName);
 
@@ -589,20 +606,34 @@ export class McpClientManager {
       await client.connect();
       await client.discover(cliConfig);
     } catch (error) {
-      // Log the error but don't throw: callers expect best-effort discovery.
+      // PR 14 fix (review #4247 wenshao R3 line 546): two-mode
+      // cleanup for connect failure, matching the `readResource`
+      // R2 C3 fix pattern:
       //
-      // PR 14 design intent (wenshao R2 P3 line 390): this catch
-      // INTENTIONALLY does NOT release the budget slot or remove the
-      // client entry. Rationale: the operator declared this server in
-      // `mcpServers` config — that IS the budget-slot intent. A
-      // failed connect leaves the client in `DISCONNECTED` state so
-      // the health monitor (started in `finally` below) and the next
-      // `discoverAllMcpToolsIncremental` pass can retry without
-      // needing to re-reserve. Releasing here would race with
-      // health-monitor reconnect AND let a transient connect failure
-      // permanently demote the server to "no slot". The bulk path
-      // `discoverAllMcpTools` releases on catch because `stop()`
-      // owns its lifecycle — different contract, see comment there.
+      //   - `weReservedSlot === true` (this call freshly took a
+      //     slot for a brand-new server): RELEASE the slot + drop
+      //     the client. The server never successfully held a slot
+      //     and shouldn't permanently block another server in
+      //     `enforce` mode. Operator can re-add it later; the next
+      //     `discoverAllMcpToolsIncremental` pass will re-reserve
+      //     if capacity is available.
+      //   - `weReservedSlot === false` (reconnect against an
+      //     `'already_held'` slot — e.g. health-monitor retry,
+      //     `/mcp reconnect` against a stable-but-momentarily-flaky
+      //     server): KEEP the slot. The original successful connect
+      //     established operator intent + capacity reservation; a
+      //     transient reconnect hiccup shouldn't lose that.
+      //
+      // Round 3 documented "always keep" — corrected here per
+      // wenshao R3 P3 line 390 + R4 line 546/639: align with
+      // `discoverAllMcpTools` (bulk) catch and `readResource`
+      // (lazy spawn) catch. All three paths now use the same
+      // weReserved-driven cleanup.
+      if (weReservedSlot) {
+        this.reservedSlots.delete(serverName);
+        this.clients.delete(serverName);
+      }
+      // Log the error but don't throw: callers expect best-effort discovery.
       debugLogger.error(
         `Error during discovery for server '${serverName}': ${getErrorMessage(
           error,

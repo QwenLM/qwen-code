@@ -226,22 +226,27 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
 export type DaemonMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
- * Workspace-level budget status cell. Issue #4175 PR 14 introduced
- * one entry (`scope: 'workspace'`); future PRs (e.g. Wave 5 PR 23
- * shared pool) may add additional entries with new scope values.
- * Consumers MUST tolerate unrecognized scope values — drop, don't fail.
+ * MCP client budget status cell. Issue #4175 PR 14 v1 emits one
+ * entry with `scope: 'session'` (per-session enforcement; see the
+ * `scope` field doc for why). Wave 5 PR 23 shared pool will add
+ * `scope: 'workspace'`. Consumers MUST tolerate unrecognized scope
+ * values — drop, don't fail.
  */
 export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   kind: 'mcp_budget';
   /**
-   * Today only `'workspace'` is emitted; future PRs (e.g. Wave 5
-   * PR 23 shared MCP pool) will add `'pool'` without a schema bump.
+   * **PR 14 v1 emits `'session'`** — the budget caps live MCP
+   * clients per ACP session, not per-workspace. Each session has its
+   * own `McpClientManager` (created via `acpAgent.newSessionConfig`).
+   * Wave 5 PR 23 (shared MCP pool) will introduce a workspace-scoped
+   * manager and emit `'workspace'` (or `'pool'`) cells.
+   *
    * The `string & {}` widening keeps IDE autocomplete + literal
    * narrowing for known scopes while allowing unknown scopes through
    * — the protocol contract is "consumers MUST tolerate additional
    * scope values, drop don't fail." See `qwen-serve-protocol.md`.
    */
-  scope: 'workspace' | (string & {});
+  scope: 'session' | 'workspace' | (string & {});
   liveCount: number;
   /** Configured cap. Absent when mode is `off`. */
   budget?: number;

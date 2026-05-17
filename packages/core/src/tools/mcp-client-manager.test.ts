@@ -1575,4 +1575,81 @@ describe('McpClientManager — PR 14 guardrails', () => {
     // pair; this test is a tripwire against accidental fraction drift.
     expect(MCP_BUDGET_WARN_FRACTION).toBe(0.75);
   });
+
+  // Round 4 review fixes (PR #4247 wenshao R3-R4 zombie leak in internal path).
+  it('discoverMcpToolsForServer fresh-reserve connect-failure releases slot (wenshao R4 C2)', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect: vi.fn().mockRejectedValue(new Error('boom')),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const config = configWithServers({ x: { command: 'node' } });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    // Server `x` not previously reserved; this call freshly reserves
+    // then connect() throws. Pre-fix the slot leaked permanently
+    // under enforce mode, blocking any later server in `clients.size=1`.
+    await manager.discoverMcpToolsForServer('x', config);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    expect(
+      (manager as unknown as { clients: Map<string, unknown> }).clients.has(
+        'x',
+      ),
+    ).toBe(false);
+  });
+
+  it('discoverMcpToolsForServer reconnect-attempt connect-failure KEEPS slot (wenshao R4 C2 already_held)', async () => {
+    // Distinguish from the previous test: same call signature, but
+    // here the slot is already-held (from a prior successful connect
+    // in discoverAllMcpTools). A failed reconnect must NOT release —
+    // the operator's stable server that just hiccupped should keep
+    // its capacity reservation for the health-monitor retry loop.
+    let connectThrows = false;
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect: vi.fn().mockImplementation(async () => {
+            if (connectThrows) throw new Error('reconnect boom');
+          }),
+          discover: vi.fn().mockResolvedValue(undefined),
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(() =>
+            connectThrows
+              ? undefined
+              : ((vi.mocked as unknown as { val: unknown }).val =
+                  'CONNECTED' as unknown),
+          ),
+        }) as unknown as McpClient,
+    );
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    // First pass: a connects successfully, slot reserved.
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    // Now simulate health-monitor reconnect against a flaky server:
+    // discoverMcpToolsForServer goes through tryReserveSlot →
+    // 'already_held' (slot stays) → existing client.disconnect()
+    // (slot stays) → new client.connect() throws → fix says
+    // weReservedSlot=false here so slot NOT released.
+    connectThrows = true;
+    await manager.discoverMcpToolsForServer('a', config);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+  });
 });
