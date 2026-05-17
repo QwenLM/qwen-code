@@ -96,6 +96,7 @@ export const isSeparatorItem = (item: SidebarItem): item is SeparatorItem =>
 interface LeftSidebarProps {
   isCollapsed: boolean
   links: SidebarItem[]
+  className?: string
   /** Get props for each item (from unified sidebar navigation) */
   getItemProps?: (id: string) => {
     tabIndex: number
@@ -165,7 +166,7 @@ const itemVariants: Variants = {
  * - Uses @dnd-kit with DragOverlay portaled to document.body (no clipping)
  * - Two-phase drop animation: overlay fades out, ghost fades in
  */
-export function LeftSidebar({ links, isCollapsed, getItemProps, focusedItemId, isNested }: LeftSidebarProps) {
+export function LeftSidebar({ links, isCollapsed, className, getItemProps, focusedItemId, isNested }: LeftSidebarProps) {
   // For nested sidebars, wrap in motion container for stagger effect
   const NavWrapper = isNested ? motion.nav : 'nav'
   const navProps = isNested ? {
@@ -176,7 +177,7 @@ export function LeftSidebar({ links, isCollapsed, getItemProps, focusedItemId, i
   } : {}
 
   return (
-    <div className={cn("flex flex-col select-none", !isNested && "py-1")}>
+    <div className={cn("flex flex-col select-none", !isNested && "py-1", className)}>
       <NavWrapper
         className={cn(
           "grid gap-0.5",
