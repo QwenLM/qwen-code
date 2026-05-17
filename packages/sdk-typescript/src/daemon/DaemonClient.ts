@@ -140,6 +140,18 @@ export interface SubscribeOptions {
   lastEventId?: number;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
+  /**
+   * Per-subscriber backlog cap requested from the daemon. Forwarded as
+   * `?maxQueued=N` on `GET /session/:id/events`. Daemon-side range is
+   * `[16, 2048]` (default 256); out-of-range or non-decimal values get
+   * a `400 invalid_max_queued` response. Old daemons without the
+   * `slow_client_warning` capability silently ignore the param — SDK
+   * clients should pre-flight `caps.features.slow_client_warning`
+   * before opting in. Useful for cold reconnects with a large
+   * `Last-Event-ID: 0` replay backlog so the force-pushed replay
+   * frames don't trip the warn / eviction path on the first publish.
+   */
+  maxQueued?: number;
 }
 
 export class DaemonClient {
@@ -539,12 +551,19 @@ export class DaemonClient {
     const fetchSignal = opts.signal
       ? composeAbortSignals([opts.signal, connectCtrl.signal])
       : connectCtrl.signal;
+    // Build the SSE URL, optionally with `?maxQueued=N`. We don't
+    // validate the value client-side — the daemon's
+    // `parseMaxQueuedQuery` is the source of truth on the range
+    // `[16, 2048]` and returns a structured `400 invalid_max_queued`
+    // for anything outside, so duplicating the bounds here would
+    // diverge if the daemon's range ever shifts.
+    let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
+    if (opts.maxQueued !== undefined) {
+      url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
+    }
     let res: Response;
     try {
-      res = await this._fetch(
-        `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`,
-        { headers, signal: fetchSignal },
-      );
+      res = await this._fetch(url, { headers, signal: fetchSignal });
     } finally {
       if (connectTimer !== undefined) clearTimeout(connectTimer);
     }
