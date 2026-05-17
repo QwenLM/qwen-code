@@ -691,13 +691,23 @@ class QwenAgent implements Agent {
           const disabled = config.isMcpServerDisabled(name);
           const rawStatus = getMCPServerStatus(name);
           const refusedByBudget = refusedSet.has(name);
+          // PR 14 fix (review #4247): config-disable takes precedence
+          // over budget-refusal. `lastRefusedServerNames` is a
+          // per-discovery-pass snapshot; if an operator runs
+          // `/mcp disable <name>` against a server that was refused
+          // last pass, the entry stays in the refused list until the
+          // next discovery pass clears it (`McpClientManager.removeServer`
+          // now drops the entry too — see sibling fix). Either way,
+          // a `disabled` cell should NEVER show `budget_exhausted` —
+          // the operator's deliberate disable wins.
+          const effectivelyRefused = refusedByBudget && !disabled;
           const out: ServeWorkspaceMcpServerStatus = {
             kind: 'mcp_server',
             // Refused-by-budget shadows the raw status: the rawStatus
             // is `DISCONNECTED` (we never tried to connect), but the
             // operator-facing severity is `error` with an explanatory
             // errorKind rather than the generic disconnected `error`.
-            status: refusedByBudget
+            status: effectivelyRefused
               ? 'error'
               : this.mcpCellStatus(rawStatus, disabled),
             name,
@@ -705,7 +715,7 @@ class QwenAgent implements Agent {
             transport: this.mcpTransport(server),
             disabled,
           };
-          if (refusedByBudget) {
+          if (effectivelyRefused) {
             out.errorKind = 'budget_exhausted';
             out.disabledReason = 'budget';
             out.hint =
@@ -772,6 +782,16 @@ class QwenAgent implements Agent {
     mode: ServeMcpBudgetMode,
     refusedCount: number,
   ): ServeMcpBudgetStatusCell[] {
+    // PR 14 fix (review #4247): when no `--mcp-client-budget` is
+    // configured the manager resolves to `mode: 'off'`. The protocol
+    // docs and SDK type comments promise `budgets: []` for that case;
+    // a synthetic `mcp_budget` cell carrying nothing actionable was
+    // (a) protocol-noncompliant, (b) clutter — clients iterating
+    // `budgets[]` to render rows would draw an "ok" budget row for
+    // uncapped workspaces. Always return empty so the top-level
+    // `budgetMode: 'off'` field is the sole signal that guardrails
+    // are inactive.
+    if (mode === 'off') return [];
     let status: ServeStatus = 'ok';
     let errorKind: string | undefined;
     let hint: string | undefined;

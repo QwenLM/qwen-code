@@ -83,13 +83,21 @@ export type ServeMcpBudgetMode = 'enforce' | 'warn' | 'off';
  */
 export interface ServeMcpBudgetStatusCell extends ServeStatusCell {
   kind: 'mcp_budget';
-  /** Identifies which accounting scope this cell describes. */
-  scope: 'workspace';
+  /**
+   * Identifies which accounting scope this cell describes. Today only
+   * `'workspace'` is emitted; future PRs (e.g. Wave 5 PR 23 shared
+   * pool) will add `'pool'`. The `string & {}` widening keeps IDE
+   * autocomplete + literal narrowing for known scopes while allowing
+   * unknown scopes through without a compile-time break — the
+   * protocol contract is "consumers MUST tolerate additional scope
+   * values, drop don't fail." See `qwen-serve-protocol.md` forward-compat note.
+   */
+  scope: 'workspace' | (string & {});
   /** Live (CONNECTED) MCP client count at snapshot time. */
   liveCount: number;
   /** Configured cap (positive integer). Absent only when mode is `off`. */
   budget?: number;
-  /** Active enforcement mode. `off` cells SHOULD still be reported with status `ok`. */
+  /** Active enforcement mode. `off` mode produces no cell — `budgets: []`. */
   mode: ServeMcpBudgetMode;
   /** Servers refused during the most recent discovery pass. */
   refusedCount: number;

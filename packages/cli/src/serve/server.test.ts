@@ -2661,6 +2661,75 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/--require-auth/);
   });
 
+  // PR 14 fix (review #4247): runQwenServe is the documented embedded
+  // entry point, so budget validation must live here, not just in the
+  // yargs CLI handler. Embedded callers (other tools wrapping the
+  // daemon, deps.bridge test injection) silently produced an uncapped
+  // child pre-fix despite requesting enforce.
+  it('rejects non-positive mcpClientBudget (#4175 PR 14)', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpClientBudget: 0,
+      }),
+    ).rejects.toThrow(/mcpClientBudget/);
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpClientBudget: -5,
+      }),
+    ).rejects.toThrow(/mcpClientBudget/);
+  });
+
+  it('rejects mcpBudgetMode=enforce without a budget (#4175 PR 14)', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpBudgetMode: 'enforce',
+      }),
+    ).rejects.toThrow(/enforce.*requires.*mcpClientBudget/);
+  });
+
+  it('clears mcp env vars when caller omits the options (no leakage across daemons)', async () => {
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '99';
+    process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = 'enforce';
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        // No mcpClientBudget / mcpBudgetMode — must wipe stale env
+        // from the previous daemon in the same process.
+      });
+      expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBeUndefined();
+      expect(process.env['QWEN_SERVE_MCP_BUDGET_MODE']).toBeUndefined();
+    } finally {
+      delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+      delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+    }
+  });
+
+  it('writes mcp env vars when caller provides the options', async () => {
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      mcpClientBudget: 10,
+      mcpBudgetMode: 'warn',
+    });
+    expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBe('10');
+    expect(process.env['QWEN_SERVE_MCP_BUDGET_MODE']).toBe('warn');
+    // Cleanup so the next test starts clean.
+    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+  });
+
   it('starts with --require-auth + token on loopback', async () => {
     handle = await runQwenServe({
       hostname: '127.0.0.1',

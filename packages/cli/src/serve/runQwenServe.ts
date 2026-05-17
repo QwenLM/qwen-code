@@ -185,11 +185,42 @@ export async function runQwenServe(
   // `process.env` via `{...process.env}` at spawn time. Standalone
   // `qwen` invocations (no daemon) leave the env untouched, so
   // direct CLI usage retains the historical no-enforcement default.
+  //
+  // PR 14 fix (review #4247): `runQwenServe` is exported and other
+  // validations (`requireAuth` no-token, `maxConnections` NaN,
+  // `--workspace` checks) live here, so embedded callers expect
+  // boot-time rejection of invalid inputs. The yargs CLI handler
+  // duplicates these checks for fast-fail UX, but `runQwenServe` is
+  // the source of truth. Also explicitly DELETE (vs leaving stale)
+  // the env vars when the caller omits the option, so an embedded
+  // process that starts multiple daemons in sequence doesn't leak
+  // a prior budget/mode into the next ACP child.
+  if (opts.mcpClientBudget !== undefined) {
+    if (
+      !Number.isFinite(opts.mcpClientBudget) ||
+      !Number.isInteger(opts.mcpClientBudget) ||
+      opts.mcpClientBudget <= 0
+    ) {
+      throw new TypeError(
+        `Invalid mcpClientBudget: ${opts.mcpClientBudget}. Must be a positive integer.`,
+      );
+    }
+  }
+  if (opts.mcpBudgetMode === 'enforce' && opts.mcpClientBudget === undefined) {
+    throw new Error(
+      'mcpBudgetMode="enforce" requires a positive mcpClientBudget. ' +
+        'Pass mcpClientBudget=N, or set mcpBudgetMode to "warn" or "off".',
+    );
+  }
   if (opts.mcpClientBudget !== undefined) {
     process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = String(opts.mcpClientBudget);
+  } else {
+    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
   }
   if (opts.mcpBudgetMode !== undefined) {
     process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = opts.mcpBudgetMode;
+  } else {
+    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
   }
 
   const bridge =

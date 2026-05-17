@@ -447,6 +447,28 @@ export class McpClientManager {
       return;
     }
 
+    // PR 14 fix (review #4247): single-server rediscovery (reachable from
+    // `/mcp reconnect <name>` and `ToolRegistry.discoverToolsForServer`)
+    // previously bypassed the budget gate, so a server refused at startup
+    // could be brought online later under `enforce` mode and exceed the
+    // cap. True reconnect against a held slot returns `'already_held'`
+    // and falls through unchanged; only a fresh attempt against a server
+    // without a reservation can be refused. Best-effort semantics — log
+    // the refusal and return without creating an `McpClient`; the caller
+    // observes the absence via `getStatus()` like any other discovery
+    // failure.
+    const reservation = this.tryReserveSlot(serverName);
+    if (reservation === 'refused') {
+      if (!this.lastRefusedServerNames.includes(serverName)) {
+        this.lastRefusedServerNames.push(serverName);
+      }
+      process.stderr.write(
+        `qwen serve: MCP server '${serverName}' refused (budget exhausted, ` +
+          `budget=${this.clientBudget}, mode=enforce)\n`,
+      );
+      return;
+    }
+
     this.stopHealthCheck(serverName);
 
     // Ensure we don't leak an existing connection for this server.
@@ -552,14 +574,22 @@ export class McpClientManager {
         this.consecutiveFailures.delete(serverName);
         this.isReconnecting.delete(serverName);
         this.serverDiscoveryPromises.delete(serverName);
-        // PR 14: explicit operator-driven disconnect releases the
-        // budget slot. The internal reconnect path
-        // (`discoverMcpToolsForServerInternal`) calls
-        // `existingClient.disconnect()` directly, NOT this public
-        // method, so reconnect doesn't release.
-        this.reservedSlots.delete(serverName);
         this.eventEmitter?.emit('mcp-client-update', this.clients);
       }
+    }
+    // PR 14: explicit operator-driven disconnect releases the budget
+    // slot AND drops the entry from the per-pass refusal log. Outside
+    // the `if (client)` guard because a budget-refused server has NO
+    // `McpClient` instance — but operator intent ("stop tracking this
+    // server") still demands the records be cleared so a subsequent
+    // snapshot doesn't keep tagging it as `budget_exhausted`. The
+    // internal reconnect path (`discoverMcpToolsForServerInternal`)
+    // calls `existingClient.disconnect()` directly, NOT this public
+    // method, so reconnect still doesn't release the slot.
+    this.reservedSlots.delete(serverName);
+    const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
+    if (refusedIdx >= 0) {
+      this.lastRefusedServerNames.splice(refusedIdx, 1);
     }
   }
 
@@ -755,6 +785,22 @@ export class McpClientManager {
     const currentServerNames = new Set(this.clients.keys());
     const newServerNames = new Set(Object.keys(servers));
 
+    // PR 14 fix (review #4247): process removals BEFORE the new-server
+    // reservation pass so freed slots are visible to `tryReserveSlot`.
+    // Scenario: budget=2, currently `{a, b}` reserved, new config
+    // `{a, c}`. Pre-fix order refused `c` because `b`'s slot was only
+    // freed after the new-server loop. Now `b` is removed first →
+    // reservedSlots={a} → `c` reservation succeeds. Disabled-mid-session
+    // removals stay inline (below) because they also release slots
+    // via `removeServer`'s `reservedSlots.delete` — same call, just
+    // reached from a different branch.
+    for (const name of currentServerNames) {
+      if (!newServerNames.has(name)) {
+        // Server was removed from configuration
+        await this.removeServer(name);
+      }
+    }
+
     // Check for new servers or configuration changes
     for (const [name] of Object.entries(servers)) {
       // Mirror `discoverAllMcpTools` (line ~102): users who explicitly
@@ -799,14 +845,6 @@ export class McpClientManager {
       }
       // Note: Configuration change detection would require comparing
       // the old and new config, which is not implemented here
-    }
-
-    // Find removed servers
-    for (const name of currentServerNames) {
-      if (!newServerNames.has(name)) {
-        // Server was removed from configuration
-        await this.removeServer(name);
-      }
     }
 
     // Update only the servers that need it. Each per-server discover is
@@ -1043,6 +1081,15 @@ export class McpClientManager {
     // be running", so it must not block a different server from taking
     // its place on the next discovery pass.
     this.reservedSlots.delete(serverName);
+    // PR 14 fix (review #4247): also drop the entry from the per-pass
+    // refusal log so a snapshot taken between discoveries doesn't
+    // stale-tag the (now-disabled or now-removed) server as
+    // `disabledReason: 'budget'`. Operator action wins over the
+    // last-pass startup refusal record.
+    const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
+    if (refusedIdx >= 0) {
+      this.lastRefusedServerNames.splice(refusedIdx, 1);
+    }
 
     // Remove tools for this server from registry
     this.toolRegistry.removeMcpToolsByServer(serverName);

@@ -1239,8 +1239,9 @@ describe('McpClientManager — PR 14 guardrails', () => {
       created.push(name);
       return makeConnectedMcpClientMock() as unknown as McpClient;
     });
-    // `b` is disabled — must not even attempt to reserve. With budget=1,
-    // `a` and `c` should both succeed (b is invisible to the gate).
+    // `b` is disabled — must not even attempt to reserve. With budget=2,
+    // `a` and `c` should both succeed (b is invisible to the gate, so it
+    // doesn't consume a slot; the cap is enough for the remaining two).
     const config = configWithServers(
       {
         a: { command: 'node' },
@@ -1267,5 +1268,141 @@ describe('McpClientManager — PR 14 guardrails', () => {
       'c',
     ]);
     expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([]);
+  });
+
+  // PR 14 fix (review #4247): regression tests for the four bypass /
+  // ordering / staleness bugs the Codex + Copilot reviews caught.
+  it('single-server rediscovery respects the budget gate (review #1)', async () => {
+    const created: string[] = [];
+    vi.mocked(McpClient).mockImplementation((name: string) => {
+      created.push(name);
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    // `b` was refused at startup. A manual `/mcp reconnect b` (which goes
+    // through `discoverMcpToolsForServer` → `...Internal`) would have
+    // pre-fix bypassed the gate and exceeded the cap. Now it must stay
+    // refused.
+    expect(created).toEqual(['a']);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
+    await manager.discoverMcpToolsForServer('b', config);
+    expect(created).toEqual(['a']); // no new McpClient created
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['a']);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
+  });
+
+  it('disconnectServer-then-disable drops refusal tag (review #4)', async () => {
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
+    // Operator action: explicit disconnect of `b` should drop it from
+    // the refusal log so a snapshot doesn't keep tagging the now-
+    // operator-disabled server with `budget_exhausted`.
+    await manager.disconnectServer('b');
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([]);
+  });
+
+  it('incremental discovery frees removed slots BEFORE reserving new ones (review #5)', async () => {
+    let inflight = 0;
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    inflight = 0;
+    const mcpServers: Record<string, { command: string }> = {
+      a: { command: 'node' },
+      b: { command: 'node' },
+    };
+    const config = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => mcpServers,
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () => ({}) as PromptRegistry,
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+    } as unknown as Config;
+    const manager = new McpClientManager(
+      config,
+      {
+        removeMcpToolsByServer: () => undefined,
+      } as unknown as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 2, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpToolsIncremental(config);
+    expect(manager.getMcpClientAccounting().reservedSlots.sort()).toEqual([
+      'a',
+      'b',
+    ]);
+
+    // Swap b → c (still budget=2). Pre-fix order: `c` refused because
+    // `b`'s slot was only freed after the new-server loop. Post-fix:
+    // `b` removed first → reservedSlots={a} → `c` reserved.
+    delete mcpServers['b'];
+    mcpServers['c'] = { command: 'node' };
+    await manager.discoverAllMcpToolsIncremental(config);
+    expect(manager.getMcpClientAccounting().reservedSlots.sort()).toEqual([
+      'a',
+      'c',
+    ]);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([]);
+    void inflight;
+  });
+
+  it('buildBudgetCells deferred to acpAgent — manager off-mode returns no budget bookkeeping (review #2)', async () => {
+    // Sibling check: when `mode === 'off'` the manager doesn't reserve
+    // anything and the snapshot has empty `reservedSlots` + zero
+    // `refusedServerNames`. The empty-`budgets[]` assertion lives in
+    // the serve route test (`server.test.ts`) because the cell is
+    // built by `acpAgent.buildBudgetCells`. This test just pins the
+    // manager-side invariant: off-mode is pure observability.
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { budgetMode: 'off' },
+    );
+    await manager.discoverAllMcpTools(config);
+    const accounting = manager.getMcpClientAccounting();
+    expect(accounting.total).toBe(2);
+    expect(accounting.reservedSlots).toEqual([]);
+    expect(accounting.refusedServerNames).toEqual([]);
   });
 });

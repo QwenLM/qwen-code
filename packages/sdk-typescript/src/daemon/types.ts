@@ -233,7 +233,15 @@ export type DaemonMcpBudgetMode = 'enforce' | 'warn' | 'off';
  */
 export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   kind: 'mcp_budget';
-  scope: 'workspace';
+  /**
+   * Today only `'workspace'` is emitted; future PRs (e.g. Wave 5
+   * PR 23 shared MCP pool) will add `'pool'` without a schema bump.
+   * The `string & {}` widening keeps IDE autocomplete + literal
+   * narrowing for known scopes while allowing unknown scopes through
+   * — the protocol contract is "consumers MUST tolerate additional
+   * scope values, drop don't fail." See `qwen-serve-protocol.md`.
+   */
+  scope: 'workspace' | (string & {});
   liveCount: number;
   /** Configured cap. Absent when mode is `off`. */
   budget?: number;
