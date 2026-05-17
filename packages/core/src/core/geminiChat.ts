@@ -1447,6 +1447,13 @@ export class GeminiChat {
    */
   clearHistory(): void {
     this.history = [];
+    // Any pending partial-push marker points into the now-empty history;
+    // resetting prevents `popPartialIfPushed` from splicing whatever
+    // shows up at that index in a future send (defense-in-depth — the
+    // helper also bounds-checks, but a stale marker that happens to
+    // line up with a real model turn could otherwise pop the wrong
+    // entry).
+    this.pendingPartialAssistantTurnIndex = null;
   }
 
   /**
@@ -1458,10 +1465,24 @@ export class GeminiChat {
 
   setHistory(history: Content[]): void {
     this.history = history;
+    // History replacement (compression, /clear, --resume reload) wipes
+    // the index basis the partial-push marker was captured against. The
+    // marker MUST be cleared — otherwise `popPartialIfPushed` could find
+    // a model turn at the stale index in the replacement history and
+    // splice an entry that has nothing to do with the original partial
+    // push, corrupting the conversation.
+    this.pendingPartialAssistantTurnIndex = null;
   }
 
   truncateHistory(keepCount: number): void {
     this.history = this.history.slice(0, keepCount);
+    // Truncation can drop the entry the partial-push marker points at,
+    // or leave it valid but shift the meaning of nearby indices. Reset
+    // the marker rather than try to fix it up — it's per-send and
+    // ephemeral, so losing it across a truncate is safe (the
+    // sendMessageStream that pushed it has already finished or will
+    // start fresh on the next call).
+    this.pendingPartialAssistantTurnIndex = null;
   }
 
   stripThoughtsFromHistory(): void {
