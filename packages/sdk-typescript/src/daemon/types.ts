@@ -341,17 +341,21 @@ export interface DaemonWriteMemoryResult {
 /**
  * Storage level for a subagent definition.
  *
- * `project` / `user` / `builtin` / `extension` are the levels the
- * `qwen serve` daemon currently surfaces through `GET /workspace/agents`
- * and the per-`agentType` detail route.
+ * `project` / `user` / `builtin` are the levels the `qwen serve`
+ * daemon currently surfaces through `GET /workspace/agents` and the
+ * per-`agentType` detail route.
  *
- * `session` is reserved for forward-compat: the `SubagentManager` core
- * tracks session-scoped agents in a separate cache populated only at
- * runtime, and the daemon's CRUD routes do not return them today. SDK
- * consumers writing exhaustive switches over `DaemonAgentLevel` should
- * therefore include a `'session'` arm but treat it as unreachable on
- * the current route surface — its presence on the type avoids a
- * breaking SDK change when a future PR exposes session agents.
+ * `extension` and `session` are present on the union for forward-
+ * compat but the daemon does NOT return them today — the daemon-
+ * scoped `SubagentManager` is constructed against a stub `Config`
+ * whose `getActiveExtensions()` returns `[]` (extension plumbing has
+ * no entry point through the workspace daemon yet) and session-level
+ * subagents live in a runtime-only cache no CRUD route reads. SDK
+ * consumers writing exhaustive switches over `DaemonAgentLevel`
+ * should therefore include arms for both values but treat them as
+ * unreachable on today's route surface — having them on the type
+ * avoids a breaking SDK change when a future PR exposes either
+ * source.
  */
 export type DaemonAgentLevel =
   | 'project'

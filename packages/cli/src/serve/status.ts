@@ -182,6 +182,18 @@ export interface ServeWorkspaceMemoryStatus {
   errors?: ServeStatusCell[];
 }
 
+/**
+ * Storage level for a subagent definition surfaced through
+ * `GET /workspace/agents` and the per-`agentType` detail route.
+ *
+ * `project` / `user` / `builtin` are the values the daemon actually
+ * returns today. `extension` and `session` are forward-compat slots:
+ * the daemon-scoped `SubagentManager` runs against a stub `Config`
+ * whose `getActiveExtensions()` returns `[]`, and session-level
+ * subagents live in a runtime-only cache no CRUD route reads.
+ * Mirrors `DaemonAgentLevel` in `@qwen-code/sdk` so route + SDK
+ * consumers see the same forward-compat union.
+ */
 export type ServeAgentLevel =
   | 'project'
   | 'user'

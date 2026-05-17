@@ -351,11 +351,19 @@ export class DaemonClient {
   // -- Workspace memory (issue #4175 PR 16) ------------------------------
 
   /**
-   * Fetch the daemon's hierarchical QWEN.md / AGENTS.md snapshot. Read-
-   * only; pre-flight `caps.features.workspace_memory` before calling
+   * Fetch the daemon's `QWEN.md` / `AGENTS.md` snapshot. Read-only;
+   * pre-flight `caps.features.workspace_memory` before calling
    * against an unknown daemon. Returns `initialized: false` and an
-   * empty `files` array when no memory files exist anywhere in the
-   * workspace tree or `~/.qwen`.
+   * empty `files` array when no memory files exist at the bound
+   * workspace root or `~/.qwen`.
+   *
+   * v1 discovers files at the bound workspace ROOT only, plus the
+   * user's global `~/.qwen` directory — it does NOT walk parent
+   * directories or recurse into the workspace tree. The route's
+   * companion helper `walkWorkspaceForMemory` keeps a guarded
+   * upward-walk loop body for a future hierarchical mode but breaks
+   * after iteration 1 in this release. PR 16.5 will lift the cap
+   * once auto-memory CRUD lands.
    */
   async workspaceMemory(): Promise<DaemonWorkspaceMemoryStatus> {
     return await this.fetchWithTimeout(
