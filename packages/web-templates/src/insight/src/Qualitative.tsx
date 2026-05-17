@@ -10,6 +10,10 @@ import React from 'react';
 // Qualitative Insight Components
 // -----------------------------------------------------------------------------
 
+function hasMeaningfulText(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 export interface AtAGlanceTargetSections {
   wins: boolean;
   friction: boolean;
@@ -27,46 +31,58 @@ export function AtAGlance({
   const { atAGlance } = qualitative;
   if (!atAGlance) return null;
 
+  const sections = [
+    {
+      key: 'wins',
+      label: "What's working:",
+      body: atAGlance.whats_working,
+      href: '#section-wins',
+      link: 'Impressive Things You Did →',
+      showLink: targetSections.wins,
+    },
+    {
+      key: 'friction',
+      label: "What's hindering you:",
+      body: atAGlance.whats_hindering,
+      href: '#section-friction',
+      link: 'Where Things Go Wrong →',
+      showLink: targetSections.friction,
+    },
+    {
+      key: 'features',
+      label: 'Quick wins to try:',
+      body: atAGlance.quick_wins,
+      href: '#section-features',
+      link: 'Features to Try →',
+      showLink: targetSections.features,
+    },
+    {
+      key: 'horizon',
+      label: 'Ambitious workflows:',
+      body: atAGlance.ambitious_workflows,
+      href: '#section-horizon',
+      link: 'On the Horizon →',
+      showLink: targetSections.horizon,
+    },
+  ].filter((section) => hasMeaningfulText(section.body));
+
+  if (sections.length === 0) return null;
+
   return (
     <div className="at-a-glance">
       <div className="glance-title">At a Glance</div>
       <div className="glance-sections">
-        <div className="glance-section">
-          <strong>What&apos;s working:</strong>{' '}
-          <MarkdownText>{atAGlance.whats_working}</MarkdownText>
-          {targetSections.wins && (
-            <a href="#section-wins" className="see-more">
-              Impressive Things You Did →
-            </a>
-          )}
-        </div>
-        <div className="glance-section">
-          <strong>What&apos;s hindering you:</strong>{' '}
-          <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
-          {targetSections.friction && (
-            <a href="#section-friction" className="see-more">
-              Where Things Go Wrong →
-            </a>
-          )}
-        </div>
-        <div className="glance-section">
-          <strong>Quick wins to try:</strong>{' '}
-          <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
-          {targetSections.features && (
-            <a href="#section-features" className="see-more">
-              Features to Try →
-            </a>
-          )}
-        </div>
-        <div className="glance-section">
-          <strong>Ambitious workflows:</strong>{' '}
-          <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
-          {targetSections.horizon && (
-            <a href="#section-horizon" className="see-more">
-              On the Horizon →
-            </a>
-          )}
-        </div>
+        {sections.map((section) => (
+          <div key={section.key} className="glance-section">
+            <strong>{section.label}</strong>{' '}
+            <MarkdownText>{section.body}</MarkdownText>
+            {section.showLink && (
+              <a href={section.href} className="see-more">
+                {section.link}
+              </a>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -202,12 +218,11 @@ export function ImpressiveWorkflows({
   primarySuccess,
   outcomes,
 }: {
-  qualitative: QualitativeData;
+  qualitative?: QualitativeData;
   primarySuccess: Record<string, number>;
   outcomes: Record<string, number>;
 }) {
-  const { impressiveWorkflows } = qualitative;
-  if (!impressiveWorkflows) return null;
+  const impressiveWorkflows = qualitative?.impressiveWorkflows;
 
   return (
     <>
@@ -217,22 +232,24 @@ export function ImpressiveWorkflows({
       >
         Impressive Things You Did
       </h2>
-      {impressiveWorkflows.intro && (
+      {impressiveWorkflows?.intro && (
         <p className="section-intro">
           <MarkdownText>{impressiveWorkflows.intro}</MarkdownText>
         </p>
       )}
-      <div className="big-wins">
-        {Array.isArray(impressiveWorkflows.impressive_workflows) &&
-          impressiveWorkflows.impressive_workflows.map((win, idx) => (
-            <div key={idx} className="big-win">
-              <div className="big-win-title">{win.title}</div>
-              <div className="big-win-desc">
-                <MarkdownText>{win.description}</MarkdownText>
+      {impressiveWorkflows && (
+        <div className="big-wins">
+          {Array.isArray(impressiveWorkflows.impressive_workflows) &&
+            impressiveWorkflows.impressive_workflows.map((win, idx) => (
+              <div key={idx} className="big-win">
+                <div className="big-win-title">{win.title}</div>
+                <div className="big-win-desc">
+                  <MarkdownText>{win.description}</MarkdownText>
+                </div>
               </div>
-            </div>
-          ))}
-      </div>
+            ))}
+        </div>
+      )}
 
       <div
         style={{
@@ -303,7 +320,9 @@ function HorizontalBarChart({
   if (!data || Object.keys(data).length === 0) return null;
 
   // Filter and sort entries
-  let entries = Object.entries(data);
+  let entries = Object.entries(data).filter(
+    ([, count]) => Number.isFinite(count) && count !== 0,
+  );
   if (allowedKeys) {
     entries = entries.filter(([key]) => allowedKeys.includes(key));
   }
@@ -426,12 +445,11 @@ export function FrictionPoints({
   satisfaction,
   friction,
 }: {
-  qualitative: QualitativeData;
+  qualitative?: QualitativeData;
   satisfaction?: Record<string, number>;
   friction?: Record<string, number>;
 }) {
-  const { frictionPoints } = qualitative;
-  if (!frictionPoints) return null;
+  const frictionPoints = qualitative?.frictionPoints;
 
   return (
     <>
@@ -441,31 +459,33 @@ export function FrictionPoints({
       >
         Where Things Go Wrong
       </h2>
-      {frictionPoints.intro && (
+      {frictionPoints?.intro && (
         <p className="section-intro">
           <MarkdownText>{frictionPoints.intro}</MarkdownText>
         </p>
       )}
-      <div className="friction-categories">
-        {Array.isArray(frictionPoints.categories) &&
-          frictionPoints.categories.map((cat, idx) => (
-            <div key={idx} className="friction-category">
-              <div className="friction-title">{cat.category}</div>
-              <div className="friction-desc">
-                <MarkdownText>{cat.description}</MarkdownText>
+      {frictionPoints && (
+        <div className="friction-categories">
+          {Array.isArray(frictionPoints.categories) &&
+            frictionPoints.categories.map((cat, idx) => (
+              <div key={idx} className="friction-category">
+                <div className="friction-title">{cat.category}</div>
+                <div className="friction-desc">
+                  <MarkdownText>{cat.description}</MarkdownText>
+                </div>
+                {Array.isArray(cat.examples) && cat.examples.length > 0 && (
+                  <ul className="friction-examples">
+                    {cat.examples.map((ex, i) => (
+                      <li key={i}>
+                        <MarkdownText>{ex}</MarkdownText>
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
-              {Array.isArray(cat.examples) && cat.examples.length > 0 && (
-                <ul className="friction-examples">
-                  {cat.examples.map((ex, i) => (
-                    <li key={i}>
-                      <MarkdownText>{ex}</MarkdownText>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          ))}
-      </div>
+            ))}
+        </div>
+      )}
 
       {/* Facets Data Charts */}
       <div

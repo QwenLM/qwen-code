@@ -12,6 +12,13 @@ import type {
   SessionFacets,
 } from '../types/StaticInsightTypes.js';
 
+const mockLogger = vi.hoisted(() => ({
+  info: vi.fn(),
+  error: vi.fn(),
+  warn: vi.fn(),
+  debug: vi.fn(),
+}));
+
 // Mock dependencies
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const actual = await vi.importActual<
@@ -20,12 +27,7 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
   return {
     ...actual,
     read: vi.fn(),
-    createDebugLogger: vi.fn(() => ({
-      info: vi.fn(),
-      error: vi.fn(),
-      warn: vi.fn(),
-      debug: vi.fn(),
-    })),
+    createDebugLogger: vi.fn(() => mockLogger),
   };
 });
 
@@ -375,6 +377,38 @@ describe('DataProcessor', () => {
       });
     });
 
+    it('should ignore zero and non-finite count values', () => {
+      const facets = [
+        {
+          session_id: 's1',
+          underlying_goal: 'test',
+          goal_categories: { coding: 0, debugging: Number.NaN, testing: 2 },
+          outcome: 'fully_achieved',
+          user_satisfaction_counts: { satisfied: 0, happy: 1 },
+          Qwen_helpfulness: 'very_helpful',
+          session_type: 'single_task',
+          friction_counts: { slow_response: Number.POSITIVE_INFINITY },
+          friction_detail: '',
+          primary_success: 'none',
+          brief_summary: 'Test summary',
+        },
+      ] as unknown as SessionFacets[];
+
+      const result = (
+        dataProcessor as unknown as {
+          aggregateFacetsData(facets: SessionFacets[]): {
+            satisfactionAgg: Record<string, number>;
+            frictionAgg: Record<string, number>;
+            goalsAgg: Record<string, number>;
+          };
+        }
+      ).aggregateFacetsData(facets);
+
+      expect(result.satisfactionAgg).toEqual({ happy: 1 });
+      expect(result.frictionAgg).toEqual({});
+      expect(result.goalsAgg).toEqual({ testing: 2 });
+    });
+
     it('should ignore malformed count objects when aggregating facets', () => {
       const facets = [
         {
@@ -718,6 +752,9 @@ describe('DataProcessor', () => {
         primary_success: 'none',
         brief_summary: 'Test summary',
       });
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        'Normalized unknown insight enum value "invalid" to fallback "moderately_helpful"',
+      );
     });
 
     it('should return null when LLM returns empty result', async () => {
@@ -1486,6 +1523,11 @@ describe('DataProcessor', () => {
           brief_summary: 'Cached summary',
         },
       ]);
+      expect(mockedFs.writeFile).toHaveBeenCalledWith(
+        '/facets/cached-session.json',
+        JSON.stringify(result[0], null, 2),
+        'utf-8',
+      );
     });
   });
 });

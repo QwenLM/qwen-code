@@ -19,13 +19,18 @@ import type { InsightData } from './types';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
+// Keep in sync with packages/cli/src/services/insight/generators/DataProcessor.ts.
 function hasMeaningfulValue(value: unknown): boolean {
   if (typeof value === 'string') {
     return value.trim().length > 0;
   }
 
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return true;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value !== 0;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
   }
 
   if (Array.isArray(value)) {
@@ -43,10 +48,17 @@ function hasRecordEntries(
   value?: Record<string, number> | Array<[string, number]>,
 ): boolean {
   if (Array.isArray(value)) {
-    return value.length > 0;
+    return value.some(([, count]) => Number.isFinite(count) && count !== 0);
   }
 
-  return !!value && Object.keys(value).length > 0;
+  return (
+    !!value &&
+    Object.values(value).some((count) => Number.isFinite(count) && count !== 0)
+  );
+}
+
+function hasMeaningfulArray(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => hasMeaningfulValue(item));
 }
 
 // Main App Component
@@ -136,23 +148,21 @@ function InsightApp({ data }: { data: InsightData }) {
   const showInteractionStyle = hasMeaningfulValue(
     data.qualitative?.interactionStyle,
   );
-  const showImpressiveWorkflows = hasMeaningfulValue(
-    data.qualitative?.impressiveWorkflows,
-  );
-  const showFrictionPoints = hasMeaningfulValue(
-    data.qualitative?.frictionPoints,
-  );
+  const showImpressiveWorkflows =
+    hasMeaningfulValue(data.qualitative?.impressiveWorkflows) ||
+    hasRecordEntries(data.primarySuccess) ||
+    hasRecordEntries(data.outcomes);
+  const showFrictionPoints =
+    hasMeaningfulValue(data.qualitative?.frictionPoints) ||
+    hasRecordEntries(data.satisfaction) ||
+    hasRecordEntries(data.friction);
   const showFeatures =
     !!data.qualitative &&
-    hasMeaningfulValue({
-      Qwen_md_additions: data.qualitative.improvements?.Qwen_md_additions,
-      features_to_try: data.qualitative.improvements?.features_to_try,
-    });
+    (hasMeaningfulArray(data.qualitative.improvements?.Qwen_md_additions) ||
+      hasMeaningfulArray(data.qualitative.improvements?.features_to_try));
   const showPatterns =
     !!data.qualitative &&
-    hasMeaningfulValue({
-      usage_patterns: data.qualitative.improvements?.usage_patterns,
-    });
+    hasMeaningfulArray(data.qualitative.improvements?.usage_patterns);
   const showFutureOpportunities = hasMeaningfulValue(
     data.qualitative?.futureOpportunities,
   );
@@ -241,19 +251,19 @@ function InsightApp({ data }: { data: InsightData }) {
         <InteractionStyle qualitative={data.qualitative} insights={data} />
       )}
 
-      {showImpressiveWorkflows && data.qualitative && (
+      {showImpressiveWorkflows && (
         <ImpressiveWorkflows
           qualitative={data.qualitative}
-          primarySuccess={data.primarySuccess!}
-          outcomes={data.outcomes!}
+          primarySuccess={data.primarySuccess ?? {}}
+          outcomes={data.outcomes ?? {}}
         />
       )}
 
-      {showFrictionPoints && data.qualitative && (
+      {showFrictionPoints && (
         <FrictionPoints
           qualitative={data.qualitative}
-          satisfaction={data.satisfaction}
-          friction={data.friction}
+          satisfaction={data.satisfaction ?? {}}
+          friction={data.friction ?? {}}
         />
       )}
 

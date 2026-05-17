@@ -45,6 +45,7 @@ const SESSION_OUTCOMES = [
   'not_achieved',
   'unclear_from_transcript',
 ] as const;
+const OUTCOME_FALLBACK = 'unclear_from_transcript';
 const QWEN_HELPFULNESS_LEVELS = [
   'unhelpful',
   'slightly_helpful',
@@ -68,14 +69,20 @@ const PRIMARY_SUCCESS_VALUES = [
   'multi_file_changes',
   'good_debugging',
 ] as const;
+const PRIMARY_SUCCESS_FALLBACK = 'none';
 
+// Keep in sync with packages/web-templates/src/insight/src/App.tsx.
 function hasMeaningfulInsightValue(value: unknown): boolean {
   if (typeof value === 'string') {
     return value.trim().length > 0;
   }
 
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return true;
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && value !== 0;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
   }
 
   if (Array.isArray(value)) {
@@ -100,7 +107,7 @@ function normalizeInsightCountRecord(value: unknown): Record<string, number> {
 
   return Object.entries(value).reduce<Record<string, number>>(
     (acc, [key, count]) => {
-      if (typeof count === 'number' && Number.isFinite(count) && count >= 0) {
+      if (typeof count === 'number' && Number.isFinite(count) && count > 0) {
         acc[key] = count;
       }
       return acc;
@@ -118,9 +125,14 @@ function normalizeInsightEnum<T extends string>(
   allowed: readonly T[],
   fallback: T,
 ): T {
-  return typeof value === 'string' && allowed.some((item) => item === value)
-    ? (value as T)
-    : fallback;
+  if (typeof value === 'string' && allowed.some((item) => item === value)) {
+    return value as T;
+  }
+
+  logger.debug(
+    `Normalized unknown insight enum value "${String(value)}" to fallback "${fallback}"`,
+  );
+  return fallback;
 }
 
 function normalizeSessionFacet(
@@ -139,7 +151,7 @@ function normalizeSessionFacet(
     outcome: normalizeInsightEnum(
       rawFacet['outcome'],
       SESSION_OUTCOMES,
-      'unclear_from_transcript',
+      OUTCOME_FALLBACK,
     ),
     user_satisfaction_counts: normalizeInsightCountRecord(
       rawFacet['user_satisfaction_counts'],
@@ -159,7 +171,7 @@ function normalizeSessionFacet(
     primary_success: normalizeInsightEnum(
       rawFacet['primary_success'],
       PRIMARY_SUCCESS_VALUES,
-      'none',
+      PRIMARY_SUCCESS_FALLBACK,
     ),
     brief_summary: normalizeInsightText(rawFacet['brief_summary']),
   };
@@ -168,14 +180,14 @@ function normalizeSessionFacet(
     underlying_goal: normalizedFacet.underlying_goal,
     goal_categories: normalizedFacet.goal_categories,
     outcome:
-      normalizedFacet.outcome === 'unclear_from_transcript'
+      normalizedFacet.outcome === OUTCOME_FALLBACK
         ? ''
         : normalizedFacet.outcome,
     user_satisfaction_counts: normalizedFacet.user_satisfaction_counts,
     friction_counts: normalizedFacet.friction_counts,
     friction_detail: normalizedFacet.friction_detail,
     primary_success:
-      normalizedFacet.primary_success === 'none'
+      normalizedFacet.primary_success === PRIMARY_SUCCESS_FALLBACK
         ? ''
         : normalizedFacet.primary_success,
     brief_summary: normalizedFacet.brief_summary,
@@ -505,9 +517,9 @@ export class DataProcessor {
       const primarySuccess = normalizeInsightEnum(
         facet.primary_success,
         PRIMARY_SUCCESS_VALUES,
-        'none',
+        PRIMARY_SUCCESS_FALLBACK,
       );
-      if (primarySuccess !== 'none') {
+      if (primarySuccess !== PRIMARY_SUCCESS_FALLBACK) {
         primarySuccessAgg[primarySuccess] =
           (primarySuccessAgg[primarySuccess] || 0) + 1;
       }
@@ -516,7 +528,7 @@ export class DataProcessor {
       const outcome = normalizeInsightEnum(
         facet.outcome,
         SESSION_OUTCOMES,
-        'unclear_from_transcript',
+        OUTCOME_FALLBACK,
       );
       outcomesAgg[outcome] = (outcomesAgg[outcome] || 0) + 1;
 
@@ -860,7 +872,7 @@ export class DataProcessor {
       const outcome = normalizeInsightEnum(
         facet.outcome,
         SESSION_OUTCOMES,
-        'unclear_from_transcript',
+        OUTCOME_FALLBACK,
       );
       outcomesAgg[outcome] = (outcomesAgg[outcome] || 0) + 1;
 
@@ -880,9 +892,9 @@ export class DataProcessor {
       const primarySuccess = normalizeInsightEnum(
         facet.primary_success,
         PRIMARY_SUCCESS_VALUES,
-        'none',
+        PRIMARY_SUCCESS_FALLBACK,
       );
-      if (primarySuccess !== 'none') {
+      if (primarySuccess !== PRIMARY_SUCCESS_FALLBACK) {
         successAgg[primarySuccess] = (successAgg[primarySuccess] || 0) + 1;
       }
     });
@@ -1248,6 +1260,11 @@ None captured`;
                   );
                   throw new Error('Malformed cached insight facet');
                 }
+                await fs.writeFile(
+                  existingFacetPath,
+                  JSON.stringify(normalizedFacet, null, 2),
+                  'utf-8',
+                );
                 completed++;
                 if (onProgress) {
                   const percent = 20 + Math.round((completed / total) * 60);
