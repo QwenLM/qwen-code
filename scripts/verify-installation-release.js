@@ -37,10 +37,14 @@ const EXPECTED_RELEASE_ASSET_NAMES = [
 ];
 const REMOTE_FETCH_TIMEOUT_MS = 30_000;
 
+// Mirrors `build-standalone-release.js`'s archive-name derivation. The two
+// must stay aligned: any new platform/extension landing in RELEASE_TARGETS
+// has to be reflected here (and there) before a new target ships, otherwise
+// the verify and the build will disagree on expected filenames.
 function standaloneArchiveNamesFromReleaseTargets(releaseTargets) {
   return releaseTargets.map(
     ({ qwenTarget }) =>
-      `qwen-code-${qwenTarget}.${qwenTarget.startsWith('win-') ? 'zip' : 'tar.gz'}`,
+      `qwen-code-${qwenTarget}.${qwenTarget === 'win-x64' ? 'zip' : 'tar.gz'}`,
   );
 }
 
