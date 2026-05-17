@@ -64,6 +64,7 @@ vi.mock('../utils/export/index.js', () => ({
 }));
 
 vi.mock('node:fs/promises', () => ({
+  chmod: vi.fn(),
   mkdir: vi.fn(),
   realpath: vi.fn(),
   writeFile: vi.fn(),
@@ -120,6 +121,7 @@ describe('exportCommand', () => {
     vi.mocked(generateExportFilename).mockImplementation(
       (ext: string) => `export-2025-01-01T00-00-00-000Z.${ext}`,
     );
+    vi.mocked(fs.chmod).mockResolvedValue(undefined);
     vi.mocked(fs.realpath).mockImplementation(async (p) => p.toString());
   });
 
@@ -600,7 +602,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: expect.stringContaining('Failed to export session:'),
+        content: expect.stringContaining('Export path validation failed:'),
       });
       if (!result || result.type !== 'message') {
         throw new Error('expected message result');

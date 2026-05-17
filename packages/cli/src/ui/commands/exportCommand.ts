@@ -47,11 +47,22 @@ type ExportTargetContext = {
   resolvedCwd: string;
 };
 
+type ExportTarget = ExportTargetContext & {
+  filepath: string;
+  displayPath: string;
+  outputDirKind: ExportOutputDirKind;
+  isInsideCwd: boolean;
+};
+
 function formatExportTargetContext(target: ExportTargetContext): string {
   return `target: "${target.outputDir}", cwd: "${target.resolvedCwd}"`;
 }
 
-function resolveExportTarget(cwd: string, args: string, extension: string) {
+function resolveExportTarget(
+  cwd: string,
+  args: string,
+  extension: string,
+): ExportTarget {
   const filename = generateExportFilename(extension);
   const outputDirArg = args.trim();
   const resolvedCwd = path.resolve(cwd);
@@ -76,10 +87,9 @@ function resolveExportTarget(cwd: string, args: string, extension: string) {
   };
 }
 
-async function validateExportTargetWithinCwd(target: {
-  outputDir: string;
-  resolvedCwd: string;
-}): Promise<MessageActionReturn | undefined> {
+async function validateExportTargetWithinCwd(
+  target: ExportTargetContext,
+): Promise<MessageActionReturn | undefined> {
   debugLogger.debug(
     'Validating export target realpath:',
     formatExportTargetContext(target),
@@ -160,14 +170,15 @@ async function realpathNearestExisting(
   }
 
   throw new Error(
-    `Cannot resolve any existing ancestor within cwd: ${resolvedCwd}`,
+    `Cannot resolve any existing ancestor within cwd: ${resolvedCwd}. ` +
+      'This usually means the project working directory has been deleted ' +
+      'or is on an unmounted filesystem.',
   );
 }
 
-async function validateExistingExportParentWithinCwd(target: {
-  outputDir: string;
-  resolvedCwd: string;
-}): Promise<MessageActionReturn | undefined> {
+async function validateExistingExportParentWithinCwd(
+  target: ExportTargetContext,
+): Promise<MessageActionReturn | undefined> {
   debugLogger.debug(
     'Validating existing export parent realpath:',
     formatExportTargetContext(target),
@@ -246,6 +257,10 @@ async function exportSessionAction(
     };
   }
 
+  // Three-phase directory validation closes symlink-swap windows:
+  // 1. Initial: validate the target or nearest existing parent before work.
+  // 2. Post-mkdir: verify mkdir did not follow a symlink outside cwd.
+  // 3. Pre-write: verify the target was not swapped before writeFile.
   try {
     const initialValidationError =
       target.outputDirKind === 'custom'
@@ -313,6 +328,16 @@ async function exportSessionAction(
       if (writeValidationError) {
         return writeValidationError;
       }
+    } catch (error) {
+      debugLogger.debug('Export path validation failed before write:', error);
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: `Export path validation failed: ${error instanceof Error ? error.message : String(error)} (${exportFormat.displayName} target: "${targetFilepath}")`,
+      };
+    }
+
+    try {
       debugLogger.debug('Writing export file:', {
         format: exportFormat.displayName,
         filepath: target.filepath,
@@ -320,6 +345,9 @@ async function exportSessionAction(
       await fs.writeFile(target.filepath, content, {
         encoding: 'utf-8',
         mode: 0o600,
+      });
+      await fs.chmod(target.filepath, 0o600).catch((error) => {
+        debugLogger.debug('Failed to tighten export file permissions:', error);
       });
     } catch (error) {
       debugLogger.debug('Failed to write export file:', error);
