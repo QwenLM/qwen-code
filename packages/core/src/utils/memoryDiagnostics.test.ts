@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import process from 'node:process';
 
 const debugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -145,6 +146,10 @@ describe('collectMemoryDiagnostics', () => {
     );
     expect(nativeRisk?.message).toContain('80.0 MB');
     expect(nativeRisk?.message).toContain('32.0 MB');
+    expect(diagnostics.analysis.recommendation).toBe(
+      '5 potential leak indicator(s) found.',
+    );
+    expect(diagnostics.analysis.recommendation).not.toContain('WARNING:');
   });
 
   it('does not flag native pressure when malloced memory is below the absolute floor', async () => {
@@ -317,9 +322,7 @@ describe('collectMemoryDiagnostics', () => {
     expect(diagnostics.analysis.recommendation).toBe(
       'No obvious leak indicators detected.',
     );
-    expect(diagnostics.analysis.recommendation).not.toContain(
-      'heap snapshot',
-    );
+    expect(diagnostics.analysis.recommendation).not.toContain('heap snapshot');
     expect(debugLogger.debug).toHaveBeenCalledWith(
       expect.stringContaining('heapSpaceStatistics'),
       expect.any(Error),
@@ -370,6 +373,59 @@ describe('collectMemoryDiagnostics', () => {
     expect(diagnostics.activeHandles).toBe(0);
     expect(diagnostics.activeRequests).toBe(0);
     expect(diagnostics.analysis.risks).toEqual([]);
+  });
+
+  it('logs unavailable Node.js internal active probes before returning zero counts', async () => {
+    const internals = process as typeof process & {
+      _getActiveHandles?: () => unknown[];
+      _getActiveRequests?: () => unknown[];
+    };
+    const originalGetActiveHandles = internals._getActiveHandles;
+    const originalGetActiveRequests = internals._getActiveRequests;
+    internals._getActiveHandles = undefined;
+    internals._getActiveRequests = undefined;
+
+    try {
+      const diagnostics = await collectMemoryDiagnostics({
+        memoryUsage: () => ({
+          heapUsed: 100,
+          heapTotal: 200,
+          rss: 300,
+          external: 10,
+          arrayBuffers: 5,
+        }),
+        heapStatistics: () => ({
+          heap_size_limit: 1_000,
+          total_heap_size: 200,
+          total_heap_size_executable: 0,
+          total_physical_size: 200,
+          used_heap_size: 100,
+          malloced_memory: 0,
+          peak_malloced_memory: 0,
+          does_zap_garbage: 0,
+          number_of_native_contexts: 1,
+          number_of_detached_contexts: 0,
+          total_available_size: 900,
+          total_global_handles_size: 0,
+          used_global_handles_size: 0,
+          external_memory: 10,
+        }),
+      });
+
+      expect(diagnostics.activeHandles).toBe(0);
+      expect(diagnostics.activeRequests).toBe(0);
+      expect(debugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('activeHandles'),
+        expect.any(Error),
+      );
+      expect(debugLogger.debug).toHaveBeenCalledWith(
+        expect.stringContaining('activeRequests'),
+        expect.any(Error),
+      );
+    } finally {
+      internals._getActiveHandles = originalGetActiveHandles;
+      internals._getActiveRequests = originalGetActiveRequests;
+    }
   });
 
   it('starts independent optional probes before awaiting slow probes', async () => {

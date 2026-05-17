@@ -765,7 +765,57 @@ describe('doctorCommand', () => {
     expect(doctorCommand.subCommands?.map((command) => command.name)).toContain(
       'memory',
     );
-    expect(getMemoryCommand().argumentHint).toBe('[--json]');
+    expect(getMemoryCommand().argumentHint).toBe(
+      '[--json] [--sample] [--snapshot]',
+    );
+  });
+
+  it('should support sampled memory diagnostics through the memory subcommand', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await getMemoryCommand().action!(mockContext, '--sample');
+
+    expect(
+      memoryDiagnosticsModule.collectMemoryPressureSamples,
+    ).toHaveBeenCalledWith({
+      sampleCount: 3,
+      intervalMs: 1000,
+      signal: undefined,
+    });
+    expect(collectMemoryDiagnostics).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nMemory pressure samples\nSample count: 1',
+    });
+  });
+
+  it('should support heap snapshots through the memory subcommand', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      ui: {
+        addItem: vi.fn(),
+        setPendingItem: vi.fn(),
+      },
+    } as unknown as CommandContext);
+
+    const result = await getMemoryCommand().action!(mockContext, '--snapshot');
+
+    expect(memoryDiagnosticsModule.writeMemoryHeapSnapshot).toHaveBeenCalled();
+    expect(collectMemoryDiagnostics).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Memory diagnostics\nRSS: 100.0 MiB\nActive handles: 3\n\nHeap snapshot written: /tmp/qwen-code-heap.heapsnapshot\nHeap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.',
+    });
   });
 
   it('should render risk indicators without failing memory diagnostics', async () => {
@@ -802,7 +852,7 @@ describe('doctorCommand', () => {
       nodeVersion: 'v20.19.0',
       analysis: {
         risks: [{ type: 'heap-pressure', message: 'Heap pressure detected.' }],
-        recommendation: 'WARNING: 1 potential leak indicator(s) found.',
+        recommendation: '1 potential leak indicator(s) found.',
       },
     });
     const result = await getMemoryCommand().action!(mockContext, '');
@@ -815,6 +865,12 @@ describe('doctorCommand', () => {
     );
     expect(result?.type === 'message' ? result.content : '').toContain(
       'heap-pressure: Heap pressure detected.',
+    );
+    expect(result?.type === 'message' ? result.content : '').toContain(
+      'recommendation: 1 potential leak indicator(s) found.',
+    );
+    expect(result?.type === 'message' ? result.content : '').not.toContain(
+      'recommendation: WARNING:',
     );
   });
 
@@ -864,8 +920,53 @@ describe('doctorCommand', () => {
       }),
     );
     expect(result?.type === 'message' ? result.content : '').toContain(
-      '/doctor memory [--json]',
+      '/doctor memory [--json] [--sample] [--snapshot]',
     );
+  });
+
+  it('should show a parse error marker for malformed smaps rollup data', async () => {
+    vi.mocked(collectMemoryDiagnostics).mockResolvedValueOnce({
+      timestamp: '2026-05-01T10:00:00.000Z',
+      uptimeSeconds: 60,
+      memoryUsage: {
+        heapUsed: 1_000,
+        heapTotal: 2_000,
+        rss: 3_000,
+        external: 100,
+        arrayBuffers: 50,
+      },
+      v8HeapStats: {
+        heapSizeLimit: 4_000,
+        totalHeapSize: 2_000,
+        usedHeapSize: 1_000,
+        mallocedMemory: 2_048,
+        peakMallocedMemory: 4_096,
+        detachedContexts: 0,
+        nativeContexts: 1,
+      },
+      v8HeapSpaces: null,
+      resourceUsage: {
+        maxRSS: 4_000,
+        userCPUTime: 10,
+        systemCPUTime: 20,
+      },
+      activeHandles: 2,
+      activeRequests: 0,
+      openFileDescriptors: null,
+      smapsRollup: 'Pss:               1000 kB\n',
+      platform: 'linux',
+      nodeVersion: 'v20.19.0',
+      analysis: {
+        risks: [],
+        recommendation: 'No obvious leak indicators.',
+      },
+    });
+
+    const result = await getMemoryCommand().action!(mockContext, '');
+    const content = result?.type === 'message' ? result.content : '';
+
+    expect(content).toContain('smapsRollup: parse error: Pss:');
+    expect(content).not.toContain('smapsRollup: available');
   });
 
   it('should suppress JSON output when aborted between probe and return', async () => {

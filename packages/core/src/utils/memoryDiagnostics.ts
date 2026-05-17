@@ -101,8 +101,8 @@ export interface MemoryDiagnosticsOptions {
 // change in a future Node release. Both call sites guard with try/catch and
 // fall back to 0, so a removal degrades gracefully.
 interface ProcessInternals {
-  _getActiveHandles?: () => unknown[];
-  _getActiveRequests?: () => unknown[];
+  _getActiveHandles?: () => unknown;
+  _getActiveRequests?: () => unknown;
 }
 
 export async function collectMemoryDiagnostics(
@@ -203,7 +203,22 @@ function getProcessInternalCount(
       return probe();
     }
     const internals = process as unknown as ProcessInternals;
-    return internals[internalMethod]?.().length ?? 0;
+    const internalProbe = internals[internalMethod];
+    if (typeof internalProbe !== 'function') {
+      logProbeFailure(name, new Error(`${internalMethod} is unavailable`));
+      return 0;
+    }
+
+    const result = internalProbe();
+    if (!Array.isArray(result)) {
+      logProbeFailure(
+        name,
+        new Error(`${internalMethod} returned a non-array result`),
+      );
+      return 0;
+    }
+
+    return result.length;
   } catch (error) {
     logProbeFailure(name, error);
     return 0;
@@ -325,7 +340,7 @@ function analyzeMemoryDiagnostics(
     risks,
     recommendation:
       risks.length > 0
-        ? `WARNING: ${risks.length} potential leak indicator(s) found.`
+        ? `${risks.length} potential leak indicator(s) found.`
         : 'No obvious leak indicators detected.',
   };
 }

@@ -230,13 +230,13 @@ export const doctorCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-      argumentHint: '[--json]',
+      argumentHint: '[--json] [--sample] [--snapshot]',
       action: memoryDoctorAction,
     },
   ],
 };
 
-const MEMORY_USAGE_HINT = '/doctor memory [--json]';
+const MEMORY_USAGE_HINT = '/doctor memory [--json] [--sample] [--snapshot]';
 
 async function memoryDoctorAction(context: CommandContext, args = '') {
   if (context.abortSignal?.aborted) {
@@ -244,13 +244,27 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
   }
 
   const tokens = args.trim().split(/\s+/).filter(Boolean);
-  const unknown = tokens.filter((token) => token !== '--json');
+  const unknown = tokens.filter(
+    (token) =>
+      token !== '--json' && token !== '--sample' && token !== '--snapshot',
+  );
   if (unknown.length > 0) {
     return {
       type: 'message' as const,
       messageType: 'error' as const,
       content: `${t('Unknown argument(s)')}: ${unknown.join(', ')}. ${t('Usage')}: ${MEMORY_USAGE_HINT}`,
     };
+  }
+
+  const shouldSampleMemory = tokens.includes('--sample');
+  const shouldWriteHeapSnapshot = tokens.includes('--snapshot');
+  if (shouldSampleMemory || shouldWriteHeapSnapshot) {
+    return doctorCommand.action?.(
+      context,
+      [MEMORY_SUBCOMMAND, ...tokens.filter((token) => token !== '--json')].join(
+        ' ',
+      ),
+    );
   }
 
   try {
@@ -281,7 +295,7 @@ async function memoryDoctorAction(context: CommandContext, args = '') {
     return {
       type: 'message' as const,
       messageType: 'error' as const,
-      content: `${t('Failed to collect memory diagnostics')}: ${formatError(error)}`,
+      content: `${t('Failed to collect memory diagnostics')}: ${formatErrorMessage(error)}`,
     };
   }
 }
@@ -317,8 +331,12 @@ function formatSmapsRollup(smapsRollup: string | null): string {
     .split(/\r?\n/)
     .map((line) => line.trim().replace(/\s+/g, ' '))
     .find((line) => line.startsWith('Rss:'));
+  if (rssLine) {
+    return rssLine;
+  }
 
-  return rssLine ?? t('available');
+  const preview = smapsRollup.slice(0, 80).trim().replace(/\s+/g, ' ');
+  return `${t('parse error')}: ${preview}`;
 }
 
 function formatCoreDiagnostics(diagnostics: MemoryDiagnostics): string {
@@ -363,8 +381,4 @@ function formatCoreDiagnostics(diagnostics: MemoryDiagnostics): string {
     `recommendation: ${diagnostics.analysis.recommendation}`,
   );
   return lines.join('\n');
-}
-
-function formatError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
