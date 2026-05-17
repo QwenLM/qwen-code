@@ -526,6 +526,77 @@ describe('SessionService', () => {
       expect(assistantMsg?.usageMetadata?.totalTokenCount).toBe(30);
       expect(assistantMsg?.model).toBe('gemini-pro');
     });
+
+    it('should expose persisted file-history snapshots from the active branch', async () => {
+      const records: ChatRecord[] = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 's1',
+          parentUuid: 'u1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:00:01Z',
+          type: 'system',
+          subtype: 'file_history_snapshot',
+          systemPayload: {
+            version: 1,
+            snapshot: {
+              promptId: 'prompt-1',
+              timestamp: '2024-01-01T00:00:01.000Z' as unknown as Date,
+              trackedFileBackups: {
+                'src/app.ts': {
+                  backupFileName: 'backup-1',
+                  version: 1,
+                  backupTime: '2024-01-01T00:00:01.000Z' as unknown as Date,
+                },
+              },
+            },
+          },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'a1',
+          parentUuid: 's1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:00:02Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Done' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+      ];
+
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue(records);
+
+      const loaded = await sessionService.loadSession('test');
+
+      expect(loaded?.fileHistorySnapshots).toEqual([
+        {
+          promptId: 'prompt-1',
+          timestamp: '2024-01-01T00:00:01.000Z',
+          trackedFileBackups: {
+            'src/app.ts': {
+              backupFileName: 'backup-1',
+              version: 1,
+              backupTime: '2024-01-01T00:00:01.000Z',
+            },
+          },
+        },
+      ]);
+    });
   });
 
   describe('removeSession', () => {

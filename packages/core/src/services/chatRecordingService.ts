@@ -28,6 +28,7 @@ import type {
 import type { Status } from '../core/coreToolScheduler.js';
 import type { AgentResultDisplay, FileDiff } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
+import type { FileHistorySnapshot } from './fileHistoryService.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -229,6 +230,7 @@ export interface ChatRecord {
     | 'ui_telemetry'
     | 'at_command'
     | 'attribution_snapshot'
+    | 'file_history_snapshot'
     | 'notification'
     | 'cron'
     | 'mid_turn_user_message'
@@ -278,6 +280,7 @@ export interface ChatRecord {
     | UiTelemetryRecordPayload
     | AtCommandRecordPayload
     | AttributionSnapshotPayload
+    | FileHistorySnapshotRecordPayload
     | CustomTitleRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
@@ -416,6 +419,11 @@ export interface UiTelemetryRecordPayload {
  */
 export interface AttributionSnapshotPayload {
   snapshot: AttributionSnapshot;
+}
+
+export interface FileHistorySnapshotRecordPayload {
+  version: 1;
+  snapshot: FileHistorySnapshot;
 }
 
 /**
@@ -1337,6 +1345,24 @@ export class ChatRecordingService {
         this.lastAttributionSnapshotJson = undefined;
       }
       debugLogger.error('Error saving attribution snapshot:', error);
+    }
+  }
+
+  recordFileHistorySnapshot(snapshot: FileHistorySnapshot): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        systemPayload: {
+          version: 1,
+          snapshot,
+        },
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving file history snapshot:', error);
     }
   }
 }

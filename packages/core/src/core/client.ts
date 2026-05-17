@@ -1275,7 +1275,14 @@ export class GeminiClient {
 
         if (messageType === SendMessageType.UserQuery) {
           try {
-            await this.config.getFileHistoryService().makeSnapshot(prompt_id);
+            const fileHistoryService = this.config.getFileHistoryService();
+            await fileHistoryService.makeSnapshot(prompt_id);
+            const latestSnapshot = fileHistoryService.getSnapshots().at(-1);
+            if (latestSnapshot?.promptId === prompt_id) {
+              this.config
+                .getChatRecordingService()
+                ?.recordFileHistorySnapshot(latestSnapshot);
+            }
           } catch (e) {
             debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
           }

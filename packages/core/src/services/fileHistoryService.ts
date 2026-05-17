@@ -315,9 +315,22 @@ export class FileHistoryService {
       for (const [p, backup] of Object.entries(snapshot.trackedFileBackups)) {
         const trackingPath = this.maybeShortenFilePath(p);
         trackedFiles.add(trackingPath);
-        trackedFileBackups[trackingPath] = backup;
+        trackedFileBackups[trackingPath] = {
+          ...backup,
+          backupTime:
+            backup.backupTime instanceof Date
+              ? backup.backupTime
+              : new Date(backup.backupTime),
+        };
       }
-      migrated.push({ ...snapshot, trackedFileBackups });
+      migrated.push({
+        ...snapshot,
+        timestamp:
+          snapshot.timestamp instanceof Date
+            ? snapshot.timestamp
+            : new Date(snapshot.timestamp),
+        trackedFileBackups,
+      });
     }
     this.state = {
       snapshots: migrated,

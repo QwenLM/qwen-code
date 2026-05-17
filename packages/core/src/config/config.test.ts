@@ -46,6 +46,7 @@ import { readAutoMemoryIndex } from '../memory/store.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import type { ResumedSessionData } from '../services/sessionService.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -414,13 +415,51 @@ describe('Server Config (config.ts)', () => {
       expect(cache.size()).toBe(0);
     });
 
-    it('refreshes the telemetry session context with the new session ID', () => {
+  it('refreshes the telemetry session context with the new session ID', () => {
       const config = new Config(baseParams);
       vi.mocked(refreshSessionContext).mockClear();
 
       const newSessionId = config.startNewSession();
 
       expect(refreshSessionContext).toHaveBeenCalledWith(newSessionId);
+    });
+
+    it('restores persisted file-history snapshots when resuming a session', () => {
+      const config = new Config({ ...baseParams, fileCheckpointingEnabled: true });
+      const resumedSessionData: ResumedSessionData = {
+        conversation: {
+          sessionId: 'resumed-session',
+          projectHash: 'test-project-hash',
+          startTime: '2026-05-17T00:00:00.000Z',
+          lastUpdated: '2026-05-17T00:00:05.000Z',
+          messages: [],
+        },
+        filePath: '/tmp/resumed-session.jsonl',
+        lastCompletedUuid: null,
+        fileHistorySnapshots: [
+          {
+            promptId: 'prompt-1',
+            timestamp: '2026-05-17T00:00:00.000Z' as unknown as Date,
+            trackedFileBackups: {
+              '/tmp/src/app.ts': {
+                backupFileName: 'backup-1',
+                version: 1,
+                backupTime: '2026-05-17T00:00:01.000Z' as unknown as Date,
+              },
+            },
+          },
+        ],
+      };
+
+      config.startNewSession('resumed-session', resumedSessionData);
+
+      const snapshots = config.getFileHistoryService().getSnapshots();
+      expect(snapshots).toHaveLength(1);
+      expect(snapshots[0]?.promptId).toBe('prompt-1');
+      expect(snapshots[0]?.timestamp).toBeInstanceOf(Date);
+      expect(
+        snapshots[0]?.trackedFileBackups['/tmp/src/app.ts']?.backupTime,
+      ).toBeInstanceOf(Date);
     });
   });
 

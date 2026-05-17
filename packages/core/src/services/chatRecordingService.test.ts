@@ -15,6 +15,7 @@ import {
   type ChatRecord,
   type AtCommandRecordPayload,
 } from './chatRecordingService.js';
+import type { FileHistorySnapshot } from './fileHistoryService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
@@ -748,6 +749,33 @@ describe('ChatRecordingService', () => {
       chatRecordingService.recordAttributionSnapshot(baseSnapshot);
       await chatRecordingService.flush();
       expect(vi.mocked(jsonl.writeLine)).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('recordFileHistorySnapshot', () => {
+    it('should append a versioned file-history snapshot system record', async () => {
+      const snapshot: FileHistorySnapshot = {
+        promptId: 'prompt-1',
+        timestamp: new Date('2026-05-17T00:00:00.000Z'),
+        trackedFileBackups: {
+          'src/app.ts': {
+            backupFileName: 'backup-1',
+            version: 1,
+            backupTime: new Date('2026-05-17T00:00:01.000Z'),
+          },
+        },
+      };
+
+      chatRecordingService.recordFileHistorySnapshot(snapshot);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('file_history_snapshot');
+      expect(record.systemPayload).toEqual({
+        version: 1,
+        snapshot,
+      });
     });
   });
 

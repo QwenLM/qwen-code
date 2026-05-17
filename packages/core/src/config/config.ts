@@ -766,6 +766,7 @@ export class Config {
   private readonly checkpointing: boolean;
   private readonly fileCheckpointingEnabled: boolean;
   private fileHistoryService: FileHistoryService | undefined;
+  private fileHistoryRestoredFromSessionData = false;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly explicitIncludeDirectories: string[];
@@ -1753,6 +1754,7 @@ export class Config {
     // cache, not the parent's.
     this.getFileReadCache().clear();
     this.fileHistoryService = undefined;
+    this.fileHistoryRestoredFromSessionData = false;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
@@ -2783,6 +2785,15 @@ export class Config {
         this.fileCheckpointingEnabled,
         this.cwd,
       );
+    }
+    if (
+      !this.fileHistoryRestoredFromSessionData &&
+      this.sessionData?.fileHistorySnapshots
+    ) {
+      this.fileHistoryService.restoreFromSnapshots(
+        this.sessionData.fileHistorySnapshots,
+      );
+      this.fileHistoryRestoredFromSessionData = true;
     }
     return this.fileHistoryService;
   }

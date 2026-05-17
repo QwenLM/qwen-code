@@ -15,9 +15,11 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
+import type { FileHistorySnapshot } from './fileHistoryService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -129,6 +131,8 @@ export interface ResumedSessionData {
   filePath: string;
   /** UUID of the last completed message - new messages should use this as parentUuid */
   lastCompletedUuid: string | null;
+  /** File-history snapshots persisted on the active session branch, if any. */
+  fileHistorySnapshots?: FileHistorySnapshot[];
 }
 
 /**
@@ -707,10 +711,14 @@ export class SessionService {
       messages,
     };
 
+    const fileHistorySnapshots = extractFileHistorySnapshots(messages);
+
     return {
       conversation,
       filePath,
       lastCompletedUuid: lastMessage.uuid,
+      fileHistorySnapshots:
+        fileHistorySnapshots.length > 0 ? fileHistorySnapshots : undefined,
     };
   }
 
@@ -1288,6 +1296,29 @@ export function replayUiTelemetryFromConversation(
   if (resumePromptTokens !== undefined) {
     uiTelemetryService.setLastPromptTokenCount(resumePromptTokens);
   }
+}
+
+function extractFileHistorySnapshots(
+  messages: ChatRecord[],
+): FileHistorySnapshot[] {
+  const snapshots: FileHistorySnapshot[] = [];
+  for (const record of messages) {
+    if (record.type !== 'system' || record.subtype !== 'file_history_snapshot') {
+      continue;
+    }
+
+    const payload = record.systemPayload as
+      | FileHistorySnapshotRecordPayload
+      | undefined;
+    const snapshot = payload?.snapshot;
+    if (payload?.version !== 1 || !snapshot) {
+      continue;
+    }
+
+    snapshots.push(snapshot);
+  }
+
+  return snapshots;
 }
 
 /**
