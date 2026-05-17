@@ -282,6 +282,23 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         });
       }
       const sizeOutcome = enforceReadSize(st.size, opts.maxBytes);
+      // Reject `opts.line` values that the docstring forbids
+      // (positive integer required). Without this guard `Infinity`
+      // (`Infinity > 1` is true; `Infinity - 1` is still
+      // `Infinity`) and floats (`2.5 - 1 = 1.5`) flow through to
+      // `readFileWithLineAndLimit` and degrade silently to weird
+      // truncation behavior. `NaN` and `0` happen to work via the
+      // falsy fallback but that's accidental — prefer an explicit
+      // error.
+      if (
+        opts.line !== undefined &&
+        (!Number.isSafeInteger(opts.line) || opts.line < 1)
+      ) {
+        throw new FsError(
+          'parse_error',
+          `line must be a positive integer, got ${opts.line}`,
+        );
+      }
       // Delegate encoding-aware read to the existing core service so
       // BOM, CRLF, and iconv-supported codepages remain consistent
       // with what the tools layer already does. The core service's
@@ -290,7 +307,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // convention SDK consumers expect from line-numbered errors,
       // editor jump-to-line, etc.). Convert here so the public
       // contract isn't tied to the internal helper's indexing.
-      const startLineIndex = opts.line && opts.line > 1 ? opts.line - 1 : 0;
+      const startLineIndex = opts.line !== undefined ? opts.line - 1 : 0;
       const result = await this.deps.lowFs.readTextFile({
         path: p as string,
         limit: opts.limit ?? Number.POSITIVE_INFINITY,
@@ -447,6 +464,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const out: ResolvedPath[] = [];
       const max = opts.maxResults ?? Number.POSITIVE_INFINITY;
       let escapedCount = 0;
+      let permissionErrorCount = 0;
       let transientErrorCount = 0;
       for (const hit of matches) {
         if (out.length >= max) break;
@@ -457,29 +475,28 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         // sits there), but the realpath isn't — so we resolve
         // each hit's symlink chain and compare the canonical to
         // the canonical workspace root. Filtered hits are counted
-        // and reported via a single aggregated `fs.denied` after
+        // and reported via aggregated `fs.denied` events after
         // the loop so per-hit emit doesn't flood the bus when a
         // misconfigured tree contains many escape symlinks.
         let canonical: string;
         try {
           canonical = await fsp.realpath(absolute);
         } catch (err) {
-          // Distinguish between the security-relevant escape kinds
-          // and transient I/O errors. `ENOENT` (dangling symlink
-          // or unlinked-mid-glob hit) and `ELOOP` (symlink cycle)
-          // are the cases that legitimately signal "this hit
-          // resolved outside of what the boundary trusts" — they
-          // count as `symlink_escape`. Other errnos (`EIO`,
-          // `EACCES`, `ENAMETOOLONG`, `EBUSY`) are environmental
-          // failures; treating them as escapes mislabels the audit
-          // and gives operators false security signal. Drop those
-          // hits silently from the result set but track them
-          // separately for the audit emission below so a
-          // monitoring pipeline can distinguish "filtered for
-          // escape" from "filtered for transient FS error".
+          // Three-way classification so monitoring pipelines can
+          // tell escapes from access denials from transient I/O:
+          //   - `ENOENT` / `ELOOP`  → real `symlink_escape`
+          //     (dangling symlink, symlink cycle)
+          //   - `EACCES` / `EPERM`  → `permission_denied`
+          //     (the literal access-denied case the kind names)
+          //   - everything else     → `io_error` (EIO, EBUSY,
+          //     ENAMETOOLONG, EMFILE, …) — environmental, NOT a
+          //     security signal. Conflating these poisons audit:
+          //     a failing disk would page security oncall.
           const code = (err as NodeJS.ErrnoException)?.code;
           if (code === 'ENOENT' || code === 'ELOOP') {
             escapedCount += 1;
+          } else if (code === 'EACCES' || code === 'EPERM') {
+            permissionErrorCount += 1;
           } else {
             transientErrorCount += 1;
           }
@@ -525,12 +542,27 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           hint: `glob filtered ${escapedCount} hit(s) that resolved outside workspace`,
         });
       }
-      if (transientErrorCount > 0) {
+      if (permissionErrorCount > 0) {
         this.deps.audit.recordDenied(this.deps.ctx, {
           intent: 'glob',
           input: pattern,
           errorKind: 'permission_denied',
-          hint: `glob skipped ${transientErrorCount} hit(s) due to transient I/O errors (EIO/EACCES/ENAMETOOLONG/EBUSY)`,
+          hint: `glob skipped ${permissionErrorCount} hit(s) due to EACCES/EPERM`,
+        });
+      }
+      if (transientErrorCount > 0) {
+        this.deps.audit.recordDenied(this.deps.ctx, {
+          intent: 'glob',
+          input: pattern,
+          // `io_error` (not `permission_denied`) so monitoring
+          // pipelines that page security oncall on
+          // `permission_denied` aren't woken up by a failing disk
+          // or busy file. The kind was added to `FsErrorKind` for
+          // exactly this case (and for `wrapAsFsError`'s ENOSPC /
+          // EIO / EBUSY / ETXTBSY / ENAMETOOLONG / EMFILE / ENFILE
+          // mappings).
+          errorKind: 'io_error',
+          hint: `glob skipped ${transientErrorCount} hit(s) due to transient I/O errors (EIO/EBUSY/ENAMETOOLONG/EMFILE)`,
         });
       }
       this.deps.audit.recordAccess(this.deps.ctx, {
@@ -628,11 +660,23 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         path: p as string,
         content: next,
       });
+      // Symmetric with `readText` / `writeText` — operators
+      // monitoring `fs.access` need to see when an edit landed on
+      // a `.gitignore`d / `.qwenignore`d file (build artifacts,
+      // logs, etc.) rather than only learning about
+      // matchedIgnore for reads and writes.
+      const editVerdict = shouldIgnore(
+        p,
+        this.deps.boundWorkspace,
+        this.deps.ignore,
+        'file',
+      );
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'edit',
         absolute: p,
         durationMs: performance.now() - start,
         sizeBytes: buf.length,
+        matchedIgnore: editVerdict.ignored ? editVerdict.category : undefined,
       });
       return { writtenBytes: buf.length };
     } catch (err) {

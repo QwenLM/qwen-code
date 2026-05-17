@@ -22,6 +22,19 @@ export type FsErrorKind =
   | 'file_too_large'
   | 'untrusted_workspace'
   | 'permission_denied'
+  /**
+   * Environmental I/O failure that is *not* a permission decision —
+   * disk full (`ENOSPC`), generic I/O error (`EIO`), filesystem busy
+   * (`EBUSY`/`ETXTBSY`), path-too-long (`ENAMETOOLONG`), or
+   * file-descriptor exhaustion (`EMFILE`/`ENFILE`).
+   *
+   * Separated from `permission_denied` because monitoring pipelines
+   * key on `errorKind` for alerting — conflating "ACL denied" with
+   * "disk full" pages the security oncall when the real action is
+   * `df -h`. The 503 status communicates "service-level transient
+   * failure" to PR 19/20 route handlers and SDK consumers.
+   */
+  | 'io_error'
   | 'parse_error';
 
 /**
@@ -32,7 +45,7 @@ export type FsErrorKind =
  * boundary is being asked to model a transport-level concern that
  * doesn't belong here (5xx, 401/403 from auth, etc.).
  */
-export type FsErrorStatus = 400 | 403 | 404 | 413 | 422;
+export type FsErrorStatus = 400 | 403 | 404 | 413 | 422 | 503;
 
 /**
  * Default HTTP status mapping. Centralized here so callers can throw
@@ -50,6 +63,7 @@ const DEFAULT_STATUS_BY_KIND: Record<FsErrorKind, FsErrorStatus> = {
   file_too_large: 413,
   untrusted_workspace: 403,
   permission_denied: 403,
+  io_error: 503,
   parse_error: 400,
 };
 
@@ -129,9 +143,30 @@ export function wrapAsFsError(
         cause: err,
         hint: 'a path component is not a directory where one was expected',
       });
+    case 'ENOSPC':
+      return new FsError('io_error', message, {
+        cause: err,
+        hint: 'filesystem is full (df -h reporting 100%)',
+      });
+    case 'EIO':
+      return new FsError('io_error', message, {
+        cause: err,
+        hint: 'underlying I/O error (failing disk or kernel-level fault)',
+      });
+    case 'EBUSY':
+    case 'ETXTBSY':
+      return new FsError('io_error', message, {
+        cause: err,
+        hint: 'file is busy; another process holds an exclusive handle',
+      });
+    case 'ENAMETOOLONG':
+      return new FsError('io_error', message, {
+        cause: err,
+        hint: 'path exceeds the OS PATH_MAX',
+      });
     case 'EMFILE':
     case 'ENFILE':
-      return new FsError('permission_denied', message, {
+      return new FsError('io_error', message, {
         cause: err,
         hint: 'too many open files; daemon is at file-descriptor limit',
       });

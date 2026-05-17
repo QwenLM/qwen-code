@@ -374,6 +374,37 @@ describe('WorkspaceFileSystem - write/edit', () => {
     const out = await h.fs.readText(r, { line: 2, limit: 1 });
     expect(out.content.split('\n')[0]).toBe('two');
   });
+
+  it('rejects non-positive-integer opts.line with parse_error', async () => {
+    const target = path.join(h.workspace, 'v.txt');
+    await fsp.writeFile(target, 'a\nb\nc\n');
+    const r = await h.fs.resolve('v.txt', 'read');
+    for (const bad of [Infinity, -Infinity, 0, -1, 1.5, NaN]) {
+      const err = await h.fs
+        .readText(r, { line: bad })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('parse_error');
+    }
+  });
+
+  it('records matchedIgnore on edit() audit (parity with readText/writeText)', async () => {
+    const ignore = new Ignore().add(['*.log']);
+    h = await makeHarness({ ignore });
+    const target = path.join(h.workspace, 'app.log');
+    await fsp.writeFile(target, 'foo=1\nbar=2\n');
+    const r = await h.fs.resolve('app.log', 'edit');
+    await h.fs.edit(r, 'foo=1', 'foo=2');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'edit',
+    );
+    expect(access).toBeDefined();
+    expect((access!.data as { matchedIgnore?: string }).matchedIgnore).toBe(
+      'file',
+    );
+  });
 });
 
 describe('WorkspaceFileSystem - trust gate', () => {

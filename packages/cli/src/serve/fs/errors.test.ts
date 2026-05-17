@@ -115,10 +115,24 @@ describe('wrapAsFsError', () => {
     expect(wrapAsFsError(errno('EISDIR')).kind).toBe('parse_error');
   });
 
-  it('maps EMFILE / ENFILE to permission_denied with a hint', () => {
+  it('maps EMFILE / ENFILE to io_error with a hint', () => {
     const out = wrapAsFsError(errno('EMFILE'));
-    expect(out.kind).toBe('permission_denied');
+    expect(out.kind).toBe('io_error');
     expect(out.hint).toMatch(/file-descriptor/);
+  });
+
+  it('maps ENOSPC / EIO / EBUSY / ETXTBSY / ENAMETOOLONG to io_error', () => {
+    const enospc = wrapAsFsError(errno('ENOSPC'));
+    expect(enospc.kind).toBe('io_error');
+    expect(enospc.hint).toMatch(/full/);
+    expect(wrapAsFsError(errno('EIO')).kind).toBe('io_error');
+    expect(wrapAsFsError(errno('EBUSY')).kind).toBe('io_error');
+    expect(wrapAsFsError(errno('ETXTBSY')).kind).toBe('io_error');
+    expect(wrapAsFsError(errno('ENAMETOOLONG')).kind).toBe('io_error');
+  });
+
+  it('io_error has HTTP status 503', () => {
+    expect(new FsError('io_error', 'disk full').status).toBe(503);
   });
 
   it('falls back to the configured default kind for unknown errnos', () => {

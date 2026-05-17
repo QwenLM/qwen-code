@@ -335,19 +335,81 @@ export async function resolveWithinWorkspace(
       // detects the symlink without following it; `readlink` +
       // resolved-target containment closes the loop.
       try {
-        const linkStat = await fsp.lstat(absolute);
-        if (linkStat.isSymbolicLink()) {
-          const target = await fsp.readlink(absolute);
+        // Walk the FULL symlink chain via `lstat` + `readlink`,
+        // not just one hop. The earlier single-readlink fix was
+        // bypassed by `<ws>/leak -> <ws>/middle -> /etc/passwd`
+        // (where `middle` is itself a symlink): `findExistingAncestor`
+        // uses `fsp.stat` which follows the rest of the chain,
+        // landed on the target's parent, and reported the
+        // intermediate hop as canonical — letting the OS write
+        // follow the full chain to the escape target. The loop
+        // below dereferences every layer up to a max-depth bound
+        // and tracks visited inodes to surface cycles as
+        // `symlink_escape`. Once we reach a non-symlink leaf, we
+        // canonicalize that leaf via the deepest-existing-ancestor
+        // path (so macOS `/var` vs `/private/var` and Win32 case
+        // collapse consistently with `boundCanonical`).
+        let cursor: string = absolute;
+        const visitedInodes = new Set<bigint>();
+        let firstHopTarget: string | null = null;
+        let resolvedFully = false;
+        for (let hop = 0; hop < MAX_ANCESTOR_HOPS; hop++) {
+          let linkStat: Awaited<ReturnType<typeof fsp.lstat>>;
+          try {
+            linkStat = await fsp.lstat(cursor);
+          } catch (lstatErr) {
+            const lcode = (lstatErr as NodeJS.ErrnoException)?.code;
+            if (lcode === 'ENOENT' || lcode === 'ENOTDIR') {
+              // Reached a non-existent leaf — no symlink to chase
+              // here. Run the deepest-existing-ancestor check on
+              // `cursor` so the eventual write target is bounded.
+              resolvedFully = true;
+              break;
+            }
+            throw lstatErr;
+          }
+          if (!linkStat.isSymbolicLink()) {
+            // Reached a real file/dir — chain terminates here.
+            resolvedFully = true;
+            break;
+          }
+          // Detect cycles via inode identity (ino is a bigint on
+          // recent Node versions). Some filesystems return 0 for
+          // ino (e.g. virtual mounts); the depth bound covers
+          // those cases as a fallback.
+          const ino =
+            typeof linkStat.ino === 'bigint'
+              ? linkStat.ino
+              : BigInt(linkStat.ino as unknown as number);
+          if (ino !== 0n && visitedInodes.has(ino)) {
+            throw new FsError(
+              'symlink_escape',
+              `symlink cycle detected at ${cursor}`,
+              { hint: 'symlink loops back onto a previously visited inode' },
+            );
+          }
+          if (ino !== 0n) visitedInodes.add(ino);
+          const target = await fsp.readlink(cursor);
           const absTarget = path.isAbsolute(target)
             ? target
-            : path.resolve(path.dirname(absolute), target);
-          // The symlink target itself doesn't exist (that's why
-          // we're in the ENOENT branch), so resolve via the
-          // deepest existing ancestor so case-insensitive
-          // filesystems and macOS `/var` vs `/private/var`
-          // canonicalize consistently with `boundCanonical`.
+            : path.resolve(path.dirname(cursor), target);
+          if (firstHopTarget === null) firstHopTarget = target;
+          cursor = absTarget;
+        }
+        if (!resolvedFully) {
+          throw new FsError(
+            'symlink_escape',
+            `symlink chain exceeded ${MAX_ANCESTOR_HOPS} hops for ${input}`,
+            { hint: 'symlink chain is too long or contains a cycle' },
+          );
+        }
+        // Only run the containment check when we actually traversed
+        // at least one symlink — `firstHopTarget !== null` means the
+        // input was a symlink (vs a path through a non-existent
+        // ancestor that wasn't itself a symlink).
+        if (firstHopTarget !== null) {
           const { ancestor: targetAncestor, tail: targetTail } =
-            await findExistingAncestor(absTarget);
+            await findExistingAncestor(cursor);
           const targetAncestorReal = await fsp.realpath(targetAncestor);
           const canonicalTarget = targetTail
             ? path.join(targetAncestorReal, targetTail)
@@ -356,16 +418,16 @@ export async function resolveWithinWorkspace(
             throw new FsError(
               'symlink_escape',
               `dangling symlink target escapes workspace: ${input}`,
-              { hint: `symlink points to ${target}` },
+              { hint: `symlink points to ${firstHopTarget}` },
             );
           }
         }
       } catch (err2) {
         if (err2 instanceof FsError) throw err2;
-        // `lstat` ENOENT means the input path itself doesn't
-        // exist (input is a path through a non-existent
-        // ancestor) — no symlink to worry about; fall through
-        // to the ancestor walk.
+        // `lstat` ENOENT on the very first hop means the input
+        // path itself doesn't exist (input is a path through a
+        // non-existent ancestor) — no symlink to worry about;
+        // fall through to the ancestor walk.
         const code2 = (err2 as NodeJS.ErrnoException)?.code;
         if (code2 !== 'ENOENT') throw err2;
       }

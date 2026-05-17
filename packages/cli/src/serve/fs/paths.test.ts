@@ -266,6 +266,43 @@ describe('resolveWithinWorkspace', () => {
     expect(typeof out).toBe('string');
   });
 
+  it('rejects a multi-hop dangling symlink chain that escapes the workspace', async () => {
+    // The exploit class: `<ws>/leak -> <ws>/middle -> /scratch/evil`
+    // where every link is a symlink and the final target doesn't
+    // exist. A single-hop guard (read T19's earlier fix) only
+    // checks the first readlink target — `<ws>/middle` — sees it's
+    // inside the workspace, and lets the chain through. The OS
+    // write at `<ws>/leak` then follows BOTH hops and creates
+    // `/scratch/evil`. The multi-hop loop fix dereferences every
+    // link before the containment check.
+    const evil = path.join(scratch, 'multi-hop-target.txt');
+    const middle = path.join(workspace, 'middle');
+    const leak = path.join(workspace, 'leak');
+    await fsp.symlink(evil, middle, 'file');
+    await fsp.symlink(middle, leak, 'file');
+    const err = await resolveWithinWorkspace('leak', workspace, 'write').catch(
+      (e: unknown) => e,
+    );
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+  });
+
+  it('detects a symlink cycle and rejects with symlink_escape', async () => {
+    // a -> b -> a — symmetric self-referential pair. realpath
+    // returns ELOOP on most platforms; the multi-hop loop's inode
+    // tracking catches this even on filesystems that don't
+    // surface ELOOP.
+    const a = path.join(workspace, 'a');
+    const b = path.join(workspace, 'b');
+    await fsp.symlink(b, a, 'file');
+    await fsp.symlink(a, b, 'file');
+    const err = await resolveWithinWorkspace('a', workspace, 'write').catch(
+      (e: unknown) => e,
+    );
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+  });
+
   it('returns a value usable as ResolvedPath brand', async () => {
     const target = path.join(workspace, 'b.txt');
     await fsp.writeFile(target, 'b');
