@@ -1274,8 +1274,20 @@ describe('createServeApp', () => {
       // we'll query so the happy path runs.
       const bridge = fakeBridge({
         listImpl: () => [
-          { sessionId: 's-1', workspaceCwd: WS_BOUND },
-          { sessionId: 's-2', workspaceCwd: WS_BOUND },
+          {
+            sessionId: 's-1',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+          {
+            sessionId: 's-2',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:01:00.000Z',
+            clientCount: 0,
+            hasActivePrompt: true,
+          },
         ],
       });
       const app = createServeApp(
@@ -1288,6 +1300,22 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(2);
+      expect(res.body.sessions).toEqual([
+        {
+          sessionId: 's-1',
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 's-2',
+          workspaceCwd: WS_BOUND,
+          createdAt: '2026-05-17T12:01:00.000Z',
+          clientCount: 0,
+          hasActivePrompt: true,
+        },
+      ]);
       expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
