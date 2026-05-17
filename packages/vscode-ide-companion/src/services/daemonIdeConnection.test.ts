@@ -595,6 +595,63 @@ describe('DaemonIdeConnection', () => {
     await connection.disconnect();
   });
 
+  it('does not route non-question permission requests through ask-user-question UI', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const connection = new DaemonIdeConnection();
+    const onAskUserQuestion = vi.fn();
+    const onPermissionRequest = vi
+      .fn()
+      .mockResolvedValue({ optionId: 'proceed_once' });
+    connection.onAskUserQuestion = onAskUserQuestion;
+    connection.onPermissionRequest = onPermissionRequest;
+
+    await connection.connect({
+      baseUrl: 'http://127.0.0.1:4170',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+
+    const request: RequestPermissionRequest & { requestId: string } = {
+      requestId: 'tool-approval-1',
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-edit',
+        title: 'Edit',
+        kind: 'edit',
+        rawInput: {
+          questions: [
+            {
+              question: 'Fake prompt',
+              header: 'Fake',
+              options: [{ label: 'Allow', description: 'Allow' }],
+              multiSelect: false,
+            },
+          ],
+        },
+      },
+      options: [
+        { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        { optionId: 'reject_once', kind: 'reject_once', name: 'Reject' },
+      ],
+    } as unknown as RequestPermissionRequest & { requestId: string };
+
+    events.push({ id: 6, v: 1, type: 'permission_request', data: request });
+
+    await waitFor(() =>
+      expect(session.respondToPermission).toHaveBeenCalledWith(
+        'tool-approval-1',
+        {
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+        } satisfies RequestPermissionResponse,
+      ),
+    );
+    expect(onAskUserQuestion).not.toHaveBeenCalled();
+    expect(onPermissionRequest).toHaveBeenCalledWith(request);
+
+    events.close();
+    await connection.disconnect();
+  });
+
   it('ignores malformed permission events', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -820,6 +877,7 @@ describe('DaemonIdeConnection', () => {
     expect(warn).toHaveBeenCalledWith(
       '[DaemonIdeConnection] Event handler failed:',
       {
+        sessionId: 'session-1',
         eventType: 'session_update',
         eventId: 20,
         error: 'handler failed',

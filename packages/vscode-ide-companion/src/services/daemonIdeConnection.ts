@@ -15,6 +15,8 @@ import type {
   RequestPermissionResponse,
   SessionNotification,
 } from '@agentclientprotocol/sdk';
+// This SDK is intentionally statically imported so the VSIX bundling path can
+// include it; keep it pure JS with no native runtime dependency assumptions.
 import {
   DaemonClient,
   DaemonSessionClient as SdkDaemonSessionClient,
@@ -82,9 +84,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isLoopbackHostname(hostname: string): boolean {
+  // Keep this client-side policy aligned with
+  // packages/cli/src/serve/loopbackBinds.ts when daemon bind rules change.
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (normalized === 'localhost' || normalized === '::1') {
     return true;
+  }
+  if (normalized.startsWith('::ffff:')) {
+    return isLoopbackHostname(normalized.slice('::ffff:'.length));
   }
   const parts = normalized.split('.');
   return (
@@ -155,6 +162,8 @@ export class DaemonIdeConnection {
   private session: DaemonIdeSessionClient | null = null;
   private eventController: AbortController | null = null;
   private eventPump: Promise<void> | null = null;
+  // Authoritative replay cursor for IDE processing. It may intentionally lag
+  // behind the SDK cursor when permission responses fail, preserving replay.
   private lastSeenEventId: number | undefined;
   private connectPromise: Promise<void> | null = null;
   private pumpGeneration = 0;
@@ -175,9 +184,12 @@ export class DaemonIdeConnection {
     while (this.connectPromise) {
       try {
         await this.connectPromise;
-      } catch {
+      } catch (previousError) {
         // Let this connect attempt proceed with its own options after the
         // in-flight attempt reports its failure to its caller.
+        console.debug('[DaemonIdeConnection] Previous connect failed:', {
+          error: toSafeErrorMessage(previousError),
+        });
       }
     }
 
@@ -223,15 +235,28 @@ export class DaemonIdeConnection {
   ): Promise<DaemonIdePromptResult> {
     const session = this.ensureSession();
     const promptBlocks = normalizePrompt(prompt);
+    console.debug('[DaemonIdeConnection] Sending prompt:', {
+      sessionId: session.sessionId,
+    });
     try {
       const response = await session.prompt(
         { prompt: promptBlocks },
         this.eventController?.signal,
       );
+      console.debug('[DaemonIdeConnection] Prompt completed:', {
+        sessionId: session.sessionId,
+        stopReason: response.stopReason,
+      });
       this.onEndTurn(response.stopReason);
       return response;
     } catch (error) {
-      this.onEndTurn('error');
+      console.warn('[DaemonIdeConnection] Prompt failed:', {
+        sessionId: session.sessionId,
+        error: toSafeErrorMessage(error),
+      });
+      if (!isAbortError(error)) {
+        this.onEndTurn('error');
+      }
       throw error;
     }
   }
@@ -239,6 +264,9 @@ export class DaemonIdeConnection {
   async cancelSession(): Promise<void> {
     const session = this.session;
     if (!session) {
+      console.debug(
+        '[DaemonIdeConnection] cancelSession ignored without active session',
+      );
       return;
     }
     await session.cancel();
@@ -306,6 +334,7 @@ export class DaemonIdeConnection {
           shouldAdvanceLastSeenEventId = await this.handleEvent(event, signal);
         } catch (error) {
           console.warn('[DaemonIdeConnection] Event handler failed:', {
+            sessionId: session.sessionId,
             eventType: event.type,
             eventId: event.id,
             error: toSafeErrorMessage(error),
@@ -325,6 +354,9 @@ export class DaemonIdeConnection {
           '[DaemonIdeConnection] Event stream failed:',
           toSafeErrorMessage(error),
         );
+        console.debug('[DaemonIdeConnection] Event stream session:', {
+          sessionId: session.sessionId,
+        });
         this.eventController?.abort();
         this.clearCurrentSession(session, 'daemon_error');
       }
@@ -352,6 +384,7 @@ export class DaemonIdeConnection {
         return true;
       default:
         console.debug('[DaemonIdeConnection] Ignoring daemon event:', {
+          sessionId: this.session?.sessionId,
           eventType: event.type,
           eventId: event.id,
         });
@@ -372,6 +405,10 @@ export class DaemonIdeConnection {
     const request = data;
     const session = this.session;
     if (!session) {
+      console.warn(
+        '[DaemonIdeConnection] Dropping permission request: not connected',
+        { requestId },
+      );
       return true;
     }
     const response = await this.resolvePermissionResponseUntilAbort(
@@ -382,6 +419,14 @@ export class DaemonIdeConnection {
       return true;
     }
     if (this.session !== session) {
+      console.warn(
+        '[DaemonIdeConnection] Permission response dropped: session changed',
+        {
+          requestId,
+          originalSessionId: session.sessionId,
+          currentSessionId: this.session?.sessionId,
+        },
+      );
       return true;
     }
     try {
@@ -391,6 +436,9 @@ export class DaemonIdeConnection {
           '[DaemonIdeConnection] Permission response rejected by daemon for request:',
           requestId,
         );
+        console.debug('[DaemonIdeConnection] Permission response session:', {
+          sessionId: session.sessionId,
+        });
       }
       return true;
     } catch (error) {
@@ -438,8 +486,11 @@ export class DaemonIdeConnection {
     request: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
     const rawInput = request.toolCall?.rawInput;
+    const toolCallKind = request.toolCall?.kind as string | undefined;
     const isAskUserQuestion =
-      isRecord(rawInput) && Array.isArray(rawInput['questions']);
+      toolCallKind === 'ask_user_question' &&
+      isRecord(rawInput) &&
+      Array.isArray(rawInput['questions']);
 
     if (isAskUserQuestion) {
       const askResponse = await this.onAskUserQuestion({
@@ -458,6 +509,13 @@ export class DaemonIdeConnection {
         askResponse.optionId,
       );
       if (!optionId) {
+        console.warn(
+          '[DaemonIdeConnection] AskUserQuestion option not advertised; cancelling',
+          {
+            requestId: (request as { requestId?: string }).requestId,
+            optionId: askResponse.optionId,
+          },
+        );
         return { outcome: { outcome: 'cancelled' } };
       }
       return {
@@ -478,6 +536,13 @@ export class DaemonIdeConnection {
 
     const optionId = this.resolvePermissionOptionId(request, response.optionId);
     if (!optionId) {
+      console.warn(
+        '[DaemonIdeConnection] Permission option not advertised; cancelling',
+        {
+          requestId: (request as { requestId?: string }).requestId,
+          optionId: response.optionId,
+        },
+      );
       return { outcome: { outcome: 'cancelled' } };
     }
 
@@ -495,6 +560,10 @@ export class DaemonIdeConnection {
         ? data['sessionId']
         : undefined;
     if (!this.session) {
+      console.debug(
+        '[DaemonIdeConnection] session_died received with no active session',
+        { eventSessionId },
+      );
       return;
     }
     if (eventSessionId === undefined) {
@@ -509,6 +578,10 @@ export class DaemonIdeConnection {
       isRecord(data) && typeof data['reason'] === 'string'
         ? data['reason']
         : 'session_died';
+    console.debug('[DaemonIdeConnection] Session died:', {
+      sessionId: this.session.sessionId,
+      reason,
+    });
     this.eventController?.abort();
     this.clearCurrentSession(this.session, reason);
   }
@@ -554,9 +627,17 @@ export class DaemonIdeConnection {
     if (this.session !== session) {
       return;
     }
+    console.debug('[DaemonIdeConnection] Clearing session:', {
+      sessionId: session.sessionId,
+      reason,
+    });
     this.eventController = null;
     this.eventPump = null;
     this.session = null;
     this.onDisconnected(null, reason);
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return isRecord(error) && error['name'] === 'AbortError';
 }
