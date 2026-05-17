@@ -15,6 +15,7 @@ import type {
   DaemonEvent,
   DaemonSessionState,
   DaemonSession,
+  HeartbeatResult,
   PermissionResponse,
   PromptResult,
   SetModelResult,
@@ -172,6 +173,17 @@ export class DaemonSessionClient {
 
   async cancel(): Promise<void> {
     await this.client.cancel(this.sessionId, this.clientId);
+  }
+
+  /**
+   * Bump the daemon's last-seen bookkeeping for this session. Adapters
+   * with a long-lived view of a session (TUI/IDE/web) can fire this on
+   * an interval to keep diagnostics fresh and feed PR 24 revocation
+   * policy. Forwards the bound `clientId` so identified clients update
+   * their per-client timestamp instead of just the session-wide one.
+   */
+  async heartbeat(): Promise<HeartbeatResult> {
+    return await this.client.heartbeat(this.sessionId, this.clientId);
   }
 
   async setModel(modelId: string): Promise<SetModelResult> {
