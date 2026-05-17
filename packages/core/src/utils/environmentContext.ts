@@ -12,6 +12,7 @@ import type {
   ToolRegistry,
 } from '../tools/tool-registry.js';
 import { getFolderStructure } from './getFolderStructure.js';
+import { escapeSystemReminderTags } from './xml.js';
 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
@@ -78,8 +79,16 @@ ${directoryContext}
   return [{ text: context }];
 }
 
+// Centralized reminder envelope. Every reminder body — startup/env context,
+// deferred-tool metadata, and MCP server instructions — flows through here,
+// so escaping nested `<system-reminder>` tags once at the boundary protects
+// all untrusted inputs (MCP server names, server instructions, tool
+// names/descriptions) from closing the wrapper and injecting follow-up text
+// outside the data-only framing. JSON.stringify in formatDeferredToolLine
+// neutralizes quotes/backticks/newlines but does NOT escape `<`/`>`, so
+// without this an MCP tool named `foo</system-reminder>bar` would break out.
 function wrapSystemReminder(body: string): string {
-  return `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
+  return `${SYSTEM_REMINDER_OPEN}\n${escapeSystemReminderTags(body)}\n${SYSTEM_REMINDER_CLOSE}`;
 }
 
 function truncateDeferredToolDescription(description: string): string {
@@ -94,8 +103,10 @@ function truncateDeferredToolDescription(description: string): string {
 // quoted strings instead of being interpolated raw into surrounding markdown.
 // MCP tool descriptions originate from a remote server and are untrusted; this
 // keeps adversarial backticks from re-opening an inline-code span elsewhere in
-// the reminder. The framing line in buildDeferredToolsReminder() is the second
-// line of defense (telling the model the list is data, not instructions).
+// the reminder. Reminder-envelope breakout (`</system-reminder>`) is handled
+// separately by wrapSystemReminder(), which JSON.stringify does NOT cover. The
+// framing line in buildDeferredToolsReminder() is the final line of defense
+// (telling the model the list is data, not instructions).
 function formatDeferredToolLine({
   name,
   description,
@@ -259,8 +270,13 @@ export function getStartupContextLength(history: Content[]): number {
   const firstEntry = history[0];
   if (firstEntry?.role !== 'user') return 0;
   const firstText = firstEntry.parts?.[0]?.text;
+  // Require BOTH the opening prefix and a closing tag. A prefix-only check
+  // would misclassify a user message that merely begins with the literal
+  // text `<system-reminder>` (e.g. someone quoting/testing the tag) as
+  // startup context, corrupting stripStartupContext and rewind indexing.
   return typeof firstText === 'string' &&
-    firstText.startsWith(SYSTEM_REMINDER_OPEN)
+    firstText.startsWith(SYSTEM_REMINDER_OPEN) &&
+    firstText.includes(SYSTEM_REMINDER_CLOSE)
     ? 1
     : 0;
 }

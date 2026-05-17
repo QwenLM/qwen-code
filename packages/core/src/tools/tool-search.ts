@@ -466,7 +466,7 @@ function clamp(n: number, lo: number, hi: number): number {
  * Strip a single layer of surrounding `"…"` or `'…'` if present.
  * Used to normalize `select:"foo"` → `foo` so models that paste tool
  * names back as JSON-quoted literals (the form they appear in the
- * deferred-tools section of the system prompt) resolve correctly.
+ * deferred-tools startup reminder) resolve correctly.
  * Mismatched / unbalanced quotes are returned unchanged.
  */
 function stripMatchingQuotes(s: string): string {

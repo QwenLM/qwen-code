@@ -3203,6 +3203,33 @@ describe('GeminiChat', async () => {
       expect(chat.getHistory()).toEqual([startupReminder]);
     });
 
+    it('preserves a mid-history MCP added-tool reminder when a later prompt fails', () => {
+      // drainPendingAddedMcpToolsReminder injects a system-reminder user
+      // entry; if the following prompt fails, popping it must NOT also pop
+      // the reminder — the announcement can't be re-queued (the tool is
+      // already in announcedDeferredToolNames) so it would be lost forever.
+      const mcpReminder: Content = {
+        role: 'user',
+        parts: [
+          { text: `${SYSTEM_REMINDER_OPEN}\nadded: foo\n</system-reminder>` },
+        ],
+      };
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        mcpReminder,
+        { role: 'user', parts: [{ text: 'failed prompt' }] },
+      ]);
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'earlier prompt' }] },
+        { role: 'model', parts: [{ text: 'earlier response' }] },
+        mcpReminder,
+      ]);
+    });
+
     it('should be a no-op when last entry is a model response', () => {
       const history = [
         { role: 'user', parts: [{ text: 'hello' }] },

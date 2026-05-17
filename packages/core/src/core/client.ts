@@ -489,6 +489,37 @@ export class GeminiClient {
   }
 
   /**
+   * Re-prepend a fresh startup-context prelude after auto-compaction.
+   *
+   * Auto-compaction runs in-place inside `GeminiChat.sendMessageStream`
+   * (`setHistory([summary, ack, ...kept])`) and does NOT route through
+   * `tryCompressChat` → `startChat`, so — unlike manual `/compress` — the
+   * startup prelude at history[0] is consumed into the summary and never
+   * rebuilt. Without this, workspace/env context, deferred-tool metadata,
+   * and MCP server instructions are lost for the rest of the session (before
+   * this PR they lived in the system instruction and survived compaction).
+   *
+   * Unlike `refreshStartupContextReminder` (which replaces an existing
+   * prelude and no-ops when absent), this prepends when absent. No-ops if a
+   * prelude is already present so it can't double-prepend.
+   */
+  async restoreStartupContextAfterCompaction(): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+
+    const currentHistory = this.getChat().getHistory();
+    if (getStartupContextLength(currentHistory) !== 0) {
+      return;
+    }
+
+    const [startupContext] = await getInitialChatHistory(this.config);
+    if (startupContext) {
+      this.getChat().setHistory([startupContext, ...currentHistory]);
+    }
+  }
+
+  /**
    * Rebuilds the main-session system instruction from the current
    * `userMemory` / model / prompt overrides and re-binds it to the live chat.
    *
@@ -564,6 +595,17 @@ export class GeminiClient {
     for (const name of this.pendingAddedMcpTools.keys()) {
       if (!currentDeferredNames.has(name)) {
         this.pendingAddedMcpTools.delete(name);
+      }
+    }
+
+    // Drop announced names that are no longer deferred (e.g. an MCP server
+    // disconnected and removeMcpToolsByServer() pruned its tools). Without
+    // this, a tool that reconnects later is still in announcedDeferredToolNames
+    // and gets silently skipped below, so the user never sees the "new tools
+    // available" reminder even though setTools() re-declared the tool.
+    for (const name of this.announcedDeferredToolNames) {
+      if (!currentDeferredNames.has(name)) {
+        this.announcedDeferredToolNames.delete(name);
       }
     }
 
@@ -1476,6 +1518,10 @@ export class GeminiClient {
         // the previous merged IDE context.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
+          // Auto-compaction summarized away the startup prelude. Rebuild it
+          // before the next turn so env/tool/MCP context isn't lost for the
+          // rest of the session (manual /compress gets this via startChat).
+          await this.restoreStartupContextAfterCompaction();
           void this.fireSessionStartHook(SessionStartSource.Compact)
             .then((compactAdditionalContext) => {
               if (!compactAdditionalContext || !this.chat) {

@@ -307,7 +307,10 @@ describe('getInitialChatHistory', () => {
 describe('stripStartupContext', () => {
   it('should strip the startup reminder from the start of history', () => {
     const history: Content[] = [
-      { role: 'user', parts: [{ text: '<system-reminder>\nctx' }] },
+      {
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nctx\n</system-reminder>' }],
+      },
       { role: 'user', parts: [{ text: 'Hello' }] },
       { role: 'model', parts: [{ text: 'Hi there' }] },
     ];
@@ -331,7 +334,10 @@ describe('stripStartupContext', () => {
 
   it('should return empty array when history is only the startup context', () => {
     const history: Content[] = [
-      { role: 'user', parts: [{ text: '<system-reminder>\nctx' }] },
+      {
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nctx\n</system-reminder>' }],
+      },
     ];
 
     const result = stripStartupContext(history);

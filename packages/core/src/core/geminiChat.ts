@@ -1223,9 +1223,17 @@ export class GeminiChat {
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
+      // Never pop a system-reminder user entry. These are structural, not
+      // orphaned turns: the startup-context prelude (history[0]) and
+      // mid-history MCP added-tool reminders injected by
+      // drainPendingAddedMcpToolsReminder. Popping the latter would lose the
+      // announcement permanently — pendingAddedMcpTools is already cleared and
+      // the tool name is already in announcedDeferredToolNames, so
+      // queueAddedMcpToolsReminder won't re-queue it.
+      const lastText = this.history[this.history.length - 1]?.parts?.[0]?.text;
       if (
-        this.history.length === 1 &&
-        this.history[0]?.parts?.[0]?.text?.startsWith(SYSTEM_REMINDER_OPEN)
+        typeof lastText === 'string' &&
+        lastText.startsWith(SYSTEM_REMINDER_OPEN)
       ) {
         break;
       }

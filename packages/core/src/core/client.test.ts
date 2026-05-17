@@ -1172,6 +1172,42 @@ describe('Gemini Client (client.ts)', () => {
       expect(addHistorySpy).toHaveBeenCalledTimes(1);
     });
 
+    it('re-announces an MCP tool after its server disconnects and reconnects', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__flaky__do',
+        description: 'd',
+        serverName: 'flaky',
+      };
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+
+      // Initial registration → announced.
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      await runTurn();
+      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+
+      // Server disconnects: removeMcpToolsByServer() drops it from the
+      // deferred set. queueAddedMcpToolsReminder must prune the stale
+      // announced name here.
+      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      await client.setTools();
+      await runTurn();
+
+      // Server reconnects with the same tool. Without the prune the name
+      // would still be in announcedDeferredToolNames and be skipped, so
+      // the user would never get a "new tools available" reminder.
+      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      await runTurn();
+      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+    });
+
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
       // Mirrors startChat's silent-disappearance guard: without ToolSearch
       // a deferred MCP tool can't be reached, so the only safe option is
@@ -1931,6 +1967,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -1982,6 +2019,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2040,6 +2078,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2080,6 +2119,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2129,6 +2169,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
         applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
 
@@ -2211,6 +2252,7 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
+        setHistory: vi.fn(),
       } as unknown as GeminiChat;
       client['forceFullIdeContext'] = false;
 
@@ -2225,6 +2267,62 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('re-prepends the startup prelude after an auto-compaction ChatCompressed event', async () => {
+      // Auto-compaction replaces history in place inside
+      // chat.sendMessageStream and never routes through startChat, so the
+      // startup prelude consumed into the summary must be rebuilt here or
+      // env/tool/MCP context is lost for the rest of the session.
+      const compactedHistory: Content[] = [
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ok' }] },
+      ];
+      const setHistory = vi.fn();
+      vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: CompressionStatus.NOOP,
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield {
+            type: GeminiEventType.ChatCompressed,
+            value: {
+              originalTokenCount: 1000,
+              newTokenCount: 200,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          };
+        })(),
+      );
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(compactedHistory),
+        setHistory,
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-auto-restore',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalledWith([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\nMocked env context\n</system-reminder>',
+            },
+          ],
+        },
+        ...compactedHistory,
+      ]);
     });
   });
 
