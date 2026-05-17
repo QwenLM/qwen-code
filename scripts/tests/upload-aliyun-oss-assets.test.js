@@ -118,7 +118,7 @@ exit 1
       const previousPath = process.env.PATH;
       process.env.PATH = `${tmp}${path.delimiter}${previousPath}`;
       try {
-        await uploadAssets({
+        uploadAssets({
           assets,
           bucket: 'qwen-test-bucket',
           config: configPath,
@@ -154,14 +154,14 @@ exit 1
       const previousPath = process.env.PATH;
       process.env.PATH = `${tmp}${path.delimiter}${previousPath}`;
       try {
-        await expect(
+        expect(() =>
           uploadAssets({
             assets: [assetPath],
             bucket: 'qwen-test-bucket',
             config: configPath,
             prefix: 'releases/qwen-code/v0.0.0',
           }),
-        ).rejects.toThrow(/asset uploads failed/);
+        ).toThrow(/ossutil failed after 3 attempts/);
       } finally {
         process.env.PATH = previousPath;
       }
