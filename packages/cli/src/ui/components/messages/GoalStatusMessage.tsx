@@ -132,7 +132,8 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
             <Text wrap="wrap">{condition}</Text>
           </Box>
         </Box>
-        {/* `lastReason` is shown on terminal cards (achieved / aborted) so
+        {/* `lastReason` is shown on terminal cards (achieved / aborted /
+            failed) so
             the final summary records *why* the judge ruled the goal complete
             or why the loop gave up. Skipped for `cleared` because user-driven
             clears don't carry a judge reason.

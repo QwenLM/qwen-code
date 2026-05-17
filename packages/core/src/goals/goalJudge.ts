@@ -48,6 +48,28 @@ const userJudgementPrompt = (condition: string): string =>
   `condition been satisfied? Answer based on transcript evidence only.\n` +
   `Condition JSON string: ${JSON.stringify(condition)}`;
 
+export interface JudgeResult {
+  ok: boolean;
+  reason: string;
+  impossible?: boolean;
+}
+
+export const JUDGE_RESULT_SCHEMA_KEYS = [
+  'ok',
+  'reason',
+  'impossible',
+] as const satisfies ReadonlyArray<keyof JudgeResult>;
+
+type SchemaCoversJudgeResult =
+  Exclude<
+    keyof JudgeResult,
+    (typeof JUDGE_RESULT_SCHEMA_KEYS)[number]
+  > extends never
+    ? true
+    : never;
+
+export const JUDGE_RESULT_SCHEMA_COVERS_INTERFACE: SchemaCoversJudgeResult = true;
+
 const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
   // Schema typing in @google/genai uses an enum-like Type, but accepts the
   // lower-cased literals at runtime for the upstream JSON-schema payload.
@@ -60,12 +82,6 @@ const RESPONSE_SCHEMA: Schema & { additionalProperties: boolean } = {
   required: ['ok', 'reason'],
   additionalProperties: false,
 };
-
-export interface JudgeResult {
-  ok: boolean;
-  reason: string;
-  impossible?: boolean;
-}
 
 const JUDGE_REASON_FALLBACK =
   'Goal judge unavailable; continue working toward the goal and run `/goal clear` to stop early.';

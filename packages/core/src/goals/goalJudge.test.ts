@@ -7,7 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { judgeGoal } from './goalJudge.js';
+import { judgeGoal, JUDGE_RESULT_SCHEMA_KEYS } from './goalJudge.js';
 
 const reportErrorMock = vi.hoisted(() => vi.fn());
 vi.mock('../utils/errorReporting.js', () => ({
@@ -271,6 +271,9 @@ describe('judgeGoal', () => {
     expect(generationConfig.responseSchema.properties).toHaveProperty(
       'impossible',
     );
+    expect(
+      Object.keys(generationConfig.responseSchema.properties).sort(),
+    ).toEqual([...JUDGE_RESULT_SCHEMA_KEYS].sort());
     expect(generationConfig.responseSchema.additionalProperties).toBe(false);
     expect(generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
     expect(generationConfig.temperature).toBe(0);

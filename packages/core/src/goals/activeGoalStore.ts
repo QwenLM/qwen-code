@@ -62,9 +62,9 @@ export function __resetActiveGoalStoreForTests(): void {
 // Terminal-state observers
 //
 // The Stop hook callback that drives /goal runs inside core, but the UI cards
-// for "Goal achieved" / "Goal aborted" need to land in CLI history. We bridge
-// the two with a module-scoped observer table that the CLI command populates
-// when it registers the goal and clears when the goal is unregistered.
+// for terminal outcomes need to land in CLI history. We bridge the two with a
+// module-scoped observer table that the CLI command populates when it
+// registers the goal and clears when the goal is unregistered.
 //
 // Observers are fire-and-forget — they MUST NOT throw or block the hook
 // callback; any side effect (e.g. context.ui.addItem) should be guarded.
