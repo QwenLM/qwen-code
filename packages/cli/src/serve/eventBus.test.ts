@@ -97,13 +97,15 @@ describe('EventBus', () => {
     aborts.forEach((c) => c.abort());
   });
 
-  it('evicts a slow subscriber when its queue overflows', async () => {
+  it('evicts a slow subscriber when its queue overflows (warning precedes eviction)', async () => {
     const bus = new EventBus();
     const abort = new AbortController();
     const iter = bus.subscribe({ maxQueued: 2, signal: abort.signal });
 
-    // Publish 3 events without draining the iterator. Queue cap is 2; the
-    // 3rd should trip the eviction path and append a `client_evicted`
+    // Publish 3 events without draining the iterator. Queue cap is 2;
+    // event 2 fills the queue to 100% (above the 75% warn threshold),
+    // so the bus force-pushes a `slow_client_warning`; event 3 then
+    // trips the eviction path and appends a `client_evicted`
     // terminal frame.
     bus.publish({ type: 'foo', data: 1 });
     bus.publish({ type: 'foo', data: 2 });
@@ -113,12 +115,117 @@ describe('EventBus', () => {
     for await (const e of iter) {
       collected.push(e);
     }
-    expect(collected).toHaveLength(3);
+    expect(collected).toHaveLength(4);
     expect(collected[0]?.data).toBe(1);
     expect(collected[1]?.data).toBe(2);
-    expect(collected[2]?.type).toBe('client_evicted');
+    expect(collected[2]?.type).toBe('slow_client_warning');
+    expect(collected[3]?.type).toBe('client_evicted');
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
+  });
+
+  it('emits slow_client_warning exactly once per overflow episode', async () => {
+    // Queue size 8; warn threshold = 75% = 6. Push to 6 → warning
+    // fires; push to 7 → no additional warning (sub.warned latched).
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 8, signal: abort.signal });
+
+    for (let i = 1; i <= 7; i++) bus.publish({ type: 'foo', data: i });
+
+    const collected: BridgeEvent[] = [];
+    // Drain 8 items (7 publishes + 1 warning).
+    for (let i = 0; i < 8; i++) {
+      const { value, done } = await iter[Symbol.asyncIterator]().next();
+      if (done) break;
+      collected.push(value);
+    }
+    const warnings = collected.filter((e) => e.type === 'slow_client_warning');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.data).toMatchObject({ maxQueued: 8 });
+    abort.abort();
+  });
+
+  it('slow_client_warning frame has no id (synthetic, no sequence slot)', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 2, signal: abort.signal });
+    bus.publish({ type: 'foo', data: 1 });
+    bus.publish({ type: 'foo', data: 2 });
+    bus.publish({ type: 'foo', data: 3 });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(warning).toBeDefined();
+    expect(warning!.id).toBeUndefined();
+    expect(evicted!.id).toBeUndefined();
+    // The two live events that DID make it through must carry
+    // contiguous ids — synthetic frames must not burn a slot.
+    const live = collected.filter((e) => e.type === 'foo');
+    expect(live.map((e) => e.id)).toEqual([1, 2]);
+    abort.abort();
+  });
+
+  it('rearms slow_client_warning after queue drains below the hysteresis threshold', async () => {
+    // Threshold 75%, reset 37.5%. maxQueued=8 → warn at 6, reset at 3.
+    const bus = new EventBus();
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 8, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    // Fill to 6 → first warning fires (force-pushed AFTER the 6th
+    // event, so it sits at the back of the queue behind the 6 live
+    // events).
+    for (let i = 1; i <= 6; i++) bus.publish({ type: 'foo', data: i });
+    // Drain all 7 items (events 1–6 + warning frame) — leaves the
+    // queue empty, well below the 3-item reset threshold.
+    const firstEpisode: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) firstEpisode.push((await it.next()).value);
+    expect(
+      firstEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    // Trigger another publish so the hysteresis check inside publish()
+    // observes the drained queue and re-arms sub.warned. After this
+    // publish, live size = 1, well below the 3-item reset threshold.
+    bus.publish({ type: 'foo', data: 7 });
+    expect((await it.next()).value.data).toBe(7);
+
+    // Re-fill back past the threshold — second overflow episode must
+    // produce a second warning because the flag was re-armed.
+    for (let i = 8; i <= 13; i++) bus.publish({ type: 'foo', data: i });
+    const secondEpisode: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) secondEpisode.push((await it.next()).value);
+    expect(
+      secondEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('default ring size is 8000 (#3803 §02 target)', () => {
+    const bus = new EventBus();
+    for (let i = 1; i <= 8001; i++) bus.publish({ type: 'foo', data: i });
+    // After publishing 8001 frames into the default ring, the resume
+    // backlog should hold the most recent 8000 (1 through 8001 with
+    // the oldest dropped). Subscribing with `lastEventId: 0` replays
+    // exactly 8000 frames from the ring.
+    const it = bus
+      .subscribe({ lastEventId: 0, maxQueued: 9000 })
+      [Symbol.asyncIterator]();
+    let count = 0;
+    const drain = (async () => {
+      for (let i = 0; i < 8000; i++) {
+        const { value, done } = await it.next();
+        if (done) break;
+        if (value.type !== 'slow_client_warning' && value.id !== undefined)
+          count++;
+      }
+    })();
+    return drain.then(() => {
+      expect(count).toBe(8000);
+    });
   });
 
   it('eviction detaches the abort listener from a stalled consumer (BmJT1)', async () => {

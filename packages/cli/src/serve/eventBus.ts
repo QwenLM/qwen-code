@@ -68,10 +68,23 @@ const DEFAULT_MAX_QUEUED = 256;
  * turn, real workloads can be 10× that or more once tool-call /
  * thought streams pile up). 1000 was the original default and could
  * be exhausted by a moderate turn before the client reconnected;
- * 4000 gives ~30× headroom over a typical-but-busy turn at the cost
- * of a few hundred KB of RAM per session.
+ * 8000 matches the target set in #3803 §02 for chatty Stage 1
+ * sessions, with ~30–60× headroom over a typical-but-busy turn at
+ * the cost of a few hundred KB of RAM per session. Operators can
+ * override per-daemon via `qwen serve --event-ring-size <n>`.
  */
-const DEFAULT_RING_SIZE = 4000;
+export const DEFAULT_RING_SIZE = 8000;
+/**
+ * Fraction of `maxQueued` at which a `slow_client_warning` synthetic
+ * frame is force-pushed to the at-risk subscriber. The warning fires
+ * ONCE per overflow episode (tracked via `sub.warned`); the queue
+ * must drain below `WARN_RESET_RATIO * maxQueued` before another
+ * warning can fire — small hysteresis prevents flap-near-threshold
+ * spam when a subscriber oscillates around 75% full.
+ */
+const WARN_THRESHOLD_RATIO = 0.75;
+/** See `WARN_THRESHOLD_RATIO` doc. */
+const WARN_RESET_RATIO = 0.375;
 /**
  * Per-bus subscriber cap. With per-subscriber `maxQueued` defaulting to
  * 256 frames, 64 concurrent subscribers caps the per-session subscriber
@@ -86,6 +99,16 @@ const DEFAULT_MAX_SUBSCRIBERS = 64;
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
   evicted: boolean;
+  /** Cap remembered per subscriber so the warning ratio + reset can be
+   * checked without rummaging through the queue's private state. */
+  maxQueued: number;
+  /**
+   * True once `slow_client_warning` has been force-pushed to this
+   * subscriber in the current overflow episode. Cleared when the queue
+   * drains below `WARN_RESET_RATIO * maxQueued` (hysteresis), so a
+   * subscriber that recovers and then lags again gets a fresh warning.
+   */
+  warned: boolean;
   /**
    * BmJT1: cleanup hook for the eviction path (overflow → close queue
    * → remove from `subs`). Without this, the abort listener registered
@@ -219,6 +242,34 @@ export class EventBus {
         // Under attack (thousands of stalled SSE clients) this
         // amplified into significant heap retention.
         sub.dispose();
+        continue;
+      }
+      // Backpressure warning: synthetic `slow_client_warning` frame to
+      // the at-risk subscriber when its live backlog crosses
+      // `WARN_THRESHOLD_RATIO`. Fires ONCE per overflow episode (the
+      // `warned` flag clears only after `WARN_RESET_RATIO` hysteresis
+      // drain). Like `client_evicted` the frame carries no `id` — it
+      // is private to this subscriber and must not burn a sequence
+      // slot the replay ring would otherwise be missing for other
+      // healthy subscribers. Force-push so the warning bypasses the
+      // exact backlog cap that triggered it.
+      const liveSize = sub.queue.size;
+      if (!sub.warned && liveSize >= WARN_THRESHOLD_RATIO * sub.maxQueued) {
+        sub.warned = true;
+        const warningFrame: BridgeEvent = {
+          v: EVENT_SCHEMA_VERSION,
+          type: 'slow_client_warning',
+          data: {
+            queueSize: liveSize,
+            maxQueued: sub.maxQueued,
+            lastEventId: event.id ?? this.lastEventId,
+          },
+        };
+        sub.queue.forcePush(warningFrame);
+      } else if (sub.warned && liveSize <= WARN_RESET_RATIO * sub.maxQueued) {
+        // Hysteresis: subscriber recovered well below the warn line,
+        // re-arm so a future lag spike produces a fresh warning.
+        sub.warned = false;
       }
     }
     return event;
@@ -253,15 +304,20 @@ export class EventBus {
     if (this.subs.size >= this.maxSubscribers) {
       throw new SubscriberLimitExceededError(this.maxSubscribers);
     }
-    const queue = new BoundedAsyncQueue<BridgeEvent>(
-      opts.maxQueued ?? DEFAULT_MAX_QUEUED,
-    );
+    const maxQueued = opts.maxQueued ?? DEFAULT_MAX_QUEUED;
+    const queue = new BoundedAsyncQueue<BridgeEvent>(maxQueued);
 
     // `dispose` is assigned below (mutable so the closure can reference
     // `sub.dispose`); placeholder no-op covers the brief window between
     // `subs.add(sub)` and the real assignment so an absurdly fast
     // `publish() → forcePush → close → dispose()` race can't crash.
-    const sub: InternalSub = { queue, evicted: false, dispose: () => {} };
+    const sub: InternalSub = {
+      queue,
+      evicted: false,
+      maxQueued,
+      warned: false,
+      dispose: () => {},
+    };
     this.subs.add(sub);
 
     if (opts.lastEventId !== undefined) {
@@ -392,6 +448,18 @@ class BoundedAsyncQueue<T> {
   private forcedInBuf = 0;
 
   constructor(private readonly maxSize: number) {}
+
+  /**
+   * Number of LIVE (non-force-pushed) items currently waiting in the
+   * buffer. Mirrors the cap check in `push()`: replay/eviction frames
+   * inserted via `forcePush` don't count toward the backpressure
+   * threshold the bus uses to decide when to emit
+   * `slow_client_warning`. Returns 0 (not negative) if the buffer
+   * happens to be all-force-pushed.
+   */
+  get size(): number {
+    return Math.max(0, this.buf.length - this.forcedInBuf);
+  }
 
   /** Returns true if accepted, false if dropped due to overflow. */
   push(value: T): boolean {

@@ -168,6 +168,9 @@ export async function runQwenServe(
     deps.bridge ??
     createHttpAcpBridge({
       maxSessions: opts.maxSessions,
+      ...(opts.eventRingSize !== undefined
+        ? { eventRingSize: opts.eventRingSize }
+        : {}),
       boundWorkspace,
     });
   let actualPort = opts.port;

@@ -14,6 +14,7 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'model_switch_failed',
   'session_died',
   'client_evicted',
+  'slow_client_warning',
   'stream_error',
 ] as const;
 
@@ -80,6 +81,20 @@ export interface DaemonClientEvictedData {
   [key: string]: unknown;
 }
 
+export interface DaemonSlowClientWarningData {
+  /** Live (non-replay) items currently queued for this subscriber. */
+  queueSize: number;
+  /** Per-subscriber backlog cap that triggered the warning. */
+  maxQueued: number;
+  /**
+   * Most recent monotonic event id observed by the bus at warning
+   * time. Lets the client decide whether to reconnect with a
+   * `Last-Event-ID` or detach + drain.
+   */
+  lastEventId: number;
+  [key: string]: unknown;
+}
+
 export interface DaemonStreamErrorData {
   error: string;
   [key: string]: unknown;
@@ -113,6 +128,10 @@ export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
 >;
+export type DaemonSlowClientWarningEvent = DaemonEventEnvelope<
+  'slow_client_warning',
+  DaemonSlowClientWarningData
+>;
 export type DaemonStreamErrorEvent = DaemonEventEnvelope<
   'stream_error',
   DaemonStreamErrorData
@@ -130,6 +149,7 @@ export type DaemonControlEvent =
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
+  | DaemonSlowClientWarningEvent
   | DaemonStreamErrorEvent;
 
 export type KnownDaemonEvent =
@@ -161,6 +181,14 @@ export interface DaemonSessionViewState {
   lastDroppedPermissionRequestId?: string;
   unmatchedPermissionResolutionCount: number;
   lastUnmatchedPermissionResolutionId?: string;
+  /**
+   * Count of `slow_client_warning` frames this stream has observed.
+   * Non-terminal — warnings precede eviction but don't themselves
+   * close the stream. Adapters tap this counter to surface "your
+   * stream is lagging" UI before `client_evicted` arrives.
+   */
+  slowClientWarningCount: number;
+  lastSlowClientWarning?: DaemonSlowClientWarningData;
 }
 
 export function createDaemonSessionViewState(
@@ -184,6 +212,8 @@ export function createDaemonSessionViewState(
       seed.unmatchedPermissionResolutionCount ?? 0,
     lastUnmatchedPermissionResolutionId:
       seed.lastUnmatchedPermissionResolutionId,
+    slowClientWarningCount: seed.slowClientWarningCount ?? 0,
+    lastSlowClientWarning: seed.lastSlowClientWarning,
   };
 }
 
@@ -232,6 +262,10 @@ export function asKnownDaemonEvent(
     case 'client_evicted':
       return isClientEvictedData(event.data)
         ? (event as DaemonClientEvictedEvent)
+        : undefined;
+    case 'slow_client_warning':
+      return isSlowClientWarningData(event.data)
+        ? (event as DaemonSlowClientWarningEvent)
         : undefined;
     case 'stream_error':
       return isStreamErrorData(event.data)
@@ -327,6 +361,16 @@ export function reduceDaemonSessionEvent(
         alive: false,
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         pendingPermissions: {},
+      };
+    case 'slow_client_warning':
+      // Non-terminal: warning precedes eviction but doesn't close
+      // the stream on its own. Count + capture the latest snapshot
+      // so adapters can render lag UI (or pre-emptively detach).
+      // `alive` and `pendingPermissions` are unchanged.
+      return {
+        ...base,
+        slowClientWarningCount: base.slowClientWarningCount + 1,
+        lastSlowClientWarning: event.data,
       };
     case 'stream_error':
       return {
@@ -435,6 +479,17 @@ function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
     isRecord(value) &&
     isNonEmptyString(value['reason']) &&
     isOptionalNumber(value['droppedAfter'])
+  );
+}
+
+function isSlowClientWarningData(
+  value: unknown,
+): value is DaemonSlowClientWarningData {
+  return (
+    isRecord(value) &&
+    typeof value['queueSize'] === 'number' &&
+    typeof value['maxQueued'] === 'number' &&
+    typeof value['lastEventId'] === 'number'
   );
 }
 

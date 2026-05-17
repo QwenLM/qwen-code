@@ -17,6 +17,7 @@ import {
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   EventBus,
+  DEFAULT_RING_SIZE,
   type BridgeEvent,
   type SubscribeOptions,
 } from './eventBus.js';
@@ -523,6 +524,20 @@ export interface BridgeOptions {
    * `ServeOptions.maxSessions` for the rationale.
    */
   maxSessions?: number;
+  /**
+   * Per-session SSE replay ring depth. Sets `ringSize` on every
+   * `new EventBus(...)` the bridge constructs (both fresh sessions
+   * and restored sessions). Defaults to `DEFAULT_RING_SIZE` (8000,
+   * #3803 §02 target). Must be a positive finite integer; `0` /
+   * `NaN` / negative throw at boot (fail-CLOSED — same posture as
+   * `maxSessions`, where silently disabling a backpressure knob on a
+   * config typo is worse than failing to start).
+   *
+   * Operators tune via `qwen serve --event-ring-size <n>`. Cost is
+   * roughly `ringSize × ~500 B per session` of RAM held until the
+   * session ends.
+   */
+  eventRingSize?: number;
   /**
    * Bd1yh: per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
@@ -1196,6 +1211,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     throw new TypeError(
       `Invalid sessionScope: ${JSON.stringify(defaultSessionScope)}. ` +
         `Expected 'single' or 'thread'.`,
+    );
+  }
+  // `eventRingSize` follows the same fail-CLOSED posture as
+  // `maxSessions`: silently disabling SSE backpressure on a config
+  // typo is worse than failing to start. Unlike `maxSessions` there
+  // is NO unlimited sentinel — an unbounded ring would grow forever.
+  const eventRingSize = opts.eventRingSize ?? DEFAULT_RING_SIZE;
+  if (
+    !Number.isFinite(eventRingSize) ||
+    !Number.isInteger(eventRingSize) ||
+    eventRingSize < 1
+  ) {
+    throw new TypeError(
+      `Invalid eventRingSize: ${opts.eventRingSize}. ` +
+        `Must be a positive finite integer.`,
     );
   }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
@@ -1918,7 +1948,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = new EventBus(),
+    events = new EventBus(eventRingSize),
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -2055,7 +2085,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = new EventBus();
+    const restoreEvents = new EventBus(eventRingSize);
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore

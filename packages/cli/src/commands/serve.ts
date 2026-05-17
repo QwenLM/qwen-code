@@ -30,6 +30,7 @@ interface ServeArgs {
   token?: string;
   'max-sessions': number;
   'max-connections': number;
+  'event-ring-size': number;
   workspace?: string;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
@@ -84,6 +85,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'sockets — slow/phantom SSE clients get rejected at accept time once full. ' +
           'Set to 0 to disable.',
       })
+      .option('event-ring-size', {
+        type: 'number',
+        default: 8000,
+        description:
+          'Per-session SSE replay ring depth (#3803 §02 target). Sets the ' +
+          'replay backlog available to `GET /session/:id/events?Last-Event-ID=N` ' +
+          'reconnects. Larger = more reconnect headroom at the cost of a few ' +
+          'hundred KB extra RAM per session. Must be a positive finite integer.',
+      })
       .option('http-bridge', {
         type: 'boolean',
         default: true,
@@ -122,6 +132,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
         maxConnections: argv['max-connections'],
+        eventRingSize: argv['event-ring-size'],
         workspace: argv.workspace,
       });
     } catch (err) {
