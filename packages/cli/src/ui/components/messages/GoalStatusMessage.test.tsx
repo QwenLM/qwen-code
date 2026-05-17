@@ -25,4 +25,22 @@ describe('<GoalStatusMessage />', () => {
     expect(output).toContain('Goal: finish the refactor');
     expect(output).toContain('Judge: tests are still failing');
   });
+
+  it('shows impossible goals as failed terminal cards', () => {
+    const { lastFrame } = render(
+      <GoalStatusMessage
+        kind="failed"
+        condition="merge a nonexistent branch"
+        iterations={2}
+        durationMs={12_000}
+        lastReason="the remote branch does not exist"
+      />,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Goal could not be achieved');
+    expect(output).toContain('2 turns');
+    expect(output).toContain('Goal: merge a nonexistent branch');
+    expect(output).toContain('Last check: the remote branch does not exist');
+  });
 });

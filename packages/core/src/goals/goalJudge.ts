@@ -25,10 +25,16 @@ user-provided condition is satisfied.
 Your response MUST be a JSON object with one of these shapes:
 - {"ok": true, "reason": "<quote evidence from the transcript that satisfies the condition>"}
 - {"ok": false, "reason": "<quote what is missing or what blocks the condition>"}
+- {"ok": false, "impossible": true, "reason": "<explain why the condition can never be satisfied>"}
 
 Always include a "reason" field, quoting specific text from the transcript
 whenever possible. If the transcript does not contain clear evidence that the
-condition is satisfied, return {"ok": false, "reason": "insufficient evidence in transcript"}.`;
+condition is satisfied, return {"ok": false, "reason": "insufficient evidence in transcript"}.
+Only use {"ok": false, "impossible": true} when the condition is genuinely
+unachievable in this session: for example, it is self-contradictory, depends on
+an unavailable resource or capability, or the assistant has exhausted reasonable
+approaches and the transcript confirms there is no path forward. Do not use it
+just because progress is slow or evidence is currently missing.`;
 
 /**
  * Wraps the raw user condition into a transcript-grounded question so the
@@ -46,6 +52,7 @@ const RESPONSE_SCHEMA: Schema = {
   properties: {
     ok: { type: 'BOOLEAN' as unknown as Schema['type'] },
     reason: { type: 'STRING' as unknown as Schema['type'] },
+    impossible: { type: 'BOOLEAN' as unknown as Schema['type'] },
   },
   required: ['ok', 'reason'],
 };
@@ -53,6 +60,7 @@ const RESPONSE_SCHEMA: Schema = {
 export interface JudgeResult {
   ok: boolean;
   reason: string;
+  impossible?: boolean;
 }
 
 const JUDGE_REASON_FALLBACK =
@@ -328,7 +336,12 @@ function parseJudgeReply(text: string): JudgeResult | null {
       : ok
         ? 'Goal condition reported as met.'
         : JUDGE_REASON_FALLBACK;
-  return { ok, reason: reasonText };
+  const impossible = (payload as { impossible?: unknown }).impossible === true;
+  return {
+    ok,
+    reason: reasonText,
+    ...(impossible && !ok ? { impossible: true } : {}),
+  };
 }
 
 function stripCodeFence(s: string): string {

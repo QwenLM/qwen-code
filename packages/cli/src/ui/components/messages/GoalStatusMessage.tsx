@@ -81,6 +81,12 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
           prefixColor: theme.text.secondary,
           title: 'Goal cleared',
         };
+      case 'failed':
+        return {
+          prefix: '!',
+          prefixColor: theme.status.error,
+          title: 'Goal could not be achieved',
+        };
       case 'aborted':
       default:
         return {
@@ -136,7 +142,8 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
             flex-row variant hangs the continuation at the value column's
             left edge (≈12 cols of empty space, easily mistaken for a blank
             line). One Text + natural wrap keeps the continuation flush. */}
-        {(kind === 'achieved' || kind === 'aborted') && lastReason?.trim() ? (
+        {(kind === 'achieved' || kind === 'aborted' || kind === 'failed') &&
+        lastReason?.trim() ? (
           <Text color={theme.text.secondary} wrap="wrap">
             Last check: {lastReason.trim()}
           </Text>

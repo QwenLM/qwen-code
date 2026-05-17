@@ -70,7 +70,7 @@ export function __resetActiveGoalStoreForTests(): void {
 // callback; any side effect (e.g. context.ui.addItem) should be guarded.
 // ───────────────────────────────────────────────────────────────────────────
 
-export type GoalTerminalKind = 'achieved' | 'aborted';
+export type GoalTerminalKind = 'achieved' | 'aborted' | 'failed';
 
 export interface GoalTerminalEvent {
   kind: GoalTerminalKind;

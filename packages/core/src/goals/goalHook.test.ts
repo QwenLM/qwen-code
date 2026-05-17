@@ -314,6 +314,41 @@ describe('createGoalStopHookCallback', () => {
     expect(events[0].lastReason).toBe('still stuck now');
   });
 
+  it('clears the goal as failed when the judge says it is impossible', async () => {
+    setActiveGoal('sess-1', {
+      condition: 'merge a nonexistent branch',
+      iterations: 2,
+      setAt: 100,
+      tokensAtStart: 0,
+      hookId: 'h1',
+      lastReason: 'branch still missing',
+    });
+    judgeMock.mockResolvedValue({
+      ok: false,
+      impossible: true,
+      reason: 'the remote branch does not exist',
+    });
+    const events: GoalTerminalEvent[] = [];
+    setGoalTerminalObserver('sess-1', (e) => events.push(e));
+
+    const cb = createGoalStopHookCallback({
+      config: {} as Config,
+      sessionId: 'sess-1',
+      condition: 'merge a nonexistent branch',
+    });
+    const out = await cb(stopInput(), undefined);
+
+    expect(out).toEqual({ continue: true });
+    expect(getActiveGoal('sess-1')).toBeUndefined();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'failed',
+      condition: 'merge a nonexistent branch',
+      iterations: 2,
+      lastReason: 'the remote branch does not exist',
+    });
+  });
+
   it('does NOT notify observer on a single not-met turn', async () => {
     setActiveGoal('sess-1', {
       condition: 'do x',

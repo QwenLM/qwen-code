@@ -505,6 +505,7 @@ export type GoalStatusKind =
   | 'set'
   | 'achieved'
   | 'cleared'
+  | 'failed'
   | 'aborted'
   | 'checking';
 

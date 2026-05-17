@@ -91,6 +91,25 @@ describe('judgeGoal', () => {
     expect(verdict.reason).toBe('missing unit test for auth');
   });
 
+  it('parses impossible=true for genuinely unachievable goals', async () => {
+    const client = makeMockClient({
+      reply:
+        '{"ok": false, "impossible": true, "reason": "required remote is unavailable"}',
+    });
+    const config = makeConfig({ client });
+    const verdict = await judgeGoal(config, {
+      condition: 'merge the missing remote branch',
+      lastAssistantText: 'the remote does not exist',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toEqual({
+      ok: false,
+      impossible: true,
+      reason: 'required remote is unavailable',
+    });
+  });
+
   it('falls back to main model when no fast model is configured', async () => {
     const client = makeMockClient({});
     const config = makeConfig({ client, model: 'big-main' });
@@ -226,8 +245,12 @@ describe('judgeGoal', () => {
     // System prompt + structured output configured
     expect(generationConfig.systemInstruction).toMatch(/stop-condition hook/);
     expect(generationConfig.systemInstruction).toMatch(/quote evidence/);
+    expect(generationConfig.systemInstruction).toMatch(/impossible/);
     expect(generationConfig.responseMimeType).toBe('application/json');
     expect(generationConfig.responseSchema).toBeTruthy();
+    expect(generationConfig.responseSchema.properties).toHaveProperty(
+      'impossible',
+    );
     expect(generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
     expect(generationConfig.temperature).toBe(0);
   });

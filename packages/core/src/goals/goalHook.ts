@@ -184,6 +184,17 @@ export function createGoalStopHookCallback(args: {
       return { continue: true };
     }
 
+    if (verdict.impossible) {
+      finishGoal(config, sessionId, latest, {
+        kind: 'failed',
+        condition: latest.condition,
+        iterations: latest.iterations,
+        durationMs: Date.now() - latest.setAt,
+        lastReason: verdict.reason,
+      });
+      return { continue: true };
+    }
+
     // Give the latest assistant output one final evaluation before aborting.
     // The iteration cap is a safety valve for still-not-met verdicts, not a
     // pre-judge hard stop; otherwise the final generated turn could satisfy

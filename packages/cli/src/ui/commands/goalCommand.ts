@@ -57,7 +57,12 @@ function formatTerminalSummary(event: GoalTerminalEvent): string {
   // most recent terminal event, including the judge's `lastReason` (when
   // present) so this view matches the inline `Goal achieved / aborted`
   // history card.
-  const title = event.kind === 'achieved' ? 'Goal achieved' : 'Goal aborted';
+  const title =
+    event.kind === 'achieved'
+      ? 'Goal achieved'
+      : event.kind === 'failed'
+        ? 'Goal could not be achieved'
+        : 'Goal aborted';
   const stats: string[] = [];
   if (event.iterations > 0) stats.push(formatTurns(event.iterations));
   if (typeof event.durationMs === 'number')
