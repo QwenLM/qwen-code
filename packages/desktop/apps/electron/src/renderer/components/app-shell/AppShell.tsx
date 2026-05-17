@@ -18,11 +18,8 @@ import {
   Search,
   Plus,
   Trash2,
-  DatabaseZap,
   Zap,
   Inbox,
-  Globe,
-  FolderOpen,
   Calendar,
   Layers,
   ListTodo,
@@ -32,10 +29,8 @@ import {
   Info,
 } from "lucide-react"
 // SessionStatusIcons no longer used - icons come from dynamic sessionStatuses
-import { SourceAvatar } from "@/components/ui/source-avatar"
 import { TopBar } from "./TopBar"
 import { SquarePenRounded } from "../icons/SquarePenRounded"
-import { McpIcon } from "../icons/McpIcon"
 import { cn } from "@/lib/utils"
 import { isMac } from "@/lib/platform"
 import { Button } from "@/components/ui/button"
@@ -1622,18 +1617,6 @@ function AppShellContent({
     return counts
   }, [activeSessionMetas, effectiveSessionStatuses])
 
-  // Count sources by type for the Sources dropdown subcategories
-  const sourceTypeCounts = useMemo(() => {
-    const counts = { api: 0, mcp: 0, local: 0 }
-    for (const source of sources) {
-      const t = source.config.type
-      if (t === 'api' || t === 'mcp' || t === 'local') {
-        counts[t]++
-      }
-    }
-    return counts
-  }, [sources])
-
   // Count automations by type for the Automations dropdown subcategories
   const automationTypeCounts = useMemo(() => {
     const counts = { scheduled: 0, event: 0, agentic: 0 }
@@ -1903,24 +1886,6 @@ function AppShellContent({
     window.electronAPI.reorderStatuses(activeWorkspaceId, orderedIds)
   }, [activeWorkspaceId])
 
-  // Handler for sources view (all sources)
-  const handleSourcesClick = useCallback(() => {
-    navigate(routes.view.sources())
-  }, [])
-
-  // Handlers for source type filter views (subcategories in Sources dropdown)
-  const handleSourcesApiClick = useCallback(() => {
-    navigate(routes.view.sourcesApi())
-  }, [])
-
-  const handleSourcesMcpClick = useCallback(() => {
-    navigate(routes.view.sourcesMcp())
-  }, [])
-
-  const handleSourcesLocalClick = useCallback(() => {
-    navigate(routes.view.sourcesLocal())
-  }, [])
-
   // Handler for skills view
   const handleSkillsClick = useCallback(() => {
     navigate(routes.view.skills())
@@ -2185,13 +2150,12 @@ function AppShellContent({
   const unifiedSidebarItems = React.useMemo((): SidebarItem[] => {
     const result: SidebarItem[] = []
 
-    result.push({ id: 'nav:sources', type: 'nav', action: handleSourcesClick })
     result.push({ id: 'nav:skills', type: 'nav', action: handleSkillsClick })
     result.push({ id: 'nav:automations', type: 'nav', action: handleAutomationsClick })
     result.push({ id: 'nav:settings', type: 'nav', action: () => handleSettingsClick('app') })
 
     return result
-  }, [handleSourcesClick, handleSkillsClick, handleAutomationsClick, handleSettingsClick])
+  }, [handleSkillsClick, handleAutomationsClick, handleSettingsClick])
 
   // Toggle folder expanded state
   const handleToggleFolder = React.useCallback((path: string) => {
@@ -2435,63 +2399,6 @@ function AppShellContent({
                     getItemProps={getSidebarItemProps}
                     focusedItemId={focusedSidebarItemId}
                     links={[
-                      {
-                        id: "nav:sources",
-                        title: t("sidebar.sources"),
-                        label: String(sources.length),
-                        icon: DatabaseZap,
-                        variant: (isSourcesNavigation(navState) && !sourceFilter) ? "default" : "ghost",
-                        onClick: handleSourcesClick,
-                        dataTutorial: "sources-nav",
-                        expandable: true,
-                        expanded: isExpanded('nav:sources'),
-                        onToggle: () => toggleExpanded('nav:sources'),
-                        contextMenu: {
-                          type: 'sources',
-                          onAddSource: () => openAddSource(),
-                        },
-                        items: [
-                          {
-                            id: "nav:sources:api",
-                            title: t("sidebar.apis"),
-                            label: String(sourceTypeCounts.api),
-                            icon: Globe,
-                            variant: (sourceFilter?.kind === 'type' && sourceFilter.sourceType === 'api') ? "default" : "ghost",
-                            onClick: handleSourcesApiClick,
-                            contextMenu: {
-                              type: 'sources' as const,
-                              onAddSource: () => openAddSource('api'),
-                              sourceType: 'api',
-                            },
-                          },
-                          {
-                            id: "nav:sources:mcp",
-                            title: t("sidebar.mcps"),
-                            label: String(sourceTypeCounts.mcp),
-                            icon: <McpIcon className="h-3.5 w-3.5" />,
-                            variant: (sourceFilter?.kind === 'type' && sourceFilter.sourceType === 'mcp') ? "default" : "ghost",
-                            onClick: handleSourcesMcpClick,
-                            contextMenu: {
-                              type: 'sources' as const,
-                              onAddSource: () => openAddSource('mcp'),
-                              sourceType: 'mcp',
-                            },
-                          },
-                          {
-                            id: "nav:sources:local",
-                            title: t("sidebar.localFolders"),
-                            label: String(sourceTypeCounts.local),
-                            icon: FolderOpen,
-                            variant: (sourceFilter?.kind === 'type' && sourceFilter.sourceType === 'local') ? "default" : "ghost",
-                            onClick: handleSourcesLocalClick,
-                            contextMenu: {
-                              type: 'sources' as const,
-                              onAddSource: () => openAddSource('local'),
-                              sourceType: 'local',
-                            },
-                          },
-                        ],
-                      },
                       {
                         id: "nav:skills",
                         title: t("sidebar.skills"),

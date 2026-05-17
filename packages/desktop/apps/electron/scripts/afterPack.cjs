@@ -1,18 +1,14 @@
 /**
  * electron-builder afterPack hook
  *
- * Copies the pre-compiled macOS 26+ Liquid Glass icon (Assets.car) into the
- * app bundle. The Assets.car file is compiled locally using actool with the
- * macOS 26 SDK (not available in CI), then committed to the repo.
+ * Copies the optional pre-compiled macOS 26+ Liquid Glass icon (Assets.car)
+ * into the app bundle when present. Without it, macOS falls back to icon.icns.
  *
- * To regenerate Assets.car after icon changes:
- *   cd apps/electron
- *   xcrun actool "resources/icon.icon" --compile "resources" \
- *     --app-icon AppIcon --minimum-deployment-target 26.0 \
- *     --platform macosx --output-partial-info-plist /dev/null
+ * If a future Icon Composer workflow produces Assets.car for the current app
+ * icon, place it at resources/Assets.car and this hook will bundle it.
  *
- * For older macOS versions, the app falls back to icon.icns which is
- * included separately by electron-builder.
+ * For older macOS versions, or builds without Assets.car, the app falls back
+ * to icon.icns which is included separately by electron-builder.
  */
 
 const path = require('path');

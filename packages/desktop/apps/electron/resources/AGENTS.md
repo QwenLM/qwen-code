@@ -32,7 +32,7 @@ These files are used by electron-builder or the app directly, not synced to user
 | File | Purpose |
 |------|---------|
 | `icon.*` | App icons (icns, ico, png, svg) |
-| `Assets.car` | macOS compiled asset catalog |
+| `Assets.car` | Optional macOS compiled asset catalog |
 | `dmg-background.*` | DMG installer background |
 | `craft-logos/` | Branding assets |
 | `source.png` | Default source icon |
