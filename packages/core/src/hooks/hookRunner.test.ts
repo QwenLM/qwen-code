@@ -390,6 +390,27 @@ describe('HookRunner', () => {
       expect(result.success).toBe(false);
       expect(result.error).toBeDefined();
     });
+
+    it('should throw error for prompt hook without config', async () => {
+      // HookRunner without config cannot execute prompt hooks
+      const runnerWithoutConfig = new HookRunner();
+
+      const hookConfig: HookConfig = {
+        type: HookType.Prompt,
+        prompt: 'Test prompt: $ARGUMENTS',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await runnerWithoutConfig.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('Prompt hook requires Config');
+    });
   });
 
   describe('executeHooksParallel', () => {
@@ -657,7 +678,7 @@ describe('HookRunner', () => {
       expect(result.output?.systemMessage).toBe('plain text response');
     });
 
-    it('should convert non-zero exit code to deny output', async () => {
+    it('should treat non-blocking non-zero exit codes as non-blocking warnings', async () => {
       const mockProcess = createMockProcess(3, '', 'error message');
       mockSpawn.mockImplementation(() => mockProcess);
 
@@ -675,8 +696,8 @@ describe('HookRunner', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.output?.decision).toBe('deny');
-      expect(result.output?.reason).toBe('error message');
+      expect(result.output?.decision).toBe('allow');
+      expect(result.output?.systemMessage).toBe('Warning: error message');
     });
 
     it('should use stderr when stdout is empty on success', async () => {

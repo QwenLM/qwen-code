@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { LSTool } from './ls.js';
+import type { LSToolParams } from './ls.js';
 import type { Config } from '../config/config.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { ToolErrorType } from './tool-error.js';
@@ -392,5 +393,22 @@ describe('LSTool', () => {
       expect(result.llmContent).toContain('secondary-file.txt');
       expect(result.returnDisplay).toBe('Listed 1 item(s)');
     });
+  });
+
+  describe('validateToolParams', () => {
+    it.skipIf(process.platform === 'win32')(
+      'should unescape shell-escaped path',
+      async () => {
+        // Create a directory with a space so the unescaped path exists
+        const dirWithSpace = path.join(tempRootDir, 'sub dir');
+        await fs.mkdir(dirWithSpace);
+        const params: LSToolParams = {
+          path: path.join(tempRootDir, 'sub\\ dir'),
+        };
+        const result = lsTool.validateToolParams(params);
+        expect(result).toBeNull();
+        expect(params.path).toBe(dirWithSpace);
+      },
+    );
   });
 });

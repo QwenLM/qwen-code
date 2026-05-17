@@ -1737,9 +1737,13 @@ export class WebViewProvider {
    * The webview resolves the content and posts back a 'copyToClipboard' message.
    */
   sendCopyCommand(action: string): boolean {
-    if (WebViewProvider.lastContextMenuProvider !== this) return false;
+    if (WebViewProvider.lastContextMenuProvider !== this) {
+      return false;
+    }
     const webview = this.getActiveWebview();
-    if (!webview) return false;
+    if (!webview) {
+      return false;
+    }
     webview.postMessage({ type: 'copyCommand', data: { action } });
     return true;
   }
@@ -1769,8 +1773,33 @@ export class WebViewProvider {
       return true;
     }
     if (message.type === 'copyToClipboard') {
-      const { text } = message.data as { text: string };
-      await vscode.env.clipboard.writeText(text);
+      const { text, requestId } = message.data as {
+        text: string;
+        requestId?: string;
+      };
+      try {
+        await vscode.env.clipboard.writeText(text);
+        if (requestId) {
+          await webview.postMessage({
+            type: 'copyToClipboardResult',
+            data: { requestId, success: true },
+          });
+        }
+      } catch (error) {
+        if (requestId) {
+          await webview.postMessage({
+            type: 'copyToClipboardResult',
+            data: {
+              requestId,
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+        if (!requestId) {
+          throw error;
+        }
+      }
       return true;
     }
     if (message.type === 'resolveImagePaths') {
@@ -1782,7 +1811,7 @@ export class WebViewProvider {
     }
     // Reset task timer and notification guard when user sends a new message.
     // Falls through (returns false) so the message is still routed to handlers.
-    if (message.type === 'sendMessage') {
+    if (message.type === 'sendMessage' || message.type === 'editMessage') {
       this.agentStartTime = null;
       this.idleNotificationSent = false;
     }

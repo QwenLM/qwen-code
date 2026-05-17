@@ -8,6 +8,14 @@
  * Tool name constants to avoid circular dependencies.
  * These constants are used across multiple files and should be kept in sync
  * with the actual tool class names.
+ *
+ * Filesystem-path-bearing tools (whose inputs name actual project files)
+ * also need to be added to `FS_PATH_TOOL_NAMES` in
+ * `core/coreToolScheduler.ts` so conditional rules and path-conditional
+ * skill activation see the touched paths. Forgetting that registration
+ * silently skips the activation pipeline for that tool — there is no
+ * compile-time guard. (TODO: replace the manual allowlist with a
+ * per-declaration `pathFields?: string[]` annotation on the tool class.)
  */
 export const ToolNames = {
   EDIT: 'edit',
@@ -30,6 +38,11 @@ export const ToolNames = {
   CRON_DELETE: 'cron_delete',
   TASK_STOP: 'task_stop',
   SEND_MESSAGE: 'send_message',
+  STRUCTURED_OUTPUT: 'structured_output',
+  MONITOR: 'monitor',
+  TOOL_SEARCH: 'tool_search',
+  ENTER_WORKTREE: 'enter_worktree',
+  EXIT_WORKTREE: 'exit_worktree',
 } as const;
 
 /**
@@ -58,6 +71,11 @@ export const ToolDisplayNames = {
   CRON_DELETE: 'CronDelete',
   TASK_STOP: 'TaskStop',
   SEND_MESSAGE: 'SendMessage',
+  STRUCTURED_OUTPUT: 'StructuredOutput',
+  MONITOR: 'Monitor',
+  TOOL_SEARCH: 'ToolSearch',
+  ENTER_WORKTREE: 'EnterWorktree',
+  EXIT_WORKTREE: 'ExitWorktree',
 } as const;
 
 // Migration from old tool names to new tool names

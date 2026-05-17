@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type RetryAfterMode = 'ignore' | 'minimum' | 'prefer';
+export type RetryAfterMode = 'ignore' | 'minimum';
 
 export interface RetryDelayPolicyOptions {
   attempt: number;
@@ -20,9 +20,16 @@ export interface RetryDelayPolicyOptions {
 /**
  * Calculates a retry delay using a shared exponential-backoff policy.
  *
- * Retry-After handling is explicit because different paths need different
- * semantics: stream retries use it as a minimum, while HTTP request retries
- * use it as a server-preferred delay.
+ * Retry-After handling depends on `retryAfterMode`:
+ *   - `'ignore'` (default): do not parse Retry-After; always return the
+ *     exponential delay (with optional jitter).
+ *   - `'minimum'`: use Retry-After as a floor on the exponential delay.
+ *
+ * When Retry-After is honored, `jitterRatio` is intentionally not applied —
+ * the server's wait is treated as exact.
+ *
+ * `retryAfterMaxDelayMs` caps the Retry-After-derived delay; defaults to
+ * `maxDelayMs`.
  */
 export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
   const normalizedAttempt = Math.max(1, options.attempt);
@@ -36,11 +43,8 @@ export function getRetryDelayMs(options: RetryDelayPolicyOptions): number {
 
   if (retryAfterMs !== null && retryAfterMs > 0) {
     const retryAfterCapMs = options.retryAfterMaxDelayMs ?? options.maxDelayMs;
-    const baseDelayMs =
-      retryAfterMode === 'minimum'
-        ? Math.max(cappedExponentialDelayMs, retryAfterMs)
-        : retryAfterMs;
-    return Math.min(baseDelayMs, retryAfterCapMs);
+    const cappedRetryAfterMs = Math.min(retryAfterMs, retryAfterCapMs);
+    return Math.max(cappedExponentialDelayMs, cappedRetryAfterMs);
   }
 
   const jitterRatio = options.jitterRatio ?? 0;

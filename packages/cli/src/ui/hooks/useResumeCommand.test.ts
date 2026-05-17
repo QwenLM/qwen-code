@@ -6,7 +6,11 @@
 
 import { act, renderHook } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import { useResumeCommand } from './useResumeCommand.js';
+import {
+  BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+  useResumeCommand,
+} from './useResumeCommand.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 
 const resumeMocks = vi.hoisted(() => {
   let resolveLoadSession:
@@ -38,6 +42,10 @@ const resumeMocks = vi.hoisted(() => {
 
 vi.mock('../utils/resumeHistoryUtils.js', () => ({
   buildResumedHistoryItems: vi.fn(() => [{ id: 1, type: 'user', text: 'hi' }]),
+}));
+
+vi.mock('../utils/restoreGoal.js', () => ({
+  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => {
@@ -111,7 +119,11 @@ describe('useResumeCommand', () => {
   });
 
   it('handleResume no-ops when config is null', async () => {
-    const historyManager = { clearItems: vi.fn(), loadHistory: vi.fn() };
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
     const startNewSession = vi.fn();
 
     const { result } = renderHook(() =>
@@ -135,16 +147,38 @@ describe('useResumeCommand', () => {
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
 
-    const historyManager = { clearItems: vi.fn(), loadHistory: vi.fn() };
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
     const startNewSession = vi.fn();
     const geminiClient = {
-      initialize: vi.fn(),
+      initialize: vi.fn().mockResolvedValue(undefined),
     };
+    const resetMonitorRegistry = vi.fn();
 
     const config = {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getBackgroundTaskRegistry: () => ({
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: resetMonitorRegistry,
+      }),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      getBackgroundAgentResumeService: () => ({
+        buildRecoveredBackgroundAgentsNotice: vi.fn(),
+      }),
       getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -191,7 +225,209 @@ describe('useResumeCommand', () => {
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
     expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
+    expect(geminiClient.initialize).toHaveBeenCalledWith();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
+    expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
+    // Goal must be re-armed under the resumed sessionId so the in-memory
+    // activeGoalStore entry (potentially stale across /new + /resume) gets
+    // a fresh setAt / hookId / observer — otherwise the footer pill ticks
+    // from the pre-/new setAt and the Stop hook is silently dead.
+    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
+      expect.any(Array),
+      config,
+      historyManager.addItem,
+    );
+  });
+
+  it('adds a recovered-background-agents notice when paused agents are restored', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+    const geminiClient = {
+      initialize: vi.fn(),
+    };
+    const buildRecoveredBackgroundAgentsNotice = vi
+      .fn()
+      .mockReturnValue('Recovered 2 interrupted background agents.');
+
+    const config = {
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => geminiClient,
+      startNewSession: vi.fn(),
+      getBackgroundTaskRegistry: () => ({
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      loadPausedBackgroundAgents: vi
+        .fn()
+        .mockResolvedValue([{ agentId: 'a' }, { agentId: 'b' }]),
+      getBackgroundAgentResumeService: () => ({
+        buildRecoveredBackgroundAgentsNotice,
+      }),
+      getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleResume('session-3');
+    });
+
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith('session-3');
+    expect(buildRecoveredBackgroundAgentsNotice).toHaveBeenCalledWith(2);
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: 'Recovered 2 interrupted background agents.',
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('blocks resume when the current session still has running background work', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const config = {
+      getBackgroundTaskRegistry: () => ({
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(true),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getTargetDir: () => '/tmp',
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    act(() => {
+      result.current.openResumeDialog();
+    });
+
+    await act(async () => {
+      await result.current.handleResume('session-blocked');
+    });
+
+    expect(result.current.isResumeDialogOpen).toBe(false);
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('blocks resume when the current session still has a running monitor', async () => {
+    const historyManager = {
+      addItem: vi.fn(),
+      clearItems: vi.fn(),
+      loadHistory: vi.fn(),
+    };
+    const startNewSession = vi.fn();
+
+    const config = {
+      getBackgroundTaskRegistry: () => ({
+        hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        getAll: vi.fn().mockReturnValue([]),
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([
+          {
+            monitorId: 'mon_123',
+            status: 'running',
+          },
+        ]),
+        reset: vi.fn(),
+      }),
+      getTargetDir: () => '/tmp',
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    act(() => {
+      result.current.openResumeDialog();
+    });
+
+    await act(async () => {
+      await result.current.handleResume('session-blocked');
+    });
+
+    expect(result.current.isResumeDialogOpen).toBe(false);
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+    expect(historyManager.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
+      }),
+      expect.any(Number),
+    );
   });
 });

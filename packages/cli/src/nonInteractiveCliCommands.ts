@@ -16,6 +16,7 @@ import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { McpPromptLoader } from './services/McpPromptLoader.js';
 import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
@@ -199,6 +200,7 @@ export const handleSlashCommand = async (
 
   // Load all commands to check if the command exists but is not allowed
   const allLoaders = [
+    new McpPromptLoader(config),
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
     new SkillCommandLoader(config),
@@ -229,8 +231,7 @@ export const handleSlashCommand = async (
   config.setModelInvocableCommandsProvider(() =>
     commandService.getModelInvocableCommands().map((cmd) => ({
       name: cmd.name,
-      description:
-        typeof cmd.description === 'string' ? cmd.description : cmd.description,
+      description: cmd.modelDescription ?? cmd.description,
     })),
   );
   // Register executor so SkillTool can invoke model-invocable commands
@@ -375,6 +376,7 @@ export const getAvailableCommands = async (
 ): Promise<SlashCommand[]> => {
   try {
     const loaders = [
+      new McpPromptLoader(config),
       new BuiltinCommandLoader(config),
       new BundledSkillLoader(config),
       new SkillCommandLoader(config),

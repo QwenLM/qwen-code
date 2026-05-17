@@ -8,6 +8,7 @@ import type React from 'react';
 import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { SuggestionsDisplay, MAX_WIDTH } from './SuggestionsDisplay.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { theme } from '../semantic-colors.js';
 import { useInputHistory } from '../hooks/useInputHistory.js';
 import type { TextBuffer } from './shared/text-buffer.js';
@@ -17,6 +18,7 @@ import chalk from 'chalk';
 import { useShellHistory } from '../hooks/useShellHistory.js';
 import { useReverseSearchCompletion } from '../hooks/useReverseSearchCompletion.js';
 import { useCommandCompletion } from '../hooks/useCommandCompletion.js';
+import { useExportCompletion } from '../hooks/useExportCompletion.js';
 import { useFollowupSuggestionsCLI } from '../hooks/useFollowupSuggestions.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { Key } from '../hooks/useKeypress.js';
@@ -65,6 +67,7 @@ export interface Attachment {
 }
 
 const debugLogger = createDebugLogger('INPUT_PROMPT');
+
 export interface InputPromptProps {
   buffer: TextBuffer;
   onSubmit: (value: string) => void;
@@ -73,6 +76,7 @@ export interface InputPromptProps {
   config: Config;
   slashCommands: readonly SlashCommand[];
   commandContext: CommandContext;
+  recentSlashCommands?: RecentSlashCommands;
   placeholder?: string;
   focus?: boolean;
   inputWidth: number;
@@ -107,6 +111,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   config,
   slashCommands,
   commandContext,
+  recentSlashCommands,
   placeholder,
   focus = true,
   suggestionsWidth,
@@ -138,6 +143,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Includes terminal entries — the pill stays open so users can reopen
   // the dialog to inspect final state after the last agent finishes.
   const hasBgAgents = bgEntries.length > 0;
+  const hasActiveToolConfirmation = useMemo(
+    () =>
+      Boolean(uiState.confirmationRequest) ||
+      (uiState.pendingGeminiHistoryItems ?? []).some(
+        (item) =>
+          item.type === 'tool_group' &&
+          item.tools.some((tool) => tool.confirmationDetails),
+      ),
+    [uiState.confirmationRequest, uiState.pendingGeminiHistoryItems],
+  );
   const [justNavigatedHistory, setJustNavigatedHistory] = useState(false);
   const [escPressCount, setEscPressCount] = useState(0);
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
@@ -189,6 +204,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   ]);
   const [expandedSuggestionIndex, setExpandedSuggestionIndex] =
     useState<number>(-1);
+  const exportCompletion = useExportCompletion(buffer, slashCommands);
   const shellHistory = useShellHistory(config.getProjectRoot());
   const shellHistoryData = shellHistory.history;
 
@@ -201,6 +217,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     config,
     // Suppress completion when history navigation just occurred
     !justNavigatedHistory,
+    recentSlashCommands,
   );
 
   // Ref so renderLineWithHighlighting (stable useCallback) can access fresh ghost text
@@ -302,6 +319,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const handleSubmitAndClear = useCallback(
     (submittedValue: string) => {
+      exportCompletion.reset();
       // Expand any large paste placeholders to their full content before submitting
       let finalValue = submittedValue;
       if (pendingPastes.size > 0) {
@@ -353,6 +371,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       resetReverseSearchCompletionState();
     },
     [
+      exportCompletion,
       onSubmit,
       buffer,
       resetCompletionState,
@@ -615,6 +634,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (keyMatchers[Command.ESCAPE](key)) {
+        exportCompletion.reset();
         const cancelSearch = (
           setActive: (active: boolean) => void,
           resetCompletion: () => void,
@@ -774,14 +794,49 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Prevent up/down from falling through to regular history navigation
         if (
           keyMatchers[Command.NAVIGATION_UP](key) ||
-          keyMatchers[Command.NAVIGATION_DOWN](key)
+          keyMatchers[Command.NAVIGATION_DOWN](key) ||
+          keyMatchers[Command.HISTORY_UP](key) ||
+          keyMatchers[Command.HISTORY_DOWN](key)
         ) {
           return true;
         }
       }
 
+      // Export-specific arrow/Tab/Enter handling (Phase 1 + Phase 2).
+      if (exportCompletion.handleExportInput(key, completion)) {
+        return true;
+      }
+
+      const acceptActiveCompletionSuggestion = () => {
+        if (completion.suggestions.length === 0) {
+          return false;
+        }
+
+        const targetIndex =
+          completion.activeSuggestionIndex === -1
+            ? 0
+            : completion.activeSuggestionIndex;
+        if (targetIndex >= completion.suggestions.length) {
+          return false;
+        }
+
+        completion.handleAutocomplete(targetIndex);
+        exportCompletion.navigatedRef.current = false;
+        setExpandedSuggestionIndex(-1);
+        return true;
+      };
+
       // If the command is a perfect match, pressing enter should execute it.
       if (completion.isPerfectMatch && keyMatchers[Command.RETURN](key)) {
+        if (
+          completion.showSuggestions &&
+          exportCompletion.navigatedRef.current &&
+          exportCompletion.navigatedTextRef.current === buffer.text &&
+          acceptActiveCompletionSuggestion()
+        ) {
+          return true;
+        }
+
         handleSubmitAndClear(buffer.text);
         return true;
       }
@@ -819,29 +874,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       if (completion.showSuggestions) {
         if (completion.suggestions.length > 1) {
-          if (keyMatchers[Command.COMPLETION_UP](key)) {
+          const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
+          const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
+          if (isCompletionUpKey) {
             completion.navigateUp();
-            setExpandedSuggestionIndex(-1); // Reset expansion when navigating
+            exportCompletion.navigatedRef.current = true;
+            exportCompletion.navigatedTextRef.current = buffer.text;
+            setExpandedSuggestionIndex(-1);
             return true;
           }
-          if (keyMatchers[Command.COMPLETION_DOWN](key)) {
+          if (isCompletionDownKey) {
             completion.navigateDown();
-            setExpandedSuggestionIndex(-1); // Reset expansion when navigating
+            exportCompletion.navigatedRef.current = true;
+            exportCompletion.navigatedTextRef.current = buffer.text;
+            setExpandedSuggestionIndex(-1);
             return true;
           }
         }
 
         if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
-          if (completion.suggestions.length > 0) {
-            const targetIndex =
-              completion.activeSuggestionIndex === -1
-                ? 0 // Default to the first if none is active
-                : completion.activeSuggestionIndex;
-            if (targetIndex < completion.suggestions.length) {
-              completion.handleAutocomplete(targetIndex);
-              setExpandedSuggestionIndex(-1); // Reset expansion after selection
-            }
-          }
+          acceptActiveCompletionSuggestion();
           return true;
         }
       }
@@ -915,6 +967,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        if (
+          hasActiveToolConfirmation &&
+          (keyMatchers[Command.HISTORY_UP](key) ||
+            keyMatchers[Command.HISTORY_DOWN](key) ||
+            keyMatchers[Command.NAVIGATION_UP](key) ||
+            keyMatchers[Command.NAVIGATION_DOWN](key))
+        ) {
+          return true;
+        }
+
         // Pop all queued messages into input when pressing Up arrow at top of input
         if (
           !isAttachmentMode &&
@@ -928,11 +990,52 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {
-          inputHistory.navigateUp();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on first visual row → move cursor up one row
+          // 2. Else if cursor not at col 0 → snap to col 0 (no history change)
+          // 3. Else → navigate to older history; cursor lands at offset 0
+          const onFirstRow =
+            buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0;
+          if (!onFirstRow) {
+            buffer.move('up');
+            return true;
+          }
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (keyMatchers[Command.HISTORY_DOWN](key)) {
-          inputHistory.navigateDown();
+          // Two-step edge transition (matches Claude Code):
+          // 1. If not on last visual row → move cursor down one row
+          // 2. Else if cursor not at end of line → snap to end (no history change)
+          // 3. Else → navigate to newer history; cursor lands at end (setText default)
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const onLastRow = buffer.visualCursor[0] === lastRowIdx;
+          if (!onLastRow) {
+            buffer.move('down');
+            return true;
+          }
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
+          if (inputHistory.navigateDown()) {
+            return true;
+          }
+          if (hasAgents) {
+            setAgentTabBarFocused(true);
+            return true;
+          }
+          if (hasBgAgents) {
+            setBgPillFocused(true);
+            return true;
+          }
           return true;
         }
         // Handle arrow-up/down for history on single-line or at edges
@@ -941,7 +1044,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          inputHistory.navigateUp();
+          // Two-step edge transition: snap cursor to col 0 before triggering history
+          if (buffer.visualCursor[1] > 0) {
+            buffer.move('home');
+            return true;
+          }
+          if (inputHistory.navigateUp()) {
+            buffer.moveToOffset(0);
+          }
           return true;
         }
         if (
@@ -949,6 +1059,13 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             buffer.visualCursor[0] === buffer.allVisualLines.length - 1)
         ) {
+          // Two-step edge transition: snap cursor to end of line before triggering history
+          const lastRowIdx = buffer.allVisualLines.length - 1;
+          const lastRowLen = cpLen(buffer.allVisualLines[lastRowIdx] ?? '');
+          if (buffer.visualCursor[1] < lastRowLen) {
+            buffer.move('end');
+            return true;
+          }
           if (inputHistory.navigateDown()) {
             return true;
           }
@@ -1068,8 +1185,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // No placeholder matched — fall through to BaseTextInput's default backspace
       }
 
+      // Ctrl+U (clear-line) — reset export cycling state so a subsequent
+      // manual typing of "/export <fmt>" doesn't mistakenly show the
+      // persistent suggestion panel as if the user had cycled.
+      if (key.ctrl && key.name === 'u') {
+        exportCompletion.reset();
+      }
+
       // Ctrl+C with completion active — also reset completion state
       if (keyMatchers[Command.CLEAR_INPUT](key)) {
+        exportCompletion.reset();
         if (buffer.text.length > 0) {
           resetCompletionState();
         }
@@ -1090,6 +1215,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         followup.dismiss();
         onPromptSuggestionDismiss?.();
       }
+
+      if (
+        !key.ctrl &&
+        !key.meta &&
+        !key.paste &&
+        ((key.sequence && key.sequence.length === 1) ||
+          key.name === 'backspace' ||
+          key.name === 'delete')
+      ) {
+        exportCompletion.markNextTextChangeAsUserInput();
+      }
+      // NOTE: the former unconditional
+      //   `exportCompletion.reset();`
+      // at this fallthrough was removed — the phase-2 buffer-text guard above
+      // already prevents stale state from affecting non-/export input, and
+      // the blanket reset was wiping selection on cursor-only keys such as
+      // Home / End / Ctrl+A.
       return false;
     },
     [
@@ -1133,10 +1275,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       bgPillFocused,
       hasAgents,
       hasBgAgents,
+      hasActiveToolConfirmation,
       setAgentTabBarFocused,
       setBgPillFocused,
       followup,
       onPromptSuggestionDismiss,
+      exportCompletion,
     ],
   );
 
@@ -1153,7 +1297,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       const mapEntry = buf.visualToLogicalMap[absoluteVisualIndex];
       const [logicalLineIdx, logicalStartCol] = mapEntry;
       const logicalLine = buf.lines[logicalLineIdx] || '';
-      const tokens = parseInputForHighlighting(logicalLine, logicalLineIdx);
+      const tokens = parseInputForHighlighting(
+        logicalLine,
+        logicalLineIdx,
+        slashCommands,
+      );
 
       const visualStart = logicalStartCol;
       const visualEnd = logicalStartCol + cpLen(lineText);
@@ -1245,7 +1393,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       return <Text>{renderedLine}</Text>;
     },
-    [],
+    [slashCommands],
   );
 
   const getActiveCompletion = () => {
@@ -1255,7 +1403,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   };
 
   const activeCompletion = getActiveCompletion();
-  const shouldShowSuggestions = activeCompletion.showSuggestions;
+  const shouldUseExportSuggestions =
+    !commandSearchActive && !reverseSearchActive;
+  const suggestionDisplayProps =
+    shouldUseExportSuggestions && exportCompletion.suggestionDisplayProps
+      ? exportCompletion.suggestionDisplayProps
+      : {
+          suggestions: activeCompletion.suggestions,
+          activeIndex: activeCompletion.activeSuggestionIndex,
+          isLoading: activeCompletion.isLoadingSuggestions,
+          scrollOffset: activeCompletion.visibleStartIndex,
+        };
+  const shouldShowSuggestions =
+    (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
+    activeCompletion.showSuggestions;
 
   // Notify parent about suggestions visibility changes
   useEffect(() => {
@@ -1354,11 +1515,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       {shouldShowSuggestions && (
         <Box marginLeft={2} marginRight={2}>
           <SuggestionsDisplay
-            suggestions={activeCompletion.suggestions}
-            activeIndex={activeCompletion.activeSuggestionIndex}
-            isLoading={activeCompletion.isLoadingSuggestions}
+            suggestions={suggestionDisplayProps.suggestions}
+            activeIndex={suggestionDisplayProps.activeIndex}
+            isLoading={suggestionDisplayProps.isLoading}
             width={suggestionsWidth}
-            scrollOffset={activeCompletion.visibleStartIndex}
+            scrollOffset={suggestionDisplayProps.scrollOffset}
             userInput={buffer.text}
             mode={
               buffer.text.startsWith('/') &&

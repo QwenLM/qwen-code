@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
+import type { Conversation } from '../../services/conversationStore.js';
 import type { ImageAttachment } from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import {
@@ -21,6 +22,10 @@ import {
   parseExportSlashCommand,
   type SessionExportFormat,
 } from '../../services/sessionExportService.js';
+import {
+  DISCONTINUED_MESSAGES,
+  isDiscontinuedModel,
+} from '../utils/discontinuedModel.js';
 
 function formatExportSuccessMessage(
   formatLabel: string,
@@ -43,6 +48,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
   canHandle(messageType: string): boolean {
     return [
       'sendMessage',
+      'editMessage',
       'newQwenSession',
       'switchQwenSession',
       'getQwenSessions',
@@ -90,6 +96,33 @@ export class SessionMessageHandler extends BaseMessageHandler {
               }
             | undefined,
           data?.attachments as ImageAttachment[] | undefined,
+        );
+        break;
+
+      case 'editMessage':
+        await this.handleSendMessage(
+          (data?.text as string) || '',
+          data?.context as
+            | Array<{
+                type: string;
+                name: string;
+                value: string;
+                startLine?: number;
+                endLine?: number;
+              }>
+            | undefined,
+          data?.fileContext as
+            | {
+                fileName: string;
+                filePath: string;
+                startLine?: number;
+                endLine?: number;
+              }
+            | undefined,
+          data?.attachments as ImageAttachment[] | undefined,
+          typeof data?.targetTurnIndex === 'number'
+            ? data.targetTurnIndex
+            : undefined,
         );
         break;
 
@@ -197,6 +230,76 @@ export class SessionMessageHandler extends BaseMessageHandler {
    */
   resetStreamContent(): void {
     this.currentStreamContent = '';
+  }
+
+  private async captureConversationSnapshot(
+    conversationId: string | null,
+  ): Promise<Conversation | null> {
+    if (!conversationId) {
+      return null;
+    }
+
+    const conversation =
+      await this.conversationStore.getConversation(conversationId);
+    if (conversation) {
+      return {
+        ...conversation,
+        messages: conversation.messages.map((message) => ({ ...message })),
+      };
+    }
+
+    const getSessionMessages = (
+      this.agentManager as {
+        getSessionMessages?: (sessionId: string) => Promise<ChatMessage[]>;
+      }
+    ).getSessionMessages;
+    if (!getSessionMessages) {
+      return null;
+    }
+
+    const messages = await getSessionMessages.call(
+      this.agentManager,
+      conversationId,
+    );
+    if (messages.length === 0) {
+      return null;
+    }
+
+    const timestamps = messages.map((message) => message.timestamp);
+    const recoveredConversation: Conversation = {
+      id: conversationId,
+      title: messages.find((message) => message.role === 'user')?.content ?? '',
+      messages: messages.map((message) => ({ ...message })),
+      createdAt: Math.min(...timestamps),
+      updatedAt: Math.max(...timestamps),
+    };
+    await this.conversationStore.upsertConversation(recoveredConversation);
+
+    return recoveredConversation;
+  }
+
+  private async restoreConversationSnapshot(
+    snapshot: Conversation | null,
+  ): Promise<void> {
+    if (!snapshot) {
+      return;
+    }
+
+    const restored = await this.conversationStore.replaceMessages(
+      snapshot.id,
+      snapshot.messages,
+    );
+    if (!restored) {
+      console.warn(
+        '[SessionMessageHandler] Failed to restore conversation snapshot; conversation not found:',
+        snapshot.id,
+      );
+    }
+    this.updateCurrentConversationId(snapshot.id);
+    this.sendToWebView({
+      type: 'conversationLoaded',
+      data: snapshot,
+    });
   }
 
   /**
@@ -388,6 +491,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       endLine?: number;
     },
     attachments?: ImageAttachment[],
+    editTargetTurnIndex?: number,
   ): Promise<void> {
     console.log('[SessionMessageHandler] handleSendMessage called with:', text);
     // Guard: do not process empty or whitespace-only messages.
@@ -458,7 +562,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
       try {
         const newConv = await this.conversationStore.createConversation();
-        this.currentConversationId = newConv.id;
+        this.updateCurrentConversationId(newConv.id);
         this.sendToWebView({
           type: 'conversationLoaded',
           data: newConv,
@@ -487,18 +591,144 @@ export class SessionMessageHandler extends BaseMessageHandler {
       return;
     }
 
+    let editRestoreSnapshot: Conversation | null = null;
+    let editStoreMutationApplied = false;
+    let editAcpMutationApplied = false;
+    let editAcpHistorySnapshot: unknown[] | null = null;
+
+    if (editTargetTurnIndex !== undefined) {
+      if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
+        const errorMsg = 'Invalid message edit target.';
+        console.error('[SessionMessageHandler]', errorMsg, editTargetTurnIndex);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!this.agentManager.isConnected) {
+        await this.promptAuth(
+          'You need to configure your provider to use Qwen Code.',
+        );
+        return;
+      }
+
+      if (!this.agentManager.currentSessionId) {
+        try {
+          const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+          const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
+          await this.agentManager.createNewSession(workingDir);
+        } catch (createErr) {
+          console.error(
+            '[SessionMessageHandler] Failed to create session before editing message:',
+            createErr,
+          );
+          const errorMsg = this.getErrorMessage(createErr);
+          if (this.shouldPromptAuth(createErr)) {
+            await this.promptAuth(
+              'Your session has expired or is invalid. Please configure your provider to continue using Qwen Code.',
+            );
+            return;
+          }
+          vscode.window.showErrorMessage(
+            `Failed to create session: ${errorMsg}`,
+          );
+          return;
+        }
+      }
+
+      try {
+        editRestoreSnapshot = await this.captureConversationSnapshot(
+          this.currentConversationId,
+        );
+      } catch (error) {
+        console.error(
+          '[SessionMessageHandler] Failed to capture edit restore snapshot:',
+          error,
+        );
+        const errorMsg = this.getErrorMessage(error);
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+
+      if (!editRestoreSnapshot) {
+        console.warn(
+          '[SessionMessageHandler] Local conversation snapshot missing before edit; continuing with ACP rewind only.',
+        );
+      }
+
+      try {
+        if (editRestoreSnapshot) {
+          const truncated = await this.conversationStore.truncateFromUserTurn(
+            this.currentConversationId,
+            editTargetTurnIndex,
+          );
+          if (!truncated) {
+            throw new Error('Conversation not found for edit target.');
+          }
+          editStoreMutationApplied = true;
+        }
+
+        const rewindResult =
+          await this.agentManager.rewindSession(editTargetTurnIndex);
+        editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
+        editAcpMutationApplied = true;
+
+        this.sendToWebView({
+          type: 'conversationRewound',
+          data: { targetTurnIndex: editTargetTurnIndex },
+        });
+      } catch (error) {
+        if (editAcpMutationApplied && editAcpHistorySnapshot) {
+          try {
+            await this.agentManager.restoreSessionHistory(
+              editAcpHistorySnapshot,
+            );
+          } catch (restoreError) {
+            console.warn(
+              '[SessionMessageHandler] Failed to restore ACP history after rewind failure:',
+              restoreError,
+            );
+          }
+        }
+        if (editStoreMutationApplied) {
+          await this.restoreConversationSnapshot(editRestoreSnapshot);
+        }
+        const errorMsg = this.getErrorMessage(error);
+        console.error(
+          '[SessionMessageHandler] Failed to rewind session:',
+          error,
+        );
+        vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+        this.sendToWebView({
+          type: 'error',
+          data: { message: errorMsg },
+        });
+        return;
+      }
+    }
+
     // Check if this is the first message
     let isFirstMessage = false;
-    try {
-      const conversation = await this.conversationStore.getConversation(
-        this.currentConversationId,
-      );
-      isFirstMessage = !conversation || conversation.messages.length === 0;
-    } catch (error) {
-      console.error(
-        '[SessionMessageHandler] Failed to check conversation:',
-        error,
-      );
+    if (editTargetTurnIndex !== undefined) {
+      isFirstMessage = editTargetTurnIndex === 0;
+    } else {
+      try {
+        const conversation = await this.conversationStore.getConversation(
+          this.currentConversationId,
+        );
+        isFirstMessage = !conversation || conversation.messages.length === 0;
+      } catch (error) {
+        console.error(
+          '[SessionMessageHandler] Failed to check conversation:',
+          error,
+        );
+      }
     }
 
     // Generate title for first message, but only if it hasn't been set yet
@@ -520,10 +750,40 @@ export class SessionMessageHandler extends BaseMessageHandler {
       timestamp: Date.now(),
     };
 
-    await this.conversationStore.addMessage(
-      this.currentConversationId,
-      userMessage,
-    );
+    try {
+      await this.conversationStore.addMessage(
+        this.currentConversationId,
+        userMessage,
+      );
+    } catch (error) {
+      console.error(
+        '[SessionMessageHandler] Failed to save user message:',
+        error,
+      );
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          console.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after user message save failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
+
+      const errorMsg = this.getErrorMessage(error);
+      vscode.window.showErrorMessage(`Failed to edit message: ${errorMsg}`);
+      this.sendToWebView({
+        type: 'error',
+        data: { message: errorMsg },
+      });
+      return;
+    }
 
     this.sendToWebView({
       type: 'message',
@@ -611,7 +871,22 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // After first message, sync ACP session ID to webview for session list highlighting
       const acpSessionId = this.agentManager.currentSessionId;
       if (acpSessionId && acpSessionId !== this.currentConversationId) {
-        this.currentConversationId = acpSessionId;
+        const previousConversationId = this.currentConversationId;
+        if (previousConversationId) {
+          const renamed = await this.conversationStore.renameConversationId(
+            previousConversationId,
+            acpSessionId,
+          );
+          if (!renamed) {
+            console.warn(
+              '[SessionMessageHandler] Failed to align conversation store with ACP session id:',
+              previousConversationId,
+              acpSessionId,
+            );
+            return;
+          }
+        }
+        this.updateCurrentConversationId(acpSessionId);
         this.sendToWebView({
           type: 'sessionTitleUpdated',
           data: {
@@ -624,6 +899,21 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
     } catch (error) {
       console.error('[SessionMessageHandler] Error sending message:', error);
+
+      if (editAcpMutationApplied && editAcpHistorySnapshot) {
+        try {
+          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+        } catch (restoreError) {
+          console.warn(
+            '[SessionMessageHandler] Failed to restore ACP history after send failure:',
+            restoreError,
+          );
+        }
+      }
+
+      if (editStoreMutationApplied) {
+        await this.restoreConversationSnapshot(editRestoreSnapshot);
+      }
 
       const err = error as unknown as Error;
       // Safely convert error to string
@@ -719,7 +1009,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
-      this.currentConversationId = null;
+      this.updateCurrentConversationId(null);
 
       this.sendToWebView({
         type: 'conversationCleared',
@@ -774,7 +1064,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           // Show messages from local cache only
           const messages =
             await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
@@ -819,7 +1109,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Try to load session via ACP (now we should be connected)
       try {
         // Set current id and clear UI first so replayed updates append afterwards
-        this.currentConversationId = sessionId;
+        this.updateCurrentConversationId(sessionId);
         this.sendToWebView({
           type: 'qwenSessionSwitched',
           data: { sessionId, messages: [], session: sessionDetails },
@@ -884,7 +1174,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
             // to the new ACP id here would desync the backend from the webview
             // and cause rename/delete/title-update flows to target the wrong
             // session during the fallback window.
-            this.currentConversationId = sessionId;
+            this.updateCurrentConversationId(sessionId);
 
             this.sendToWebView({
               type: 'qwenSessionSwitched',
@@ -935,7 +1225,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           }
         } else {
           // Offline view only
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages, session: sessionDetails },
@@ -1060,7 +1350,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         if (choice === 'offline') {
           const messages =
             await this.agentManager.getSessionMessages(sessionId);
-          this.currentConversationId = sessionId;
+          this.updateCurrentConversationId(sessionId);
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
@@ -1077,7 +1367,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Try ACP load first
       try {
         // Pre-clear UI so replayed updates append afterwards
-        this.currentConversationId = sessionId;
+        this.updateCurrentConversationId(sessionId);
         this.sendToWebView({
           type: 'qwenSessionSwitched',
           data: { sessionId, messages: [] },
@@ -1256,6 +1546,21 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const modelId = data?.modelId;
       if (!modelId) {
         throw new Error('Model ID is required');
+      }
+      // Defensive guard: refuse non-runtime Qwen OAuth models in case the UI
+      // is bypassed (programmatic call, stale webview, restored session).
+      if (isDiscontinuedModel(modelId)) {
+        console.warn(
+          '[SessionMessageHandler] Rejected discontinued model',
+          modelId,
+        );
+        const message = `Failed to switch model: ${DISCONTINUED_MESSAGES.blockedError}`;
+        vscode.window.showErrorMessage(message);
+        this.sendToWebView({
+          type: 'error',
+          data: { message },
+        });
+        return;
       }
       await this.agentManager.setModelFromUi(modelId);
       void vscode.window.showInformationMessage(

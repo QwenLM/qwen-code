@@ -959,7 +959,7 @@ export function recordMemoryDreamMetrics(
   durationMs: number,
   attrs: {
     trigger: 'auto' | 'manual';
-    status: 'updated' | 'noop' | 'failed';
+    status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
   },
 ): void {

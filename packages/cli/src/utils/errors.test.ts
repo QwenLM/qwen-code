@@ -12,6 +12,7 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import {
+  AlreadyReportedError,
   _resetExitLatchForTest,
   getErrorMessage,
   handleError,
@@ -203,6 +204,22 @@ describe('errors', () => {
           'API Error: String error',
         );
       });
+
+      it('does not reformat or reprint AlreadyReportedError', async () => {
+        // The non-interactive runner formats and prints the API error
+        // itself, then throws AlreadyReportedError as a marker. handleError
+        // must propagate that throw without producing a second stderr line
+        // (the bug this fix targets) or running parseAndFormatApiError on
+        // the already-formatted message (which would yield
+        // "[API Error: [API Error: ...]]").
+        const reported = new AlreadyReportedError(
+          '[API Error: 402 Model X is not available for billing.]',
+        );
+
+        await expect(handleError(reported, mockConfig)).rejects.toBe(reported);
+
+        expect(mockWriteStderrLine).not.toHaveBeenCalled();
+      });
     });
 
     describe('in JSON mode', () => {
@@ -226,6 +243,33 @@ describe('errors', () => {
                 type: 'Error',
                 message: 'Test error',
                 code: 1,
+              },
+            },
+            null,
+            2,
+          ),
+        );
+      });
+
+      it('does not reformat or reprint AlreadyReportedError in JSON mode', async () => {
+        const reported = new AlreadyReportedError(
+          '[API Error: 402 Model X is not available for billing.]',
+          42,
+        );
+
+        await expect(handleError(reported, mockConfig)).rejects.toThrow(
+          'process.exit called with code: 42',
+        );
+
+        expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+        expect(mockWriteStderrLine).toHaveBeenCalledWith(
+          JSON.stringify(
+            {
+              error: {
+                type: 'AlreadyReportedError',
+                message:
+                  '[API Error: 402 Model X is not available for billing.]',
+                code: 42,
               },
             },
             null,
@@ -679,6 +723,53 @@ describe('errors', () => {
             2,
           ),
         );
+      });
+    });
+
+    describe('with --json-schema active', () => {
+      // When the structured-output run hits maxSessionTurns the generic
+      // "increase maxSessionTurns" message can be misleading: the real
+      // cause is usually that structured_output never got called (denied
+      // by permissions, unsatisfiable schema, prompt didn't instruct the
+      // model). Append a contextual hint so users debugging a stuck
+      // --json-schema run know where to look.
+      beforeEach(() => {
+        (mockConfig as unknown as { getJsonSchema: Mock }).getJsonSchema = vi
+          .fn()
+          .mockReturnValue({ type: 'object' });
+      });
+
+      it('appends a json-schema-specific hint in text mode', async () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.TEXT);
+
+        await expect(handleMaxTurnsExceededError(mockConfig)).rejects.toThrow(
+          'process.exit called with code: 53',
+        );
+
+        const written = mockWriteStderrLine.mock.calls[0]?.[0] as string;
+        expect(written).toMatch(/Reached max session turns for this session\./);
+        expect(written).toMatch(/--json-schema is active/);
+        expect(written).toMatch(/permissions\.deny.*--exclude-tools/);
+      });
+
+      it('appends a json-schema-specific hint inside the JSON error message', async () => {
+        (
+          mockConfig.getOutputFormat as ReturnType<typeof vi.fn>
+        ).mockReturnValue(OutputFormat.JSON);
+
+        await expect(handleMaxTurnsExceededError(mockConfig)).rejects.toThrow(
+          'process.exit called with code: 53',
+        );
+
+        const written = mockWriteStderrLine.mock.calls[0]?.[0] as string;
+        const parsed = JSON.parse(written) as {
+          error: { type: string; message: string; code: number };
+        };
+        expect(parsed.error.type).toBe('FatalTurnLimitedError');
+        expect(parsed.error.code).toBe(53);
+        expect(parsed.error.message).toMatch(/--json-schema is active/);
       });
     });
   });

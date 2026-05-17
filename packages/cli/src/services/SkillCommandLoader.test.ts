@@ -100,6 +100,7 @@ describe('SkillCommandLoader', () => {
     expect(cmd.kind).toBe(CommandKind.SKILL);
     expect(cmd.source).toBe('skill-dir-command');
     expect(cmd.sourceLabel).toBe('User');
+    expect(cmd.sourceDetail).toBe('user');
     expect(cmd.modelInvocable).toBe(true);
   });
 
@@ -114,6 +115,7 @@ describe('SkillCommandLoader', () => {
     const commands = await loader.loadCommands(signal);
 
     expect(commands[0].sourceLabel).toBe('Project');
+    expect(commands[0].sourceDetail).toBe('project');
     expect(commands[0].source).toBe('skill-dir-command');
     expect(commands[0].modelInvocable).toBe(true);
   });
@@ -182,6 +184,7 @@ describe('SkillCommandLoader', () => {
       expect(commands[0].modelInvocable).toBe(true);
       expect(commands[0].source).toBe('plugin-command');
       expect(commands[0].sourceLabel).toBe('Extension: superpowers-lab');
+      expect(commands[0].sourceDetail).toBe('extension');
     });
 
     it('should be modelInvocable when whenToUse is present', async () => {
@@ -249,6 +252,7 @@ describe('SkillCommandLoader', () => {
       const commands = await loader.loadCommands(signal);
 
       expect(commands[0].sourceLabel).toBe('Extension: unknown');
+      expect(commands[0].sourceDetail).toBe('extension');
     });
   });
 

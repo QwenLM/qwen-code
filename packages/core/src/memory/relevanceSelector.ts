@@ -58,6 +58,7 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
   docs: ScannedAutoMemoryDocument[],
   limit: number,
   recentTools: readonly string[] = [],
+  callerAbortSignal?: AbortSignal,
 ): Promise<ScannedAutoMemoryDocument[]> {
   if (docs.length === 0 || limit <= 0 || query.trim().length === 0) {
     return [];
@@ -90,7 +91,12 @@ export async function selectRelevantAutoMemoryDocumentsByModel(
     purpose: 'auto-memory-recall',
     contents,
     schema: RESPONSE_SCHEMA,
-    abortSignal: AbortSignal.timeout(5_000),
+    abortSignal: callerAbortSignal
+      ? AbortSignal.any([AbortSignal.timeout(1_000), callerAbortSignal])
+      : AbortSignal.timeout(1_000),
+
+    // Uses runSideQuery's default side-query model policy: fast model first,
+    // then main session model when no fast model is configured.
     systemInstruction: SELECT_MEMORIES_SYSTEM_PROMPT,
     config: {
       temperature: 0,

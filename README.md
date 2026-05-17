@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 [![License](https://img.shields.io/github/license/QwenLM/qwen-code.svg)](./LICENSE)
-[![Node.js Version](https://img.shields.io/badge/node-%3E%3D20.0.0-brightgreen.svg)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D22.0.0-brightgreen.svg)](https://nodejs.org/)
 [![Downloads](https://img.shields.io/npm/dm/@qwen-code/qwen-code.svg)](https://www.npmjs.com/package/@qwen-code/qwen-code)
 
 <a href="https://trendshift.io/repositories/15287" target="_blank"><img src="https://trendshift.io/api/badge/repositories/15287" alt="QwenLM%2Fqwen-code | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
@@ -63,7 +63,7 @@ powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou
 
 #### Prerequisites
 
-Make sure you have Node.js 20 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
+Make sure you have Node.js 22 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
 
 #### NPM
 
@@ -353,6 +353,9 @@ Use the `/model` command at any time to switch between all configured models.
 
 You can also run models locally — no API key or cloud account needed. This is not an authentication method; instead, configure your local model endpoint in `~/.qwen/settings.json` using the `modelProviders` field.
 
+Set `generationConfig.contextWindowSize` inside the matching provider entry
+and adjust it to the context length configured on your local server.
+
 <details>
 <summary>Ollama setup</summary>
 
@@ -368,7 +371,10 @@ You can also run models locally — no API key or cloud account needed. This is 
         "id": "qwen3:32b",
         "name": "Qwen3 32B (Ollama)",
         "baseUrl": "http://localhost:11434/v1",
-        "description": "Qwen3 32B running locally via Ollama"
+        "description": "Qwen3 32B running locally via Ollama",
+        "generationConfig": {
+          "contextWindowSize": 131072
+        }
       }
     ]
   },
@@ -400,7 +406,10 @@ You can also run models locally — no API key or cloud account needed. This is 
         "id": "Qwen/Qwen3-32B",
         "name": "Qwen3 32B (vLLM)",
         "baseUrl": "http://localhost:8000/v1",
-        "description": "Qwen3 32B running locally via vLLM"
+        "description": "Qwen3 32B running locally via vLLM",
+        "generationConfig": {
+          "contextWindowSize": 131072
+        }
       }
     ]
   },
@@ -419,12 +428,13 @@ You can also run models locally — no API key or cloud account needed. This is 
 
 ## Usage
 
-As an open-source terminal agent, you can use Qwen Code in four primary ways:
+As an open-source terminal agent, you can use Qwen Code in five primary ways:
 
 1. Interactive mode (terminal UI)
 2. Headless mode (scripts, CI)
 3. IDE integration (VS Code, Zed)
 4. SDKs (TypeScript, Python, Java)
+5. Daemon mode — `qwen serve` exposes ACP over HTTP+SSE so multiple clients share one agent (experimental)
 
 #### Interactive mode
 
@@ -451,6 +461,20 @@ Use Qwen Code inside your editor (VS Code, Zed, and JetBrains IDEs):
 - [Use in VS Code](https://qwenlm.github.io/qwen-code-docs/en/users/integration-vscode/)
 - [Use in Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/)
 - [Use in JetBrains IDEs](https://qwenlm.github.io/qwen-code-docs/en/users/integration-jetbrains/)
+
+#### Daemon mode (`qwen serve`, experimental)
+
+```bash
+cd your-project/
+qwen serve
+# → qwen serve listening on http://127.0.0.1:4170 (mode=http-bridge)
+```
+
+Run Qwen Code as a local HTTP daemon so IDE plugins, web UIs, CI scripts and custom CLIs all share **one** agent session over HTTP+SSE — instead of each spawning their own subprocess. Loopback bind has no auth by default (set `QWEN_SERVER_TOKEN` to enable bearer auth even on loopback); remote binds (`--hostname 0.0.0.0`) **require** a token — boot refuses without one. See:
+
+- [Daemon mode user guide](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve)
+- [HTTP protocol reference](https://qwenlm.github.io/qwen-code-docs/en/developers/qwen-serve-protocol)
+- [DaemonClient TypeScript quickstart](https://qwenlm.github.io/qwen-code-docs/en/developers/examples/daemon-client-quickstart)
 
 #### SDKs
 

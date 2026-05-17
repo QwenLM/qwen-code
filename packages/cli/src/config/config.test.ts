@@ -21,6 +21,15 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockSessionServiceInstance = vi.hoisted(() => ({
+  loadLastSession: vi.fn(),
+  loadSession: vi.fn(),
+  forkSession: vi.fn(),
+  sessionExists: vi.fn(),
+}));
+const mockSessionServiceCtor = vi.hoisted(() =>
+  vi.fn(() => mockSessionServiceInstance),
+);
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
@@ -44,6 +53,22 @@ const createNativeLspServiceInstance = () => ({
   workspaceDiagnostics: vi.fn().mockResolvedValue([]),
   codeActions: vi.fn().mockResolvedValue([]),
   applyWorkspaceEdit: vi.fn().mockResolvedValue(false),
+  getStatusSnapshot: vi.fn().mockReturnValue({
+    enabled: true,
+    configuredServers: 1,
+    readyServers: 1,
+    failedServers: 0,
+    inProgressServers: 0,
+    notStartedServers: 0,
+    servers: [
+      {
+        name: 'typescript',
+        status: 'READY',
+        languages: ['typescript'],
+        transport: 'stdio',
+      },
+    ],
+  }),
 });
 
 vi.mock('./trustedFolders.js', () => ({
@@ -139,6 +164,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     NativeLspService: vi
       .fn()
       .mockImplementation(() => createNativeLspServiceInstance()),
+    SessionService: mockSessionServiceCtor,
     SkillManager: SkillManagerMock,
     IdeClient: {
       getInstance: vi.fn().mockResolvedValue({
@@ -254,6 +280,123 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('rejects --json-schema combined with --acp', async () => {
+    // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
+    // the synthetic structured_output terminal contract. The yargs check
+    // must reject the combination at parse time so users get an actionable
+    // error instead of silently watching the run never terminate.
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --experimental-acp (deprecated alias)', async () => {
+    // --experimental-acp is the deprecated alias; the same mutual-
+    // exclusion logic must apply or users get the silent-no-terminate
+    // behaviour the --acp check was added to prevent.
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-acp',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('--json-schema cannot be used with --acp'),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --prompt-interactive (-i)', async () => {
+    // The interactive flow doesn't honour the synthetic-tool terminal
+    // contract — `structured_output` would just print "accepted" and
+    // leave the chat alive. The yargs check must reject this at parse
+    // time so users get an actionable message instead of a silently
+    // misbehaving run.
+    process.argv = [
+      'node',
+      'script.js',
+      '-i',
+      'do work then submit',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'structured output only terminates the non-interactive flow',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
+  it('rejects --json-schema combined with --input-format stream-json', async () => {
+    // The "first valid structured_output call ends the session"
+    // contract is incompatible with the long-lived stream-json input
+    // protocol. Also load-bearing: gemini.tsx's
+    // `process.exit(process.exitCode ?? 0)` plumbing in the stream-json
+    // branch explicitly relies on this rejection holding. Pair with
+    // --output-format stream-json because input/output formats must
+    // match (a separate yargs check fires first otherwise).
+    process.argv = [
+      'node',
+      'script.js',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('first structured_output call ends the session'),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should parse --system-prompt', async () => {
     process.argv = [
       'node',
@@ -293,6 +436,46 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '-c'];
     const argv = await parseArguments();
     expect(argv.continue).toBe(true);
+  });
+
+  it('should parse --fork-session with --resume', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--resume',
+      '123e4567-e89b-12d3-a456-426614174000',
+      '--fork-session',
+    ];
+    const argv = await parseArguments();
+    expect(argv.resume).toBe('123e4567-e89b-12d3-a456-426614174000');
+    expect(argv.forkSession).toBe(true);
+  });
+
+  it('should parse --fork-session with the --resume picker form', async () => {
+    process.argv = ['node', 'script.js', '--resume', '--fork-session'];
+    const argv = await parseArguments();
+    // Empty string is the existing yargs shape for picker form: --resume
+    // without an explicit session ID.
+    expect(argv.resume).toBe('');
+    expect(argv.forkSession).toBe(true);
+  });
+
+  it('should reject --fork-session without --resume or --continue', async () => {
+    process.argv = ['node', 'script.js', '--fork-session'];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--fork-session must be used with --resume or --continue',
+      ),
+    );
+
+    mockExit.mockRestore();
   });
 
   it('should convert positional query argument to prompt by default', async () => {
@@ -503,6 +686,80 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
+    // True interactive invocation with no prompt anywhere → fail fast.
+    process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = true;
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '--json-schema only applies to non-interactive mode',
+        ),
+      );
+    } finally {
+      mockExit.mockRestore();
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it('should accept --json-schema with no -p / positional when stdin is piped', async () => {
+    // `echo "..." | qwen --json-schema ...` — input arrives via the
+    // pipe, so the prompt-presence check must not block the run.
+    process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
+
+    const originalIsTTY = process.stdin.isTTY;
+    process.stdin.isTTY = false;
+    try {
+      const argv = await parseArguments();
+      expect(argv.jsonSchema).toBe('{"type":"object"}');
+      expect(argv.prompt).toBeUndefined();
+    } finally {
+      process.stdin.isTTY = originalIsTTY;
+    }
+  });
+
+  it('should throw when --json-schema is combined with --input-format stream-json', async () => {
+    // stream-json input runs through runNonInteractiveStreamJson which
+    // doesn't honor the structured-output single-shot termination
+    // contract — reject the combination at parse time so the user sees
+    // the mismatch immediately.
+    process.argv = [
+      'node',
+      'script.js',
+      '-p',
+      'hi',
+      '--output-format',
+      'stream-json',
+      '--input-format',
+      'stream-json',
+      '--json-schema',
+      '{"type":"object"}',
+    ];
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    mockWriteStderrLine.mockClear();
+
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '--json-schema cannot be used with --input-format stream-json',
+      ),
+    );
+
+    mockExit.mockRestore();
+  });
+
   it('should parse stream-json formats and include-partial-messages flag', async () => {
     process.argv = [
       'node',
@@ -596,6 +853,14 @@ describe('loadCliConfig', () => {
     nativeLspServiceMock.mockImplementation(
       () => createNativeLspServiceInstance() as unknown as NativeLspService,
     );
+    mockSessionServiceCtor.mockImplementation(() => mockSessionServiceInstance);
+    mockSessionServiceInstance.loadLastSession.mockResolvedValue(undefined);
+    mockSessionServiceInstance.loadSession.mockResolvedValue(undefined);
+    mockSessionServiceInstance.forkSession.mockResolvedValue({
+      filePath: '/mock/fork.jsonl',
+      copiedCount: 1,
+    });
+    mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
   });
@@ -662,6 +927,117 @@ describe('loadCliConfig', () => {
     expect(config.getIncludePartialMessages()).toBe(true);
   });
 
+  it('should fork and load a new session when --resume is combined with --fork-session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const sourceData = {
+      conversation: { sessionId: sourceSessionId, messages: [] },
+      uiHistory: [],
+    };
+    const forkedData = {
+      conversation: { sessionId: 'forked-session-id', messages: [] },
+      uiHistory: [],
+    };
+    mockSessionServiceInstance.loadSession.mockImplementation(
+      async (sessionId: string) => {
+        if (sessionId === sourceSessionId) return sourceData;
+        return forkedData;
+      },
+    );
+
+    const config = await loadCliConfig({}, {
+      resume: sourceSessionId,
+      forkSession: true,
+    } as CliArgs);
+
+    expect(mockSessionServiceInstance.forkSession).toHaveBeenCalledWith(
+      sourceSessionId,
+      config.getSessionId(),
+    );
+    expect(config.getSessionId()).toBe(
+      mockSessionServiceInstance.forkSession.mock.calls[0]?.[1],
+    );
+    expect(mockSessionServiceInstance.loadSession).toHaveBeenCalledWith(
+      config.getSessionId(),
+    );
+  });
+
+  it('should explain when --fork-session fails to copy the source session', async () => {
+    const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const sourceData = {
+      conversation: { sessionId: sourceSessionId, messages: [] },
+      uiHistory: [],
+    };
+    mockSessionServiceInstance.loadSession.mockResolvedValue(sourceData);
+    mockSessionServiceInstance.forkSession.mockRejectedValue(
+      new Error('source session belongs to another project'),
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(
+      loadCliConfig({}, {
+        resume: sourceSessionId,
+        forkSession: true,
+      } as CliArgs),
+    ).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      `Failed to fork session ${sourceSessionId}: source session belongs to another project`,
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should explain when --continue --fork-session has no saved session to fork', async () => {
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(
+      loadCliConfig({}, {
+        continue: true,
+        forkSession: true,
+      } as CliArgs),
+    ).rejects.toThrow('process.exit called');
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Cannot use --fork-session with --continue: no saved session found to fork.',
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should use internal sandbox session ID without treating it as a new session', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    vi.stubEnv('SANDBOX', 'sandbox-exec');
+    process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getSessionId()).toBe(sessionId);
+    expect(mockSessionServiceInstance.sessionExists).not.toHaveBeenCalled();
+  });
+
+  it('should reject direct use of the internal sandbox session ID flag', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    process.argv = ['node', 'script.js', '--sandbox-session-id', sessionId];
+    const argv = await parseArguments();
+
+    await expect(loadCliConfig({}, argv)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '--sandbox-session-id is for internal sandbox use only.',
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+    expect(mockSessionServiceInstance.sessionExists).not.toHaveBeenCalled();
+  });
+
   it('should reset context filenames to defaults when context.fileName is not configured', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -705,6 +1081,28 @@ describe('loadCliConfig', () => {
     expect(lspInstance).toBeDefined();
     expect(lspInstance?.discoverAndPrepare).toHaveBeenCalledTimes(1);
     expect(lspInstance?.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('should collect LSP status snapshots during debug-mode startup', async () => {
+    process.argv = ['node', 'script.js', '--experimental-lsp', '--debug'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    await loadCliConfig(settings, argv);
+
+    const lspInstance = getLastLspInstance();
+    expect(lspInstance?.getStatusSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('should not collect LSP status snapshots during normal startup', async () => {
+    process.argv = ['node', 'script.js', '--experimental-lsp'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+
+    await loadCliConfig(settings, argv);
+
+    const lspInstance = getLastLspInstance();
+    expect(lspInstance?.getStatusSnapshot).not.toHaveBeenCalled();
   });
 
   describe('Proxy configuration', () => {
@@ -1005,6 +1403,24 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(true);
   });
 
+  it('should use includeSensitiveSpanAttributes from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: true },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should default includeSensitiveSpanAttributes to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
+  });
+
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1059,6 +1475,7 @@ describe('loadCliConfig telemetry', () => {
 describe('mergeExcludeTools', () => {
   const defaultExcludes = [
     ToolNames.SHELL,
+    ToolNames.MONITOR,
     ToolNames.EDIT,
     ToolNames.WRITE_FILE,
   ];
@@ -1100,6 +1517,63 @@ describe('mergeExcludeTools', () => {
     );
     expect(config.getPermissionsDeny()).toHaveLength(2);
   });
+
+  it('should add tool_search to deny list when tools.toolSearch.enabled is false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: false } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v4 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-v3 models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v3'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should auto-disable tool_search for deepseek-chat models with provider prefix', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--model',
+      'openrouter/deepseek/deepseek-chat',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should not auto-disable tool_search for non-deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'qwen-max'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+  });
+
+  it('should respect explicit enabled:true override for deepseek models', async () => {
+    process.argv = ['node', 'script.js', '--model', 'deepseek-v4-flash'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { toolSearch: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getPermissionsDeny()).not.toContain('tool_search');
+  });
 });
 
 describe('Approval mode tool exclusion logic', () => {
@@ -1125,6 +1599,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1144,6 +1619,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1164,6 +1640,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1180,6 +1657,43 @@ describe('Approval mode tool exclusion logic', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.allowed', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should honor monitor aliases in tools.allowed for non-interactive exclusions', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: ['Monitor', 'Shell(git status)'],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.SHELL);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
@@ -1198,6 +1712,25 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
+    expect(excludedTools).toContain(ToolNames.EDIT);
+    expect(excludedTools).toContain(ToolNames.WRITE_FILE);
+  });
+
+  it('should not exclude monitor when explicitly allowed in tools.core', async () => {
+    process.argv = ['node', 'script.js', '-p', 'test'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.MONITOR],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).toContain(ToolNames.EDIT);
     expect(excludedTools).toContain(ToolNames.WRITE_FILE);
   });
@@ -1218,6 +1751,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain(ToolNames.SHELL);
+    expect(excludedTools).toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1238,6 +1772,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1251,6 +1786,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1276,6 +1812,7 @@ describe('Approval mode tool exclusion logic', () => {
 
       const excludedTools = config.getPermissionsDeny();
       expect(excludedTools).not.toContain(ToolNames.SHELL);
+      expect(excludedTools).not.toContain(ToolNames.MONITOR);
       expect(excludedTools).not.toContain(ToolNames.EDIT);
       expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
     }
@@ -1288,6 +1825,7 @@ describe('Approval mode tool exclusion logic', () => {
 
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.MONITOR);
     expect(excludedTools).not.toContain(ToolNames.EDIT);
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
   });
@@ -1308,6 +1846,7 @@ describe('Approval mode tool exclusion logic', () => {
     const excludedTools = config.getPermissionsDeny();
     expect(excludedTools).toContain('custom_tool'); // From settings
     expect(excludedTools).toContain(ToolNames.SHELL); // From approval mode
+    expect(excludedTools).toContain(ToolNames.MONITOR); // From approval mode
     expect(excludedTools).not.toContain(ToolNames.EDIT); // Should be allowed in auto-edit
     expect(excludedTools).not.toContain(ToolNames.WRITE_FILE); // Should be allowed in auto-edit
   });
@@ -2596,6 +3135,17 @@ describe('Telemetry configuration via environment variables', () => {
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
   });
 
+  it('should prioritize QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'true');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { includeSensitiveSpanAttributes: false },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {
     vi.stubEnv('QWEN_TELEMETRY_OUTFILE', '/gemini/env/telemetry.log');
     process.argv = ['node', 'script.js'];
@@ -2605,15 +3155,6 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryOutfile()).toBe('/gemini/env/telemetry.log');
-  });
-
-  it('should prioritize QWEN_TELEMETRY_USE_COLLECTOR over settings', async () => {
-    vi.stubEnv('QWEN_TELEMETRY_USE_COLLECTOR', 'true');
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments();
-    const settings: Settings = { telemetry: { useCollector: false } };
-    const config = await loadCliConfig(settings, argv, undefined, []);
-    expect(config.getTelemetryUseCollector()).toBe(true);
   });
 
   it('should use settings value when QWEN_TELEMETRY_ENABLED is not set', async () => {
@@ -2676,6 +3217,27 @@ describe('Telemetry configuration via environment variables', () => {
       [],
     );
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='1' as true", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', '1');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it("should treat QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES='false' as false", async () => {
+    vi.stubEnv('QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES', 'false');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { telemetry: { includeSensitiveSpanAttributes: true } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
   });
 });
 

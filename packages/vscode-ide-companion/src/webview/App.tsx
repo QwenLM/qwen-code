@@ -43,6 +43,8 @@ import {
   InsightProgressCard,
   ImageMessageRenderer,
   ImagePreview,
+  ZERO_WIDTH_SPACE,
+  CloseSmallIcon,
   // Layout components imported directly from webui
   EmptyState,
   ChatHeader,
@@ -74,15 +76,55 @@ import {
  * Memoized message list that only re-renders when messages or callbacks change,
  * not on every keystroke in the input field.
  */
-interface MessageListItem {
+export interface MessageListItem {
   type: 'message' | 'in-progress-tool-call' | 'completed-tool-call';
   data: TextMessage | ToolCallData;
   timestamp: number;
 }
 
+interface UserTurnCounter {
+  next: number;
+}
+
+const consumeUserTurnIndex = (
+  msg: TextMessage,
+  counter: UserTurnCounter,
+): number => {
+  if (typeof msg.turnIndex === 'number') {
+    counter.next = Math.max(counter.next, msg.turnIndex + 1);
+    return msg.turnIndex;
+  }
+
+  const fallback = counter.next;
+  counter.next += 1;
+  return fallback;
+};
+
+export const getLastUserTurnIndex = (
+  allMessages: MessageListItem[],
+): number | null => {
+  const counter: UserTurnCounter = { next: 0 };
+  let lastUserTurnIndex: number | null = null;
+
+  allMessages.forEach((item) => {
+    if (item.type !== 'message') {
+      return;
+    }
+
+    const msg = item.data as TextMessage;
+    if (msg.role === 'user') {
+      lastUserTurnIndex = consumeUserTurnIndex(msg, counter);
+    }
+  });
+
+  return lastUserTurnIndex;
+};
+
 interface MessageListProps {
   allMessages: MessageListItem[];
   onFileClick: (path: string) => void;
+  onEditUserMessage: (targetTurnIndex: number, content: string) => void;
+  canEditMessages: boolean;
   /**
    * After each render, this ref is updated with an array that maps
    * DOM child position → allMessages index, only for items that
@@ -92,8 +134,16 @@ interface MessageListProps {
 }
 
 const MessageList = React.memo<MessageListProps>(
-  ({ allMessages, onFileClick, childIndexMap }) => {
+  ({
+    allMessages,
+    onFileClick,
+    onEditUserMessage,
+    canEditMessages,
+    childIndexMap,
+  }) => {
     let imageIndex = 0;
+    const userTurnCounter: UserTurnCounter = { next: 0 };
+    const lastUserTurnIndex = getLastUserTurnIndex(allMessages);
 
     // Build child→allMessages index mapping: for each item that renders
     // a non-null element, record its allMessages index. This array's
@@ -107,6 +157,9 @@ const MessageList = React.memo<MessageListProps>(
           const msg = item.data as TextMessage;
 
           if (msg.kind === 'image' && msg.imagePath) {
+            if (msg.role === 'user') {
+              consumeUserTurnIndex(msg, userTurnCounter);
+            }
             imageIndex += 1;
             child = (
               <ImageMessageRenderer
@@ -129,12 +182,21 @@ const MessageList = React.memo<MessageListProps>(
           }
 
           if (msg.role === 'user') {
+            const targetTurnIndex = consumeUserTurnIndex(msg, userTurnCounter);
+            const canEditThisMessage =
+              canEditMessages && targetTurnIndex === lastUserTurnIndex;
             child = (
               <UserMessage
                 content={msg.content || ''}
                 timestamp={msg.timestamp || 0}
                 onFileClick={onFileClick}
                 fileContext={msg.fileContext}
+                onEdit={
+                  canEditThisMessage
+                    ? () =>
+                        onEditUserMessage(targetTurnIndex, msg.content || '')
+                    : undefined
+                }
               />
             );
             break;
@@ -177,7 +239,9 @@ const MessageList = React.memo<MessageListProps>(
       }
       // No wrapper div — message components render directly as children
       // of the scroll container, preserving the original CSS layout.
-      if (child == null) return null;
+      if (child == null) {
+        return null;
+      }
       mapping.push(index);
       return <React.Fragment key={`msg-${index}`}>{child}</React.Fragment>;
     });
@@ -213,7 +277,9 @@ function findMessageIndex(
   while (directChild && directChild.parentElement !== container) {
     directChild = directChild.parentElement;
   }
-  if (!directChild) return -1;
+  if (!directChild) {
+    return -1;
+  }
 
   // Find DOM child position among container's children
   const children = container.children;
@@ -237,6 +303,7 @@ export const App: React.FC = () => {
     completedToolCalls,
     handleToolCallUpdate,
     clearToolCalls,
+    rewindToolCallsToTimestamp,
   } = useToolCalls();
 
   // UI state
@@ -285,6 +352,9 @@ export const App: React.FC = () => {
   );
   const [thinkingEnabled, setThinkingEnabled] = useState(false);
   const [isComposing, setIsComposing] = useState(false);
+  const [editingMessage, setEditingMessage] = useState<{
+    targetTurnIndex: number;
+  } | null>(null);
   // When true, do NOT auto-attach the active editor file/selection to message context
   const [skipAutoActiveContext, setSkipAutoActiveContext] = useState(false);
 
@@ -468,11 +538,67 @@ export const App: React.FC = () => {
       },
     });
 
+  const setComposerText = useCallback(
+    (text: string) => {
+      setInputText(text);
+      const inputElement = inputFieldRef.current;
+      if (!inputElement) {
+        return;
+      }
+
+      inputElement.textContent = text || ZERO_WIDTH_SPACE;
+      inputElement.setAttribute(
+        'data-empty',
+        text.trim().length === 0 ? 'true' : 'false',
+      );
+      inputElement.focus();
+
+      requestAnimationFrame(() => {
+        const selection = window.getSelection();
+        if (!selection) {
+          return;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(inputElement);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      });
+    },
+    [setInputText],
+  );
+
+  const handleEditUserMessage = useCallback(
+    (targetTurnIndex: number, content: string) => {
+      if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
+        return;
+      }
+      clearImages();
+      setEditingMessage({ targetTurnIndex });
+      setComposerText(content);
+    },
+    [
+      clearImages,
+      messageHandling.isStreaming,
+      messageHandling.isWaitingForResponse,
+      setComposerText,
+    ],
+  );
+
+  const clearEditingMessage = useCallback(() => {
+    setEditingMessage(null);
+    setComposerText('');
+    clearImages();
+    fileContext.clearFileReferences();
+  }, [clearImages, fileContext, setComposerText]);
+
   const { handleSubmit: submitMessage } = useMessageSubmit({
     inputText,
     setInputText,
     attachedImages,
     clearImages,
+    editTargetTurnIndex: editingMessage?.targetTurnIndex ?? null,
+    onSubmitted: () => setEditingMessage(null),
     messageHandling,
     fileContext,
     skipAutoActiveContext,
@@ -481,6 +607,42 @@ export const App: React.FC = () => {
     isStreaming: messageHandling.isStreaming,
     isWaitingForResponse: messageHandling.isWaitingForResponse,
   });
+
+  useEffect(() => {
+    const clearEditingOnRestoreOrFailure = (event: MessageEvent) => {
+      const message = event.data;
+      if (
+        message?.type === 'conversationLoaded' ||
+        message?.type === 'qwenSessionSwitched' ||
+        message?.type === 'conversationCleared'
+      ) {
+        setEditingMessage(null);
+        return;
+      }
+
+      if (message?.type === 'streamEnd') {
+        const reason = String(message.data?.reason ?? '').toLowerCase();
+        if (
+          reason === 'user_cancelled' ||
+          reason === 'cancelled' ||
+          reason === 'timeout' ||
+          reason === 'error' ||
+          reason === 'session_expired'
+        ) {
+          setEditingMessage(null);
+        }
+        return;
+      }
+
+      if (message?.type === 'error' || message?.type === 'sessionExpired') {
+        setEditingMessage(null);
+      }
+    };
+
+    window.addEventListener('message', clearEditingOnRestoreOrFailure);
+    return () =>
+      window.removeEventListener('message', clearEditingOnRestoreOrFailure);
+  }, []);
 
   const canSubmit = shouldSendMessage({
     inputText,
@@ -492,6 +654,15 @@ export const App: React.FC = () => {
   // Handle cancel/stop from the input bar
   // Emit a cancel to the extension and immediately reflect interruption locally.
   const handleCancel = useCallback(() => {
+    if (
+      editingMessage &&
+      !messageHandling.isStreaming &&
+      !messageHandling.isWaitingForResponse
+    ) {
+      clearEditingMessage();
+      return;
+    }
+
     if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
       // End streaming state and add an 'Interrupted' line.
       // IMPORTANT: Do NOT clear isWaitingForResponse here — let the
@@ -517,7 +688,7 @@ export const App: React.FC = () => {
       type: 'cancelStreaming',
       data: {},
     });
-  }, [messageHandling, vscode]);
+  }, [clearEditingMessage, editingMessage, messageHandling, vscode]);
 
   // Message handling
   useWebViewMessages({
@@ -526,6 +697,7 @@ export const App: React.FC = () => {
     messageHandling,
     handleToolCallUpdate,
     clearToolCalls,
+    rewindToolCallsToTimestamp,
     setPlanEntries,
     handlePermissionRequest: setPermissionRequest,
     handleAskUserQuestion: setAskUserQuestionRequest,
@@ -1211,7 +1383,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const message = event.data;
-      if (message?.type !== 'copyCommand') return;
+      if (message?.type !== 'copyCommand') {
+        return;
+      }
 
       const { action } = message.data as { action: string };
 
@@ -1242,7 +1416,9 @@ export const App: React.FC = () => {
               msg.kind === 'image' && msg.imagePath
                 ? `![image](${msg.imagePath})`
                 : (msg.content || '').trim();
-            if (!content) continue;
+            if (!content) {
+              continue;
+            }
             if (msg.role === 'user') {
               parts.push(`**User:** ${content}`);
             } else if (msg.role === 'thinking') {
@@ -1255,7 +1431,9 @@ export const App: React.FC = () => {
             item.type === 'in-progress-tool-call'
           ) {
             const tc = item.data as ToolCallData;
-            if (!shouldShowToolCall(tc.kind)) continue;
+            if (!shouldShowToolCall(tc.kind)) {
+              continue;
+            }
             const text = formatToolCallForCopy(tc, true);
             if (text) {
               parts.push(`**[Tool: ${tc.kind}]**\n\n${text}`);
@@ -1366,6 +1544,11 @@ export const App: React.FC = () => {
             <MessageList
               allMessages={allMessages}
               onFileClick={handleFileClick}
+              onEditUserMessage={handleEditUserMessage}
+              canEditMessages={
+                !messageHandling.isStreaming &&
+                !messageHandling.isWaitingForResponse
+              }
               childIndexMap={childIndexMapRef}
             />
 
@@ -1478,11 +1661,29 @@ export const App: React.FC = () => {
           onCompletionClose={closeCompletion}
           canSubmit={canSubmit}
           extraContent={
-            attachedImages.length > 0 ? (
-              <ImagePreview
-                images={attachedImages}
-                onRemove={handleRemoveImage}
-              />
+            editingMessage || attachedImages.length > 0 ? (
+              <>
+                {editingMessage && (
+                  <div className="flex items-center justify-between gap-2 border-t border-[var(--app-input-border)] px-2 py-1 text-xs text-[var(--app-secondary-foreground)]">
+                    <span className="truncate">Editing message</span>
+                    <button
+                      type="button"
+                      className="btn-icon-compact h-6 w-6"
+                      title="Cancel editing"
+                      aria-label="Cancel editing"
+                      onClick={clearEditingMessage}
+                    >
+                      <CloseSmallIcon />
+                    </button>
+                  </div>
+                )}
+                {attachedImages.length > 0 ? (
+                  <ImagePreview
+                    images={attachedImages}
+                    onRemove={handleRemoveImage}
+                  />
+                ) : null}
+              </>
             ) : null
           }
           showModelSelector={showModelSelector}

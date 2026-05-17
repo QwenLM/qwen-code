@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../../agents/runtime/agent-core.js';
 import type {
   ToolResult,
   ToolResultDisplay,
@@ -30,16 +31,28 @@ import {
   AgentHeadless,
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
+import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content, FunctionDeclaration } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_PLACEHOLDER_RESULT,
   buildForkedMessages,
   buildChildMessage,
+  buildWorktreeNotice,
   isInForkExecution,
   runInForkContext,
 } from './fork-subagent.js';
-import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
+import {
+  generateAgentWorktreeSlug,
+  GitWorktreeService,
+  writeWorktreeSessionMarker,
+} from '../../services/gitWorktreeService.js';
+import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
+import { WorkspaceContext } from '../../utils/workspaceContext.js';
+import {
+  getCurrentAgentId,
+  runWithAgentContext,
+} from '../../agents/runtime/agent-context.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -56,20 +69,117 @@ import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
+import {
+  appendStopHookBlockingCapWarning,
+  formatStopHookBlockingCapWarning,
+} from '../../hooks/stopHookCap.js';
 import { ApprovalMode } from '../../config/config.js';
 import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
+  patchAgentMeta,
   writeAgentMeta,
 } from '../../agents/agent-transcript.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
+
+// Memoize git branch per cwd for the agent-launch path. `getGitBranch`
+// shells out to `git rev-parse` synchronously; caching avoids the per-launch
+// execSync on a path that runs every time a subagent (foreground or
+// background) starts. Branches don't change within a process under normal
+// use; the transcript annotation is best-effort audit metadata, so a stale
+// value after a user `git checkout` mid-session is acceptable.
+const gitBranchCache = new Map<string, string | undefined>();
+function getCachedGitBranch(cwd: string): string | undefined {
+  if (gitBranchCache.has(cwd)) return gitBranchCache.get(cwd);
+  const branch = getGitBranch(cwd);
+  gitBranchCache.set(cwd, branch);
+  return branch;
+}
+
+function persistBackgroundCancellation(
+  metaPath: string,
+  persistedStatus: 'running' | 'cancelled',
+): void {
+  patchAgentMeta(metaPath, {
+    status: persistedStatus,
+    lastUpdatedAt: new Date().toISOString(),
+    lastError: undefined,
+  });
+}
+
+function createLocalExternalInputQueue(): {
+  enqueue: (input: AgentExternalInput) => boolean;
+  drain: () => AgentExternalInput[];
+  wait: (signal: AbortSignal) => Promise<AgentExternalInput[]>;
+  wake: () => void;
+} {
+  const inputs: AgentExternalInput[] = [];
+  const waiters = new Set<() => void>();
+
+  const drain = () => inputs.splice(0);
+  const wakeWaiters = () => {
+    const pending = Array.from(waiters);
+    for (const waiter of pending) {
+      waiter();
+    }
+  };
+
+  return {
+    enqueue(input: AgentExternalInput): boolean {
+      inputs.push(input);
+      wakeWaiters();
+      return true;
+    },
+    drain,
+    wake(): void {
+      wakeWaiters();
+    },
+    wait(signal: AbortSignal): Promise<AgentExternalInput[]> {
+      const immediate = drain();
+      if (immediate.length > 0 || signal.aborted) {
+        return Promise.resolve(immediate);
+      }
+
+      return new Promise<AgentExternalInput[]>((resolve) => {
+        const cleanup = () => {
+          waiters.delete(onWake);
+          signal.removeEventListener('abort', onAbort);
+        };
+        const onWake = () => {
+          cleanup();
+          resolve(drain());
+        };
+        const onAbort = () => {
+          cleanup();
+          resolve([]);
+        };
+        waiters.add(onWake);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+          cleanup();
+          resolve([]);
+          return;
+        }
+      });
+    },
+  };
+}
 
 export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type?: string;
   run_in_background?: boolean;
+  /**
+   * When set to `'worktree'`, spins up a temporary git worktree under
+   * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
+   * confine all file operations to that path. After the agent completes:
+   * - if no changes were made, the worktree is auto-removed;
+   * - if changes were made, the worktree is preserved and its path/branch
+   *   are returned in the agent's result.
+   */
+  isolation?: 'worktree';
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -156,13 +266,82 @@ function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
 }
 
 /**
- * Creates a Config override with a different approval mode.
- * Uses prototype delegation to avoid mutating the parent config.
+ * Marker that signals "this Config wrapper has rebuilt its own tool
+ * registry so bound EditTool / WriteFileTool / ReadFileTool resolve to
+ * the wrapper instead of the parent". Stored as a Symbol-keyed property
+ * so that JavaScript's normal property lookup (which walks the
+ * prototype chain) lets a downstream wrapper detect a rebuild that
+ * happened on any ancestor without manually walking the chain.
+ *
+ * `Symbol.for` is used so the marker survives bundle-deduping; two
+ * independent imports of this module observe the same Symbol identity.
  */
-function createApprovalModeOverride(base: Config, mode: ApprovalMode): Config {
+export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
+  'qwen-code:tool-registry-rebuilt',
+);
+
+/**
+ * `true` if any Config in this wrapper's prototype chain has already
+ * rebuilt its tool registry via {@link rebuildToolRegistryOnOverride}.
+ *
+ * Used by spawn sites that may be called with a wrapper-on-wrapper
+ * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
+ * receiving `bgConfig = Object.create(agentConfig)` from the
+ * background-agent path) to skip a redundant rebuild.
+ */
+export function hasRebuiltToolRegistry(config: Config): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (config as any)[TOOL_REGISTRY_REBUILT] === true;
+}
+
+/**
+ * Rebuilds the tool registry on `override` so core tools resolve
+ * `this.config` to `override` instead of `base`. Used by both
+ * {@link createApprovalModeOverride} and
+ * `subagent-manager.ts:buildSubagentContextOverride` to avoid
+ * duplicated rebuild logic.
+ *
+ * - `override.createToolRegistry(...)` runs on the override (so the
+ *   lazy factories close over `this = override`).
+ * - Discovered tools (MCP / command-discovered) are copied from `base`
+ *   rather than re-discovered, since discovery is expensive.
+ * - The {@link TOOL_REGISTRY_REBUILT} marker is set so wrapper-of-wrapper
+ *   layers downstream skip the rebuild via {@link hasRebuiltToolRegistry}.
+ */
+export async function rebuildToolRegistryOnOverride(
+  override: Config,
+  base: Config,
+): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ov = override as any;
+  const agentRegistry = await ov.createToolRegistry(undefined, {
+    skipDiscovery: true,
+    forSubAgent: true,
+  });
+  agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
+  ov.getToolRegistry = () => agentRegistry;
+  ov[TOOL_REGISTRY_REBUILT] = true;
+}
+
+/**
+ * Creates a Config override with a different approval mode.
+ *
+ * Uses prototype delegation (Object.create) to avoid mutating the parent
+ * config, then delegates to {@link rebuildToolRegistryOnOverride} so the
+ * override's tool registry has core tools bound to the override rather
+ * than to the parent. Without that rebuild, the parent's cached tool
+ * instances continue to resolve `this.config` to the parent, defeating
+ * per-Config isolation of FileReadCache / approval mode for any code
+ * path that goes through the bound tool.
+ */
+export async function createApprovalModeOverride(
+  base: Config,
+  mode: ApprovalMode,
+): Promise<Config> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
+  await rebuildToolRegistryOnOverride(override as Config, base);
   return override as Config;
 }
 
@@ -200,6 +379,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           description:
             'Set to true to run this agent in the background. You will be notified when it completes.',
+        },
+        isolation: {
+          type: 'string',
+          enum: ['worktree'],
+          description:
+            "Isolation mode. 'worktree' creates a temporary git worktree under <projectRoot>/.qwen/worktrees/agent-<7hex> so the agent works on an isolated copy of the repo. The worktree is auto-removed if the agent makes no changes; otherwise the worktree path and branch are returned in the result.",
         },
       },
       required: ['description', 'prompt'],
@@ -290,6 +475,7 @@ Usage notes:
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 - You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
+- You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 
 Example usage:
 
@@ -385,6 +571,19 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
       }
     }
 
+    if (params.isolation !== undefined) {
+      if (params.isolation !== 'worktree') {
+        return 'Parameter "isolation" must be "worktree" when set.';
+      }
+      // Forks (no subagent_type) reuse the parent's full conversation
+      // context — putting them in a separate worktree would split
+      // intent from working tree and confuse path resolution. Require
+      // an explicit subagent_type when requesting isolation.
+      if (!params.subagent_type) {
+        return 'Parameter "isolation" requires "subagent_type" to be set.';
+      }
+    }
+
     return null;
   }
 
@@ -433,6 +632,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (updateOutput) {
       updateOutput(this.currentDisplay);
     }
+  }
+
+  private registerOwnedMonitorNotifications(
+    agentId: string,
+    enqueue: (input: AgentExternalInput) => boolean,
+    wake: () => void,
+  ): () => void {
+    const monitorRegistry = this.config.getMonitorRegistry();
+    monitorRegistry.setAgentNotificationCallback(
+      agentId,
+      (_displayText, modelText) =>
+        void enqueue({ kind: 'notification', text: modelText }),
+    );
+    monitorRegistry.setAgentLifecycleCallback(agentId, wake);
+
+    return () => {
+      monitorRegistry.cancelRunningForOwner(agentId, { notify: false });
+      monitorRegistry.setAgentNotificationCallback(agentId, undefined);
+      monitorRegistry.setAgentLifecycleCallback(agentId, undefined);
+    };
   }
 
   /**
@@ -640,7 +859,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     eventEmitter: AgentEventEmitter = this.eventEmitter,
   ): Promise<{
     subagent: AgentHeadless;
+    initialMessages?: Content[];
     taskPrompt: string;
+    promptConfig: PromptConfig;
+    toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
     const rawHistory = geminiClient ? geminiClient.getHistory(true) : [];
@@ -705,12 +927,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // the parent, not an isolated subagent, so the general subagent
       // exclusion list does not apply. Recursive forks are blocked by the
       // ALS-based `isInForkExecution()` guard.
+      // However, we still exclude tools that must never be available to
+      // any subagent (agent, cron tools).
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{
             functionDeclarations?: FunctionDeclaration[];
           }>
-        )?.flatMap((t) => t.functionDeclarations ?? []) ?? [];
+        )
+          ?.flatMap((t) => t.functionDeclarations ?? [])
+          .filter(
+            (d) => !(d.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(d.name)),
+          ) ?? [];
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
@@ -740,35 +968,37 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       eventEmitter,
     );
 
-    return { subagent, taskPrompt };
+    return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
   }
 
-  // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
-  // reason back and re-executes — up to 5 iterations to defend against a
-  // misconfigured hook looping forever.
+  // Runs the SubagentStop hook after execution. On a blocking decision, feeds
+  // the reason back and re-executes until the configured cap prevents a
+  // misconfigured hook from looping forever.
   private async runSubagentStopHookLoop(
     subagent: AgentHeadless,
     opts: {
       agentId: string;
       agentType: string;
+      transcriptPath?: string;
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
-  ): Promise<void> {
-    const { agentId, agentType, resolvedMode, signal } = opts;
+  ): Promise<string | undefined> {
+    const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
-    if (!hookSystem) return;
+    if (!hookSystem) return undefined;
 
-    const transcriptPath = this.config.getTranscriptPath();
+    const effectiveTranscriptPath =
+      transcriptPath ?? this.config.getTranscriptPath();
     let stopHookActive = false;
-    const maxIterations = 5;
+    const maxIterations = this.config.getStopHookBlockingCap();
 
     for (let i = 0; i < maxIterations; i++) {
       try {
         const stopHookOutput = await hookSystem.fireSubagentStopEvent(
           agentId,
           agentType,
-          transcriptPath,
+          effectiveTranscriptPath,
           subagent.getFinalText(),
           stopHookActive,
           resolvedMode,
@@ -781,10 +1011,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           !typedStopOutput?.isBlockingDecision() &&
           !typedStopOutput?.shouldStopExecution()
         ) {
-          return;
+          return undefined;
         }
 
         stopHookActive = true;
+        const currentIterationCount = i + 1;
+        if (currentIterationCount >= maxIterations) {
+          const warning = formatStopHookBlockingCapWarning(
+            'SubagentStop',
+            maxIterations,
+          );
+          debugLogger.warn(`[Agent] ${warning}`);
+          return warning;
+        }
+
         const continueContext = new ContextState();
         continueContext.set(
           'task_prompt',
@@ -792,18 +1032,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         await subagent.execute(continueContext, signal);
 
-        if (signal?.aborted) return;
+        if (signal?.aborted) return undefined;
       } catch (hookError) {
         debugLogger.warn(
           `[Agent] SubagentStop hook failed, allowing stop: ${hookError}`,
         );
-        return;
+        return undefined;
       }
     }
 
-    debugLogger.warn(
-      `[Agent] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
-    );
+    return undefined;
   }
 
   /**
@@ -820,7 +1058,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       signal?: AbortSignal;
       updateOutput?: (output: ToolResultDisplay) => void;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
     const hookSystem = this.config.getHookSystem();
 
@@ -849,8 +1087,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Execute the subagent (blocking)
       await subagent.execute(contextState, signal);
 
+      let stopHookWarning: string | undefined;
       if (hookSystem && !signal?.aborted) {
-        await this.runSubagentStopHookLoop(subagent, {
+        stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
           agentId,
           agentType,
           resolvedMode,
@@ -859,7 +1098,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // Get the results
-      const finalText = subagent.getFinalText();
+      const finalText = appendStopHookBlockingCapWarning(
+        subagent.getFinalText(),
+        stopHookWarning,
+      );
       const terminateMode = subagent.getTerminateMode();
       const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
@@ -884,6 +1126,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           updateOutput,
         );
       }
+      return stopHookWarning;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -897,6 +1140,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         },
         updateOutput,
       );
+      return undefined;
     }
   }
 
@@ -904,6 +1148,137 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // ── Isolation state hoisted to the outermost scope ────────────
+    // The outer try/catch in this method is the last line of defence
+    // against pre-execution failures (e.g. createApprovalModeOverride
+    // throws). If `worktreeIsolation` and `cleanupWorktreeIsolation`
+    // lived inside the try, the catch would have no way to reach them,
+    // and a provisioned worktree would leak until the 30-day startup
+    // sweep — review #4073 round 2.
+    let worktreeIsolation: {
+      slug: string;
+      path: string;
+      branch: string;
+      repoRoot: string;
+    } | null = null;
+
+    const cleanupWorktreeIsolation = async (): Promise<{
+      preservedPath?: string;
+      preservedBranch?: string;
+    }> => {
+      if (!worktreeIsolation) return {};
+      const isolation = worktreeIsolation;
+      // Null the closure var BEFORE doing any work so any concurrent
+      // re-entry (e.g. the foreground-finally fallback firing in
+      // parallel with the outer catch on a thrown rejection) sees no
+      // isolation and bails. Without this, the second caller would
+      // operate on a worktree directory the first caller has already
+      // removed and `hasWorktreeChanges()` would fail-closed and
+      // produce a bogus `[worktree preserved: <missing path>]` suffix.
+      worktreeIsolation = null;
+      const wtService = new GitWorktreeService(isolation.repoRoot);
+      // The two checks have no data dependency on each other and each
+      // spawns its own `git` invocation. Run them concurrently so
+      // cleanup wall-clock on the common case is the slower of the two
+      // instead of their sum.
+      const [hasChanges, hasUnmerged] = await Promise.all([
+        wtService.hasWorktreeChanges(isolation.path).catch((error) => {
+          debugLogger.warn(
+            `[Agent] hasWorktreeChanges failed for ${isolation.path}: ${error}`,
+          );
+          // Fail-closed: assume changes exist so we preserve.
+          return true;
+        }),
+        wtService.hasUnmergedWorktreeCommits(isolation.slug).catch((error) => {
+          debugLogger.warn(
+            `[Agent] hasUnmergedWorktreeCommits failed for ${isolation.slug}: ${error}`,
+          );
+          // Fail-closed: assume uncovered work exists so we preserve.
+          return true;
+        }),
+      ]);
+      if (hasChanges || hasUnmerged) {
+        debugLogger.info(
+          `[Agent] Preserving isolation worktree ${isolation.path} ` +
+            `(branch ${isolation.branch}, hasChanges=${hasChanges}, hasUnmerged=${hasUnmerged})`,
+        );
+        return {
+          preservedPath: isolation.path,
+          preservedBranch: isolation.branch,
+        };
+      }
+      try {
+        const result = await wtService.removeUserWorktree(isolation.slug, {
+          deleteBranch: true,
+        });
+        if (!result.success) {
+          // Removal itself failed (could not delete the directory). The
+          // worktree is still on disk — do NOT silently drop it from
+          // the user's view. Surface as preserved so they can recover.
+          debugLogger.warn(
+            `[Agent] Failed to remove ephemeral worktree ${isolation.path}: ${result.error}`,
+          );
+          return {
+            preservedPath: isolation.path,
+            preservedBranch: isolation.branch,
+          };
+        }
+        if (result.branchPreserved) {
+          // Status check said "clean" and the unmerged check said "fully
+          // covered", but the safe-delete still refused — most likely a
+          // race where commits landed between the checks and the delete.
+          // Be loud rather than silently force-deleting.
+          //
+          // Critical: do NOT return `preservedPath` here. The worktree
+          // *directory* is already gone (removeUserWorktree removes the
+          // dir before attempting `git branch -d`). The branch alone is
+          // what's preserved. Reporting the old path as preserved would
+          // tell the parent model / user the worktree is recoverable at
+          // a location that no longer exists.
+          debugLogger.warn(
+            `[Agent] Removed worktree directory ${isolation.path} but kept ` +
+              `branch ${isolation.branch} (unmerged commits at delete time)`,
+          );
+          return {
+            preservedBranch: isolation.branch,
+          };
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `[Agent] Failed to remove ephemeral worktree ${isolation.path}: ${error}`,
+        );
+        return {
+          preservedPath: isolation.path,
+          preservedBranch: isolation.branch,
+        };
+      }
+      return {};
+    };
+
+    const formatWorktreeSuffix = (info: {
+      preservedPath?: string;
+      preservedBranch?: string;
+    }): string => {
+      if (info.preservedPath) {
+        return (
+          `\n\n[worktree preserved: ${info.preservedPath} ` +
+          `(branch ${info.preservedBranch ?? 'unknown'})]`
+        );
+      }
+      if (info.preservedBranch) {
+        // Worktree directory was removed but the branch was kept (race:
+        // unmerged commits landed after the pre-checks passed). Tell
+        // the user which branch holds the work so they can recover via
+        // `git worktree add <new-path> <branch>` or by force-deleting
+        // it if they really meant to discard.
+        return (
+          `\n\n[worktree directory removed; branch ${info.preservedBranch} ` +
+          `preserved — recover with \`git worktree add <path> ${info.preservedBranch}\`]`
+        );
+      }
+      return '';
+    };
+
     try {
       const isFork = !this.params.subagent_type;
       let subagentConfig: SubagentConfig;
@@ -963,6 +1338,143 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
+      // ── Optional worktree isolation (Phase 1: provision) ──────────
+      // Provision the worktree BEFORE creating the agent Config so the
+      // override below can rebind `getTargetDir()` to the worktree path
+      // before the subagent's tools are registered. Without this,
+      // tools that resolve relative paths via `config.getTargetDir()`
+      // (Shell default cwd, Edit/Write/Read workspace checks, Glob /
+      // Grep / Ls roots) would silently operate on the parent project
+      // tree and the cleanup helper would then see a "clean" worktree
+      // and remove it — destroying any evidence of the leak.
+      const failWorktreeProvisioning = (reason: string): ToolResult => {
+        debugLogger.warn(`[Agent] worktree isolation failed: ${reason}`);
+        this.currentDisplay = {
+          ...this.currentDisplay!,
+          status: 'failed' as const,
+          terminateReason: reason,
+        };
+        return {
+          llmContent: reason,
+          returnDisplay: this.currentDisplay,
+        };
+      };
+
+      if (this.params.isolation === 'worktree') {
+        const cwd = this.config.getTargetDir();
+        // Refuse nested isolation. If the parent itself is already
+        // running inside a worktree (cwd contains `.qwen/worktrees/`),
+        // creating a sibling isolation worktree at the repo root
+        // would leave the model's mental map pointing at the outer
+        // worktree while the override aimed it at the inner one.
+        // Same guard `enter_worktree` uses.
+        if (/\.qwen[\\/]worktrees[\\/]/.test(cwd)) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent is already inside ` +
+              `a worktree (${cwd}). Nested isolation worktrees are not ` +
+              `supported — the model's inherited paths would still reference ` +
+              `the outer worktree.`,
+          );
+        }
+        const probe = new GitWorktreeService(cwd);
+        const gitCheck = await probe.checkGitAvailable();
+        if (!gitCheck.available) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: ${gitCheck.error ?? 'git is not available'}`,
+          );
+        }
+        if (!(await probe.isGitRepository())) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: ${cwd} is not a git repository.`,
+          );
+        }
+        // Anchor the worktree at the repo top-level so monorepo subdir
+        // launches still gather worktrees under `<repoRoot>/.qwen/...`,
+        // which is also the path the startup sweep scans.
+        const projectRoot = (await probe.getRepoTopLevel()) ?? cwd;
+        const wtService =
+          projectRoot === cwd ? probe : new GitWorktreeService(projectRoot);
+
+        // Refuse isolation when the parent has uncommitted changes.
+        // `git worktree add -b <branch> <path> <base>` checks out the
+        // base branch's tip — uncommitted edits in the parent's
+        // working tree do NOT propagate to the new worktree. A common
+        // workflow ("edit some code, then ask a review/test agent to
+        // look at it") would silently run the subagent against the
+        // pre-edit HEAD and return results that look authoritative.
+        // Refusing forces the user to commit / stash first; the
+        // alternative (overlaying dirty state à la Arena) is
+        // out of scope for Phase B.
+        let parentDirty = false;
+        try {
+          parentDirty = await wtService.hasWorktreeChanges(projectRoot);
+        } catch (error) {
+          debugLogger.warn(
+            `[Agent] hasWorktreeChanges failed at ${projectRoot}: ${error}`,
+          );
+          // Fail-closed: assume dirty so we refuse rather than
+          // silently launch a subagent against a possibly-stale tree.
+          parentDirty = true;
+        }
+        if (parentDirty) {
+          return failWorktreeProvisioning(
+            `Failed to set up worktree isolation: parent working tree at ` +
+              `${projectRoot} has uncommitted changes that would not ` +
+              `propagate into the isolated worktree. The subagent would ` +
+              `see the prior HEAD instead of your current state. Commit ` +
+              `or stash the changes, then call the agent again.`,
+          );
+        }
+
+        const slug = generateAgentWorktreeSlug();
+        // Anchor the isolation worktree to the parent's currently
+        // checked-out branch. Without an explicit base,
+        // `createUserWorktree` falls back to whichever branch the main
+        // working tree happens to be on — which silently becomes `main`
+        // when the user invoked the agent from a feature branch, from
+        // inside another user worktree, or from a detached HEAD set up
+        // by the test harness. The subagent would then see the wrong
+        // code and produce diffs against an unrelated baseline.
+        let parentBranch: string | undefined;
+        try {
+          parentBranch = await wtService.getCurrentBranch();
+        } catch (error) {
+          // Best-effort: leave undefined so createUserWorktree's own
+          // fallback runs. A debug log lets operators see when we hit
+          // the fallback path.
+          debugLogger.warn(
+            `[Agent] getCurrentBranch failed at ${projectRoot}: ${error}`,
+          );
+        }
+        const created = await wtService.createUserWorktree(slug, parentBranch);
+        if (!created.success || !created.worktree) {
+          return failWorktreeProvisioning(
+            `Failed to create isolation worktree: ${created.error ?? 'unknown error'}`,
+          );
+        }
+        worktreeIsolation = {
+          slug,
+          path: created.worktree.path,
+          branch: created.worktree.branch,
+          repoRoot: projectRoot,
+        };
+
+        // Tag the isolation worktree with the parent session id for
+        // consistency with `enter_worktree` (ownership-aware
+        // `exit_worktree` refuses to drop worktrees from other
+        // sessions). Best-effort.
+        try {
+          await writeWorktreeSessionMarker(
+            created.worktree.path,
+            this.config.getSessionId(),
+          );
+        } catch (error) {
+          debugLogger.warn(
+            `[Agent] failed to write session marker at ${created.worktree.path}: ${error}`,
+          );
+        }
+      }
+
       // Resolve the subagent's permission mode before creating it
       const resolvedMode = resolveSubagentApprovalMode(
         this.config.getApprovalMode(),
@@ -970,10 +1482,57 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         this.config.isTrustedFolder(),
       );
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
-      const agentConfig =
-        resolvedApprovalMode !== this.config.getApprovalMode()
-          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
-          : this.config;
+      // ALWAYS produce a child Config via Object.create, even when the
+      // approval mode is identical to the parent. Subagents must run
+      // against an isolated FileReadCache so a parent's prior_read
+      // entries cannot satisfy enforcement on a path the subagent's
+      // transcript never contained — see the per-Config own-property
+      // machinery in `Config.getFileReadCache()`. Reusing
+      // `this.config` directly here would short-circuit that
+      // isolation for the same-mode path, which is the common case.
+      //
+      // The override also rebuilds its own tool registry so core
+      // tools (`EditTool` / `WriteFileTool` / `ReadFileTool`) are
+      // bound to the override Config rather than the parent. Without
+      // that rebuild, the parent's cached tool instances continue to
+      // resolve `this.config` to the parent, reaching the parent's
+      // FileReadCache rather than the subagent's. See
+      // `createApprovalModeOverride` above for details.
+      const agentConfig = await createApprovalModeOverride(
+        this.config,
+        resolvedApprovalMode,
+      );
+
+      // ── Optional worktree isolation (Phase 2: rebind cwd) ─────────
+      // Rebind every "where am I?" surface on the agent's Config
+      // override to the worktree path so the subagent's tools cannot
+      // leak into the parent project tree.
+      //
+      // We override at two layers because Config getters mix direct
+      // field reads and getter calls. Shadowing only the methods would
+      // leave call sites like `this.targetDir` (e.g. inside
+      // `getProjectRoot`, `getFileService`) resolving via the
+      // prototype chain to the parent's `targetDir` — JS does not
+      // promote a getter assignment to a field shadow. Setting both
+      // `ov.targetDir` (own-property field) AND `ov.getTargetDir`
+      // (own-property method) covers both lookup paths.
+      if (worktreeIsolation) {
+        const wtPath = worktreeIsolation.path;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const ov = agentConfig as any;
+        ov.targetDir = wtPath;
+        ov.cwd = wtPath;
+        ov.getTargetDir = () => wtPath;
+        ov.getCwd = () => wtPath;
+        ov.getWorkingDir = () => wtPath;
+        ov.getProjectRoot = () => wtPath;
+        const wtFileService = new FileDiscoveryService(wtPath);
+        ov.fileDiscoveryService = wtFileService;
+        ov.getFileService = () => wtFileService;
+        const wtWorkspace = new WorkspaceContext(wtPath);
+        ov.workspaceContext = wtWorkspace;
+        ov.getWorkspaceContext = () => wtWorkspace;
+      }
 
       // Create the subagent. Fork bypasses SubagentManager because its
       // runtime configs are synthesized from the parent's cache-safe params.
@@ -991,6 +1550,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           { eventEmitter: this.eventEmitter },
         );
         taskPrompt = this.params.prompt;
+      }
+
+      // ── Optional worktree isolation (Phase 3: notice to prompt) ───
+      // Prepend a notice to the task prompt telling the subagent it is
+      // operating in an isolated worktree. The mechanical isolation
+      // above guarantees correctness; the notice reduces user-visible
+      // surprises when the model summarises file paths.
+      //
+      // "parent cwd" is the parent agent's actual `getTargetDir()` —
+      // the directory the inherited conversation context speaks from.
+      // Using the repo top-level here would mistranslate paths the
+      // parent referenced as `./packages/core/foo` when the parent
+      // was running from `packages/core/`. Round-5 review caught this:
+      // the model's mental map is the parent's cwd, not the repo root.
+      if (worktreeIsolation) {
+        const notice = buildWorktreeNotice(
+          this.config.getTargetDir(),
+          worktreeIsolation.path,
+        );
+        taskPrompt = `${notice}\n\n${taskPrompt}`;
       }
 
       const contextState = new ContextState();
@@ -1056,18 +1635,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // concurrent fork/subagent into the same transcript.
         const bgEventEmitter = new AgentEventEmitter();
         let bgSubagent: AgentHeadless;
+        let bgInitialMessages: Content[] | undefined;
+        let bgTaskPrompt: string;
+        let bgPromptConfig: PromptConfig | undefined;
+        let bgToolConfig: ToolConfig | undefined;
         if (isFork) {
           const fork = await this.createForkSubagent(
             bgConfig as Config,
             bgEventEmitter,
           );
           bgSubagent = fork.subagent;
+          bgInitialMessages = fork.initialMessages;
+          bgTaskPrompt = fork.taskPrompt;
+          bgPromptConfig = fork.promptConfig;
+          bgToolConfig = fork.toolConfig;
         } else {
           bgSubagent = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
             { eventEmitter: bgEventEmitter },
           );
+          bgTaskPrompt = this.params.prompt;
         }
 
         const registry = this.config.getBackgroundTaskRegistry();
@@ -1095,13 +1683,37 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             sessionId,
             cwd: projectRoot,
             version: this.config.getCliVersion() || 'unknown',
-            gitBranch: getGitBranch(projectRoot),
+            gitBranch: getCachedGitBranch(projectRoot),
             // Seed the JSONL with the launching prompt so the transcript is
             // self-describing — readers don't need to consult .meta.json to
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
+            bootstrapSystemInstruction: isFork
+              ? (bgPromptConfig?.renderedSystemPrompt ??
+                bgPromptConfig?.systemPrompt)
+              : undefined,
+            bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
+            launchTaskPrompt: isFork ? bgTaskPrompt : undefined,
           },
         );
+        // Register before writing the meta sidecar — see the matching
+        // foreground call below for the full rationale. Keeping the
+        // order symmetric here guards the background path against the
+        // same orphaned-meta hazard if register() ever grows a throw.
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: subagentConfig.name,
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: bgAbortController,
+          toolUseId: this.callId,
+          prompt: this.params.prompt,
+          outputFile: jsonlPath,
+          metaPath,
+        });
         writeAgentMeta(metaPath, {
           agentId: hookOpts.agentId,
           agentType: hookOpts.agentType,
@@ -1112,18 +1724,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // top-level launches from the user session.
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
-        });
-
-        registry.register({
-          agentId: hookOpts.agentId,
-          description: this.params.description,
-          subagentType: subagentConfig.name,
           status: 'running',
-          startTime: Date.now(),
-          abortController: bgAbortController,
-          toolUseId: this.callId,
-          prompt: this.params.prompt,
-          outputFile: jsonlPath,
+          lastUpdatedAt: new Date().toISOString(),
+          resolvedApprovalMode,
+          subagentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          resumeCount: 0,
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -1164,10 +1770,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         bgEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
         bgEmitter.on(AgentEventType.USAGE_METADATA, onUsageMetadata);
 
-        // Wire external message drain so SendMessage can inject messages
-        // into this agent's reasoning loop between tool rounds.
+        const cleanupOwnedMonitorNotifications =
+          this.registerOwnedMonitorNotifications(
+            hookOpts.agentId,
+            (input) => registry.queueExternalInput(hookOpts.agentId, input),
+            () => registry.wakeExternalInputWaiters(hookOpts.agentId),
+          );
+
+        // Wire external message drain so SendMessage and owned Monitor
+        // notifications can inject inputs between tool rounds.
         bgSubagent.setExternalMessageProvider(() =>
           registry.drainMessages(hookOpts.agentId),
+        );
+        bgSubagent.setExternalMessageWaiter?.((waitSignal) =>
+          registry.waitForMessages(hookOpts.agentId, waitSignal),
+        );
+        bgSubagent.setExternalMessageWaitPredicate?.(() =>
+          this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
         );
 
         const getCompletionStats = () => {
@@ -1188,10 +1807,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
+            let stopHookWarning: string | undefined;
             if (hookSystem && !bgAbortController.signal.aborted) {
-              await this.runSubagentStopHookLoop(bgSubagent, {
+              stopHookWarning = await this.runSubagentStopHookLoop(bgSubagent, {
                 agentId: hookOpts.agentId,
                 agentType: hookOpts.agentType,
+                transcriptPath: jsonlPath,
                 resolvedMode,
                 signal: bgAbortController.signal,
               });
@@ -1204,15 +1825,32 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // the parent model (and the UI) don't treat incomplete runs as
             // completed.
             const terminateMode = bgSubagent.getTerminateMode();
-            const finalText = bgSubagent.getFinalText();
+            const wtSuffix = formatWorktreeSuffix(
+              await cleanupWorktreeIsolation(),
+            );
+            const finalText =
+              appendStopHookBlockingCapWarning(
+                bgSubagent.getFinalText(),
+                stopHookWarning,
+              ) + wtSuffix;
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
+              patchAgentMeta(metaPath, {
+                status: 'completed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: undefined,
+              });
             } else if (terminateMode === AgentTerminateMode.CANCELLED) {
               registry.finalizeCancelled(
                 hookOpts.agentId,
                 finalText,
                 completionStats,
+              );
+              persistBackgroundCancellation(
+                metaPath,
+                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
               );
             } else {
               registry.fail(
@@ -1220,11 +1858,34 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 finalText || `Agent terminated with mode: ${terminateMode}`,
                 completionStats,
               );
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError:
+                  finalText || `Agent terminated with mode: ${terminateMode}`,
+              });
             }
           } catch (error) {
-            const errorMsg =
+            const baseErrorMsg =
               error instanceof Error ? error.message : String(error);
-            debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
+            debugLogger.error(
+              `[Agent] Background agent failed: ${baseErrorMsg}`,
+            );
+
+            // Preserve or remove the isolation worktree, AND surface the
+            // preserved path/branch in the registry message. Without
+            // this, an agent that crashed mid-edit would have its
+            // worktree preserved on disk but the user would never see
+            // its location in the failure notification — they would
+            // assume nothing was left behind.
+            let wtSuffix = '';
+            try {
+              wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
+            } catch {
+              // Helper logs its own failures; don't mask the original
+              // crash message.
+            }
+            const errorMsg = baseErrorMsg + wtSuffix;
 
             // If the error came from a cancellation, preserve the cancelled
             // status so the model's notification matches what task_stop
@@ -1235,20 +1896,41 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 errorMsg,
                 getCompletionStats(),
               );
+              persistBackgroundCancellation(
+                metaPath,
+                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
+              );
             } else {
               registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: errorMsg,
+              });
             }
           } finally {
             bgEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
             bgEmitter.off(AgentEventType.USAGE_METADATA, onUsageMetadata);
+            cleanupOwnedMonitorNotifications();
             cleanupJsonl?.();
+            // Release the per-subagent ToolRegistry now that the
+            // background agent has finished — see the matching call in
+            // the foreground finally for why. Stopping here, after
+            // bgSubagent.execute resolves, is safe: by this point the
+            // detached body cannot invoke any more tool factories on
+            // this registry.
+            void agentConfig
+              .getToolRegistry()
+              .stop()
+              .catch(() => {});
           }
         };
         // Wrap in the agent-identity frame so nested `agent` tool calls
         // from this subagent's model record this agent's id as their
         // `parentAgentId` in the sidecar meta.
         const framedBgBody = () =>
-          runWithAgentContext({ agentId: hookOpts.agentId }, bgBody);
+          runWithAgentContext(hookOpts.agentId, bgBody);
         void (isFork ? runInForkContext(framedBgBody) : framedBgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
@@ -1268,38 +1950,326 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Same agent-identity frame as the background path: a foreground
       // subagent can also launch nested agents, and those nested launches
       // need to see this subagent's id as their `parentAgentId`.
-      const runFramed = () =>
-        runWithAgentContext({ agentId: hookOpts.agentId }, () =>
-          this.runSubagentWithHooks(subagent, contextState, hookOpts),
-        );
 
       if (isFork) {
+        const forkMonitorInputs = createLocalExternalInputQueue();
+        subagent.setExternalMessageProvider?.(() => forkMonitorInputs.drain());
+        subagent.setExternalMessageWaiter?.((waitSignal) =>
+          forkMonitorInputs.wait(waitSignal),
+        );
+        subagent.setExternalMessageWaitPredicate?.(() =>
+          this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
+        );
+        const cleanupOwnedMonitorNotifications =
+          this.registerOwnedMonitorNotifications(
+            hookOpts.agentId,
+            forkMonitorInputs.enqueue,
+            forkMonitorInputs.wake,
+          );
+
         // Background fork execution. Run under an AsyncLocalStorage frame so
         // nested `agent` tool calls by the fork's model can be detected.
-        void runInForkContext(runFramed);
+        // Forks run async (return a placeholder); skip foreground registration.
+        // Wrap the fork body in try/finally so the per-subagent ToolRegistry
+        // is stopped after the fork finishes — the other three spawn paths
+        // (foreground non-fork, background fork, background non-fork) already
+        // do this in their finally blocks. Without it, every AgentTool /
+        // SkillTool the fork's model instantiates from this registry leaks
+        // its change-listener on shared SubagentManager / SkillManager.
+        const runFramedFork = () =>
+          runWithAgentContext(hookOpts.agentId, async () => {
+            try {
+              await this.runSubagentWithHooks(subagent, contextState, hookOpts);
+            } finally {
+              cleanupOwnedMonitorNotifications();
+              void agentConfig
+                .getToolRegistry()
+                .stop()
+                .catch(() => {});
+            }
+          });
+        void runInForkContext(runFramedFork);
         return {
           llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
           returnDisplay: this.currentDisplay!,
         };
+      }
+
+      // ── Foreground (synchronous) execution path ────────────────
+      // Compose a child AbortController so the dialog's per-agent cancel
+      // can abort just this subagent without aborting the parent turn.
+      // Parent abort still propagates down (so ESC at the parent kills
+      // the subagent), but child abort does NOT propagate up.
+      const fgAbortController = new AbortController();
+      const onParentAbort = () => fgAbortController.abort();
+      if (signal?.aborted) {
+        fgAbortController.abort();
       } else {
-        await runFramed();
-        const finalText = subagent.getFinalText();
+        signal?.addEventListener('abort', onParentAbort, { once: true });
+      }
+
+      const fgHookOpts = { ...hookOpts, signal: fgAbortController.signal };
+      const runFramed = () =>
+        runWithAgentContext(hookOpts.agentId, () =>
+          this.runSubagentWithHooks(subagent, contextState, fgHookOpts),
+        );
+
+      // Register in BackgroundTaskRegistry with isBackgrounded:false so the
+      // pill counts the run and the dialog can drill in. Foreground entries
+      // skip XML notification and headless-holdback (see the registry for
+      // the gating logic).
+      //
+      // Persistence wiring mirrors the background path so foreground
+      // subagents leave the same JSONL transcript + meta sidecar on disk
+      // as their backgrounded counterparts. Without this, post-mortem of a
+      // cancelled / crashed foreground subagent has no on-disk evidence
+      // beyond what made it into the parent's tool result.
+      const registry = this.config.getBackgroundTaskRegistry();
+      const fgProjectDir = this.config.storage.getProjectDir();
+      const fgSessionId = this.config.getSessionId();
+      const fgJsonlPath = getAgentJsonlPath(
+        fgProjectDir,
+        fgSessionId,
+        hookOpts.agentId,
+      );
+      const fgMetaPath = getAgentMetaPath(
+        fgProjectDir,
+        fgSessionId,
+        hookOpts.agentId,
+      );
+      const fgProjectRoot = this.config.getProjectRoot();
+      // Declared `let` so the `finally` block can release the writer's
+      // listeners + fd even if the attach itself throws partway through.
+      // The attach happens inside the `try` below — keeping it outside
+      // would leak listeners on any synchronous setup failure.
+      let cleanupFgJsonl: (() => void) | undefined;
+
+      const cleanupOwnedMonitorNotifications =
+        this.registerOwnedMonitorNotifications(
+          hookOpts.agentId,
+          (input) => registry.queueExternalInput(hookOpts.agentId, input),
+          () => registry.wakeExternalInputWaiters(hookOpts.agentId),
+        );
+      subagent.setExternalMessageProvider?.(() =>
+        registry.drainMessages(hookOpts.agentId),
+      );
+      subagent.setExternalMessageWaiter?.((waitSignal) =>
+        registry.waitForMessages(hookOpts.agentId, waitSignal),
+      );
+      subagent.setExternalMessageWaitPredicate?.(() =>
+        this.config.getMonitorRegistry().hasRunningForOwner(hookOpts.agentId),
+      );
+
+      // Mirror the background path's progress wiring so the dialog detail
+      // body has live tool-call activity AND a current `entry.stats`
+      // subtitle (`N tools · X tokens · Ys`). Without this, foreground
+      // entries collapse to elapsed-only in the dialog while background
+      // entries show full stats — strictly less information for the same
+      // runtime events.
+      //
+      // This is a separate listener from setupEventListeners' TOOL_CALL
+      // handler (which feeds `currentDisplay.toolCalls` for the committed
+      // inline frame). They consume different state — committed inline UI
+      // vs. live registry stats — and setupEventListeners runs before we
+      // know the flavor or the registry id, so folding them is awkward.
+      let fgLiveToolCallCount = 0;
+      const refreshFgLiveStats = () => {
+        const entry = registry.get(hookOpts.agentId);
+        if (!entry || entry.status !== 'running') return;
+        const summary = subagent.getExecutionSummary();
+        entry.stats = {
+          totalTokens: summary.totalTokens,
+          toolUses: fgLiveToolCallCount,
+          durationMs: summary.totalDurationMs,
+        };
+      };
+      const onFgToolCall = (...args: unknown[]) => {
+        const event = args[0] as AgentToolCallEvent;
+        fgLiveToolCallCount += 1;
+        refreshFgLiveStats();
+        registry.appendActivity(hookOpts.agentId, {
+          name: event.name,
+          description: event.description,
+          at: event.timestamp,
+        });
+      };
+      const onFgUsageMetadata = () => {
+        refreshFgLiveStats();
+      };
+      this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
+      this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+
+      try {
+        ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
+          this.eventEmitter,
+          fgJsonlPath,
+          {
+            agentId: hookOpts.agentId,
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            sessionId: fgSessionId,
+            cwd: fgProjectRoot,
+            version: this.config.getCliVersion() || 'unknown',
+            gitBranch: getCachedGitBranch(fgProjectRoot),
+            // Seed the JSONL with the launching prompt so the transcript
+            // is self-describing — readers don't need the meta sidecar to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+          },
+        ));
+        // Register before writing the meta sidecar: if register() throws
+        // (e.g. duplicate agent id), we leave no orphaned 'running' meta
+        // file behind. writeAgentMeta is best-effort and never throws, so
+        // a failure there leaves the registry entry without a sidecar —
+        // a benign degradation (post-mortem readers miss this run) rather
+        // than a stuck meta file the cleanup path can't reach.
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: hookOpts.agentType,
+          isBackgrounded: false,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: fgAbortController,
+          prompt: this.params.prompt,
+          toolUseId: this.callId,
+          outputFile: fgJsonlPath,
+          metaPath: fgMetaPath,
+        });
+        writeAgentMeta(fgMetaPath, {
+          agentId: hookOpts.agentId,
+          agentType: hookOpts.agentType,
+          description: this.params.description,
+          parentSessionId: fgSessionId,
+          parentAgentId: getCurrentAgentId(),
+          createdAt: new Date().toISOString(),
+          status: 'running',
+          lastUpdatedAt: new Date().toISOString(),
+          resolvedApprovalMode,
+          subagentName: subagentConfig.name,
+          agentColor: subagentConfig.color,
+          resumeCount: 0,
+        });
+
+        const stopHookWarning = await runFramed();
+        const finalText = appendStopHookBlockingCapWarning(
+          subagent.getFinalText(),
+          stopHookWarning,
+        );
         const terminateMode = subagent.getTerminateMode();
+        const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {
-            llmContent: finalText || 'Subagent execution failed.',
+            llmContent: (finalText || 'Subagent execution failed.') + wtSuffix,
+            returnDisplay: this.currentDisplay!,
+          };
+        }
+        if (terminateMode === AgentTerminateMode.CANCELLED) {
+          // Distinguish a user-cancelled run from a successful complete in
+          // the parent model's tool result. Without this prefix, a cancel
+          // collapses into the same `{ llmContent: [{ text: finalText }] }`
+          // shape as a successful run — the parent can't tell that the
+          // partial result is incomplete and may act on it as if the agent
+          // had finished. The background path surfaces this via the
+          // `<status>cancelled</status>` XML envelope; the foreground path
+          // has no equivalent envelope, so the marker has to ride the
+          // llmContent payload itself.
+          const partial = finalText || '(no partial result captured)';
+          return {
+            llmContent: [
+              {
+                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}${wtSuffix}`,
+              },
+            ],
             returnDisplay: this.currentDisplay!,
           };
         }
         return {
-          llmContent: [{ text: finalText }],
+          llmContent: [{ text: finalText + wtSuffix }],
           returnDisplay: this.currentDisplay!,
         };
+      } finally {
+        // Mirror the background path: ensure the isolation worktree is
+        // reaped on every termination shape (success, failure, cancel,
+        // and any uncaught throw inside runFramed). The helper itself
+        // nulls `worktreeIsolation` on its first call (see the comment
+        // at its definition), so this fallback fires once at most even
+        // when the success path already ran it.
+        try {
+          await cleanupWorktreeIsolation();
+        } catch {
+          // Helper logs its own failures; never mask the original
+          // error path with cleanup noise.
+        }
+        this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
+        this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        signal?.removeEventListener('abort', onParentAbort);
+        cleanupOwnedMonitorNotifications();
+        // Release the JSONL writer's listeners and close the fd before
+        // patching the meta sidecar — closing first guarantees the
+        // transcript file is flushed and visible to any post-mortem reader
+        // by the time the sidecar reports the terminal status.
+        // The optional chain covers the rare case where the attach itself
+        // threw before assigning `cleanupFgJsonl`; in that case there is
+        // nothing to release and we still want the meta-patch / unregister
+        // tail of the cleanup path to run.
+        cleanupFgJsonl?.();
+        // Patch the sidecar so a post-mortem reader sees the agent's final
+        // state. Foreground subagents settle synchronously through the
+        // tool-result channel rather than emitting a `task-notification`,
+        // so this is the only point where the on-disk meta gets the
+        // terminal status — without it, the sidecar would be frozen at
+        // `running` for every completed foreground run.
+        const fgTerminateMode = subagent.getTerminateMode();
+        const fgTerminalStatus =
+          fgTerminateMode === AgentTerminateMode.GOAL
+            ? 'completed'
+            : fgTerminateMode === AgentTerminateMode.CANCELLED
+              ? 'cancelled'
+              : 'failed';
+        patchAgentMeta(fgMetaPath, {
+          status: fgTerminalStatus,
+          lastUpdatedAt: new Date().toISOString(),
+        });
+        // Foreground entries leave the registry as soon as the tool-call
+        // returns — the parent's tool-result is the durable record. Doing
+        // this in finally guarantees we clean up on success, failure,
+        // cancel, AND any unexpected throw inside runFramed.
+        registry.unregisterForeground(hookOpts.agentId);
+        // Release the per-subagent ToolRegistry so any AgentTool /
+        // SkillTool the model instantiated during execution disposes
+        // its change-listeners on shared SubagentManager / SkillManager.
+        // Without this, repeated foreground subagent runs accumulate
+        // listeners for the rest of the session. Fire-and-forget; the
+        // subagent has already returned its result, and stop() logs its
+        // own errors.
+        void agentConfig
+          .getToolRegistry()
+          .stop()
+          .catch(() => {});
       }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);
+
+      // Final fallback for the isolation worktree: if the failure
+      // happened between provisioning and the inner try (e.g. inside
+      // `createApprovalModeOverride`, the agent constructor, or
+      // anywhere else upstream of the foreground/background try blocks
+      // that own cleanup), the worktree is still on disk. Reap or
+      // preserve it here, and surface the preserved path/branch in the
+      // failure message so the user can recover it.
+      let wtSuffix = '';
+      if (worktreeIsolation) {
+        try {
+          wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
+        } catch (cleanupError) {
+          debugLogger.warn(
+            `[AgentTool] Worktree cleanup after error failed: ${cleanupError}`,
+          );
+        }
+      }
 
       const errorDisplay: AgentResultDisplay = {
         ...this.currentDisplay!,
@@ -1308,7 +2278,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
 
       return {
-        llmContent: `Failed to run subagent: ${errorMessage}`,
+        llmContent: `Failed to run subagent: ${errorMessage}${wtSuffix}`,
         returnDisplay: errorDisplay,
       };
     }

@@ -8,10 +8,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import { clearCommand } from './clearCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import {
-  SessionEndReason,
-  SessionStartSource,
-} from '@qwen-code/qwen-code-core';
+import { SessionEndReason } from '@qwen-code/qwen-code-core';
 
 // Mock the telemetry service
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -33,6 +30,12 @@ describe('clearCommand', () => {
   let mockFireSessionEndEvent: ReturnType<typeof vi.fn>;
   let mockFireSessionStartEvent: ReturnType<typeof vi.fn>;
   let mockGetHookSystem: ReturnType<typeof vi.fn>;
+  let mockAbortBackgroundTasks: ReturnType<typeof vi.fn>;
+  let mockAbortMonitors: ReturnType<typeof vi.fn>;
+  let mockAbortBackgroundShells: ReturnType<typeof vi.fn>;
+  let mockResetBackgroundTasks: ReturnType<typeof vi.fn>;
+  let mockResetMonitors: ReturnType<typeof vi.fn>;
+  let mockResetBackgroundShells: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     mockResetChat = vi.fn().mockResolvedValue(undefined);
@@ -43,6 +46,12 @@ describe('clearCommand', () => {
       fireSessionEndEvent: mockFireSessionEndEvent,
       fireSessionStartEvent: mockFireSessionStartEvent,
     });
+    mockAbortBackgroundTasks = vi.fn();
+    mockAbortMonitors = vi.fn();
+    mockAbortBackgroundShells = vi.fn();
+    mockResetBackgroundTasks = vi.fn();
+    mockResetMonitors = vi.fn();
+    mockResetBackgroundShells = vi.fn();
     vi.clearAllMocks();
 
     mockContext = createMockCommandContext({
@@ -52,6 +61,17 @@ describe('clearCommand', () => {
             ({
               resetChat: mockResetChat,
             }) as unknown as GeminiClient,
+          getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+            hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+            reset: mockResetBackgroundTasks,
+            abortAll: mockAbortBackgroundTasks,
+          }),
+          getBackgroundShellRegistry: vi.fn().mockReturnValue({
+            getAll: vi.fn().mockReturnValue([]),
+            hasRunningEntries: vi.fn().mockReturnValue(false),
+            reset: mockResetBackgroundShells,
+            abortAll: mockAbortBackgroundShells,
+          }),
           startNewSession: mockStartNewSession,
           getHookSystem: mockGetHookSystem,
           getDebugLogger: () => ({
@@ -60,6 +80,11 @@ describe('clearCommand', () => {
           getModel: () => 'test-model',
           getToolRegistry: () => undefined,
           getApprovalMode: () => 'default',
+          getMonitorRegistry: () => ({
+            getRunning: vi.fn().mockReturnValue([]),
+            abortAll: mockAbortMonitors,
+            reset: mockResetMonitors,
+          }),
         },
       },
       session: {
@@ -95,7 +120,7 @@ describe('clearCommand', () => {
     expect(mockContext.ui.clear).toHaveBeenCalled();
   });
 
-  it('should fire SessionEnd event before clearing and SessionStart event after clearing', async () => {
+  it('should fire SessionEnd event before clearing', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
@@ -106,18 +131,43 @@ describe('clearCommand', () => {
     expect(mockFireSessionEndEvent).toHaveBeenCalledWith(
       SessionEndReason.Clear,
     );
-    expect(mockFireSessionStartEvent).toHaveBeenCalledWith(
-      SessionStartSource.Clear,
-      'test-model',
-      expect.any(String), // permissionMode
-    );
+    expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
+  });
 
-    // SessionEnd should be called before SessionStart
-    const sessionEndCallOrder =
-      mockFireSessionEndEvent.mock.invocationCallOrder[0];
-    const sessionStartCallOrder =
-      mockFireSessionStartEvent.mock.invocationCallOrder[0];
-    expect(sessionEndCallOrder).toBeLessThan(sessionStartCallOrder);
+  it('aborts old background work before starting a new session', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    await clearCommand.action(mockContext, '');
+
+    expect(mockAbortBackgroundTasks).toHaveBeenCalledWith({ notify: false });
+    expect(mockAbortMonitors).toHaveBeenCalledWith({ notify: false });
+    expect(mockAbortBackgroundShells).toHaveBeenCalledTimes(1);
+    expect(mockAbortBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
+      mockResetBackgroundShells.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      mockResetBackgroundTasks.mock.invocationCallOrder[0],
+    );
+    expect(mockAbortMonitors.mock.invocationCallOrder[0]).toBeLessThan(
+      mockResetMonitors.mock.invocationCallOrder[0],
+    );
+    expect(mockResetBackgroundShells.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockResetBackgroundTasks.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
+    expect(mockResetMonitors.mock.invocationCallOrder[0]).toBeLessThan(
+      mockStartNewSession.mock.invocationCallOrder[0],
+    );
   });
 
   it('should handle hook errors gracefully and continue execution', async () => {
@@ -197,10 +247,10 @@ describe('clearCommand', () => {
     // The action should complete immediately without waiting for hooks
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
     expect(mockResetChat).toHaveBeenCalledTimes(1);
-    // Hooks should have been called but not necessarily resolved
+    // SessionEnd hook should have been called but not necessarily resolved
     expect(mockFireSessionEndEvent).toHaveBeenCalled();
-    expect(mockFireSessionStartEvent).toHaveBeenCalled();
-    // Hooks should NOT have resolved yet since they have 5s timeouts
+    expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
+    // SessionEnd hook should NOT have resolved yet since it has a 5s timeout
     expect(sessionEndResolved).toBe(false);
     expect(sessionStartResolved).toBe(false);
   });
@@ -237,6 +287,17 @@ describe('clearCommand', () => {
         services: {
           config: {
             getHookSystem: mockGetHookSystem,
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+              reset: mockResetBackgroundTasks,
+              abortAll: mockAbortBackgroundTasks,
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: mockResetBackgroundShells,
+              abortAll: mockAbortBackgroundShells,
+            }),
             startNewSession: mockStartNewSession,
             getGeminiClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
@@ -245,6 +306,11 @@ describe('clearCommand', () => {
             getApprovalMode: vi.fn().mockReturnValue('default'),
             getToolRegistry: vi.fn().mockReturnValue({
               getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getMonitorRegistry: () => ({
+              getRunning: vi.fn().mockReturnValue([]),
+              abortAll: mockAbortMonitors,
+              reset: mockResetMonitors,
             }),
           },
         },
@@ -276,7 +342,7 @@ describe('clearCommand', () => {
       expect(mockResetChat).toHaveBeenCalledTimes(1);
     });
 
-    it('should still fire session events in non-interactive mode', async () => {
+    it('should still fire SessionEnd in non-interactive mode', async () => {
       if (!clearCommand.action)
         throw new Error('clearCommand must have an action.');
 
@@ -285,7 +351,170 @@ describe('clearCommand', () => {
       expect(mockFireSessionEndEvent).toHaveBeenCalledWith(
         SessionEndReason.Clear,
       );
-      expect(mockFireSessionStartEvent).toHaveBeenCalled();
+      expect(mockFireSessionStartEvent).not.toHaveBeenCalled();
+    });
+
+    it('blocks session clearing while background work is still running', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      const blockedContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasUnfinalizedTasks: vi.fn().mockReturnValue(true),
+              reset: vi.fn(),
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([]),
+              reset: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getGeminiClient: vi.fn().mockReturnValue({
+              resetChat: mockResetChat,
+            } as unknown as GeminiClient),
+            getModel: vi.fn().mockReturnValue('test-model'),
+            getApprovalMode: vi.fn().mockReturnValue('default'),
+            getToolRegistry: vi.fn().mockReturnValue({
+              getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      const result = await clearCommand.action(blockedContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          "Stop the current session's running background tasks before starting a new session.",
+      });
+      expect(mockStartNewSession).not.toHaveBeenCalled();
+      expect(mockResetChat).not.toHaveBeenCalled();
+    });
+
+    it('blocks session clearing while a monitor is still running', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      const blockedContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([]),
+              hasRunningEntries: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([
+                {
+                  monitorId: 'mon_123',
+                  status: 'running',
+                },
+              ]),
+              reset: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getGeminiClient: vi.fn().mockReturnValue({
+              resetChat: mockResetChat,
+            } as unknown as GeminiClient),
+            getModel: vi.fn().mockReturnValue('test-model'),
+            getApprovalMode: vi.fn().mockReturnValue('default'),
+            getToolRegistry: vi.fn().mockReturnValue({
+              getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      const result = await clearCommand.action(blockedContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          "Stop the current session's running background tasks before starting a new session.",
+      });
+      expect(mockStartNewSession).not.toHaveBeenCalled();
+      expect(mockResetChat).not.toHaveBeenCalled();
+    });
+
+    it('blocks session clearing while a background shell is still running', async () => {
+      if (!clearCommand.action)
+        throw new Error('clearCommand must have an action.');
+
+      const blockedContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {
+            getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+              hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
+              reset: vi.fn(),
+            }),
+            getBackgroundShellRegistry: vi.fn().mockReturnValue({
+              getAll: vi.fn().mockReturnValue([
+                {
+                  shellId: 'shell_123',
+                  status: 'running',
+                },
+              ]),
+              hasRunningEntries: vi.fn().mockReturnValue(true),
+              reset: vi.fn(),
+            }),
+            getMonitorRegistry: vi.fn().mockReturnValue({
+              getRunning: vi.fn().mockReturnValue([]),
+              reset: vi.fn(),
+            }),
+            getHookSystem: mockGetHookSystem,
+            startNewSession: mockStartNewSession,
+            getGeminiClient: vi.fn().mockReturnValue({
+              resetChat: mockResetChat,
+            } as unknown as GeminiClient),
+            getModel: vi.fn().mockReturnValue('test-model'),
+            getApprovalMode: vi.fn().mockReturnValue('default'),
+            getToolRegistry: vi.fn().mockReturnValue({
+              getAllTools: vi.fn().mockReturnValue([]),
+            }),
+            getDebugLogger: vi.fn().mockReturnValue({ warn: vi.fn() }),
+          },
+        },
+        session: {
+          startNewSession: vi.fn(),
+        },
+      });
+
+      const result = await clearCommand.action(blockedContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content:
+          "Stop the current session's running background tasks before starting a new session.",
+      });
+      expect(mockStartNewSession).not.toHaveBeenCalled();
+      expect(mockResetChat).not.toHaveBeenCalled();
     });
   });
 });

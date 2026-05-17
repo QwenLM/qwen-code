@@ -12,7 +12,7 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput } from './types.js';
+import type { DefaultHookOutput, HookPhase } from './types.js';
 import { createHookOutput } from './types.js';
 import type {
   SessionStartSource,
@@ -31,6 +31,8 @@ import type {
   PendingAsyncOutput,
   MessagesProvider,
   StopFailureErrorType,
+  TodoItem,
+  TodoStatus,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
@@ -60,7 +62,7 @@ export class HookSystem {
 
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
-    this.hookRunner = new HookRunner(allowedHttpUrls);
+    this.hookRunner = new HookRunner(allowedHttpUrls, config); // Pass config for prompt hooks
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
     this.sessionHooksManager = new SessionHooksManager();
@@ -130,10 +132,10 @@ export class HookSystem {
    * This is a fast-path check to avoid expensive MessageBus round-trips
    * when no hooks are configured for a given event.
    */
-  hasHooksForEvent(eventName: string): boolean {
-    return (
-      this.hookRegistry.getHooksForEvent(eventName as HookEventName).length > 0
-    );
+  hasHooksForEvent(eventName: string, sessionId?: string): boolean {
+    const event = eventName as HookEventName;
+    if (this.hookRegistry.getHooksForEvent(event).length > 0) return true;
+    return this.sessionHooksManager.hasHooksForEvent(event, sessionId);
   }
 
   async fireUserPromptSubmitEvent(
@@ -405,6 +407,50 @@ export class HookSystem {
     return result.finalOutput
       ? createHookOutput('PermissionRequest', result.finalOutput)
       : undefined;
+  }
+
+  /**
+   * Fire a TodoCreated event
+   * Called when a new todo item is added to the list
+   */
+  async fireTodoCreatedEvent(
+    todoId: string,
+    todoContent: string,
+    todoStatus: TodoStatus,
+    allTodos: TodoItem[],
+    phase: HookPhase,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireTodoCreatedEvent(
+      todoId,
+      todoContent,
+      todoStatus,
+      allTodos,
+      phase,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a TodoCompleted event
+   * Called when a todo item's status changes to 'completed'
+   */
+  async fireTodoCompletedEvent(
+    todoId: string,
+    todoContent: string,
+    previousStatus: 'pending' | 'in_progress',
+    allTodos: TodoItem[],
+    phase: HookPhase,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireTodoCompletedEvent(
+      todoId,
+      todoContent,
+      previousStatus,
+      allTodos,
+      phase,
+      signal,
+    );
   }
 
   // ==================== Session Hooks API ====================

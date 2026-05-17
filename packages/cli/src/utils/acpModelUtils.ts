@@ -9,6 +9,12 @@ import { z } from 'zod';
 
 /**
  * ACP model IDs are represented as `${modelId}(${authType})` in the ACP protocol.
+ *
+ * NOTE: The VSCode webview side mirrors this encoding contract in
+ * `packages/vscode-ide-companion/src/webview/utils/discontinuedModel.ts` to
+ * detect discontinued Qwen OAuth registry models without changing the wire
+ * format. If the encoding here evolves (new authTypes, runtime prefix changes,
+ * etc.), update that file too.
  */
 export function formatAcpModelId(modelId: string, authType: AuthType): string {
   return `${modelId}(${authType})`;

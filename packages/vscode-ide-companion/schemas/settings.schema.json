@@ -18,16 +18,6 @@
       "type": "object",
       "additionalProperties": true
     },
-    "codingPlan": {
-      "description": "Coding Plan template version tracking and configuration.",
-      "type": "object",
-      "properties": {
-        "version": {
-          "description": "SHA256 hash of the Coding Plan template. Used to detect template updates.",
-          "type": "string"
-        }
-      }
-    },
     "env": {
       "description": "Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.",
       "type": "object",
@@ -66,9 +56,31 @@
           "default": 5
         },
         "gitCoAuthor": {
-          "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
-          "type": "boolean",
-          "default": true
+          "description": "Attribution added to git commits and pull requests created through Qwen Code.",
+          "default": {
+            "commit": true,
+            "pr": true
+          },
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "commit": {
+                  "description": "Add a Co-authored-by trailer to git commit messages AND attach a per-file AI-attribution git note (`refs/notes/ai-attribution`) for commits made through Qwen Code. Disabling skips both.",
+                  "type": "boolean",
+                  "default": true
+                },
+                "pr": {
+                  "description": "Append a Qwen Code attribution line to PR descriptions when running `gh pr create`.",
+                  "type": "boolean",
+                  "default": true
+                }
+              }
+            }
+          ]
         },
         "checkpointing": {
           "description": "Session checkpointing settings.",
@@ -106,6 +118,11 @@
           "description": "The language for LLM output. Use \"auto\" to detect from system settings, or set a specific language.",
           "type": "string",
           "default": "auto"
+        },
+        "dynamicCommandTranslation": {
+          "description": "Enable AI translation for dynamic slash command descriptions. When disabled, dynamic commands use their original descriptions and do not trigger translation model calls.",
+          "type": "boolean",
+          "default": false
         },
         "terminalBell": {
           "description": "Play terminal bell sound when response completes or needs approval.",
@@ -165,7 +182,7 @@
           "default": "Qwen Dark"
         },
         "statusLine": {
-          "description": "Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
+          "description": "Status line display configuration. Use `type: \"preset\"` with built-in item ids, or `type: \"command\"` with a shell command. Optional command `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
           "additionalProperties": true
         },
@@ -193,6 +210,14 @@
           "description": "Show line numbers in the code output.",
           "type": "boolean",
           "default": true
+        },
+        "renderMode": {
+          "description": "Default Markdown display mode. Use \"render\" for rich visual previews, or \"raw\" to show source-oriented Markdown by default. Toggle during a session with Alt/Option+M; on macOS the terminal must send Option as Meta. Options: render, raw",
+          "enum": [
+            "render",
+            "raw"
+          ],
+          "default": "render"
         },
         "showCitations": {
           "description": "Show citations for generated text in the chat.",
@@ -260,6 +285,85 @@
           "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
           "type": "number",
           "default": 5
+        },
+        "hideBanner": {
+          "description": "Hide the startup ASCII banner and info panel.",
+          "type": "boolean",
+          "default": false
+        },
+        "customBannerTitle": {
+          "description": "Replace the default \">_ Qwen Code\" title shown in the banner info panel. The version suffix is always appended.",
+          "type": "string",
+          "default": ""
+        },
+        "customBannerSubtitle": {
+          "description": "Optional subtitle line rendered between the banner title and the auth/model line. When unset, the info panel keeps its blank spacer row.",
+          "type": "string",
+          "default": ""
+        },
+        "customAsciiArt": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "small": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                },
+                "large": {
+                  "oneOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "path": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path"
+                      ],
+                      "additionalProperties": false
+                    }
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          ],
+          "description": "Replace the default QWEN ASCII art. Accepts an inline string, {\"path\": \"...\"}, or {\"small\": ..., \"large\": ...} for width-aware selection."
         }
       }
     },
@@ -291,9 +395,16 @@
       }
     },
     "telemetry": {
-      "description": "Telemetry configuration.",
       "type": "object",
-      "additionalProperties": true
+      "properties": {
+        "includeSensitiveSpanAttributes": {
+          "description": "When enabled, user prompts, system prompts, tool inputs/outputs, and model responses are written to native OTel span attributes in addition to the log-to-span bridge. Warning: this may expose sensitive data (file contents, shell commands, conversation history) to your OTLP backend.",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": true,
+      "description": "Telemetry configuration."
     },
     "fastModel": {
       "description": "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
@@ -384,6 +495,11 @@
         }
       }
     },
+    "modelPricing": {
+      "description": "Optional per-model pricing for cost estimation in /stats model. Example: {\"qwen3-coder\": {\"inputPerMillionTokens\": 0.30, \"outputPerMillionTokens\": 1.20}}",
+      "type": "object",
+      "additionalProperties": true
+    },
     "context": {
       "description": "Settings for managing context provided to the model.",
       "type": "object",
@@ -466,6 +582,11 @@
           "description": "Enable automatic consolidation (dream) of collected memories.",
           "type": "boolean",
           "default": false
+        },
+        "enableAutoSkill": {
+          "description": "Enable background review for reusable project skills after tool-heavy sessions.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -521,6 +642,17 @@
         "sandboxImage": {
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
           "type": "string"
+        },
+        "toolSearch": {
+          "description": "Settings for the ToolSearch discovery mechanism.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "When enabled, MCP tools are loaded on-demand via ToolSearch to reduce prompt size. Disable this for models that rely on prefix-based KV caching (e.g. DeepSeek) to keep the prompt prefix stable and maximize cache hit rates.",
+              "type": "boolean",
+              "default": true
+            }
+          }
         },
         "shell": {
           "description": "Settings for shell execution.",
@@ -714,7 +846,7 @@
           "additionalProperties": true
         },
         "runtimeOutputDir": {
-          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.",
+          "description": "Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). Config files remain at ~/.qwen (or QWEN_HOME if set). Env var QWEN_RUNTIME_DIR takes priority.",
           "type": "string"
         }
       }
@@ -768,6 +900,11 @@
       "description": "Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).",
       "type": "boolean",
       "default": false
+    },
+    "stopHookBlockingCap": {
+      "description": "Maximum consecutive blocking Stop/SubagentStop hook decisions before Qwen Code overrides the hook loop and ends the turn. Can be overridden by QWEN_CODE_STOP_HOOK_BLOCK_CAP.",
+      "type": "number",
+      "default": 8
     },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",
@@ -2030,7 +2167,7 @@
     "$version": {
       "type": "number",
       "description": "Settings schema version for migration tracking.",
-      "default": 3
+      "default": 4
     }
   },
   "additionalProperties": true

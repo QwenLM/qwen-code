@@ -9,7 +9,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
-import { getRetryDelayMs } from './retryPolicy.js';
+import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
 import { classifyRetryError } from './retryErrorClassification.js';
 
 const debugLogger = createDebugLogger('RETRY');
@@ -18,7 +18,6 @@ const debugLogger = createDebugLogger('RETRY');
 const PERSISTENT_MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes — single retry backoff cap
 const PERSISTENT_CAP_MS = 6 * 60 * 60 * 1000; // 6 hours — absolute single wait cap
 const HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
-const INTERACTIVE_RETRY_AFTER_CAP_MS = 5 * 60 * 1000; // 5 minutes
 
 export interface HttpError extends Error {
   status?: number;
@@ -90,10 +89,30 @@ export function isUnattendedMode(): boolean {
 /**
  * Delays execution for a specified number of milliseconds.
  * @param ms The number of milliseconds to delay.
+ * @param signal Optional signal used to abort the delay.
  * @returns A promise that resolves after the delay.
  */
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new Error('Retry aborted by signal'));
+  }
+
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      signal?.removeEventListener('abort', onAbort);
+    };
+    function onAbort() {
+      clearTimeout(timeout);
+      cleanup();
+      reject(new Error('Retry aborted by signal'));
+    }
+
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -118,7 +137,7 @@ async function sleepWithHeartbeat(
     }
 
     const chunk = Math.max(1, Math.min(remaining, ctx.heartbeatInterval));
-    await delay(chunk);
+    await delay(chunk, ctx.signal);
     remaining -= chunk;
 
     if (remaining > 0 && ctx.heartbeatFn) {
@@ -194,7 +213,7 @@ export async function retryWithBackoff<T>(
           maxDelayMs,
           jitterRatio: 0.3,
         });
-        await delay(delayMs);
+        await delay(delayMs, signal);
         currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         continue;
       }
@@ -239,16 +258,13 @@ export async function retryWithBackoff<T>(
       if (shouldPersist) {
         persistentAttempt++;
 
-        if (errorStatus === 429) {
-          delayMs = getRetryDelayMs({
-            attempt: persistentAttempt,
-            initialDelayMs,
-            maxDelayMs: Math.min(maxBackoff, capMs),
-            retryAfterMode: 'prefer',
-            retryAfterMaxDelayMs: capMs,
-            jitterRatio: 0.25,
-            error,
-          });
+        const retryAfterMs =
+          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
+
+        if (retryAfterMs !== null && retryAfterMs > 0) {
+          // Retry-After is a server-specified wait — respect it, only cap at
+          // the absolute limit (capMs/6h), NOT at maxBackoff (5min).
+          delayMs = Math.min(retryAfterMs, capMs);
         } else {
           // Exponential backoff — cap at maxBackoff (5min) then absolute cap
           delayMs = getRetryDelayMs({
@@ -282,26 +298,21 @@ export async function retryWithBackoff<T>(
         }
       } else {
         // Normal retry path.
-        if (errorStatus === 429) {
-          const delayMs = getRetryDelayMs({
-            attempt,
-            initialDelayMs,
-            maxDelayMs,
-            retryAfterMode: 'prefer',
-            retryAfterMaxDelayMs: INTERACTIVE_RETRY_AFTER_CAP_MS,
-            jitterRatio: 0.3,
-            error,
-          });
+        const retryAfterMs =
+          errorStatus === 429 ? getRetryAfterDelayMs(error) : null;
+
+        if (retryAfterMs !== null && retryAfterMs > 0) {
           debugLogger.warn(
-            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying in ${delayMs}ms...`,
+            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
             retryClassification,
             error,
           );
-          await delay(delayMs);
-          currentDelay = Math.min(
-            maxDelayMs,
-            initialDelayMs * Math.pow(2, attempt),
-          );
+          // Normal HTTP retries intentionally preserve provider-directed
+          // Retry-After waits instead of clamping to the exponential
+          // maxDelayMs. The wait remains abort-aware so cancelled requests do
+          // not stay parked for the full provider delay.
+          await delay(retryAfterMs, signal);
+          currentDelay = initialDelayMs;
         } else {
           logRetryAttempt(attempt, error, retryClassification, errorStatus);
           const delayMs = getRetryDelayMs({
@@ -310,7 +321,7 @@ export async function retryWithBackoff<T>(
             maxDelayMs,
             jitterRatio: 0.3,
           });
-          await delay(delayMs);
+          await delay(delayMs, signal);
           currentDelay = Math.min(maxDelayMs, currentDelay * 2);
         }
       }
