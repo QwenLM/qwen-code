@@ -115,6 +115,35 @@ describe('sessionPaths', () => {
     expect(text).toContain(`Latest for session: ${latestOpenAILog}`);
   });
 
+  it('formats session path sections with indentation and separators', () => {
+    const text = formatSessionPathInfo({
+      sections: [
+        {
+          title: 'Session files',
+          entries: [
+            { label: 'Session ID', value: 'session-id' },
+            { label: 'Transcript', value: '/tmp/session.jsonl' },
+          ],
+        },
+        {
+          title: 'OpenAI logs',
+          entries: [{ label: 'Directory', value: '/tmp/openai-logs' }],
+        },
+      ],
+    });
+
+    expect(text).toBe(
+      [
+        'Session files:',
+        '  Session ID: session-id',
+        '  Transcript: /tmp/session.jsonl',
+        '',
+        'OpenAI logs:',
+        '  Directory: /tmp/openai-logs',
+      ].join('\n'),
+    );
+  });
+
   it('limits OpenAI log JSON scans to recent files', async () => {
     const sessionId = '2a25a035-da35-4722-850e-b8aa074bd244';
     const openAILogDir = path.join(tmpDir, 'openai-logs');

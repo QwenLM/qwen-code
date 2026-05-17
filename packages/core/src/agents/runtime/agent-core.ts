@@ -272,7 +272,7 @@ export class AgentCore {
     hooks?: AgentHooks,
     runtimeView?: RuntimeContentGeneratorView,
   ) {
-    const randomPart = randomUUID().replace(/-/g, '').slice(0, 6);
+    const randomPart = randomUUID().replace(/-/g, '').slice(0, 8);
     this.subagentId = `${name}-${randomPart}`;
     this.name = name;
     this.runtimeContext = runtimeContext;
