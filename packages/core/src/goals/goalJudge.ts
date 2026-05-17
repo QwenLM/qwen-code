@@ -14,11 +14,9 @@ const debugLogger = createDebugLogger('GOAL_JUDGE');
 /**
  * System prompt for the goal-completion judge.
  *
- * Wording is aligned with Claude Code 2.1.140's `Stop` prompt-hook evaluator
- * (function `cRK` in the compiled binary): it forces the judge to ground its
- * verdict on transcript evidence and to default to "not met" whenever the
- * evidence is ambiguous. The strict JSON shape lets us pair this with the
- * model's structured-output mode below.
+ * The judge grounds its verdict on transcript evidence and defaults to "not
+ * met" whenever the evidence is ambiguous. The strict JSON shape lets us pair
+ * this with the model's structured-output mode below.
  */
 const JUDGE_SYSTEM_PROMPT = `You are evaluating a stop-condition hook in an autonomous coding agent.
 Read the conversation transcript above carefully, then judge whether the
@@ -33,8 +31,7 @@ whenever possible. If the transcript does not contain clear evidence that the
 condition is satisfied, return {"ok": false, "reason": "insufficient evidence in transcript"}.`;
 
 /**
- * Wraps the raw user condition into a transcript-grounded question, matching
- * Claude Code's `Based on the conversation transcript above...` framing so the
+ * Wraps the raw user condition into a transcript-grounded question so the
  * model sees the condition as a binary judgement task, not a new directive.
  */
 const userJudgementPrompt = (condition: string): string =>
@@ -110,9 +107,9 @@ export async function judgeGoal(
   if (args.signal.aborted) return { ok: false, reason: JUDGE_REASON_FALLBACK };
 
   // Feed the conversation transcript (trailing N messages) plus the framed
-  // judgement prompt — Claude Code's design. The hook input's
-  // `last_assistant_message` is appended only when the live history doesn't
-  // yet contain it (e.g. before the model turn is committed to chat).
+  // judgement prompt. The hook input's `last_assistant_message` is appended
+  // only when the live history doesn't yet contain it (e.g. before the model
+  // turn is committed to chat).
   const transcript = collectTranscript(config, args.lastAssistantText);
   transcript.push({
     role: 'user',
@@ -130,9 +127,8 @@ export async function judgeGoal(
         temperature: 0,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        // Disable extended thinking — the judge is a binary check; thinking
-        // burns latency and tokens for no quality gain. Matches Claude Code's
-        // `thinkingConfig: { type: "disabled" }` for the same call.
+        // Disable extended thinking: the judge is a binary check, and
+        // thinking burns latency and tokens for no quality gain.
         thinkingConfig: { thinkingBudget: 0 },
       },
       args.signal,

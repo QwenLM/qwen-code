@@ -358,6 +358,13 @@ export * from './test-utils/index.js';
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export {
+  DEFAULT_STOP_HOOK_BLOCK_CAP,
+  STOP_HOOK_BLOCK_CAP_ENV,
+  normalizeStopHookBlockingCap,
+  resolveStopHookBlockingCap,
+  formatStopHookBlockingCapWarning,
+} from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
 
 // ============================================================================

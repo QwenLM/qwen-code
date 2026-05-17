@@ -29,18 +29,16 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
 }) => {
   // The "checking" kind is the per-iteration "judge said not met, continuing"
   // marker that replaces the generic `stop_hook_loop` rendering for /goal.
-  // Slim one-liner with a hollow circle to signal "pending" without the
-  // alarming `Stop hook error:` framing. The judge's reason is intentionally
-  // NOT shown here — it would clutter the per-turn chip and the same reason
-  // surfaces as the model's next user prompt anyway. The eventual "Last
-  // check: …" line appears once in the final achieved/aborted card.
+  // Show the active condition and latest judge reason on every iteration so
+  // the user can see why the loop is continuing.
   if (kind === 'checking') {
+    const reason = lastReason?.trim();
     return (
       <Box flexDirection="row">
         <Box width={2} flexShrink={0}>
           <Text color={theme.text.secondary}>○</Text>
         </Box>
-        <Box flexGrow={1}>
+        <Box flexGrow={1} flexDirection="column">
           <Text color={theme.text.secondary}>
             Goal check
             {typeof iterations === 'number' && iterations > 0
@@ -48,6 +46,14 @@ export const GoalStatusMessage: React.FC<GoalStatusMessageProps> = ({
               : ''}{' '}
             · not yet met
           </Text>
+          <Text color={theme.text.secondary} wrap="wrap">
+            Goal: {condition}
+          </Text>
+          {reason ? (
+            <Text color={theme.text.secondary} wrap="wrap">
+              Judge: {reason}
+            </Text>
+          ) : null}
         </Box>
       </Box>
     );

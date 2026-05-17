@@ -69,6 +69,10 @@ import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
+import {
+  appendStopHookBlockingCapWarning,
+  formatStopHookBlockingCapWarning,
+} from '../../hooks/stopHookCap.js';
 import { ApprovalMode } from '../../config/config.js';
 import {
   getAgentJsonlPath,
@@ -967,9 +971,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     return { subagent, initialMessages, taskPrompt, promptConfig, toolConfig };
   }
 
-  // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
-  // reason back and re-executes — up to 5 iterations to defend against a
-  // misconfigured hook looping forever.
+  // Runs the SubagentStop hook after execution. On a blocking decision, feeds
+  // the reason back and re-executes until the configured cap prevents a
+  // misconfigured hook from looping forever.
   private async runSubagentStopHookLoop(
     subagent: AgentHeadless,
     opts: {
@@ -979,15 +983,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       resolvedMode: PermissionMode;
       signal?: AbortSignal;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { agentId, agentType, transcriptPath, resolvedMode, signal } = opts;
     const hookSystem = this.config.getHookSystem();
-    if (!hookSystem) return;
+    if (!hookSystem) return undefined;
 
     const effectiveTranscriptPath =
       transcriptPath ?? this.config.getTranscriptPath();
     let stopHookActive = false;
-    const maxIterations = 5;
+    const maxIterations = this.config.getStopHookBlockingCap();
 
     for (let i = 0; i < maxIterations; i++) {
       try {
@@ -1007,10 +1011,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           !typedStopOutput?.isBlockingDecision() &&
           !typedStopOutput?.shouldStopExecution()
         ) {
-          return;
+          return undefined;
         }
 
         stopHookActive = true;
+        const currentIterationCount = i + 1;
+        if (currentIterationCount >= maxIterations) {
+          const warning = formatStopHookBlockingCapWarning(
+            'SubagentStop',
+            maxIterations,
+          );
+          debugLogger.warn(`[Agent] ${warning}`);
+          return warning;
+        }
+
         const continueContext = new ContextState();
         continueContext.set(
           'task_prompt',
@@ -1018,18 +1032,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
         await subagent.execute(continueContext, signal);
 
-        if (signal?.aborted) return;
+        if (signal?.aborted) return undefined;
       } catch (hookError) {
         debugLogger.warn(
           `[Agent] SubagentStop hook failed, allowing stop: ${hookError}`,
         );
-        return;
+        return undefined;
       }
     }
 
-    debugLogger.warn(
-      `[Agent] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
-    );
+    return undefined;
   }
 
   /**
@@ -1046,7 +1058,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       signal?: AbortSignal;
       updateOutput?: (output: ToolResultDisplay) => void;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
     const hookSystem = this.config.getHookSystem();
 
@@ -1075,8 +1087,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Execute the subagent (blocking)
       await subagent.execute(contextState, signal);
 
+      let stopHookWarning: string | undefined;
       if (hookSystem && !signal?.aborted) {
-        await this.runSubagentStopHookLoop(subagent, {
+        stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
           agentId,
           agentType,
           resolvedMode,
@@ -1085,7 +1098,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // Get the results
-      const finalText = subagent.getFinalText();
+      const finalText = appendStopHookBlockingCapWarning(
+        subagent.getFinalText(),
+        stopHookWarning,
+      );
       const terminateMode = subagent.getTerminateMode();
       const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
@@ -1110,6 +1126,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           updateOutput,
         );
       }
+      return stopHookWarning;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -1123,6 +1140,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         },
         updateOutput,
       );
+      return undefined;
     }
   }
 
@@ -1789,8 +1807,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
+            let stopHookWarning: string | undefined;
             if (hookSystem && !bgAbortController.signal.aborted) {
-              await this.runSubagentStopHookLoop(bgSubagent, {
+              stopHookWarning = await this.runSubagentStopHookLoop(bgSubagent, {
                 agentId: hookOpts.agentId,
                 agentType: hookOpts.agentType,
                 transcriptPath: jsonlPath,
@@ -1809,7 +1828,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const wtSuffix = formatWorktreeSuffix(
               await cleanupWorktreeIsolation(),
             );
-            const finalText = bgSubagent.getFinalText() + wtSuffix;
+            const finalText =
+              appendStopHookBlockingCapWarning(
+                bgSubagent.getFinalText(),
+                stopHookWarning,
+              ) + wtSuffix;
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
@@ -2128,8 +2151,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           resumeCount: 0,
         });
 
-        await runFramed();
-        const finalText = subagent.getFinalText();
+        const stopHookWarning = await runFramed();
+        const finalText = appendStopHookBlockingCapWarning(
+          subagent.getFinalText(),
+          stopHookWarning,
+        );
         const terminateMode = subagent.getTerminateMode();
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {

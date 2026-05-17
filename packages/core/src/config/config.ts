@@ -75,6 +75,7 @@ import { MonitorRegistry } from '../services/monitorRegistry.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -595,6 +596,11 @@ export interface ConfigParameters {
    */
   disableAllHooks?: boolean;
   /**
+   * Maximum consecutive blocking Stop/SubagentStop hook decisions before the
+   * runtime overrides the hook loop and allows the turn to end.
+   */
+  stopHookBlockingCap?: number;
+  /**
    * User-level hooks configuration (from user settings).
    * These hooks are always loaded regardless of folder trust status.
    */
@@ -823,6 +829,7 @@ export class Config {
   private readonly enableAutoSkill: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  private readonly stopHookBlockingCap: number;
   /** User-level hooks (always loaded regardless of trust) */
   private readonly userHooks?: Record<string, unknown>;
   /** Project-level hooks (only loaded in trusted folders) */
@@ -1028,6 +1035,9 @@ export class Config {
     this.enableAutoSkill = params.enableAutoSkill ?? false;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    this.stopHookBlockingCap = resolveStopHookBlockingCap(
+      params.stopHookBlockingCap,
+    );
     // Store user and project hooks separately for proper source attribution
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
@@ -2727,6 +2737,10 @@ export class Config {
    */
   getDisableAllHooks(): boolean {
     return this.disableAllHooks || this.getBareMode();
+  }
+
+  getStopHookBlockingCap(): number {
+    return this.stopHookBlockingCap;
   }
 
   getManagedAutoMemoryEnabled(): boolean {
