@@ -8,6 +8,7 @@ import { parseSseStream } from './sse.js';
 import type {
   DaemonCapabilities,
   DaemonEvent,
+  DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
   PermissionResponse,
@@ -88,8 +89,41 @@ export class DaemonHttpError extends Error {
 }
 
 export interface CreateSessionRequest {
-  workspaceCwd: string;
+  /**
+   * Workspace path the daemon must be bound to (per #3803 §02). When
+   * omitted, the SDK sends no `cwd` field and the daemon route falls
+   * back to its boot-time `boundWorkspace`. Pass `caps.workspaceCwd`
+   * to be explicit, or omit it for the daemon-knows-best path. A
+   * non-empty `workspaceCwd` that doesn't canonicalize to the
+   * daemon's bound path yields a `400 workspace_mismatch`
+   * `DaemonHttpError`.
+   */
+  workspaceCwd?: string;
   modelServiceId?: string;
+  /**
+   * Per-request session-scope override. The production daemon defaults
+   * to `'single'`, which coalesces same-workspace `POST /session` calls
+   * into one shared session; passing `sessionScope: 'thread'` here
+   * forces a distinct session for this call. The reverse override
+   * (per-request `'single'` against a daemon defaulting to `'thread'`)
+   * is also supported, though the daemon's default is hardcoded to
+   * `'single'` today (#4175 may add a CLI flag in a follow-up). Omit
+   * to inherit the daemon-wide default.
+   *
+   * Only `'single'` and `'thread'` are accepted; anything else yields
+   * `400 invalid_session_scope`. Old daemons (pre-#4175 PR 5) silently
+   * ignore the field — clients should pre-flight
+   * `caps.features.session_scope_override` before sending.
+   */
+  sessionScope?: 'single' | 'thread';
+}
+
+export interface RestoreSessionRequest {
+  /**
+   * Workspace path the daemon must be bound to. Omit to let the daemon use
+   * its advertised bound workspace, mirroring `createOrAttachSession`.
+   */
+  workspaceCwd?: string;
 }
 
 export interface PromptRequest {
@@ -250,6 +284,18 @@ export class DaemonClient {
   async createOrAttachSession(
     req: CreateSessionRequest,
   ): Promise<DaemonSession> {
+    // Per #3803 §02: omitting `cwd` lets the daemon fall back to its
+    // bound workspace. JSON.stringify strips `undefined` values, so
+    // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
+    // server then takes the documented fallback path.
+    //
+    // Send EVERY defined `workspaceCwd` value through as-is, including
+    // the empty string. A truthy guard would silently swallow
+    // `workspaceCwd: ""` (a likely client-side bug) and let the server
+    // fall back instead of returning a clear 400 for the malformed
+    // input. The SDK should be a transparent layer here: passing the
+    // caller's value verbatim lets the server's validation surface
+    // bugs that would otherwise hide as "wrong workspace bound".
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session`,
       {
@@ -258,6 +304,15 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd: req.workspaceCwd,
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+          // `!== undefined` (not truthy) so a buggy caller passing
+          // `sessionScope: '' | null` doesn't get the field silently
+          // erased on the wire — let the daemon's `400
+          // invalid_session_scope` surface the bug. Same shape the
+          // bridge's own validation uses (`httpAcpBridge.ts:
+          // spawnOrAttach`); SDK should be a transparent layer here.
+          ...(req.sessionScope !== undefined
+            ? { sessionScope: req.sessionScope }
+            : {}),
         }),
       },
       async (res) => {
@@ -285,6 +340,48 @@ export class DaemonClient {
           sessions: DaemonSessionSummary[];
         };
         return body.sessions;
+      },
+    );
+  }
+
+  async loadSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('load', sessionId, req);
+  }
+
+  async resumeSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('resume', sessionId, req);
+  }
+
+  /**
+   * Shared transport for `loadSession` / `resumeSession`. Both routes
+   * share an identical wire shape (POST /session/:id/{load|resume}
+   * with optional `cwd` body) and identical error envelopes from the
+   * daemon, so they collapse into a single fetch path that only
+   * differs in the URL suffix and the route name reported on errors.
+   */
+  private async restoreSession(
+    action: 'load' | 'resume',
+    sessionId: string,
+    req: RestoreSessionRequest,
+  ): Promise<DaemonRestoredSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/${action}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ cwd: req.workspaceCwd }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, `POST /session/:id/${action}`);
+        }
+        return (await res.json()) as DaemonRestoredSession;
       },
     );
   }

@@ -169,35 +169,6 @@ export function getLanguageNameFromLocale(locale: SupportedLanguage): string {
 }
 
 /**
- * Maps a UI locale to an English language name for dynamic translation prompts.
- * Unknown custom locale codes fall back to Intl.DisplayNames, then the raw code,
- * so custom language packs do not accidentally request English translations.
- */
-export function getLanguageNameForTranslationTarget(
-  locale: SupportedLanguage,
-): string {
-  const resolved = resolveSupportedLanguage(locale);
-  const lang = resolved
-    ? SUPPORTED_LANGUAGES.find((language) => language.code === resolved)
-    : undefined;
-  if (lang) {
-    return lang.fullName;
-  }
-
-  try {
-    const displayNames = new Intl.DisplayNames(['en'], { type: 'language' });
-    const displayName = displayNames.of(locale);
-    if (displayName) {
-      return displayName;
-    }
-  } catch {
-    // Fall through to raw locale.
-  }
-
-  return locale;
-}
-
-/**
  * Gets the language options for the settings schema.
  */
 export function getLanguageSettingsOptions(): Array<{

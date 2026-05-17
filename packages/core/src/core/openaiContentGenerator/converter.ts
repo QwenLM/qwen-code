@@ -744,8 +744,22 @@ function createToolMessage(
     contentParts.push({ type: 'text' as const, text: textContent });
   }
 
-  // Add media parts from function response
+  // Add nested parts from the function response. Most entries here are
+  // media (image/document attachments) — but the compaction slimmer
+  // replaces inlineData/fileData with text placeholders like
+  // `[image: image/png]` so the summary side-query doesn't carry raw
+  // base64. Pass those text placeholders through as text content;
+  // otherwise they'd be silently dropped by createMediaContentPart
+  // (which only knows image_url / file_url shapes), and the summary
+  // model would receive an empty tool response with no indication that
+  // an image was ever there.
   for (const part of response.parts || []) {
+    if ('text' in part && typeof part.text === 'string') {
+      if (part.text.length > 0) {
+        contentParts.push({ type: 'text' as const, text: part.text });
+      }
+      continue;
+    }
     const mediaPart = createMediaContentPart(part, requestContext);
     if (mediaPart) {
       contentParts.push(mediaPart);

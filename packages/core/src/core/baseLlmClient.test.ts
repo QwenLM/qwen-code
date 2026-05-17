@@ -117,6 +117,19 @@ const createMockResponseWithoutFunctionCall = (): GenerateContentResponse =>
     ],
   }) as GenerateContentResponse;
 
+const createMockTextResponse = (text: string): GenerateContentResponse =>
+  ({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [{ text }],
+        },
+        index: 0,
+      },
+    ],
+  }) as GenerateContentResponse;
+
 describe('BaseLlmClient', () => {
   let client: BaseLlmClient;
   let abortController: AbortController;
@@ -322,6 +335,50 @@ describe('BaseLlmClient', () => {
 
       expect(result).toEqual({});
     });
+
+    it('should parse a loose JSON object from text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('Result:\n{"color":"purple","count":2}\nDone.'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'purple', count: 2 });
+    });
+
+    it('should parse fenced JSON text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":"orange"}\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'orange' });
+    });
+
+    it('should ignore malformed loose JSON text', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
+
+    it('should reject loose JSON arrays', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('[{"color":"blue"}]'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
   });
 
   describe('generateJson - Error Handling', () => {
@@ -501,6 +558,8 @@ describe('BaseLlmClient', () => {
           .mockReturnValue({ authType: AuthType.QWEN_OAUTH }),
         getEmbeddingModel: vi.fn().mockReturnValue('test-embedding-model'),
         getModel: vi.fn().mockReturnValue('main-model'),
+        getFastModel: vi.fn().mockReturnValue(undefined),
+        getFastModelForSideQuery: vi.fn().mockReturnValue(undefined),
         getModelsConfig: vi.fn().mockReturnValue({ getResolvedModel }),
       } as unknown as Mocked<Config>;
     });
@@ -632,6 +691,95 @@ describe('BaseLlmClient', () => {
       expect(retryWithBackoff).toHaveBeenCalledWith(
         expect.any(Function),
         expect.objectContaining({ authType: AuthType.USE_ANTHROPIC }),
+      );
+    });
+
+    it('generateJson accepts authType-qualified selectors and sends the bare model id', async () => {
+      getResolvedModel.mockImplementation((authType: string, model: string) => {
+        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
+          return {
+            id: 'shared-model',
+            authType: AuthType.USE_OPENAI,
+            envKey: 'OPENAI_API_KEY',
+          };
+        }
+        return undefined;
+      });
+      fastGenerateContent.mockResolvedValue(
+        createMockResponseWithFunctionCall({ ok: true }),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { ok: true } },
+      ]);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.generateJson({
+        contents: [{ role: 'user', parts: [{ text: 'go' }] }],
+        schema: { type: 'object' },
+        model: 'openai:shared-model',
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'shared-model',
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      );
+      expect(fastGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'shared-model' }),
+        'test',
+      );
+    });
+
+    it('generateJson resolves fast selectors through the configured fast model', async () => {
+      crossProviderConfig.getFastModelForSideQuery.mockReturnValue(
+        'openai:shared-model',
+      );
+      getResolvedModel.mockImplementation((authType: string, model: string) => {
+        if (authType === AuthType.USE_OPENAI && model === 'shared-model') {
+          return {
+            id: 'shared-model',
+            authType: AuthType.USE_OPENAI,
+            envKey: 'OPENAI_API_KEY',
+          };
+        }
+        return undefined;
+      });
+      fastGenerateContent.mockResolvedValue(
+        createMockResponseWithFunctionCall({ ok: true }),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue([
+        { name: 'respond_in_schema', args: { ok: true } },
+      ]);
+
+      const c = new BaseLlmClient(mockContentGenerator, crossProviderConfig);
+
+      await c.generateJson({
+        contents: [{ role: 'user', parts: [{ text: 'go' }] }],
+        schema: { type: 'object' },
+        model: 'fast',
+        abortSignal: new AbortController().signal,
+        promptId: 'test',
+      });
+
+      expect(getResolvedModel).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        'shared-model',
+      );
+      expect(mockBuildAgentContentGeneratorConfig).toHaveBeenCalledWith(
+        crossProviderConfig,
+        'shared-model',
+        expect.objectContaining({ authType: AuthType.USE_OPENAI }),
+      );
+      expect(fastGenerateContent).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'shared-model' }),
+        'test',
       );
     });
 

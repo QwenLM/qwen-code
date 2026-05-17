@@ -895,6 +895,21 @@ describe('SessionService', () => {
       ).toBe(450);
     });
 
+    it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: { promptTokenCount: 200, totalTokenCount: 450 },
+      };
+      expect(
+        getResumePromptTokenCount(
+          makeConversation([compressionRecord, assistant]),
+        ),
+      ).toBe(200);
+    });
+
     it('should fall back to compression when latest assistant has zero usage', () => {
       const assistant: ChatRecord = {
         ...baseRecord,

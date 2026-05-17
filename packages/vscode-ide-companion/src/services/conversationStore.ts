@@ -84,6 +84,75 @@ export class ConversationStore {
     return true;
   }
 
+  async renameConversationId(
+    fromConversationId: string,
+    toConversationId: string,
+  ): Promise<boolean> {
+    if (fromConversationId === toConversationId) {
+      return true;
+    }
+
+    const conversations = await this.getAllConversations();
+    const sourceIndex = conversations.findIndex(
+      (c) => c.id === fromConversationId,
+    );
+
+    if (sourceIndex < 0) {
+      console.warn(
+        '[ConversationStore] renameConversationId: source conversation not found:',
+        fromConversationId,
+      );
+      return false;
+    }
+
+    if (conversations.some((c) => c.id === toConversationId)) {
+      console.warn(
+        '[ConversationStore] renameConversationId: target conversation already exists:',
+        toConversationId,
+      );
+      return false;
+    }
+
+    const source = conversations[sourceIndex];
+    if (!source) {
+      return false;
+    }
+
+    conversations[sourceIndex] = {
+      ...source,
+      id: toConversationId,
+      updatedAt: Date.now(),
+    };
+
+    await this.context.globalState.update('conversations', conversations);
+
+    if (this.currentConversationId === fromConversationId) {
+      this.currentConversationId = toConversationId;
+    }
+
+    return true;
+  }
+
+  async upsertConversation(conversation: Conversation): Promise<void> {
+    const conversations = await this.getAllConversations();
+    const storedConversation: Conversation = {
+      ...conversation,
+      messages: conversation.messages.map((message) => ({ ...message })),
+    };
+    const existingIndex = conversations.findIndex(
+      (c) => c.id === conversation.id,
+    );
+
+    if (existingIndex >= 0) {
+      conversations[existingIndex] = storedConversation;
+    } else {
+      conversations.push(storedConversation);
+    }
+
+    await this.context.globalState.update('conversations', conversations);
+    this.currentConversationId = conversation.id;
+  }
+
   async truncateFromUserTurn(
     conversationId: string,
     targetTurnIndex: number,

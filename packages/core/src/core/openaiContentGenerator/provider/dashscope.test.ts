@@ -188,6 +188,39 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
+    it('should return false when the dashscope domain only appears in the URL path', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://evil.example.com/dashscope.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for a domain that only ends with dashscope.aliyuncs.com as a suffix without a dot', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://notdashscope.aliyuncs.com/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
+    it('should return false for an unparseable baseUrl', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'not a url',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(false);
+    });
+
     it('should return true when baseUrl matches DASHSCOPE_PROXY_BASE_URL', () => {
       vi.stubEnv(
         'DASHSCOPE_PROXY_BASE_URL',

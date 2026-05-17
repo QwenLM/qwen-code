@@ -9,10 +9,9 @@ import {
   SessionService,
   type Config,
   type SessionListItem,
-  SessionStartSource,
-  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItem } from '../types.js';
 import {
@@ -119,6 +118,19 @@ export function useResumeCommand(
       // Update session history core.
       resetBackgroundStateForSessionSwitch(config);
       config.startNewSession(sessionId, sessionData);
+      // Re-arm /goal: the in-memory activeGoalStore entry (if any) is stale
+      // after `config.startNewSession` rebuilds the hook system — its
+      // `setAt` was captured before /new, and its `hookId` points to a
+      // hook that no longer exists. The cold-boot path runs this same
+      // call in AppContainer; the runtime /resume path needs it too,
+      // otherwise the footer pill keeps ticking from the original setAt
+      // (visible as "几十秒" elapsed immediately after /new + /resume) and
+      // the Stop hook is silently dead until the user re-issues /goal.
+      try {
+        if (addItem) restoreGoalFromHistory(uiHistoryItems, config, addItem);
+      } catch {
+        // Best-effort — never block resume on goal restoration.
+      }
       // Rebuild turn boundary tracking so rewind works within resumed sessions.
       config
         .getChatRecordingService()
@@ -138,18 +150,8 @@ export function useResumeCommand(
         );
       }
 
-      // Fire SessionStart event after resuming session
-      try {
-        await config
-          .getHookSystem()
-          ?.fireSessionStartEvent(
-            SessionStartSource.Resume,
-            config.getModel() ?? '',
-            String(config.getApprovalMode()) as PermissionMode,
-          );
-      } catch (err) {
-        config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
-      }
+      // SessionStart hook is handled during chat initialization so its
+      // additionalContext can be injected into the resumed model context.
 
       // Refresh terminal UI.
       remount?.();

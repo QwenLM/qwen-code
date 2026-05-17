@@ -221,6 +221,7 @@ describe('AnthropicContentConverter', () => {
               type: 'tool_result',
               tool_use_id: 'call-1',
               content: 'ok',
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -253,6 +254,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: 'boom',
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -286,6 +288,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: '',
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -336,6 +339,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -434,6 +438,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -485,6 +490,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -536,6 +542,7 @@ describe('AnthropicContentConverter', () => {
                   },
                 },
               ],
+              cache_control: { type: 'ephemeral' },
             },
           ],
         },
@@ -665,6 +672,7 @@ describe('AnthropicContentConverter', () => {
                 },
               },
             ],
+            cache_control: { type: 'ephemeral' },
           },
         ],
       });
@@ -1306,6 +1314,7 @@ describe('AnthropicContentConverter', () => {
         promptTokenCount: 3,
         candidatesTokenCount: 5,
         totalTokenCount: 8,
+        cachedContentTokenCount: 0,
       });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
@@ -1331,6 +1340,35 @@ describe('AnthropicContentConverter', () => {
       expect(parts).toEqual([
         { functionCall: { id: 't1', name: 'tool', args: { x: 1 } } },
       ]);
+    });
+
+    it('forwards cache_read_input_tokens and cache_creation_input_tokens through to usageMetadata', () => {
+      // A real Anthropic mid-conversation response carries all three prompt
+      // buckets simultaneously: `input_tokens` (the non-cached tail),
+      // `cache_read_input_tokens` (the warm prefix served from cache), and
+      // `cache_creation_input_tokens` (the new region being written). The
+      // converter must forward both cache fields so the normalizer can sum
+      // them — dropping either silently undercounts the Footer reading by
+      // the size of the dropped bucket.
+      const response = converter.convertAnthropicResponseToGemini({
+        id: 'msg-1',
+        model: 'claude-test',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: {
+          input_tokens: 2_500,
+          cache_read_input_tokens: 32_088,
+          cache_creation_input_tokens: 8_700,
+          output_tokens: 400,
+        },
+      } as unknown as Anthropic.Message);
+
+      expect(response.usageMetadata).toEqual({
+        promptTokenCount: 43_288,
+        candidatesTokenCount: 400,
+        totalTokenCount: 43_688,
+        cachedContentTokenCount: 32_088,
+      });
     });
   });
 
@@ -1386,6 +1424,47 @@ describe('AnthropicContentConverter', () => {
           content: [{ type: 'text', text: 'Hello' }],
         },
       ]);
+    });
+
+    it('marks the last user message with cache_control when its last block is tool_result', () => {
+      // Regression: in agentic loops the last user message is typically a
+      // tool_result, not a text block. An earlier guard required the last
+      // block to be text, which silently dropped the per-turn cache
+      // breakpoint from turn 2 onward and collapsed the cacheable region
+      // back to system+tools. Anthropic docs explicitly list tool_result
+      // as a cacheable block type in messages.content.
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'do the thing' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'c1', name: 't', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 't',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const lastUser = messages[messages.length - 1];
+      expect(lastUser.role).toBe('user');
+      const content = Array.isArray(lastUser.content) ? lastUser.content : [];
+      const lastBlock = content[content.length - 1] as {
+        type: string;
+        cache_control?: { type: string };
+      };
+      expect(lastBlock.type).toBe('tool_result');
+      expect(lastBlock.cache_control).toEqual({ type: 'ephemeral' });
     });
 
     it('does not add cache_control to tools when disabled', async () => {
