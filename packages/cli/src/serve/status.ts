@@ -209,6 +209,39 @@ export function createIdleWorkspaceProvidersStatus(
   };
 }
 
+/**
+ * Discriminant for diagnostic cells emitted by `/workspace/env`.
+ * `env_var` cells are presence-only (the daemon never echoes secret values
+ * even when redacted). The other kinds expose non-sensitive values like
+ * runtime tag, platform, redacted proxy host, and sandbox profile name.
+ */
+export type ServeEnvKind =
+  | 'runtime'
+  | 'platform'
+  | 'sandbox'
+  | 'proxy'
+  | 'env_var';
+
+export interface ServeEnvCell extends ServeStatusCell {
+  kind: ServeEnvKind;
+  /** Stable identifier within the kind (e.g. env-var name, proxy var name). */
+  name: string;
+  present?: boolean;
+  /** Non-sensitive value; ALWAYS omitted for kind='env_var'. */
+  value?: string;
+}
+
+export interface ServeWorkspaceEnvStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  workspaceCwd: string;
+  /** Always true — the daemon answers env without consulting ACP. */
+  initialized: true;
+  /** Whether an ACP channel is currently live; informational only. */
+  acpChannelLive: boolean;
+  cells: ServeEnvCell[];
+  errors?: ServeStatusCell[];
+}
+
 const SKILL_PARSE_CODES: ReadonlySet<string> = new Set([
   'PARSE_ERROR',
   'INVALID_CONFIG',

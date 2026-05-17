@@ -291,6 +291,30 @@ export interface DaemonWorkspaceProvidersStatus {
   errors?: DaemonStatusCell[];
 }
 
+export type DaemonEnvKind =
+  | 'runtime'
+  | 'platform'
+  | 'sandbox'
+  | 'proxy'
+  | 'env_var';
+
+export interface DaemonEnvCell extends DaemonStatusCell {
+  kind: DaemonEnvKind;
+  name: string;
+  present?: boolean;
+  /** Non-sensitive value; ALWAYS omitted for kind='env_var'. */
+  value?: string;
+}
+
+export interface DaemonWorkspaceEnvStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  cells: DaemonEnvCell[];
+  errors?: DaemonStatusCell[];
+}
+
 export interface DaemonSessionContextStatus {
   v: 1;
   sessionId: string;

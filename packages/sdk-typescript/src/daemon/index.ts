@@ -70,6 +70,8 @@ export type {
 export type {
   DaemonAvailableCommand,
   DaemonCapabilities,
+  DaemonEnvCell,
+  DaemonEnvKind,
   DaemonErrorKind,
   DaemonEvent,
   DaemonMcpDiscoveryState,
@@ -86,6 +88,7 @@ export type {
   DaemonSkillLevel,
   DaemonStatus,
   DaemonStatusCell,
+  DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceProviderCurrent,

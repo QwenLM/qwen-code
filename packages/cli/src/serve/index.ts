@@ -43,6 +43,8 @@ export {
   createIdleWorkspaceProvidersStatus,
   createIdleWorkspaceSkillsStatus,
   mapDomainErrorToErrorKind,
+  type ServeEnvCell,
+  type ServeEnvKind,
   type ServeErrorKind,
   type ServeMcpDiscoveryState,
   type ServeMcpServerRuntimeStatus,
@@ -52,6 +54,7 @@ export {
   type ServeSkillLevel,
   type ServeStatus,
   type ServeStatusCell,
+  type ServeWorkspaceEnvStatus,
   type ServeWorkspaceMcpServerStatus,
   type ServeWorkspaceMcpStatus,
   type ServeWorkspaceProviderCurrent,
@@ -61,6 +64,12 @@ export {
   type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
 } from './status.js';
+export {
+  ENV_NONSECRET_VARS,
+  ENV_PROXY_VARS,
+  ENV_SECRET_VARS,
+  buildEnvStatusFromProcess,
+} from './envSnapshot.js';
 export {
   bearerAuth,
   createMutationGate,
