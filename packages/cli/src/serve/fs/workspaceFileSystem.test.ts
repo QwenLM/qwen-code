@@ -1,0 +1,435 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { promises as fsp } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { Ignore } from '@qwen-code/qwen-code-core';
+import {
+  FS_ACCESS_EVENT_TYPE,
+  FS_DENIED_EVENT_TYPE,
+  createWorkspaceFileSystemFactory,
+  type WorkspaceFileSystem,
+  type WorkspaceFileSystemFactory,
+} from './index.js';
+import type { BridgeEvent } from '../eventBus.js';
+import { canonicalizeWorkspace } from './paths.js';
+import { isFsError } from './errors.js';
+
+interface Harness {
+  factory: WorkspaceFileSystemFactory;
+  fs: WorkspaceFileSystem;
+  events: BridgeEvent[];
+  workspace: string;
+  scratch: string;
+}
+
+async function makeHarness(opts?: {
+  trusted?: boolean;
+  ignore?: Ignore;
+}): Promise<Harness> {
+  const scratch = await fsp.mkdtemp(
+    path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
+  );
+  const wsDir = path.join(scratch, 'ws');
+  await fsp.mkdir(wsDir);
+  const workspace = canonicalizeWorkspace(wsDir);
+  const events: BridgeEvent[] = [];
+  const factory = createWorkspaceFileSystemFactory({
+    boundWorkspace: workspace,
+    trusted: opts?.trusted ?? true,
+    emit: (e) => events.push(e),
+    ignore: opts?.ignore,
+  });
+  const fs = factory.forRequest({
+    originatorClientId: 'client-x',
+    sessionId: 'sess-1',
+    route: 'TEST /op',
+  });
+  return { factory, fs, events, workspace, scratch };
+}
+
+async function teardown(h: Harness): Promise<void> {
+  await fsp.rm(h.scratch, { recursive: true, force: true });
+}
+
+describe('WorkspaceFileSystem - resolve and stat', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => {
+    await teardown(h);
+  });
+
+  it('resolves an existing path and emits no audit on resolve alone', async () => {
+    const target = path.join(h.workspace, 'a.txt');
+    await fsp.writeFile(target, 'x');
+    const r = await h.fs.resolve('a.txt', 'read');
+    expect(r).toBeTruthy();
+    expect(
+      h.events.filter((e) => e.type === FS_ACCESS_EVENT_TYPE),
+    ).toHaveLength(0);
+  });
+
+  it('records fs.denied when resolve fails', async () => {
+    await expect(h.fs.resolve('../escape', 'read')).rejects.toBeDefined();
+    const denied = h.events.filter((e) => e.type === FS_DENIED_EVENT_TYPE);
+    expect(denied).toHaveLength(1);
+    expect(denied[0].data).toMatchObject({
+      errorKind: 'path_outside_workspace',
+    });
+  });
+
+  it('stat returns kind/sizeBytes/modifiedMs and emits fs.access', async () => {
+    const target = path.join(h.workspace, 'b.txt');
+    await fsp.writeFile(target, 'hi');
+    const r = await h.fs.resolve('b.txt', 'stat');
+    const st = await h.fs.stat(r);
+    expect(st.kind).toBe('file');
+    expect(st.sizeBytes).toBe(2);
+    expect(st.modifiedMs).toBeGreaterThan(0);
+    expect(h.events.find((e) => e.type === FS_ACCESS_EVENT_TYPE)).toBeDefined();
+  });
+});
+
+describe('WorkspaceFileSystem - readText', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('reads small text and reports lineEnding', async () => {
+    const target = path.join(h.workspace, 'plain.txt');
+    await fsp.writeFile(target, 'hello\nworld\n');
+    const r = await h.fs.resolve('plain.txt', 'read');
+    const out = await h.fs.readText(r);
+    expect(out.content).toBe('hello\nworld\n');
+    expect(out.meta.lineEnding).toBe('lf');
+    expect(out.meta.truncated).toBeUndefined();
+  });
+
+  it('truncates content above maxBytes and sets meta.truncated', async () => {
+    const big = path.join(h.workspace, 'big.txt');
+    const content = 'a'.repeat(2048);
+    await fsp.writeFile(big, content);
+    const r = await h.fs.resolve('big.txt', 'read');
+    const out = await h.fs.readText(r, { maxBytes: 1024 });
+    expect(out.meta.truncated).toBe(true);
+    expect(out.content.length).toBeLessThanOrEqual(1024);
+  });
+
+  it('throws file_too_large when file exceeds MAX_READ_BYTES regardless of opts.maxBytes', async () => {
+    // Write a file larger than the soft cap and assert the boundary
+    // refuses BEFORE delegating to lowFs (which would slurp the
+    // whole file into memory).
+    const big = path.join(h.workspace, 'huge.txt');
+    const bytes = (await import('./policy.js')).MAX_READ_BYTES + 1;
+    await fsp.writeFile(big, 'a'.repeat(bytes));
+    const r = await h.fs.resolve('huge.txt', 'read');
+    const err = await h.fs.readText(r).catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+    // Audit was recorded for the denial (P0 silent-failure fix).
+    const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
+    expect(denied).toBeDefined();
+    expect((denied!.data as { errorKind: string }).errorKind).toBe(
+      'file_too_large',
+    );
+  });
+
+  it('throws binary_file when reading binary content', async () => {
+    const bin = path.join(h.workspace, 'bin.dat');
+    const buf = Buffer.alloc(64);
+    buf[5] = 0;
+    await fsp.writeFile(bin, buf);
+    const r = await h.fs.resolve('bin.dat', 'read');
+    const err = await h.fs.readText(r).catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('binary_file');
+    expect(h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE)).toBeDefined();
+  });
+
+  it('annotates meta.matchedIgnore when path is ignored', async () => {
+    const ignore = new Ignore().add(['*.log']);
+    h = await makeHarness({ ignore });
+    const target = path.join(h.workspace, 'app.log');
+    await fsp.writeFile(target, 'log content');
+    const r = await h.fs.resolve('app.log', 'read');
+    const out = await h.fs.readText(r);
+    expect(out.meta.matchedIgnore).toBe('file');
+  });
+});
+
+describe('WorkspaceFileSystem - readBytes', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('returns raw bytes', async () => {
+    const target = path.join(h.workspace, 'raw.bin');
+    await fsp.writeFile(target, Buffer.from([1, 2, 3, 0, 4, 5]));
+    const r = await h.fs.resolve('raw.bin', 'read');
+    const buf = await h.fs.readBytes(r);
+    expect(Array.from(buf)).toEqual([1, 2, 3, 0, 4, 5]);
+  });
+
+  it('throws file_too_large above the cap', async () => {
+    const target = path.join(h.workspace, 'huge.bin');
+    await fsp.writeFile(target, Buffer.alloc(2048));
+    const r = await h.fs.resolve('huge.bin', 'read');
+    const err = await h.fs.readBytes(r, { maxBytes: 1024 }).catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+  });
+});
+
+describe('WorkspaceFileSystem - list', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    const ignore = new Ignore().add(['*.log']);
+    h = await makeHarness({ ignore });
+    await fsp.writeFile(path.join(h.workspace, 'a.ts'), '');
+    await fsp.writeFile(path.join(h.workspace, 'b.log'), '');
+    await fsp.mkdir(path.join(h.workspace, 'sub'));
+  });
+  afterEach(async () => teardown(h));
+
+  it('drops ignored entries by default', async () => {
+    const r = await h.fs.resolve('.', 'list');
+    const entries = await h.fs.list(r);
+    const names = entries.map((e) => e.name).sort();
+    expect(names).toEqual(['a.ts', 'sub']);
+  });
+
+  it('includes ignored entries when includeIgnored is true', async () => {
+    const r = await h.fs.resolve('.', 'list');
+    const entries = await h.fs.list(r, { includeIgnored: true });
+    const log = entries.find((e) => e.name === 'b.log');
+    expect(log?.ignored).toBe(true);
+  });
+});
+
+describe('WorkspaceFileSystem - glob', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+    await fsp.mkdir(path.join(h.workspace, 'src'));
+    await fsp.writeFile(path.join(h.workspace, 'src', 'a.ts'), '');
+    await fsp.writeFile(path.join(h.workspace, 'src', 'b.ts'), '');
+    await fsp.writeFile(path.join(h.workspace, 'README.md'), '');
+  });
+  afterEach(async () => teardown(h));
+
+  it('matches files by pattern', async () => {
+    const hits = await h.fs.glob('src/*.ts');
+    expect(hits.map((p) => path.basename(p)).sort()).toEqual(['a.ts', 'b.ts']);
+  });
+
+  it('rejects patterns containing `..`', async () => {
+    const err = await h.fs.glob('../**/*.ts').catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+
+  it('respects maxResults', async () => {
+    const hits = await h.fs.glob('**/*', { maxResults: 1 });
+    expect(hits).toHaveLength(1);
+  });
+
+  it('filters ignored hits by default', async () => {
+    const ignore = new Ignore().add(['*.md']);
+    h = await makeHarness({ ignore });
+    await fsp.writeFile(path.join(h.workspace, 'README.md'), '');
+    await fsp.writeFile(path.join(h.workspace, 'src.ts'), '');
+    const hits = await h.fs.glob('*');
+    const names = hits.map((p) => path.basename(p)).sort();
+    expect(names).not.toContain('README.md');
+  });
+});
+
+describe('WorkspaceFileSystem - write/edit', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('writes text and emits fs.access', async () => {
+    const r = await h.fs.resolve('newfile.txt', 'write');
+    await h.fs.writeText(r, 'hello');
+    const written = await fsp.readFile(r as string, 'utf-8');
+    expect(written).toBe('hello');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'write',
+    );
+    expect(access).toBeDefined();
+  });
+
+  it('rejects oversize writes with file_too_large', async () => {
+    const r = await h.fs.resolve('huge.txt', 'write');
+    const err = await h.fs
+      .writeText(r, 'a'.repeat(6 * 1024 * 1024))
+      .catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+  });
+
+  it('edits an existing file by replacing oldText with newText', async () => {
+    const target = path.join(h.workspace, 'config.txt');
+    await fsp.writeFile(target, 'foo=1\nbar=2\n');
+    const r = await h.fs.resolve('config.txt', 'write');
+    const out = await h.fs.edit(r, 'foo=1', 'foo=42');
+    expect(out.writtenBytes).toBeGreaterThan(0);
+    const after = await fsp.readFile(target, 'utf-8');
+    expect(after).toBe('foo=42\nbar=2\n');
+  });
+
+  it('throws parse_error when oldText is not present', async () => {
+    const target = path.join(h.workspace, 'c.txt');
+    await fsp.writeFile(target, 'abc');
+    const r = await h.fs.resolve('c.txt', 'write');
+    const err = await h.fs.edit(r, 'NOT THERE', 'X').catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+  });
+});
+
+describe('WorkspaceFileSystem - trust gate', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness({ trusted: false });
+    await fsp.writeFile(path.join(h.workspace, 'r.txt'), 'r');
+  });
+  afterEach(async () => teardown(h));
+
+  it('allows read on untrusted workspace', async () => {
+    const r = await h.fs.resolve('r.txt', 'read');
+    const out = await h.fs.readText(r);
+    expect(out.content).toBe('r');
+  });
+
+  it('denies write with untrusted_workspace', async () => {
+    const r = await h.fs.resolve('w.txt', 'write');
+    const err = await h.fs.writeText(r, 'x').catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+    const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
+    expect(denied).toBeDefined();
+  });
+
+  it('denies edit with untrusted_workspace', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'e.txt'), 'old');
+    const r = await h.fs.resolve('e.txt', 'edit');
+    const err = await h.fs.edit(r, 'old', 'new').catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+  });
+});
+
+describe('WorkspaceFileSystem - audit always emits on body errors', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('wraps a raw ENOENT from edit() and emits fs.denied', async () => {
+    // edit() reads via fsp.readFile; against a non-existent file the
+    // raw ENOENT used to escape uncategorized — the wrapper now
+    // converts it to FsError(path_not_found) and records denial.
+    const r = await h.fs.resolve('vanished.txt', 'write');
+    const err = await h.fs.edit(r, 'a', 'b').catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('path_not_found');
+    const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
+    expect(denied).toBeDefined();
+    expect((denied!.data as { errorKind: string }).errorKind).toBe(
+      'path_not_found',
+    );
+  });
+
+  it('rejects ENOTDIR ancestor walk with parse_error rather than passing boundary', async () => {
+    // Place a regular file where the request expects a directory.
+    await fsp.writeFile(path.join(h.workspace, 'block'), 'not a dir');
+    const err = await h.fs
+      .resolve('block/leaf', 'write')
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+    const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
+    expect(denied).toBeDefined();
+  });
+});
+
+describe('WorkspaceFileSystem - glob escape audit', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('emits aggregated fs.denied for glob hits filtered as escape', async () => {
+    // Create an in-workspace file (legit hit) plus a symlink that
+    // resolves outside the workspace (filtered hit). The glob
+    // aggregation reports the escape count via a single denial
+    // event so audit volume stays bounded on misconfigured trees.
+    await fsp.writeFile(path.join(h.workspace, 'inside.ts'), 'x');
+    const outside = path.join(h.scratch, 'outside.ts');
+    await fsp.writeFile(outside, 'y');
+    await fsp.symlink(outside, path.join(h.workspace, 'leak.ts'), 'file');
+    const hits = await h.fs.glob('*.ts');
+    const names = hits.map((p) => path.basename(p)).sort();
+    expect(names).toContain('inside.ts');
+    expect(names).not.toContain('outside.ts');
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'symlink_escape',
+    );
+    expect(denied).toBeDefined();
+    expect((denied!.data as { hint?: string }).hint).toMatch(
+      /\d+ hit\(s\) that resolved outside workspace/,
+    );
+  });
+});
+
+describe('WorkspaceFileSystem - factory', () => {
+  it('canonicalizes the workspace once at factory build', async () => {
+    const scratch = await fsp.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        `qwen-wfs-canon-${randomBytes(4).toString('hex')}-`,
+      ),
+    );
+    try {
+      const real = path.join(scratch, 'ws');
+      await fsp.mkdir(real);
+      const aliased = path.join(scratch, 'alias');
+      await fsp.symlink(real, aliased, 'dir');
+      const events: BridgeEvent[] = [];
+      const factory = createWorkspaceFileSystemFactory({
+        boundWorkspace: aliased,
+        trusted: true,
+        emit: (e) => events.push(e),
+      });
+      const fs = factory.forRequest({ route: 'TEST /op' });
+      await fsp.writeFile(path.join(real, 'inside.txt'), 'i');
+      const r = await fs.resolve('inside.txt', 'read');
+      const out = await fs.readText(r);
+      expect(out.content).toBe('i');
+    } finally {
+      await fsp.rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
