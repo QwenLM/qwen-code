@@ -8,6 +8,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { type Extension } from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
 import { ExtensionUpdateState } from '../../../state/extensions.js';
@@ -55,11 +56,11 @@ export const ExtensionListStep = ({
   // Keyboard navigation
   useKeypress(
     (key) => {
-      if (key.name === 'up' || key.name === 'k') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex((prev) =>
           prev > 0 ? prev - 1 : extensions.length - 1,
         );
-      } else if (key.name === 'down' || key.name === 'j') {
+      } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex((prev) =>
           prev < extensions.length - 1 ? prev + 1 : 0,
         );

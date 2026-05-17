@@ -131,6 +131,7 @@ describe('useSlashCommandProcessor', () => {
     openEditorDialog: vi.fn(),
     openMemoryDialog: mockOpenMemoryDialog,
     openSettingsDialog: vi.fn(),
+    openStatusLineDialog: vi.fn(),
     openModelDialog: mockOpenModelDialog,
     openManageModelsDialog: vi.fn(),
     openTrustDialog: vi.fn(),
@@ -329,6 +330,28 @@ describe('useSlashCommandProcessor', () => {
             "Command '/parent' requires a subcommand.",
           ),
         },
+        expect.any(Number),
+      );
+    });
+
+    it('should display warning message command results as warnings', async () => {
+      const command = createTestCommand({
+        name: 'warn',
+        action: vi.fn().mockResolvedValue({
+          type: 'message',
+          messageType: 'warning',
+          content: 'Check diagnostics.',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/warn');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: MessageType.WARNING, text: 'Check diagnostics.' },
         expect.any(Number),
       );
     });

@@ -126,6 +126,44 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '重命名当前对话。--auto 会让快速模型自动生成标题。',
   'Rewind conversation to a previous turn': '将对话回退到之前的某一轮',
+  'Rewind Conversation': '回退对话',
+  'No user turns to rewind to.': '没有可回退的用户对话轮次。',
+  'Rewind to: ': '回退到：',
+  'Restore code and conversation': '恢复代码和对话',
+  'Restore conversation only': '仅恢复对话',
+  'Restore code only': '仅恢复代码',
+  'Never mind': '算了',
+  'Computing file changes...': '正在计算文件变更...',
+  'Restoring...': '正在恢复...',
+  'Restored {{count}} file(s).': '已恢复 {{count}} 个文件。',
+  'Failed to restore files: {{error}}': '恢复文件失败：{{error}}',
+  'Rewind failed: {{error}}': '回退失败：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '无法回退对话：模型客户端未激活。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    '代码已恢复，但对话无法回退（模型客户端未激活）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '对话已回退。修改你的提示后按回车继续。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '回退不会影响手工编辑或通过 shell 命令修改的文件。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '无法回退到已被压缩的轮次，请尝试更近一些的轮次。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    '该轮次无法恢复文件（没有捕获到文件变更，或该轮次属于本次会话之前）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 个文件)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}，{{count}} 个文件)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '恢复 {{count}} 个文件失败：{{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    '无法恢复文件：该轮对话创建时尚未启用文件检查点功能。',
+  'No files needed to be restored.': '没有文件需要恢复。',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 导航 · Enter 选择 · Esc 返回',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 导航 · Enter 选择 · Esc 取消',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 确认 · Esc/N 返回',
   'change the theme': '更改主题',
   'Select Theme': '选择主题',
   Preview: '预览',
@@ -1617,6 +1655,8 @@ export default {
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Set a goal — keep working until the condition is met':
+    '设定目标 — 持续工作直到条件满足',
   'Exited plan mode. Previous approval mode restored.':
     '已退出计划模式，已恢复之前的审批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1677,6 +1717,7 @@ export default {
   '[{{label}}] failed: {{error}}': '[{{label}}] 失败：{{error}}',
   'Loading suggestions...': '正在加载建议...',
   'Open the memory manager.': '打开记忆管理器。',
+  'Show current process memory diagnostics': '显示当前进程的内存诊断。',
   'Save a durable memory to the memory system.':
     '将一条持久记忆保存到记忆系统。',
   'Show per-item context usage breakdown.': '显示按项目划分的上下文使用详情。',

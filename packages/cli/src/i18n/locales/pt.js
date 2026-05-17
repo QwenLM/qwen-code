@@ -125,6 +125,45 @@ export default {
     'Renomear a conversa atual. --auto permite que o modelo rápido escolha um título.',
   'Rewind conversation to a previous turn':
     'Voltar a conversa para um turno anterior',
+  'Rewind Conversation': 'Rebobinar conversa',
+  'No user turns to rewind to.': 'Nenhum turno de usuário para rebobinar.',
+  'Rewind to: ': 'Rebobinar para: ',
+  'Restore code and conversation': 'Restaurar código e conversa',
+  'Restore conversation only': 'Restaurar apenas a conversa',
+  'Restore code only': 'Restaurar apenas o código',
+  'Never mind': 'Deixa pra lá',
+  'Computing file changes...': 'Calculando alterações de arquivo...',
+  'Restoring...': 'Restaurando...',
+  'Restored {{count}} file(s).': '{{count}} arquivo(s) restaurado(s).',
+  'Failed to restore files: {{error}}':
+    'Falha ao restaurar arquivos: {{error}}',
+  'Rewind failed: {{error}}': 'Falha ao retroceder: {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Não é possível retroceder a conversa: nenhum cliente de modelo ativo.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Código restaurado, mas a conversa não pôde ser retrocedida (sem cliente ativo).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversa retrocedida. Edite seu prompt e pressione Enter para continuar.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'O retrocesso não afeta arquivos editados manualmente ou por meio de comandos shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Não é possível retroceder para um turno que foi compactado. Tente um turno mais recente.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'A restauração de arquivos não está disponível para este turno (sem alterações capturadas, ou o turno é anterior à sessão atual).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} em {{count}} arquivo)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} em {{count}} arquivos)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Falha ao restaurar {{count}} arquivo(s): {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'Não é possível restaurar arquivos: este turno foi criado antes do checkpoint de arquivos ser ativado.',
+  'No files needed to be restored.': 'Nenhum arquivo precisou ser restaurado.',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ navegar · Enter selecionar · Esc voltar',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ navegar · Enter selecionar · Esc cancelar',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y confirmar · Esc/N voltar',
   'change the theme': 'alterar o tema',
   'Select Theme': 'Selecionar Tema',
   Preview: 'Visualizar',

@@ -97,6 +97,17 @@ qwen serve --hostname 0.0.0.0 --port 4170
 
 Clients then send `Authorization: Bearer $QWEN_SERVER_TOKEN` on every request. `/health` is exempted **only on loopback binds** so k8s/Compose liveness probes inside the pod (where the daemon listens on `127.0.0.1`) don't need credentials. On non-loopback binds (`--hostname 0.0.0.0` etc.) `/health` requires the token like every other route — otherwise an attacker can probe arbitrary addresses to confirm the daemon's existence. Use `/capabilities` to verify your token is correct end-to-end (it always requires auth):
 
+> **Hardened loopback (`--require-auth`).** The default loopback no-token behavior is fine for a single-user laptop but unsafe on shared dev hosts, CI runners, or multi-tenant workstations where any local user can `curl 127.0.0.1:4170`. Pass `--require-auth` to make the bearer token mandatory on every route — including `/health` and `/capabilities` — even when bound to `127.0.0.1`. Boot fails without a token. With the flag on, an **unauthenticated** client can't read `/capabilities` to discover that auth is required; the discovery surface is the 401 response body itself. Once authenticated, the `caps.features.require_auth` tag is a post-auth confirmation that the deployment is hardened (useful for audit / compliance UIs):
+>
+> ```bash
+> qwen serve --require-auth --token "$(openssl rand -hex 32)"
+> # → /health, /capabilities, /session, … all require Authorization: Bearer …
+> curl http://127.0.0.1:4170/health
+> # → 401
+> curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:4170/capabilities | jq '.features | index("require_auth")'
+> # → 13   (or whatever index — non-null after authenticating means the tag is present)
+> ```
+
 ```bash
 curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" http://your-host:4170/capabilities
 # → {"v":1,"mode":"http-bridge","features":[...],"modelServices":[],"workspaceCwd":"/path/to/your-project"}
@@ -107,15 +118,17 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 
 ## CLI flags
 
-| Flag                    | Default         | Purpose                                                                                                                                                                                                                                                                                                                                             |
-| ----------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--port <n>`            | `4170`          | TCP port. `0` = OS-assigned ephemeral port.                                                                                                                                                                                                                                                                                                         |
-| `--hostname <addr>`     | `127.0.0.1`     | Bind interface. Anything beyond loopback requires a token.                                                                                                                                                                                                                                                                                          |
-| `--token <str>`         | —               | Bearer token. Falls back to `QWEN_SERVER_TOKEN` env var (with leading/trailing whitespace stripped — handy for `$(cat token.txt)`).                                                                                                                                                                                                                 |
-| `--max-sessions <n>`    | `20`            | Cap on concurrent live sessions. New `POST /session` requests that would spawn a fresh child return `503` (with `Retry-After: 5`) when the cap is hit; attaches to existing sessions are NOT counted. Set to `0` to disable. Sized for single-user / small-team usage; raise it if your deployment has the RAM/FD headroom (~30–50 MB per session). |
-| `--workspace <path>`    | `process.cwd()` | Absolute workspace path this daemon binds to (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02 — 1 daemon = 1 workspace). `POST /session` requests with a mismatched `cwd` return `400 workspace_mismatch`. For multi-workspace deployments, run one `qwen serve` per workspace on separate ports.                                  |
-| `--max-connections <n>` | `256`           | Listener-level TCP connection cap (`server.maxConnections`). Bounds raw socket count irrespective of session count — slow / phantom SSE clients get rejected at accept time once full. Raise alongside `--max-sessions` if your deployment expects many SSE subscribers per session.                                                                |
-| `--http-bridge`         | `true`          | Stage 1 mode: one `qwen --acp` child per daemon (bound to one workspace at boot, per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02); N sessions multiplex onto that child via ACP `newSession()`. Stage 2 native in-process becomes available later.                                                                                 |
+| Flag                    | Default         | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ----------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `--port <n>`            | `4170`          | TCP port. `0` = OS-assigned ephemeral port.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `--hostname <addr>`     | `127.0.0.1`     | Bind interface. Anything beyond loopback requires a token.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `--token <str>`         | —               | Bearer token. Falls back to `QWEN_SERVER_TOKEN` env var (with leading/trailing whitespace stripped — handy for `$(cat token.txt)`).                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `--require-auth`        | `false`         | Refuse to start without a bearer token, even on loopback. Hardens the `127.0.0.1` developer default for shared dev hosts / CI runners / multi-tenant workstations where any local user can hit the listener. Boots only with `--token` or `QWEN_SERVER_TOKEN` set; gates `/health` behind the bearer too.                                                                                                                                                                                                                                                                            |
+| `--max-sessions <n>`    | `20`            | Cap on concurrent live sessions. New `POST /session` requests that would spawn a fresh child return `503` (with `Retry-After: 5`) when the cap is hit; attaches to existing sessions are NOT counted. Set to `0` to disable. Sized for single-user / small-team usage; raise it if your deployment has the RAM/FD headroom (~30–50 MB per session).                                                                                                                                                                                                                                  |
+| `--workspace <path>`    | `process.cwd()` | Absolute workspace path this daemon binds to (per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02 — 1 daemon = 1 workspace). `POST /session` requests with a mismatched `cwd` return `400 workspace_mismatch`. For multi-workspace deployments, run one `qwen serve` per workspace on separate ports.                                                                                                                                                                                                                                                                   |
+| `--max-connections <n>` | `256`           | Listener-level TCP connection cap (`server.maxConnections`). Bounds raw socket count irrespective of session count — slow / phantom SSE clients get rejected at accept time once full. Raise alongside `--max-sessions` if your deployment expects many SSE subscribers per session.                                                                                                                                                                                                                                                                                                 |
+| `--event-ring-size <n>` | `8000`          | Per-session SSE replay ring depth (#3803 §02 target). Sets the backlog available to `GET /session/:id/events` with `Last-Event-ID: N`. Larger = more reconnect headroom at the cost of a few hundred KB extra RAM per session. SDK clients can additionally request a larger per-subscriber backlog cap on a specific subscription via `?maxQueued=N` (range `[16, 2048]`, default 256). Daemons also emit a non-terminal `slow_client_warning` SSE frame at 75% queue fill so clients can drain / reconnect before getting evicted. Pre-flight `caps.features.slow_client_warning`. |
+| `--http-bridge`         | `true`          | Stage 1 mode: one `qwen --acp` child per daemon (bound to one workspace at boot, per [#3803](https://github.com/QwenLM/qwen-code/issues/3803) §02); N sessions multiplex onto that child via ACP `newSession()`. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                  |
 
 > **Sizing the load knobs.** `--max-sessions` is the **new-child** cap.
 > Three other layers also limit load — when sizing for a high-concurrency
@@ -173,16 +186,48 @@ To host **multiple workspaces** (one user, several repos; or several users on th
 
 To handle multiple **users** (each with their own quota, audit log, sandbox) or to scale beyond one process's reach (cold-start budget, FD count, RSS), spawn one daemon per workspace per user behind an external orchestrator. That orchestrator (multi-tenancy / OIDC / Quota / Audit / k8s) is **out of scope** for the qwen-code project — see issue [#3803](https://github.com/QwenLM/qwen-code/issues/3803) "External Reference Architecture" for the design pointers.
 
+## Loading and resuming a persisted session
+
+The daemon exposes ACP's `session/load` and `session/unstable_resumeSession` over HTTP via two routes:
+
+| Route                      | Use when                                                                                                                                                                                                                      |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /session/:id/load`   | The client has **no** history rendered (cold reconnect, picker-then-open). The daemon replays every persisted turn through SSE so subscribers see the full transcript. Capability tag: `session_load`.                        |
+| `POST /session/:id/resume` | The client already has the turns on screen and only needs the daemon-side handle back. Model context is restored on the agent side without UI replay — the SSE stream stays clean. Capability tag: `unstable_session_resume`. |
+
+The TypeScript SDK exposes both as static factories on `DaemonSessionClient`:
+
+```ts
+import { DaemonClient, DaemonSessionClient } from '@qwen-code/sdk';
+
+const client = new DaemonClient({ baseUrl: 'http://127.0.0.1:4170' });
+
+// Cold reconnect — daemon will replay history through SSE.
+const session = await DaemonSessionClient.load(client, 'persisted-id');
+
+// Or, if your UI already has the history, skip the replay:
+// const session = await DaemonSessionClient.resume(client, 'persisted-id');
+
+for await (const event of session.events()) {
+  // First the replayed `session_update` frames (load only),
+  // then live events.
+}
+```
+
+Pre-flight `caps.features.session_load` / `caps.features.unstable_session_resume` before calling — older daemons return `404`. Concurrent same-action requests for the same id coalesce; cross-action races (a `load` racing a `resume`) get `409 restore_in_progress` with `Retry-After: 5`. See the [protocol reference](../developers/qwen-serve-protocol.md) for the full error envelope.
+
+Note: history replay is bounded by the SSE ring (default 4000 frames). Long histories with chatty turns can exceed that — earliest frames are dropped silently. For very long sessions, prefer `resume` and rely on the client's local persisted UI.
+
 ## Durability model
 
-**Sessions are ephemeral in Stage 1.** Plan accordingly:
+**Sessions are still ephemeral in Stage 1 across daemon restarts**, but persisted sessions on disk can be reloaded:
 
-- A child process crash publishes `session_died` and removes the session from the daemon's maps. There is **no resume** — clients must `POST /session` again.
-- A daemon restart loses every in-flight session. ACP's `loadSession` / `unstable_resumeSession` are **not exposed via HTTP** in Stage 1; sessions don't outlive the daemon.
-- Long client disconnects (>5 min on a chatty turn) can outrun the SSE replay ring (default 4000 frames) — `Last-Event-ID` reconnect succeeds but state may be incoherent. For mobile / flaky-network clients, plan to re-create the session and re-open SSE on long drops.
+- A child process crash publishes `session_died` and removes the live session from the daemon's maps. The persisted on-disk session **can** be reloaded via `POST /session/:id/load` if a fresh agent child is spawnable.
+- A daemon restart loses every in-flight live session. The persisted sessions remain on disk and can be loaded against a new daemon process, subject to the same workspace binding rules.
+- Long client disconnects (>5 min on a chatty turn) can outrun the SSE replay ring (default 4000 frames) — `Last-Event-ID` reconnect succeeds but state may be incoherent. For mobile / flaky-network clients, plan to re-open SSE on long drops or call `POST /session/:id/load` to replay from disk.
 - File operations (`writeTextFile`) are atomic across crashes (write-then-rename); they aren't atomic across daemon restarts in the sense of replaying — the file write either landed or it didn't.
 
-If your integration needs cross-restart durability, you need either Stage 1.5+ (`loadSession` over HTTP, persistence layer) or your own application-level state recovery. Don't hold long-running, restart-sensitive state inside the daemon's session.
+If your integration needs server-side cross-restart durability beyond what `session/load` covers (e.g. server-managed retry queues), you still need application-level state recovery. Don't hold long-running, restart-sensitive state inside the daemon's session.
 
 ## Stage 1.5+ runtime guarantees
 
@@ -190,22 +235,21 @@ Stage 1's contract is sized for prototyping. Per [#3889 chiga0 downstream-consum
 
 **Blockers for serious downstream use:**
 
-1. **Per-request `sessionScope` override** on `POST /session` — today the daemon-wide default is the only setting; a VSCode extension can't say "I want a private session for this window" against a daemon configured for shared sessions.
-2. **`loadSession` / `unstable_resumeSession` over HTTP** — without this, no integration can survive a child crash or daemon restart, and any orchestrator coordinating the daemon can't recover state either.
-3. **Persistent client identity (pair tokens + per-client revocation)** — Stage 1 uses one shared bearer; a leaked token revokes everyone, and `originatorClientId` is client-self-declared rather than daemon-stamped from authenticated identity.
+1. **`loadSession` / `unstable_resumeSession` over HTTP** — without this, no integration can survive a child crash or daemon restart, and any orchestrator coordinating the daemon can't recover state either.
+2. **Persistent client identity (pair tokens + per-client revocation)** — Stage 1 uses one shared bearer; a leaked token revokes everyone, and `originatorClientId` is client-self-declared rather than daemon-stamped from authenticated identity.
 
 **Reliability baseline:**
 
-4. **Client-initiated heartbeat path** — distinguish "agent thinking" from "daemon dead" without waiting for the 15s server heartbeat.
-5. **`permission_already_resolved` event** when a vote loses the first-responder race — currently UIs have to infer state from a `404`.
-6. **Larger / per-session-configurable replay ring** — default 4000 covers short drops; mobile / chatty-turn workloads need 8000+ or per-session config.
-7. **`slow_client_warning` event before `client_evicted`** — soft backpressure so well-behaved slow clients can self-throttle (trim render depth, drop chunks) before being terminated.
+3. ~~**Client-initiated heartbeat path**~~ — shipped via [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 9. `POST /session/:id/heartbeat` records last-seen timestamps on the daemon (capability tag `client_heartbeat`); SDK helpers are `DaemonClient.heartbeat()` / `DaemonSessionClient.heartbeat()`.
+4. **`permission_already_resolved` event** when a vote loses the first-responder race — currently UIs have to infer state from a `404`.
+5. **Larger / per-session-configurable replay ring** — default 4000 covers short drops; mobile / chatty-turn workloads need 8000+ or per-session config.
+6. **`slow_client_warning` event before `client_evicted`** — soft backpressure so well-behaved slow clients can self-throttle (trim render depth, drop chunks) before being terminated.
 
 **Integration ergonomics:**
 
-8. **`POST /session/:id/_meta` for IM-style context** — per-session key-value attached to subsequent prompts (chat id, sender, thread id) replaces the per-channel improvisation.
-9. **`/capabilities` actual feature negotiation** — `protocol_versions: { acp: '0.14.x', daemon_envelope: 1 }` so clients can detect drift instead of falling through to "unknown frame, ignore".
-10. **First-class durability documentation** (this section) — already shipped above.
+7. **`POST /session/:id/_meta` for IM-style context** — per-session key-value attached to subsequent prompts (chat id, sender, thread id) replaces the per-channel improvisation.
+8. **`/capabilities` actual feature negotiation** — `protocol_versions: { acp: '0.14.x', daemon_envelope: 1 }` so clients can detect drift instead of falling through to "unknown frame, ignore".
+9. **First-class durability documentation** (this section) — already shipped above.
 
 The full convergence roadmap is tracked on [#3803](https://github.com/QwenLM/qwen-code/issues/3803).
 

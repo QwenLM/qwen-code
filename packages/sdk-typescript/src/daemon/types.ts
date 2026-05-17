@@ -15,9 +15,19 @@
 
 export type DaemonMode = 'http-bridge' | 'native';
 
+export interface DaemonProtocolVersions {
+  current: string;
+  supported: string[];
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
+  /**
+   * Serve protocol versions supported by the daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  protocolVersions?: DaemonProtocolVersions;
   mode: DaemonMode;
   /**
    * Feature tags the client should gate UI off (e.g. `permission_vote`,
@@ -105,17 +115,77 @@ export interface DaemonSession {
   workspaceCwd: string;
   /** True when an existing session was reused under sessionScope:single. */
   attached: boolean;
+  /**
+   * Opaque id stamped by the daemon for this attached HTTP client. Newer
+   * daemons return it from create/load/resume; older daemons omit it.
+   */
+  clientId?: string;
+  /** ISO 8601 timestamp of when the session was created. */
+  createdAt?: string;
+}
+
+/**
+ * ACP state returned by session load/resume routes.
+ *
+ * Fields mirror the ACP `LoadSessionResponse` / `ResumeSessionResponse`
+ * shapes (see `@agentclientprotocol/sdk`):
+ * - `models`: the agent's `SessionModelState` — current model id +
+ *   available models the session can switch to.
+ * - `modes`: the agent's `SessionModeState` — current mode id +
+ *   available approval / interaction modes.
+ * - `configOptions`: array of `SessionConfigOption` describing
+ *   per-session toggles the client can flip via
+ *   `POST /session/:id/config-option`.
+ *
+ * They are typed as `unknown` here to avoid coupling the SDK to ACP's
+ * internal protocol types, which the SDK doesn't re-export. Callers
+ * that need richer typing should narrow to the ACP shapes themselves.
+ */
+export interface DaemonSessionState {
+  _meta?: Record<string, unknown> | null;
+  models?: unknown;
+  modes?: unknown;
+  configOptions?: unknown[] | null;
+  [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
+export interface DaemonRestoredSession extends DaemonSession {
+  state: DaemonSessionState;
 }
 
 /** Sparse session record returned by `GET /workspace/:id/sessions`. */
 export interface DaemonSessionSummary {
   sessionId: string;
   workspaceCwd: string;
+  createdAt?: string;
+  displayName?: string;
+  clientCount?: number;
+  hasActivePrompt?: boolean;
+}
+
+/** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
+export interface SessionMetadataResult {
+  displayName?: string;
 }
 
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/**
+ * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
+ * server-side `Date.now()` epoch (ms) the daemon stored for this
+ * session. `clientId` is echoed back only when the caller supplied a
+ * trusted one through `X-Qwen-Client-Id`. Older daemons (pre-PR 9) do
+ * not expose this route — clients should pre-flight
+ * `caps.features.client_heartbeat` before sending.
+ */
+export interface HeartbeatResult {
+  sessionId: string;
+  clientId?: string;
+  lastSeenAt: number;
 }
 
 /** A frame in the SSE event stream. */

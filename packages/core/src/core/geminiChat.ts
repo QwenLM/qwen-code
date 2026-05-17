@@ -17,6 +17,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
+import { getHeapStatistics } from 'node:v8';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -58,6 +59,10 @@ import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+
+// Leave roughly 30% V8 heap headroom for compression's transient allocations.
+const HEAP_PRESSURE_COMPRESSION_RATIO = 0.7;
+const HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS = 30_000;
 
 /**
  * Replaces the args on a `structured_output` `functionCall` with the
@@ -456,6 +461,14 @@ export class GeminiChat {
   private hasFailedCompressionAttempt = false;
 
   /**
+   * Heap-pressure compaction is process-wide pressure applied per chat. If one
+   * heap-triggered attempt cannot reduce history, briefly back off this chat
+   * so every subsequent send does not immediately pay for another compression
+   * side query while memory is already tight.
+   */
+  private heapPressureCompressionCooldownUntil = 0;
+
+  /**
    * Creates a new GeminiChat instance.
    *
    * @param config - The configuration object.
@@ -515,6 +528,33 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    const heapPressureRatio = force ? null : this.getHeapPressureRatio();
+    const heapPressureCooldownActive =
+      !force && Date.now() < this.heapPressureCompressionCooldownUntil;
+    const bypassTokenThreshold =
+      heapPressureRatio !== null &&
+      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
+      !heapPressureCooldownActive;
+    if (bypassTokenThreshold) {
+      // Temporary safety net: token-based compaction can be too late for
+      // large-context sessions because JS heap pressure may hit first.
+      // Do not use force=true here because that carries manual /compress
+      // semantics in ChatCompressionService.
+      debugLogger.warn(
+        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
+          'attempting auto-compaction before token threshold.',
+      );
+    } else if (
+      heapPressureRatio !== null &&
+      heapPressureRatio >= HEAP_PRESSURE_COMPRESSION_RATIO &&
+      heapPressureCooldownActive
+    ) {
+      debugLogger.debug(
+        `Heap pressure at ${(heapPressureRatio * 100).toFixed(1)}%; ` +
+          'skipping heap-pressure auto-compaction during cooldown.',
+      );
+    }
+
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
@@ -524,6 +564,7 @@ export class GeminiChat {
       hasFailedCompressionAttempt: this.hasFailedCompressionAttempt,
       originalTokenCount:
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      bypassTokenThreshold,
       trigger: options?.trigger,
       signal,
     });
@@ -552,15 +593,42 @@ export class GeminiChat {
       // Re-enable auto-compaction so a forced /compress recovers a chat
       // that an earlier auto-attempt latched off.
       this.hasFailedCompressionAttempt = false;
+      this.heapPressureCompressionCooldownUntil = 0;
+    } else if (bypassTokenThreshold) {
+      // If heap-pressure compaction cannot reduce history (NOOP or failure),
+      // avoid repeatedly cloning history and/or paying side-query latency while
+      // the process-wide pressure remains high.
+      this.heapPressureCompressionCooldownUntil =
+        Date.now() + HEAP_PRESSURE_COMPRESSION_COOLDOWN_MS;
     } else if (isCompressionFailureStatus(info.compressionStatus)) {
       // Track failed attempts (only mark as failed if not forced) so we
       // stop spending compression-API calls on a chat that can't shrink.
+      // Heap-pressure attempts are a safety net, not evidence that normal
+      // token-threshold compaction should be latched off for this chat.
       if (!force) {
         this.hasFailedCompressionAttempt = true;
       }
     }
 
     return info;
+  }
+
+  private getHeapPressureRatio(): number | null {
+    try {
+      const { used_heap_size: usedHeapSize, heap_size_limit: heapLimit } =
+        getHeapStatistics();
+      if (
+        !Number.isFinite(usedHeapSize) ||
+        usedHeapSize < 0 ||
+        !Number.isFinite(heapLimit) ||
+        heapLimit <= 0
+      ) {
+        return null;
+      }
+      return usedHeapSize / heapLimit;
+    } catch {
+      return null;
+    }
   }
 
   setSystemInstruction(sysInstr: string) {
@@ -1174,6 +1242,27 @@ export class GeminiChat {
     // Deep copy the history to avoid mutating the history outside of the
     // chat session.
     return structuredClone(history);
+  }
+
+  /**
+   * Returns a deep-copied tail of the chat history. This avoids cloning the
+   * entire session when callers only need recent context.
+   */
+  getHistoryTail(count: number, curated: boolean = false): Content[] {
+    if (count <= 0) return [];
+    const history = curated
+      ? extractCuratedHistory(this.history)
+      : this.history;
+    return structuredClone(history.slice(-count));
+  }
+
+  /**
+   * Returns a defensive copy of the last raw history entry without cloning the
+   * full conversation. This avoids O(history) cloning, though cloning the last
+   * entry is still proportional to that entry's own size.
+   */
+  getLastHistoryEntry(): Content | undefined {
+    return this.getHistoryTail(1)[0];
   }
 
   /**

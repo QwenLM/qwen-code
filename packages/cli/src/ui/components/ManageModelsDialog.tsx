@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { theme } from '../semantic-colors.js';
 import { TextInput } from './shared/TextInput.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -397,13 +398,20 @@ export function ManageModelsDialog({
           );
           return;
         }
-        if (key.name === 'down') {
+        // tabs row has no active TextInput — accept ↓/j/Ctrl+N uniformly
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
           setFocusMode('search');
         }
         return;
       }
 
       if (focusMode === 'search') {
+        // The search TextInput is active in this mode, so only accept
+        // unambiguous non-letter shortcuts (arrows + Ctrl+P/Ctrl+N) for
+        // transitions — bare k/j must reach the TextInput as typed characters.
+        const isSearchUp = key.name === 'up' || (key.ctrl && key.name === 'p');
+        const isSearchDown =
+          key.name === 'down' || (key.ctrl && key.name === 'n');
         if (key.name === 'left') {
           setFilterMode((current) => cycleFilter(current, 'left'));
           return;
@@ -412,22 +420,22 @@ export function ManageModelsDialog({
           setFilterMode((current) => cycleFilter(current, 'right'));
           return;
         }
-        if (key.name === 'up') {
+        if (isSearchUp) {
           setFocusMode('tabs');
           return;
         }
-        if (key.name === 'down' && filteredEntries.length > 0) {
+        if (isSearchDown && filteredEntries.length > 0) {
           setFocusMode('list');
         }
         return;
       }
 
       if (focusMode === 'list') {
-        if (key.name === 'up') {
+        if (keyMatchers[Command.SELECTION_UP](key)) {
           moveHighlight('up');
           return;
         }
-        if (key.name === 'down') {
+        if (keyMatchers[Command.SELECTION_DOWN](key)) {
           moveHighlight('down');
           return;
         }
