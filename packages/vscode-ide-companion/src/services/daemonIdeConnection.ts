@@ -166,10 +166,12 @@ export class DaemonIdeConnection {
   private eventController: AbortController | null = null;
   private eventPump: Promise<void> | null = null;
   private lastSeenEventId: number | undefined;
+  private connectPromise: Promise<void> | null = null;
+  private pumpGeneration = 0;
 
   onSessionUpdate: (data: SessionNotification) => void = () => {};
   onPermissionRequest: (data: RequestPermissionRequest) => Promise<{
-    optionId: string;
+    optionId?: string;
   }> = () => Promise.resolve({ optionId: 'cancel' });
   onAskUserQuestion: (data: AskUserQuestionRequest) => Promise<{
     optionId: string;
@@ -180,6 +182,29 @@ export class DaemonIdeConnection {
     () => {};
 
   async connect(options: DaemonIdeConnectionOptions): Promise<void> {
+    while (this.connectPromise) {
+      try {
+        await this.connectPromise;
+      } catch {
+        // Let this connect attempt proceed with its own options after the
+        // in-flight attempt reports its failure to its caller.
+      }
+    }
+
+    const connectPromise = this.connectInternal(options);
+    this.connectPromise = connectPromise;
+    try {
+      await connectPromise;
+    } finally {
+      if (this.connectPromise === connectPromise) {
+        this.connectPromise = null;
+      }
+    }
+  }
+
+  private async connectInternal(
+    options: DaemonIdeConnectionOptions,
+  ): Promise<void> {
     if (this.session) {
       await this.disconnect();
     }
@@ -195,7 +220,12 @@ export class DaemonIdeConnection {
     this.lastSeenEventId = options.lastEventId ?? this.session.lastEventId;
 
     this.eventController = new AbortController();
-    this.eventPump = this.pumpEvents(this.session, this.eventController.signal);
+    const generation = ++this.pumpGeneration;
+    this.eventPump = this.pumpEvents(
+      this.session,
+      this.eventController.signal,
+      generation,
+    );
   }
 
   async sendPrompt(
@@ -260,6 +290,7 @@ export class DaemonIdeConnection {
   private async pumpEvents(
     session: DaemonIdeSessionClient,
     signal: AbortSignal,
+    generation: number,
   ): Promise<void> {
     try {
       const resumeId = this.lastSeenEventId ?? session.lastEventId;
@@ -269,7 +300,7 @@ export class DaemonIdeConnection {
         resume: true,
       })) {
         try {
-          await this.handleEvent(event);
+          await this.handleEvent(event, signal);
         } catch (error) {
           console.warn('[DaemonIdeConnection] Event handler failed:', {
             eventType: event.type,
@@ -295,19 +326,24 @@ export class DaemonIdeConnection {
         this.clearCurrentSession(session, 'daemon_error');
       }
     } finally {
-      if (this.session === session) {
+      // A disconnect callback may synchronously reconnect before the old pump
+      // reaches finally; only the active generation may clear eventPump.
+      if (this.pumpGeneration === generation) {
         this.eventPump = null;
       }
     }
   }
 
-  private async handleEvent(event: DaemonIdeEvent): Promise<void> {
+  private async handleEvent(
+    event: DaemonIdeEvent,
+    signal: AbortSignal,
+  ): Promise<void> {
     switch (event.type) {
       case 'session_update':
         this.onSessionUpdate(event.data as SessionNotification);
         break;
       case 'permission_request':
-        await this.handlePermissionRequest(event.data);
+        await this.handlePermissionRequest(event.data, signal);
         break;
       case 'session_died':
         this.handleSessionDied(event.data);
@@ -317,14 +353,23 @@ export class DaemonIdeConnection {
     }
   }
 
-  private async handlePermissionRequest(data: unknown): Promise<void> {
+  private async handlePermissionRequest(
+    data: unknown,
+    signal: AbortSignal,
+  ): Promise<void> {
     if (!isPermissionRequestData(data)) {
       return;
     }
 
     const requestId = data['requestId'];
     const request = data;
-    const response = await this.resolvePermissionResponse(request);
+    const response = await this.resolvePermissionResponseUntilAbort(
+      request,
+      signal,
+    );
+    if (!response) {
+      return;
+    }
     const accepted = await this.ensureSession().respondToPermission(
       requestId,
       response,
@@ -335,6 +380,38 @@ export class DaemonIdeConnection {
         requestId,
       );
     }
+  }
+
+  private async resolvePermissionResponseUntilAbort(
+    request: RequestPermissionRequest,
+    signal: AbortSignal,
+  ): Promise<RequestPermissionResponse | undefined> {
+    if (signal.aborted) {
+      return undefined;
+    }
+
+    const responsePromise = this.resolvePermissionResponse(request).catch(
+      (error: unknown) => {
+        console.warn(
+          '[DaemonIdeConnection] Permission handler failed:',
+          toSafeErrorMessage(error),
+        );
+        return {
+          outcome: { outcome: 'cancelled' },
+        } as RequestPermissionResponse;
+      },
+    );
+
+    return await new Promise<RequestPermissionResponse | undefined>(
+      (resolve) => {
+        const onAbort = () => resolve(undefined);
+        signal.addEventListener('abort', onAbort, { once: true });
+        responsePromise.then((response) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(signal.aborted ? undefined : response);
+        });
+      },
+    );
   }
 
   private async resolvePermissionResponse(
@@ -371,7 +448,7 @@ export class DaemonIdeConnection {
     }
 
     const response = await this.onPermissionRequest(request);
-    if (this.isCancelledOption(response.optionId)) {
+    if (response.optionId === '' || this.isCancelledOption(response.optionId)) {
       return { outcome: { outcome: 'cancelled' } };
     }
 
@@ -389,6 +466,18 @@ export class DaemonIdeConnection {
   }
 
   private handleSessionDied(data: unknown): void {
+    const eventSessionId =
+      isRecord(data) && typeof data['sessionId'] === 'string'
+        ? data['sessionId']
+        : undefined;
+    if (
+      eventSessionId !== undefined &&
+      this.session &&
+      eventSessionId !== this.session.sessionId
+    ) {
+      return;
+    }
+
     const reason =
       isRecord(data) && typeof data['reason'] === 'string'
         ? data['reason']
@@ -403,10 +492,9 @@ export class DaemonIdeConnection {
 
   private isCancelledOption(optionId?: string): boolean {
     return (
-      !optionId ||
       optionId === 'cancel' ||
       optionId === 'reject' ||
-      optionId.startsWith('reject_')
+      (optionId !== undefined && optionId.startsWith('reject_'))
     );
   }
 
