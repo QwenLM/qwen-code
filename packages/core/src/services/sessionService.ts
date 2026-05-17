@@ -1182,6 +1182,21 @@ function stripThoughtsFromContent(content: Content): Content | null {
   };
 }
 
+function appendApiHistoryRecord(history: Content[], record: ChatRecord): void {
+  if (!record.message) return;
+
+  const message = structuredClone(record.message as Content);
+  if (record.subtype === 'mid_turn_user_message') {
+    const previous = history.at(-1);
+    if (previous?.role === 'user') {
+      previous.parts = [...(previous.parts ?? []), ...(message.parts ?? [])];
+      return;
+    }
+  }
+
+  history.push(message);
+}
+
 /**
  * Builds the model-facing chat history (Content[]) from a reconstructed
  * conversation. This keeps UI history intact while applying chat compression
@@ -1222,9 +1237,7 @@ export function buildApiHistoryFromConversation(
     for (let i = lastCompressionIndex + 1; i < messages.length; i++) {
       const record = messages[i];
       if (record.type === 'system') continue;
-      if (record.message) {
-        baseHistory.push(structuredClone(record.message as Content));
-      }
+      appendApiHistoryRecord(baseHistory, record);
     }
 
     if (stripThoughtsFromHistory) {
@@ -1236,10 +1249,10 @@ export function buildApiHistoryFromConversation(
   }
 
   // Fallback: return linear messages as Content[]
-  const result = messages
-    .map((record) => record.message)
-    .filter((message): message is Content => message !== undefined)
-    .map((message) => structuredClone(message));
+  const result: Content[] = [];
+  for (const record of messages) {
+    appendApiHistoryRecord(result, record);
+  }
 
   if (stripThoughtsFromHistory) {
     return result
