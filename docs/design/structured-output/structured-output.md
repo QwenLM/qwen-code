@@ -157,9 +157,18 @@ inside `runNonInteractive` and called from both:
 
 The drain turn matters because `structured_output` is registered for
 the whole session, so a cron job or a notification reply MIGHT also
-fire the tool. The helper handles both call sites identically;
-the only call-site-specific binding is which `modelOverride` variable
-to write to — passed in as a setter.
+fire the tool. The helper handles both call sites identically at
+invocation time; the only call-site-specific binding is which
+`modelOverride` variable to write to — passed in as a setter.
+
+The **post-helper termination flow** differs between the two sites:
+the main-turn path directly calls `return emitStructuredSuccess()`,
+while the drain-turn path requires a two-hop termination
+(`drainOneItem` returns a sentinel that its caller checks to break out
+of the drain loop before calling `emitStructuredSuccess`). Both
+converge on the same terminal block, but the extra indirection in the
+drain path is load-bearing — without it the drain loop would continue
+processing queued items after the structured result was captured.
 
 ### Structured success terminal block
 
@@ -252,6 +261,13 @@ constant
 
 The shared constant prevents drift between the two surfaces. Tool-call
 metrics (duration, success, decision) are preserved.
+
+Hooks (`PreToolUse`, `PostToolUse`, `PostToolUseFailure`) are
+intentionally **not** redacted — they receive the raw `tool_input`
+because the hook contract is "see what the tool sees." This is
+documented in the user-doc Privacy section as a "Hooks see raw args"
+callout so operators can filter on `tool_name` or add hook-side
+redaction before running `--json-schema` against sensitive data.
 
 The redaction is intentionally scoped to **on-device** persistence
 surfaces (telemetry exports + chat-recording JSONL). The schema
