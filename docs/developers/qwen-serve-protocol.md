@@ -220,7 +220,7 @@ filesystem paths, or hook definitions.
 
 `discoveryState` is one of `not_started`, `in_progress`, or `completed`.
 `transport` is one of `stdio`, `sse`, `http`, `websocket`, `sdk`, or
-`unknown`.
+`unknown`. `errors` is omitted when discovery succeeds.
 
 ### `GET /workspace/skills`
 
@@ -239,8 +239,7 @@ filesystem paths, or hook definitions.
       "modelInvocable": true,
       "argumentHint": "[path]"
     }
-  ],
-  "errors": []
+  ]
 }
 ```
 
@@ -279,7 +278,8 @@ omitted when discovery succeeds.
 
 Models are grouped by auth type. Provider connection diagnostics and environment
 preflight checks are intentionally out of scope here; deeper preflight/env
-checks belong to a later daemon status wave.
+checks belong to a later daemon status wave. `errors` is omitted when snapshot
+construction succeeds.
 
 ### `GET /session/:id/context`
 

@@ -208,6 +208,7 @@ export interface DaemonWorkspaceMcpStatus {
   initialized: boolean;
   discoveryState?: DaemonMcpDiscoveryState;
   servers: DaemonWorkspaceMcpServerStatus[];
+  errors?: DaemonStatusCell[];
 }
 
 export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
@@ -259,6 +260,7 @@ export interface DaemonWorkspaceProvidersStatus {
   initialized: boolean;
   current?: DaemonWorkspaceProviderCurrent;
   providers: DaemonWorkspaceProviderStatus[];
+  errors?: DaemonStatusCell[];
 }
 
 export interface DaemonSessionContextStatus {

@@ -176,6 +176,7 @@ import {
   MCPServerStatus,
   getMCPDiscoveryState,
   getMCPServerStatus,
+  tokenLimit,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -887,6 +888,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           command: 'node',
           args: ['disabled.js'],
         },
+        malformed: {
+          command: 'node',
+          description: 123,
+          extensionName: { name: 'bad-ext' },
+        },
       }),
       isMcpServerDisabled: vi
         .fn()
@@ -966,10 +972,19 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           transport: 'stdio',
           disabled: true,
         },
+        {
+          kind: 'mcp_server',
+          status: 'ok',
+          name: 'malformed',
+          mcpStatus: 'connected',
+          transport: 'stdio',
+          disabled: false,
+        },
       ],
     });
     expect(JSON.stringify(mcp)).not.toContain('secret-token');
     expect(JSON.stringify(mcp)).not.toContain('Authorization');
+    expect(JSON.stringify(mcp)).not.toContain('bad-ext');
 
     expect(skills).toMatchObject({
       v: 1,
@@ -1018,6 +1033,176 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(JSON.stringify(providers)).not.toContain('secret.example.com');
     expect(JSON.stringify(providers)).not.toContain('DASHSCOPE_API_KEY');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('status ext methods return error cells when workspace snapshots fail', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getMcpServers: vi.fn(() => {
+        throw new Error('broken mcp config');
+      }),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAllConfiguredModels: vi.fn(() => {
+        throw new Error('broken provider config');
+      }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceMcp, {}),
+    ).resolves.toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      servers: [],
+      errors: [{ kind: 'mcp', status: 'error', error: 'broken mcp config' }],
+    });
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceProviders, {}),
+    ).resolves.toMatchObject({
+      v: 1,
+      workspaceCwd: '/work/status',
+      initialized: true,
+      providers: [],
+      errors: [
+        {
+          kind: 'providers',
+          status: 'error',
+          error: 'broken provider config',
+        },
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('provider status marks current only for matching models', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('missing-model'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-plus',
+          label: 'Qwen Plus',
+          authType: 'qwen',
+        },
+      ]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceProviders, {}),
+    ).resolves.toMatchObject({
+      current: { authType: 'qwen', modelId: 'missing-model(qwen)' },
+      providers: [
+        {
+          authType: 'qwen',
+          current: false,
+          models: [
+            {
+              modelId: 'qwen-plus(qwen)',
+              baseModelId: 'qwen-plus',
+              contextLimit: 128_000,
+              isCurrent: false,
+            },
+          ],
+        },
+      ],
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('provider status uses runtime model ids for base id and token limit', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue({
+        id: 'runtime-qwen-plus',
+        authType: 'qwen',
+      }),
+      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-plus',
+          runtimeSnapshotId: 'runtime-qwen-plus',
+          label: 'Runtime Qwen Plus',
+          authType: 'qwen',
+          isRuntimeModel: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceProviders, {}),
+    ).resolves.toMatchObject({
+      current: { authType: 'qwen', modelId: 'runtime-qwen-plus(qwen)' },
+      providers: [
+        {
+          authType: 'qwen',
+          current: true,
+          models: [
+            {
+              modelId: 'runtime-qwen-plus(qwen)',
+              baseModelId: 'runtime-qwen-plus',
+              contextLimit: 128_000,
+              isCurrent: true,
+              isRuntime: true,
+            },
+          ],
+        },
+      ],
+    });
+    expect(vi.mocked(tokenLimit)).toHaveBeenCalledWith('runtime-qwen-plus');
 
     mockConnectionState.resolve();
     await agentPromise;

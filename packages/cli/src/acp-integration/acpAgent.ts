@@ -559,6 +559,14 @@ class QwenAgent implements Agent {
     return config.getTargetDir();
   }
 
+  private safeWorkspaceCwd(config: Config): string {
+    try {
+      return this.workspaceCwd(config);
+    } catch {
+      return '';
+    }
+  }
+
   private mcpTransport(server: unknown): ServeMcpTransport {
     if (
       server &&
@@ -641,28 +649,51 @@ class QwenAgent implements Agent {
   }
 
   private buildWorkspaceMcpStatus(config: Config): ServeWorkspaceMcpStatus {
-    const servers = config.getMcpServers() ?? {};
-    return {
-      v: STATUS_SCHEMA_VERSION,
-      workspaceCwd: this.workspaceCwd(config),
-      initialized: true,
-      discoveryState: this.discoveryState(),
-      servers: Object.entries(servers).map(([name, server]) => {
-        const disabled = config.isMcpServerDisabled(name);
-        const rawStatus = getMCPServerStatus(name);
-        const out: ServeWorkspaceMcpServerStatus = {
-          kind: 'mcp_server',
-          status: this.mcpCellStatus(rawStatus, disabled),
-          name,
-          mcpStatus: this.mcpStatus(rawStatus),
-          transport: this.mcpTransport(server),
-          disabled,
-        };
-        if (server.description) out.description = server.description;
-        if (server.extensionName) out.extensionName = server.extensionName;
-        return out;
-      }),
-    };
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const servers = config.getMcpServers() ?? {};
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        discoveryState: this.discoveryState(),
+        servers: Object.entries(servers).map(([name, server]) => {
+          const disabled = config.isMcpServerDisabled(name);
+          const rawStatus = getMCPServerStatus(name);
+          const out: ServeWorkspaceMcpServerStatus = {
+            kind: 'mcp_server',
+            status: this.mcpCellStatus(rawStatus, disabled),
+            name,
+            mcpStatus: this.mcpStatus(rawStatus),
+            transport: this.mcpTransport(server),
+            disabled,
+          };
+          const description =
+            server && typeof server === 'object'
+              ? (server as { description?: unknown }).description
+              : undefined;
+          const extensionName =
+            server && typeof server === 'object'
+              ? (server as { extensionName?: unknown }).extensionName
+              : undefined;
+          if (typeof description === 'string') {
+            out.description = description;
+          }
+          if (typeof extensionName === 'string') {
+            out.extensionName = extensionName;
+          }
+          return out;
+        }),
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: true,
+        servers: [],
+        errors: [this.errorCell('mcp', error)],
+      };
+    }
   }
 
   private errorCell(kind: string, error: unknown): ServeStatusCell {
@@ -723,71 +754,84 @@ class QwenAgent implements Agent {
   private buildWorkspaceProvidersStatus(
     config: Config,
   ): ServeWorkspaceProvidersStatus {
-    const currentAuthType = config.getAuthType?.();
-    const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
-    const currentModelId = activeRuntimeSnapshot
-      ? activeRuntimeSnapshot.id
-      : (config.getModel() || '').trim();
-    const currentAuth = activeRuntimeSnapshot?.authType ?? currentAuthType;
-    const currentAcpModelId =
-      currentModelId && currentAuth
-        ? formatAcpModelId(currentModelId, currentAuth)
-        : currentModelId || undefined;
-    const providers = new Map<string, ServeWorkspaceProviderStatus>();
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const currentAuthType = config.getAuthType?.();
+      const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
+      const currentModelId = activeRuntimeSnapshot
+        ? activeRuntimeSnapshot.id
+        : (config.getModel() || '').trim();
+      const hasCurrentModel = currentModelId.length > 0;
+      const currentAuth = activeRuntimeSnapshot?.authType ?? currentAuthType;
+      const currentAcpModelId =
+        hasCurrentModel && currentAuth
+          ? formatAcpModelId(currentModelId, currentAuth)
+          : currentModelId || undefined;
+      const providers = new Map<string, ServeWorkspaceProviderStatus>();
 
-    for (const model of config.getAllConfiguredModels()) {
-      const authType = String(model.authType);
-      let provider = providers.get(authType);
-      if (!provider) {
-        provider = {
-          kind: 'model_provider',
-          status: 'ok',
-          authType,
-          current: currentAuthType === model.authType,
-          models: [],
+      for (const model of config.getAllConfiguredModels()) {
+        const authType = String(model.authType);
+        let provider = providers.get(authType);
+        if (!provider) {
+          provider = {
+            kind: 'model_provider',
+            status: 'ok',
+            authType,
+            current: false,
+            models: [],
+          };
+          providers.set(authType, provider);
+        }
+
+        const effectiveModelId =
+          model.isRuntimeModel && model.runtimeSnapshotId
+            ? model.runtimeSnapshotId
+            : model.id;
+        const modelId = formatAcpModelId(effectiveModelId, model.authType);
+        const isCurrent =
+          currentAuth === model.authType &&
+          hasCurrentModel &&
+          (currentModelId === effectiveModelId ||
+            currentModelId === model.id ||
+            currentAcpModelId === modelId);
+        const providerModel: ServeWorkspaceProviderModel = {
+          modelId,
+          baseModelId: parseAcpBaseModelId(effectiveModelId),
+          name: model.label,
+          ...(model.description !== undefined
+            ? { description: model.description }
+            : {}),
+          contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
+          isCurrent,
+          isRuntime: model.isRuntimeModel === true,
         };
-        providers.set(authType, provider);
+        provider.models.push(providerModel);
+        if (isCurrent) provider.current = true;
       }
 
-      const effectiveModelId =
-        model.isRuntimeModel && model.runtimeSnapshotId
-          ? model.runtimeSnapshotId
-          : model.id;
-      const modelId = formatAcpModelId(effectiveModelId, model.authType);
-      const isCurrent =
-        currentAuth === model.authType &&
-        (currentModelId === effectiveModelId ||
-          currentModelId === model.id ||
-          currentAcpModelId === modelId);
-      const providerModel: ServeWorkspaceProviderModel = {
-        modelId,
-        baseModelId: parseAcpBaseModelId(model.id),
-        name: model.label,
-        ...(model.description !== undefined
-          ? { description: model.description }
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        ...(currentAuth || currentAcpModelId
+          ? {
+              current: {
+                ...(currentAuth ? { authType: String(currentAuth) } : {}),
+                ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
+              },
+            }
           : {}),
-        contextLimit: model.contextWindowSize ?? tokenLimit(model.id),
-        isCurrent,
-        isRuntime: model.isRuntimeModel === true,
+        providers: [...providers.values()],
       };
-      provider.models.push(providerModel);
-      if (isCurrent) provider.current = true;
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: true,
+        providers: [],
+        errors: [this.errorCell('providers', error)],
+      };
     }
-
-    return {
-      v: STATUS_SCHEMA_VERSION,
-      workspaceCwd: this.workspaceCwd(config),
-      initialized: true,
-      ...(currentAuth || currentAcpModelId
-        ? {
-            current: {
-              ...(currentAuth ? { authType: String(currentAuth) } : {}),
-              ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
-            },
-          }
-        : {}),
-      providers: [...providers.values()],
-    };
   }
 
   private sessionOrThrow(sessionId: string): Session {

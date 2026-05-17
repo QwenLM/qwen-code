@@ -66,6 +66,7 @@ export interface ServeWorkspaceMcpStatus {
   initialized: boolean;
   discoveryState?: ServeMcpDiscoveryState;
   servers: ServeWorkspaceMcpServerStatus[];
+  errors?: ServeStatusCell[];
 }
 
 export type ServeSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
@@ -117,6 +118,7 @@ export interface ServeWorkspaceProvidersStatus {
   initialized: boolean;
   current?: ServeWorkspaceProviderCurrent;
   providers: ServeWorkspaceProviderStatus[];
+  errors?: ServeStatusCell[];
 }
 
 export interface ServeSessionContextStatus {

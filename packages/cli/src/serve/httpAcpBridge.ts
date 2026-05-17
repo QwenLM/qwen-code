@@ -2165,6 +2165,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return channelInfo;
   };
 
+  const channelInfoForEntry = (
+    entry: SessionEntry,
+  ): ChannelInfo | undefined => {
+    if (channelInfo?.channel === entry.channel) return channelInfo;
+    for (const info of aliveChannels) {
+      if (info.channel === entry.channel) return info;
+    }
+    return undefined;
+  };
+
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
       info.statusClosedReject = info.channel.exited.then(() => {
@@ -2197,6 +2207,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   ): Promise<T> => {
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
+    const info = channelInfoForEntry(entry);
+    if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
     const response = await Promise.race([
       withTimeout(
         entry.connection.extMethod(method, { sessionId }),
