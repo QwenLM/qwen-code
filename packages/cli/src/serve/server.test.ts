@@ -1426,7 +1426,7 @@ describe('GET /session/:id/events (SSE)', () => {
 });
 
 describe('GET /demo', () => {
-  it('returns 200 with text/html content type', async () => {
+  it('returns 200 with text/html content type on loopback', async () => {
     const app = createServeApp(baseOpts, () => 4170, {
       bridge: fakeBridge(),
     });
@@ -1439,30 +1439,68 @@ describe('GET /demo', () => {
     expect(res.text).toContain('<!DOCTYPE html>');
   });
 
-  it('is accessible without bearer token even when --token is set (before bearerAuth)', async () => {
-    // /demo is registered BEFORE bearerAuth so browsers can reach the
-    // page via address-bar navigation (which cannot attach Authorization
-    // headers). The in-page token input authenticates subsequent API calls.
+  it('is accessible without bearer token on loopback even when --token is set', async () => {
+    // Loopback: /demo is registered BEFORE bearerAuth so browsers can
+    // reach the page via address-bar navigation (no Authorization header).
+    const app = createServeApp({ ...baseOpts, token: 'secret' }, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('requires bearer token on non-loopback (401 without token)', async () => {
+    // Non-loopback: /demo is registered AFTER bearerAuth to prevent
+    // unauthenticated access on public interfaces.
     const app = createServeApp(
       { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
       () => 4170,
       { bridge: fakeBridge() },
     );
     const res = await request(app).get('/demo').set('Host', '0.0.0.0:4170');
+    expect(res.status).toBe(401);
+  });
+
+  it('is accessible on non-loopback with valid bearer token', async () => {
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', '0.0.0.0:4170')
+      .set('Authorization', 'Bearer secret');
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/text\/html/);
   });
 
-  it('is still guarded by CORS and Host allowlist', async () => {
+  it('is guarded by CORS (rejects cross-origin requests)', async () => {
     const app = createServeApp(baseOpts, () => 4170, {
       bridge: fakeBridge(),
     });
-    // Cross-origin request should be rejected by denyBrowserOriginCors
     const res = await request(app)
       .get('/demo')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .set('Origin', 'https://evil.example.com');
     expect(res.status).toBe(403);
+  });
+
+  it('sets anti-clickjacking headers (X-Frame-Options + CSP)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['content-security-policy']).toContain(
+      "frame-ancestors 'none'",
+    );
   });
 });
 
@@ -1510,6 +1548,28 @@ describe('same-origin Origin-stripping middleware', () => {
       .get('/health')
       .set('Host', `127.0.0.1:${baseOpts.port}`)
       .set('Origin', 'http://host.docker.internal:4170');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('strips localhost Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:4170');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('strips [::1] Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://[::1]:4170');
     expect(res.status).not.toBe(403);
   });
 });

@@ -297,6 +297,9 @@ export function getDemoHtml(_port: number): string {
       sessionIdDisplay.textContent = sessionId;
       enablePrompt(true);
       chatArea.innerHTML = '';
+      currentAssistantBubble = null;
+      pendingPerms.clear();
+      renderPermissions();
       if (r.data.attached) {
         addChatMeta('Attached to existing session');
       } else {

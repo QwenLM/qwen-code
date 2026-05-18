@@ -72,17 +72,22 @@ export function createServeApp(
   // through. Only loopback origins are matched — non-loopback deployments
   // require the operator to front the daemon with a reverse proxy for
   // browser access anyway (per the threat-model docs).
+  let cachedStripPort = -1;
+  let cachedSelfOrigins: Set<string> = new Set();
   app.use((req: import('express').Request, _res, next) => {
     const origin = req.headers.origin;
     if (origin) {
       const port = getPort();
-      const selfOrigins = new Set([
-        `http://127.0.0.1:${port}`,
-        `http://localhost:${port}`,
-        `http://[::1]:${port}`,
-        `http://host.docker.internal:${port}`,
-      ]);
-      if (selfOrigins.has(origin)) {
+      if (port !== cachedStripPort) {
+        cachedStripPort = port;
+        cachedSelfOrigins = new Set([
+          `http://127.0.0.1:${port}`,
+          `http://localhost:${port}`,
+          `http://[::1]:${port}`,
+          `http://host.docker.internal:${port}`,
+        ]);
+      }
+      if (cachedSelfOrigins.has(origin)) {
         delete req.headers.origin;
       }
     }
@@ -96,23 +101,37 @@ export function createServeApp(
   app.use(denyBrowserOriginCors);
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  // --- Demo page: registered AFTER CORS and Host allowlist but BEFORE
-  // bearerAuth. Browsers cannot attach an Authorization header on
-  // address-bar navigation, so a bearer-protected /demo would be
-  // unreachable — the in-page token input field would never load.
-  // Serving only the static HTML shell here is safe: the page itself
-  // contains no secrets, and all daemon API/SSE routes remain behind
-  // bearerAuth so the token field authenticates subsequent calls.
-  app.get('/demo', (_req, res) => {
+  // --- Demo page: mirrors the `/health` loopback-gating pattern.
+  // On loopback binds, registered BEFORE bearerAuth so browsers can
+  // reach the page via address-bar navigation (which cannot attach
+  // Authorization headers). On non-loopback binds, registered AFTER
+  // bearerAuth — an unauthenticated `/demo` on a public interface
+  // would leak the full API surface (route enumeration + interactive
+  // console), far more than `/health`'s `{"status":"ok"}`.
+  // X-Frame-Options: DENY + CSP frame-ancestors 'none' prevent
+  // clickjacking — a malicious site embedding the demo in an iframe
+  // could trick a user into performing daemon actions via transparent
+  // overlay (the iframe's same-origin fetches bypass CORS).
+  const demoHandler = (
+    _req: import('express').Request,
+    res: import('express').Response,
+  ) => {
     try {
-      res.type('html').send(getDemoHtml(getPort()));
+      res
+        .type('html')
+        .set('X-Frame-Options', 'DENY')
+        .set(
+          'Content-Security-Policy',
+          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        )
+        .send(getDemoHtml(getPort()));
     } catch (err) {
       writeStderrLine(
         `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({ error: 'Failed to render demo page' });
     }
-  });
+  };
 
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
@@ -167,6 +186,7 @@ export function createServeApp(
   const loopback = isLoopbackBind(opts.hostname);
   if (loopback) {
     app.get('/health', healthHandler);
+    app.get('/demo', demoHandler);
   }
 
   app.use(bearerAuth(opts.token));
@@ -174,10 +194,12 @@ export function createServeApp(
   app.use(express.json({ limit: '10mb' }));
 
   if (!loopback) {
-    // Non-loopback: register `/health` AFTER `bearerAuth` so probes
-    // must carry the token. Otherwise unauthenticated callers can
-    // ping any reachable address:port to confirm a daemon exists.
+    // Non-loopback: register `/health` and `/demo` AFTER `bearerAuth`
+    // so probes must carry the token. Otherwise unauthenticated callers
+    // can ping any reachable address:port to confirm a daemon exists
+    // (and `/demo` leaks the full API surface).
     app.get('/health', healthHandler);
+    app.get('/demo', demoHandler);
   }
 
   app.get('/capabilities', (_req, res) => {
