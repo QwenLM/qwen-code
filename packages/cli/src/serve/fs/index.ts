@@ -42,15 +42,22 @@ export {
 } from './audit.js';
 export {
   createWorkspaceFileSystemFactory,
+  isContentHash,
+  type ContentHash,
   type CreateWorkspaceFileSystemFactoryDeps,
   type FsEntry,
   type FsStat,
   type GlobOptions,
   type ListOptions,
+  type ReadBytesOptions,
+  type ReadBytesOutcome,
   type ReadMeta,
   type ReadTextOptions,
   type RequestContext,
   type WorkspaceFileSystem,
   type WorkspaceFileSystemFactory,
+  type WriteMode,
   type WriteOutcome,
+  type WriteTextAtomicOptions,
+  type WriteTextAtomicOutcome,
 } from './workspaceFileSystem.js';
