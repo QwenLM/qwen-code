@@ -661,12 +661,28 @@ describe('daemon event schema', () => {
   });
 
   it('recognizes slow_client_warning frames as known events', () => {
+    // PR 14b fix (codex round 8 — sibling consistency): `satisfies
+    // DaemonEvent` keeps `v: 1` / `type: 'slow_client_warning'`
+    // narrow rather than widening to `number` / `string`. The same
+    // pattern was applied to PR 14b's own fixtures in round 3
+    // (`mcp_budget_warning` + `mcp_child_refused_batch`); this is the
+    // closest sibling fixture in the same describe block, so
+    // matching it here keeps the sdk-test typing style coherent.
+    //
+    // Note: a tsconfig audit found ~17 OTHER fixtures in this file
+    // with the same widening shape (PR 4 / PR 10 / PR 11 era). They
+    // remain unfixed because (a) they're outside PR 14b's scope, and
+    // (b) the sdk package's `tsconfig.json` excludes the test
+    // directory from `tsc --noEmit`, so none of them block CI today.
+    // A future PR that opts tests into the typecheck scope can fix
+    // all of them at once. Round 3 only signed up for PR 14b's own
+    // fixtures.
     const warning = {
       // No `id` on synthetic frames (matches the daemon's emit shape).
       v: 1,
       type: 'slow_client_warning',
       data: { queueSize: 192, maxQueued: 256, lastEventId: 42 },
-    };
+    } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(warning);
     expect(known?.type).toBe('slow_client_warning');
 
