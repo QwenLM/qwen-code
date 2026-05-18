@@ -7,7 +7,9 @@
 import { SkillError, TrustGateError } from '@qwen-code/qwen-code-core';
 import { describe, expect, it } from 'vitest';
 import {
+  BridgeChannelClosedError,
   BridgeTimeoutError,
+  MissingCliEntryError,
   SERVE_ERROR_KINDS,
   mapDomainErrorToErrorKind,
 } from './status.js';
@@ -42,6 +44,37 @@ describe('BridgeTimeoutError', () => {
     expect(err.message).toBe('HttpAcpBridge init timed out after 250ms');
     expect(err.label).toBe('init');
     expect(err.timeoutMs).toBe(250);
+    expect(err).toBeInstanceOf(Error);
+  });
+});
+
+describe('BridgeChannelClosedError', () => {
+  it('preserves the legacy "agent channel closed …" wording per context', () => {
+    const sessionErr = new BridgeChannelClosedError(
+      'mid-request (session abc-123)',
+    );
+    expect(sessionErr.name).toBe('BridgeChannelClosedError');
+    expect(sessionErr.message).toBe(
+      'agent channel closed mid-request (session abc-123)',
+    );
+    expect(sessionErr.context).toBe('mid-request (session abc-123)');
+    expect(sessionErr).toBeInstanceOf(Error);
+
+    expect(
+      new BridgeChannelClosedError('mid-request (workspace status)').message,
+    ).toBe('agent channel closed mid-request (workspace status)');
+    expect(
+      new BridgeChannelClosedError('during session/load').message,
+    ).toBe('agent channel closed during session/load');
+  });
+});
+
+describe('MissingCliEntryError', () => {
+  it('exposes the operator-actionable remediation message verbatim', () => {
+    const err = new MissingCliEntryError();
+    expect(err.name).toBe('MissingCliEntryError');
+    expect(err.message).toContain('Cannot determine CLI entry path');
+    expect(err.message).toContain('QWEN_CLI_ENTRY');
     expect(err).toBeInstanceOf(Error);
   });
 });
@@ -113,16 +146,46 @@ describe('mapDomainErrorToErrorKind', () => {
     }
   });
 
-  it('classifies agent-channel-closed message as protocol_error', () => {
+  it('classifies BridgeChannelClosedError as protocol_error', () => {
     expect(
-      mapDomainErrorToErrorKind(new Error('agent channel closed mid-request')),
+      mapDomainErrorToErrorKind(
+        new BridgeChannelClosedError('mid-request (session abc)'),
+      ),
+    ).toBe('protocol_error');
+    expect(
+      mapDomainErrorToErrorKind(
+        new BridgeChannelClosedError('mid-request (workspace status)'),
+      ),
+    ).toBe('protocol_error');
+    expect(
+      mapDomainErrorToErrorKind(
+        new BridgeChannelClosedError('during session/load'),
+      ),
     ).toBe('protocol_error');
   });
 
-  it('classifies "Cannot determine CLI entry path" message as missing_binary', () => {
+  it('classifies MissingCliEntryError as missing_binary', () => {
+    expect(mapDomainErrorToErrorKind(new MissingCliEntryError())).toBe(
+      'missing_binary',
+    );
+  });
+
+  it('does NOT classify foreign errors that merely contain bridge phrases', () => {
+    // Regression for #4299: the previous regex-based fallback would
+    // misclassify any unrelated `Error` whose `.message` happened to
+    // contain "agent channel closed" or "Cannot determine CLI entry
+    // path" (e.g. a wrapping error or a user-authored message in an
+    // unrelated module). Typed-error recognition closes that hole.
     expect(
-      mapDomainErrorToErrorKind(new Error('Cannot determine CLI entry path')),
-    ).toBe('missing_binary');
+      mapDomainErrorToErrorKind(
+        new Error('wrapped: agent channel closed mid-request'),
+      ),
+    ).toBe(undefined);
+    expect(
+      mapDomainErrorToErrorKind(
+        new Error('Cannot determine CLI entry path for some other reason'),
+      ),
+    ).toBe(undefined);
   });
 
   it('returns undefined for unrelated or non-Error values', () => {

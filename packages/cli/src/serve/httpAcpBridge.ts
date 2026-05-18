@@ -18,7 +18,9 @@ import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { canonicalizeWorkspace } from './fs/paths.js';
 import { EventBus, DEFAULT_RING_SIZE, type BridgeEvent } from './eventBus.js';
 import {
+  BridgeChannelClosedError,
   BridgeTimeoutError,
+  MissingCliEntryError,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
@@ -2126,8 +2128,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const getTransportClosedReject = (entry: SessionEntry): Promise<never> => {
     if (!entry.transportClosedReject) {
       entry.transportClosedReject = entry.channel.exited.then(() => {
-        throw new Error(
-          `agent channel closed mid-request (session ${entry.sessionId})`,
+        throw new BridgeChannelClosedError(
+          `mid-request (session ${entry.sessionId})`,
         );
       });
     }
@@ -2168,7 +2170,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
     if (!info.statusClosedReject) {
       info.statusClosedReject = info.channel.exited.then(() => {
-        throw new Error('agent channel closed mid-request (workspace status)');
+        throw new BridgeChannelClosedError('mid-request (workspace status)');
       });
     }
     return info.statusClosedReject;
@@ -2413,7 +2415,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // race only — once the race settles, no new awaits attach to
       // it, so there's no listener leak across restores.
       const transportClosed = ci.channel.exited.then(() => {
-        throw new Error(`agent channel closed during session/${action}`);
+        throw new BridgeChannelClosedError(`during session/${action}`);
       });
       // Suppress the dangling rejection if `withTimeout` wins the
       // race below: `transportClosed` then stays pending, and a
@@ -4345,12 +4347,7 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   // Fail loudly with an actionable error if neither resolves.
   const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1];
   if (!cliEntry) {
-    throw new Error(
-      'Cannot determine CLI entry path for spawning the ACP child: ' +
-        'process.argv[1] is empty and QWEN_CLI_ENTRY is unset. ' +
-        'Set QWEN_CLI_ENTRY to the absolute path of the qwen entry ' +
-        'script (e.g. `export QWEN_CLI_ENTRY=$(which qwen)`) to override.',
-    );
+    throw new MissingCliEntryError();
   }
   // Each session takes ~3 file descriptors (stdin/stdout/stderr) for the
   // child plus a few sockets. Operators running many concurrent sessions
