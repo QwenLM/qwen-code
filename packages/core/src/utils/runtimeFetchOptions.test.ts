@@ -141,8 +141,9 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
 
   it('does not inject a fetch override when no proxy is set', () => {
     // No-proxy path must stay on the runtime's built-in fetch — see the
-    // comment in runtimeFetchOptions.ts:586 about avoiding version-mismatch
-    // issues on code paths that don't need a custom dispatcher.
+    // comment in buildFetchOptionsWithDispatcher() in runtimeFetchOptions.ts
+    // about avoiding version-mismatch issues on code paths
+    // that don't need a custom dispatcher.
     const openaiResult = buildRuntimeFetchOptions('openai');
     expect(openaiResult).toBeUndefined();
 
