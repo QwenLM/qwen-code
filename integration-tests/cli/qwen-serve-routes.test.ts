@@ -218,6 +218,9 @@ describe('qwen serve — capabilities envelope', () => {
       'session_metadata',
       'mcp_guardrails',
       'workspace_file_read',
+      'workspace_file_bytes',
+      'workspace_file_write',
+      'auth_device_flow',
     ]);
   });
 });
