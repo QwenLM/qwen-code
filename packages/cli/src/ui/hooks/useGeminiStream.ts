@@ -2077,8 +2077,20 @@ export const useGeminiStream = (
         // `recordCompletedToolCall` loop below over `geminiTools` —
         // filter to the same shape (non-client-initiated) so client
         // tools (which the original loop also skipped) stay skipped.
+        //
+        // Cancelled tools are also skipped: `dedupedTools` includes
+        // anything in a terminal state (success | error | cancelled),
+        // but cancelled means the tool never actually ran end-to-end —
+        // the `allToolsCancelled` branch below would have surfaced
+        // them via `addHistory + reportCancelled` rather than the
+        // completed-call metric, and the metric should match. Without
+        // this filter, a deduped + cancelled tool would inflate
+        // `toolCallCount` for a call that never produced a result
+        // (and could also flip `skillsModifiedInSession` for a
+        // never-executed skill-write).
         for (const tc of dedupedTools) {
           if (tc.request.isClientInitiated) continue;
+          if (tc.status === 'cancelled') continue;
           geminiClient?.recordCompletedToolCall(
             tc.request.name,
             tc.request.args as Record<string, unknown>,

@@ -610,6 +610,21 @@ export class GeminiChat {
     | null = null;
 
   /**
+   * Reset both partial-push markers in lockstep. Extracted so the seven
+   * call sites that need to drop both fields (sendMessageStream entry,
+   * popPartialIfPushed, clearHistory, addHistory, setHistory,
+   * truncateHistory, stripThoughtsFromHistory) can't drift apart — a
+   * future history-mutating method that only clears one would leak the
+   * other into a later flush. The fields ARE always paired by lifecycle
+   * (set together on stream-error stash, popped together on retry, flushed
+   * together at the rethrow site), so any single-field reset is a bug.
+   */
+  private clearPendingPartialState(): void {
+    this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
+  }
+
+  /**
    * Heap-pressure compaction is process-wide pressure applied per chat. If one
    * heap-triggered attempt cannot reduce history, briefly back off this chat
    * so every subsequent send does not immediately pay for another compression
@@ -857,8 +872,7 @@ export class GeminiChat {
     // leftover from a prior unretryable break would otherwise get
     // appended to JSONL by THIS send's retry-loop flush, attaching
     // someone else's failed turn to this conversation.
-    this.pendingPartialAssistantTurnIndex = null;
-    this.pendingPartialAssistantRecord = null;
+    this.clearPendingPartialState();
 
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
@@ -1004,14 +1018,13 @@ export class GeminiChat {
               ) {
                 self.history.splice(idx, 1);
               }
-              self.pendingPartialAssistantTurnIndex = null;
-              // Discard the deferred chat-recording record alongside the
-              // in-memory pop so the JSONL transcript also drops the
-              // failed attempt. (Paired with the stash in
-              // processStreamResponse — see the field-level comment on
-              // `pendingPartialAssistantRecord` for the failure mode this
-              // fixes.)
-              self.pendingPartialAssistantRecord = null;
+              // Drop both markers in lockstep — the deferred chat-
+              // recording record must be discarded alongside the
+              // in-memory splice so the JSONL transcript also drops the
+              // failed attempt. See the field-level comment on
+              // `pendingPartialAssistantRecord` for the failure mode
+              // this prevents.
+              self.clearPendingPartialState();
             };
 
             // Handle rate-limit / throttling errors returned as stream content.
@@ -1221,7 +1234,13 @@ export class GeminiChat {
           self.chatRecordingService?.recordAssistantTurn(
             self.pendingPartialAssistantRecord,
           );
-          self.pendingPartialAssistantRecord = null;
+          // Clear both fields in lockstep. The marker is no longer
+          // load-bearing past this point (its consumer is the for-loop
+          // catch above, which has exited), and the next
+          // sendMessageStream entry would clear it anyway — but pairing
+          // the reset preserves the "marker and stash are always set or
+          // cleared together" invariant the helper enforces.
+          self.clearPendingPartialState();
         }
 
         // Max output tokens escalation: if the retry loop succeeded with
@@ -1509,16 +1528,15 @@ export class GeminiChat {
    */
   clearHistory(): void {
     this.history = [];
-    // Any pending partial-push marker points into the now-empty history;
+    // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPartialIfPushed` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
     // helper also bounds-checks, but a stale marker that happens to
     // line up with a real model turn could otherwise pop the wrong
-    // entry). Drop the deferred-record stash for the same reason: a
-    // later flush would otherwise append a turn that doesn't match
-    // the (now-empty) live history.
-    this.pendingPartialAssistantTurnIndex = null;
-    this.pendingPartialAssistantRecord = null;
+    // entry). The deferred-record stash is dropped for the same reason:
+    // a later flush would append a turn that doesn't match the (now-
+    // empty) live history.
+    this.clearPendingPartialState();
   }
 
   /**
@@ -1526,22 +1544,35 @@ export class GeminiChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
-    // The marker is per-send-attempt. By the time external code calls
-    // addHistory (cancelled-tool synthesis in useGeminiStream, ACP
-    // session injects, shellCommandProcessor, etc.), the originating
+    // The marker is per-send-attempt. Today's callers (cancelled-tool
+    // synthesis in useGeminiStream, ACP session injects,
+    // shellCommandProcessor) only run between sends, so the originating
     // sendMessageStream has either already popped the partial via the
     // retry loop or hit an unrecoverable break — in both cases the
-    // marker is no longer load-bearing. Clearing here matches the
-    // defensive reset already applied in setHistory/truncateHistory/
-    // clearHistory: any future addHistory variant that splices into
-    // the middle (instead of plain push) would shift indices and a
-    // stale marker could splice the wrong entry. Belt-and-suspenders;
-    // the next sendMessageStream entry also clears it. The
-    // deferred-record stash is paired with the marker — keeping it
-    // around past an external addHistory could let a subsequent
-    // retry-loop flush land a stale partial in JSONL.
-    this.pendingPartialAssistantTurnIndex = null;
-    this.pendingPartialAssistantRecord = null;
+    // marker is no longer load-bearing.
+    //
+    // If a future code path ever calls addHistory BETWEEN the partial
+    // push and the retry attempt, silently clearing the marker would
+    // strand the partial: popPartialIfPushed would no-op, the failed
+    // attempt's `model[functionCall]` would survive into the retry,
+    // and a successful retry's response would land as a SECOND
+    // consecutive model turn (the wedge this whole subsystem exists
+    // to prevent). The warn below makes that coupling observable —
+    // anyone investigating a stale-partial bug will see this log line
+    // pointing straight at the offending caller, instead of having to
+    // trace through the marker lifecycle blind.
+    if (
+      this.pendingPartialAssistantTurnIndex !== null ||
+      this.pendingPartialAssistantRecord !== null
+    ) {
+      debugLogger.warn(
+        'addHistory called while a partial-push marker is active — ' +
+          'clearing it. This is unexpected during an active sendMessageStream ' +
+          'and likely indicates a new caller violating the between-sends ' +
+          'invariant. See comment at GeminiChat.addHistory for context.',
+      );
+    }
+    this.clearPendingPartialState();
   }
 
   setHistory(history: Content[]): void {
@@ -1553,21 +1584,18 @@ export class GeminiChat {
     // splice an entry that has nothing to do with the original partial
     // push, corrupting the conversation. Drop the paired deferred-record
     // stash too: its referent (the model turn at the old index) is gone.
-    this.pendingPartialAssistantTurnIndex = null;
-    this.pendingPartialAssistantRecord = null;
+    this.clearPendingPartialState();
   }
 
   truncateHistory(keepCount: number): void {
     this.history = this.history.slice(0, keepCount);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
-    // the marker rather than try to fix it up — it's per-send and
-    // ephemeral, so losing it across a truncate is safe (the
-    // sendMessageStream that pushed it has already finished or will
-    // start fresh on the next call). Drop the paired deferred-record
-    // stash for the same reason.
-    this.pendingPartialAssistantTurnIndex = null;
-    this.pendingPartialAssistantRecord = null;
+    // both fields rather than try to fix them up — they're per-send and
+    // ephemeral, so losing them across a truncate is safe (the
+    // sendMessageStream that pushed them has already finished or will
+    // start fresh on the next call).
+    this.clearPendingPartialState();
   }
 
   stripThoughtsFromHistory(): void {
@@ -1576,11 +1604,10 @@ export class GeminiChat {
       .filter((content): content is Content => content !== null);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
-    // exists. Clear it for the same reason setHistory does. The deferred
-    // chat-recording stash is paired with the marker — drop it too so a
-    // later flush can't land a turn that doesn't exist in live history.
-    this.pendingPartialAssistantTurnIndex = null;
-    this.pendingPartialAssistantRecord = null;
+    // exists. Clear it for the same reason setHistory does — and drop
+    // the paired deferred-record stash so a later flush can't land a
+    // turn that doesn't exist in live history.
+    this.clearPendingPartialState();
   }
 
   /**

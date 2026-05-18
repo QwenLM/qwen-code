@@ -855,6 +855,129 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('skips recordCompletedToolCall for deduped CANCELLED tools (telemetry parity)', async () => {
+    // A deduped tool with status='cancelled' never actually produced
+    // model-visible output — counting it via `recordCompletedToolCall`
+    // (which increments toolCallCount and can flip
+    // skillsModifiedInSession on a skill-write path) would inflate the
+    // metric for a call that never ran end-to-end. This test repros
+    // the deepseek-v4-pro thread on PR #4176: dedup must skip BOTH
+    // client-initiated (already skipped) AND cancelled tools, while
+    // still calling `markToolsAsSubmitted` so the scheduler unblocks.
+    const cancelledDedupedTool = {
+      request: {
+        callId: 'call_dedup_cancelled',
+        name: 'write_file',
+        args: { path: '/tmp/cancelled.txt', content: 'x' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-dedup-cancel',
+      },
+      status: 'cancelled',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_dedup_cancelled',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_dedup_cancelled',
+              name: 'write_file',
+              response: { error: 'cancelled' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+      },
+      tool: {
+        name: 'write_file',
+        displayName: 'WriteFile',
+        description: 'Write a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'cancelled write',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCancelledToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // Pre-paired in history: dedup will fire for this callId.
+    client.getHistory = vi.fn().mockReturnValue([
+      { role: 'user', parts: [{ text: 'cancelled write' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call_dedup_cancelled',
+              name: 'write_file',
+              args: { path: '/tmp/cancelled.txt', content: 'x' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call_dedup_cancelled',
+              name: 'write_file',
+              response: { error: 'synthetic' },
+            },
+          },
+        ],
+      },
+    ]);
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([cancelledDedupedTool]);
+      }
+    });
+
+    // Scheduler still gets unblocked.
+    await waitFor(() => {
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'call_dedup_cancelled',
+      ]);
+    });
+
+    // Telemetry NOT incremented — the cancelled filter held.
+    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
+  });
+
   it('runs Race A dedup BEFORE the isResponding early-return (regression guard)', async () => {
     // The dedup block in handleCompletedTools is intentionally placed
     // ABOVE the `if (isResponding) return;` early-return: the scheduler's

@@ -359,16 +359,19 @@ export class GeminiClient {
    * {@link stripOrphanedUserEntriesFromHistory}, which only handles trailing
    * `user` entries.
    *
-   * Called from three points:
-   *   1. After {@link startChat} loads transcript (covers `--resume` of a
-   *      session that crashed between partial-tool_use push and tool
-   *      completion).
-   *   2. After `stripOrphanedUserEntriesFromHistory` on the Retry submit path
-   *      (covers Ctrl+Y race — user retries while an in-flight tool's
-   *      `tool_result` has not yet been submitted, leaving a trailing
-   *      `model[functionCall]` without matching `functionResponse`).
-   *   3. Defensively at the start of UserQuery / Cron sends, so any state
-   *      that slipped past 1+2 still gets fixed before hitting the wire.
+   * This `GeminiClient` method is the resume-path entry point — called once
+   * from {@link startChat} after the transcript loads, covering `--resume`
+   * of a session that crashed between a partial-tool_use push and the
+   * tool's eventual completion.
+   *
+   * The other two coverage points (Retry submit path after
+   * `stripOrphanedUserEntriesFromHistory`, and the defensive pass at the
+   * start of every UserQuery / Cron send) live one layer down inside
+   * `GeminiChat.sendMessageStream` and call the standalone
+   * `repairOrphanedToolUseTurns(history)` function directly — they don't
+   * route through this wrapper. Anyone tracing the repair-pass coupling
+   * between the client and chat layers should follow that path
+   * separately rather than expect everything to funnel through here.
    *
    * Synthesizes an `error` `functionResponse`. The React tool scheduler
    * (`useGeminiStream.handleCompletedTools`) MUST dedupe by `callId` against
