@@ -599,25 +599,13 @@ export class DaemonIdeConnection {
     preferredOptionId?: string,
   ): string | undefined {
     const options = Array.isArray(request.options) ? request.options : [];
-    if (options.length === 0) {
+    if (!preferredOptionId || options.length === 0) {
       return undefined;
     }
 
-    if (preferredOptionId) {
-      return options.some((option) => option.optionId === preferredOptionId)
-        ? preferredOptionId
-        : undefined;
-    }
-
-    return (
-      options.find((option) => option.kind === 'allow_once')?.optionId ||
-      options.find((option) => option.optionId === 'proceed_once')?.optionId ||
-      // Some ACP producers namespace standard option ids. Prefer an
-      // explicit allow_once kind first, then tolerate namespaced proceed_once.
-      options.find((option) => option.optionId?.includes('proceed_once'))
-        ?.optionId ||
-      options[0]?.optionId
-    );
+    return options.some((option) => option.optionId === preferredOptionId)
+      ? preferredOptionId
+      : undefined;
   }
 
   private clearCurrentSession(
