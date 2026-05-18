@@ -299,6 +299,15 @@ export interface CompressOptions {
    * user message in hand (e.g. manual /compress force=true paths).
    */
   pendingUserMessage?: Content;
+  /**
+   * Pre-computed effective-token count from `estimatePromptTokens()`. When
+   * provided, the cheap-gate skips its own estimation pass (and the
+   * accompanying `chat.getHistory(true)` clone). Callers that already
+   * computed this value upstream — primarily `sendMessageStream` for the
+   * hard-tier rescue — pass it through to avoid duplicate work.
+   * (review #4168 R1.3 / R1.4)
+   */
+  precomputedEffectiveTokens?: number;
 }
 
 export class ChatCompressionService {
@@ -348,15 +357,24 @@ export class ChatCompressionService {
         config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
       const { auto } = computeThresholds(contextLimit);
+      // Order of preference for the effective-token estimate:
+      //   1. Caller already computed it (sendMessageStream hard-tier rescue)
+      //   2. Compute it here from history + pending user message
+      //   3. Fall back to the raw API-reported count
+      // Path 1 avoids a second `getHistory(true)` clone per send when
+      // sendMessageStream already paid for one. (R1.3 / R1.4)
       const pendingUserMessage = opts.pendingUserMessage;
-      const effectiveTokens = pendingUserMessage
-        ? estimatePromptTokens(
-            chat.getHistory(true),
-            pendingUserMessage,
-            originalTokenCount,
-            slimmingConfig.imageTokenEstimate,
-          )
-        : originalTokenCount;
+      const effectiveTokens =
+        opts.precomputedEffectiveTokens !== undefined
+          ? opts.precomputedEffectiveTokens
+          : pendingUserMessage
+            ? estimatePromptTokens(
+                chat.getHistory(true),
+                pendingUserMessage,
+                originalTokenCount,
+                slimmingConfig.imageTokenEstimate,
+              )
+            : originalTokenCount;
       if (effectiveTokens < auto) {
         return {
           newHistory: null,
@@ -523,9 +541,12 @@ export class ChatCompressionService {
 
     // Defensive guard: if the side-query hit COMPACT_MAX_OUTPUT_TOKENS, the
     // summary is likely truncated mid-content and unsafe to persist. Drop it
-    // and NOOP so the next send re-tries; reactive overflow still catches the
-    // catastrophic case where the next API call exceeds the window. See
-    // docs/design/auto-compaction-threshold-redesign.md risk #2.
+    // and surface it as a failure so the consecutive-failure breaker counts
+    // it — if the model consistently produces max-length summaries we want
+    // to stop trying after MAX_CONSECUTIVE_FAILURES strikes rather than burn
+    // an API call on every send. Reactive overflow still catches the
+    // catastrophic case. See docs/design/auto-compaction-threshold-redesign.md
+    // risk #2.
     if (
       !isSummaryEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
@@ -536,14 +557,19 @@ export class ChatCompressionService {
         .warn(
           `[chat-compression] summary output reached the ` +
             `COMPACT_MAX_OUTPUT_TOKENS cap (${COMPACT_MAX_OUTPUT_TOKENS}); ` +
-            `dropping potentially-truncated result and NOOPing this attempt.`,
+            `dropping potentially-truncated result. This counts as a ` +
+            `compression failure for the per-chat circuit breaker.`,
         );
       return {
         newHistory: null,
         info: {
           originalTokenCount,
           newTokenCount: originalTokenCount,
-          compressionStatus: CompressionStatus.NOOP,
+          // Reuse the empty-summary status: from the persistence layer's
+          // perspective a truncated summary is unusable just like an empty
+          // one. `isCompressionFailureStatus()` returns true for this enum,
+          // so non-force callers will tick the consecutive-failure counter.
+          compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
         },
       };
     }

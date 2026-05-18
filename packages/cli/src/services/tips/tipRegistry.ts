@@ -8,10 +8,7 @@
  * Contextual tip registry — defines tips, their conditions, and display rules.
  */
 
-import {
-  DEFAULT_TOKEN_LIMIT,
-  type CompactionThresholds,
-} from '@qwen-code/qwen-code-core';
+import { type CompactionThresholds } from '@qwen-code/qwen-code-core';
 
 export type TipTrigger = 'startup' | 'post-response';
 
@@ -36,11 +33,6 @@ export interface ContextualTip {
   isRelevant: (ctx: TipContext) => boolean;
   cooldownPrompts: number;
   priority: number;
-}
-
-export function getContextUsagePercent(ctx: TipContext): number {
-  const windowSize = ctx.contextWindowSize || DEFAULT_TOKEN_LIMIT;
-  return (ctx.lastPromptTokenCount / windowSize) * 100;
 }
 
 export const tipRegistry: ContextualTip[] = [

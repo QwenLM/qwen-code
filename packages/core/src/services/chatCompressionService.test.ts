@@ -609,11 +609,12 @@ describe('ChatCompressionService', () => {
   });
 
   it('silently ignores the deprecated chatCompression.contextPercentageThreshold = 0 (no longer disables compaction)', async () => {
-    // Pre-PR #4168, setting contextPercentageThreshold = 0 disabled
-    // auto-compaction entirely. The field is now removed from
-    // ChatCompressionSettings, so leftover values in user settings.json
-    // must be ignored without affecting compaction. Pin this so a future
-    // regression that re-introduces the disable shortcut is caught.
+    // Pre-PR #4168, setting contextPercentageThreshold = 0 short-circuited
+    // compress() at the cheap-gate (NOOP). The field was removed from
+    // ChatCompressionSettings as part of the redesign; leftover values
+    // in stale settings.json must be ignored without suppressing the gate.
+    // Drive the non-force path with originalTokenCount above auto so the
+    // gate would have to actively pass, and verify the side-query fires.
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -621,34 +622,37 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+      100_000,
+    );
     // The deprecated field is no longer in ChatCompressionSettings; cast so
     // we can simulate a leftover value coming from a stale settings.json.
     vi.mocked(mockConfig.getChatCompression).mockReturnValue({
       contextPercentageThreshold: 0,
     } as unknown as ReturnType<typeof mockConfig.getChatCompression>);
+    // 128K window → auto ≈ 95K; originalTokenCount 100K crosses.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
-      contextWindowSize: 1000,
+      contextWindowSize: 128_000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
       usage: {
-        promptTokenCount: 900,
-        candidatesTokenCount: 50,
-        totalTokenCount: 950,
+        // Realistic compression usage so the inflation guard doesn't fire:
+        //   newTokens = max(0, 100000 - (99000 - 1000) + 1500) = 3500 → COMPRESSED
+        promptTokenCount: 99_000,
+        candidatesTokenCount: 1500,
+        totalTokenCount: 100_500,
       },
     });
     vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
       generateText: mockGenerateContent,
     } as unknown as BaseLlmClient);
 
-    // force=true bypasses the token gate and proves compaction can still
-    // run end-to-end even though contextPercentageThreshold:0 is present.
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
-      force: true,
+      force: false,
       model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
@@ -658,7 +662,6 @@ describe('ChatCompressionService', () => {
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
     expect(mockGenerateContent).toHaveBeenCalled();
   });
-
 
   it('should return NOOP when historyToCompress is below MIN_COMPRESSION_FRACTION of total', async () => {
     // Construct a history where the split point lands on the 2nd regular user
@@ -2113,10 +2116,11 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(callArg.config?.maxOutputTokens).toBe(20_000);
   });
 
-  it('NOOPs when the summary output hits the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
+  it('returns FAILED_EMPTY_SUMMARY when the summary output hits the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
     // Mock the side-query to return a non-empty summary that exactly hits the
-    // 20K cap — the guard added in this PR should drop the result rather than
-    // persist a potentially truncated summary.
+    // 20K cap — the guard added in this PR should drop the result and surface
+    // it as a failure so non-force callers tick the consecutive-failure
+    // breaker (review #4168 R1.1: NOOP made the breaker never trip).
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>truncated...',
       usage: {
@@ -2161,7 +2165,9 @@ describe('ChatCompressionService.compress sideQuery config', () => {
       originalTokenCount: 180_000,
     });
 
-    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+    expect(result.info.compressionStatus).toBe(
+      CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+    );
     expect(result.newHistory).toBeNull();
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining('COMPACT_MAX_OUTPUT_TOKENS'),
