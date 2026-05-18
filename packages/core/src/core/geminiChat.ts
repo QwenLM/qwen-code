@@ -46,9 +46,9 @@ import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
   ChatCompressionService,
   computeThresholds,
-  MAX_CONSECUTIVE_FAILURES,
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
+import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
 import { estimatePromptTokens } from '../services/tokenEstimation.js';
 import {
   ContentRetryEvent,
@@ -154,6 +154,12 @@ interface TryCompressOptions {
    * history). See `estimatePromptTokens` for the fallback math.
    */
   pendingUserMessage?: Content;
+  /**
+   * Pre-computed `estimatePromptTokens` value from the caller. When set,
+   * the cheap-gate uses this instead of recomputing — avoids a second
+   * `getHistory(true)` clone per send. (review #4168 R1.3 / R1.4)
+   */
+  precomputedEffectiveTokens?: number;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -558,6 +564,7 @@ export class GeminiChat {
         options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
       bypassTokenThreshold,
       pendingUserMessage: options?.pendingUserMessage,
+      precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
       signal,
     });
@@ -715,14 +722,30 @@ export class GeminiChat {
       // large. This also resets the consecutive-failure counter so a session
       // that previously latched the breaker can recover — hard implies the
       // next API call would very likely overflow without compaction.
+      //
+      // We compute `effectiveTokens` ONCE here and pass it through to
+      // tryCompress → service.compress so the cheap-gate doesn't redo the
+      // estimation (which involves another `getHistory(true)` clone). This
+      // reuse also fixes a per-config-knob inconsistency: previously the
+      // hard-tier rescue used the default imageTokenEstimate while the
+      // cheap-gate inside tryCompress used the user's resolved value.
+      // (review #4168 R1.3 + R1.4)
       const contextLimit =
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT;
       const { hard } = computeThresholds(contextLimit);
+      const imageTokenEstimate = resolveSlimmingConfig(
+        this.config.getChatCompression(),
+      ).imageTokenEstimate;
+      // When lastPromptTokenCount > 0, estimatePromptTokens uses the
+      // API-authoritative count + a tiny estimate of just the new user
+      // message — it does NOT touch the history at all in that branch, so
+      // skip the costly `getHistory(true)` clone on the steady-state path.
       const effectiveTokens = estimatePromptTokens(
-        this.getHistory(true),
+        this.lastPromptTokenCount > 0 ? [] : this.getHistory(true),
         userContent,
         this.lastPromptTokenCount,
+        imageTokenEstimate,
       );
       const shouldForceFromHard = effectiveTokens >= hard;
       if (shouldForceFromHard) {
@@ -734,7 +757,10 @@ export class GeminiChat {
         model,
         shouldForceFromHard,
         params.config?.abortSignal,
-        { pendingUserMessage: userContent },
+        {
+          pendingUserMessage: userContent,
+          precomputedEffectiveTokens: effectiveTokens,
+        },
       );
 
       // Add user content to history ONCE before any attempts.
@@ -930,12 +956,15 @@ export class GeminiChat {
                   if (
                     isCompressionFailureStatus(reactiveInfo.compressionStatus)
                   ) {
-                    // Reactive compression is force=true so tryCompress's failure
-                    // branch did not increment the counter. We still want to
-                    // suppress further auto-compaction since the chat clearly
-                    // can't shrink — trip the breaker to its NOOP threshold so
-                    // subsequent unforced sends short-circuit at the cheap-gate.
-                    self.consecutiveFailures = MAX_CONSECUTIVE_FAILURES;
+                    // Reactive compression is force=true so tryCompress's
+                    // failure branch did not increment the counter. Count it
+                    // explicitly as one strike — a single transient error
+                    // (network blip, model 5xx) should not permanently latch
+                    // the breaker; only repeated reactive failures should.
+                    // Hard-tier rescue (sendMessageStream) resets the counter
+                    // when token usage crosses the hard threshold, which is
+                    // the intended recovery path. (review #4168 R1.2)
+                    self.consecutiveFailures += 1;
                   }
                 } catch (compressionError) {
                   if (

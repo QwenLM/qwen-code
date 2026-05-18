@@ -303,10 +303,14 @@ export async function collectContextData(
         : skills;
   }
 
-  // Tier classification: when no API data has come back yet we treat the
-  // session as `safe` rather than estimating from overhead — the per-tier
-  // labels are about *reported* usage, not pre-conversation overhead.
-  const tierTokens = isEstimated ? 0 : apiTotalTokens;
+  // Tier classification: prefer the API-reported total when available.
+  // When no API call has happened yet (first /context, --continue resume,
+  // sub-agent inheritance), classify against the estimated overhead instead
+  // of forcing `safe` — a restored session with 800K of inherited history
+  // should not silently show "safe" just because the API hasn't been hit.
+  // The estimate is a lower bound (excludes message body until first turn)
+  // so the tier may under-classify, but never over-classifies. (R2.2)
+  const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;
 
   const breakdown: ContextCategoryBreakdown = {
     systemPrompt: displaySystemPrompt,

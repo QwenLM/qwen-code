@@ -50,6 +50,26 @@ describe('estimateContentTokens', () => {
     const result = estimateContentTokens([c]);
     expect(result).toBeGreaterThan(0);
   });
+
+  it('estimates functionResponse (nested parts) contributes some positive count', () => {
+    // functionResponse takes a distinct branch in estimateContentChars
+    // (nested parts walk + json-stringify fallback). Tool-heavy
+    // conversations are where context grows fastest, so locking coverage
+    // here protects the trigger from undercounting. (review #4168 R3.5)
+    const c: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            name: 'tool',
+            response: { result: 'data'.repeat(100) },
+          },
+        },
+      ],
+    };
+    const result = estimateContentTokens([c]);
+    expect(result).toBeGreaterThan(0);
+  });
 });
 
 describe('estimatePromptTokens', () => {

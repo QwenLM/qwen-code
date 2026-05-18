@@ -11,10 +11,14 @@ import {
 } from './compactionInputSlimming.js';
 
 /**
- * Average bytes-per-token for char-based token estimation.
- * Matches claude-code's roughTokenCountEstimation default (tokens.ts).
+ * Average characters-per-token for char-based token estimation. The inputs
+ * are character counts from `estimateContentChars` (i.e. `string.length`),
+ * not byte counts — for CJK / multi-byte text the byte/char ratio differs
+ * from 1, so a "bytes" name would mislead. Matches the inverse of
+ * compactionInputSlimming.ts's TOKEN_TO_CHAR_RATIO and claude-code's
+ * roughTokenCountEstimation default. (review #4168 R3.1)
  */
-export const BYTES_PER_TOKEN = 4;
+export const CHARS_PER_TOKEN = 4;
 
 /**
  * Estimate the token count of a list of Content objects via char/4.
@@ -36,7 +40,7 @@ export function estimateContentTokens(
   for (const content of contents) {
     totalChars += estimateContentChars(content, imageTokenEstimate);
   }
-  return Math.ceil(totalChars / BYTES_PER_TOKEN);
+  return Math.ceil(totalChars / CHARS_PER_TOKEN);
 }
 
 /**
@@ -63,5 +67,10 @@ export function estimatePromptTokens(
       estimateContentTokens([userMessage], imageTokenEstimate)
     );
   }
+  // First-send fallback (no API data yet): estimate from `history + userMessage`
+  // only. This MISSES the system prompt (~8-15K), tool definitions (~5K),
+  // skill content, and cache headers — typically ~15-20K of under-estimate.
+  // The reactive overflow handler is the safety net if the hard-tier rescue
+  // misses for that reason. See review #4168 R3.3.
   return estimateContentTokens([...history, userMessage], imageTokenEstimate);
 }

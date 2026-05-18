@@ -90,6 +90,10 @@ const { mockLogContentRetry, mockLogContentRetryFailure } = vi.hoisted(() => ({
 vi.mock('../telemetry/loggers.js', () => ({
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
+  // Real ChatCompressionService.compress() calls logChatCompression on
+  // every attempt; the R3.4 integration test exercises that path, so the
+  // mock has to expose it (no-op).
+  logChatCompression: vi.fn(),
 }));
 
 vi.mock('../telemetry/uiTelemetry.js', () => ({
@@ -142,6 +146,7 @@ describe('GeminiChat', async () => {
         getTool: vi.fn(),
       }),
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
+      getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
@@ -1404,6 +1409,65 @@ describe('GeminiChat', async () => {
       ).toBe(true);
     });
 
+    it('triggers compaction end-to-end through the real ChatCompressionService when lastPromptTokenCount === 0 and inherited history is large (R3.4)', async () => {
+      // Reviewer R3.4: the "forwards the pending user message" test above
+      // mocks the service entirely, so the real cheap-gate (the actual
+      // estimatePromptTokens fallback branch when lastPromptTokenCount===0)
+      // never runs. Exercise the full chain here:
+      //   sendMessageStream → tryCompress → service.compress (REAL) →
+      //   cheap-gate (real estimate via getHistory + userMessage) →
+      //   splitter (real) → runSideQuery (mocked at baseLlmClient) →
+      //   persistence.
+      const largeChars = 'x'.repeat(400_000); // ~100K estimated tokens
+      const inheritedHistory: Content[] = [
+        { role: 'user', parts: [{ text: largeChars }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+        { role: 'user', parts: [{ text: 'follow up' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ];
+      chat.setHistory(inheritedHistory);
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      // Default DEFAULT_TOKEN_LIMIT = 128K → auto ≈ 95K. 100K estimate
+      // crosses, so cheap-gate must let compaction proceed.
+      const generateText = vi.fn().mockResolvedValue({
+        text: '<state_snapshot>compressed</state_snapshot>',
+        usage: {
+          promptTokenCount: 99_000,
+          candidatesTokenCount: 1500,
+          totalTokenCount: 100_500,
+        },
+      });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        generateText,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('done'),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'follow-up after restore' },
+        'prompt-r3-4',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const compressed = events.find(
+        (e) => e.type === StreamEventType.COMPRESSED,
+      );
+      expect(compressed).toBeDefined();
+      expect(
+        (compressed as { type: StreamEventType; info: ChatCompressionInfo })
+          .info.compressionStatus,
+      ).toBe(CompressionStatus.COMPRESSED);
+      // Real runSideQuery was hit (proves the cheap-gate didn't short-circuit
+      // and the splitter produced a non-empty historyToCompress).
+      expect(generateText).toHaveBeenCalled();
+    });
+
     it('clears consecutiveFailures after a forced successful compression', async () => {
       const compressSpy = vi.spyOn(
         ChatCompressionService.prototype,
@@ -1852,11 +1916,10 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(3);
       // Reactive compression is force=true, so tryCompress's own failure
       // branch doesn't increment the counter (force=true skips it). The
-      // reactive overflow handler instead trips the breaker explicitly to
-      // MAX_CONSECUTIVE_FAILURES so subsequent unforced sends short-circuit.
-      expect(compressSpy.mock.calls[2][1].consecutiveFailures).toBe(
-        MAX_CONSECUTIVE_FAILURES,
-      );
+      // reactive overflow handler bumps the counter by 1 so a transient
+      // network error doesn't permanently latch the breaker; only
+      // MAX_CONSECUTIVE_FAILURES repeated reactive failures will. (R1.2)
+      expect(compressSpy.mock.calls[2][1].consecutiveFailures).toBe(1);
     });
 
     it('releases the send-lock when reactive compression throws', async () => {
@@ -3999,9 +4062,7 @@ describe('GeminiChat', async () => {
       await chat.tryCompress('p2', 'm1');
 
       expect(compressSpy.mock.calls[0][1].bypassTokenThreshold).toBe(false);
-      expect(compressSpy.mock.calls[0][1].hasFailedCompressionAttempt).toBe(
-        false,
-      );
+      expect(compressSpy.mock.calls[0][1].consecutiveFailures).toBe(0);
     });
 
     it('backs off repeated heap-pressure bypasses after a heap-triggered failure', async () => {
