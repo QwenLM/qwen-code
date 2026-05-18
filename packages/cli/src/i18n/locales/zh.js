@@ -1767,6 +1767,23 @@ export default {
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     '调度门控未看到本次记忆整理的时间戳；下一轮记忆整理可能会比平时更早重新触发。',
 
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    '恢复会话时默认折叠历史记录',
+  'Set history to expand by default when resuming a session':
+    '恢复会话时默认展开历史记录',
+  'Expand the currently collapsed history transcript': '展开当前折叠的历史记录',
+  'Control history display preferences and visibility':
+    '控制历史记录显示偏好和可见性',
+  'History will be collapsed by default for future resumed sessions.':
+    '未来恢复的会话将默认折叠历史记录。',
+  'History will be expanded by default for future resumed sessions.':
+    '未来恢复的会话将默认展开历史记录。',
+  'History is already expanded in this session.': '当前会话的历史记录已展开。',
+  'History expanded.': '历史记录已展开。',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    '用法：/history collapse-on-resume|expand-on-resume|expand-now',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型注册表中）',
   'start server': '启动服务器',
