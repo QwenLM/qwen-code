@@ -44,6 +44,7 @@
     "@google/genai": "1.30.0",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/channel-base": "file:../channels/base",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
     "@qwen-code/channel-telegram": "file:../channels/telegram",

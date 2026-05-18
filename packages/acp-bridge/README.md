@@ -1,0 +1,63 @@
+# `@qwen-code/acp-bridge`
+
+Shared ACP bridge primitives consumed by `qwen serve`, channels, IDE, TUI,
+and remote-control adapters. Lives in the monorepo, not published to npm.
+
+This is **PR 22a** of the Mode B daemon roadmap (#4175 Wave 5). The full
+extraction is split:
+
+| Slice             | Scope                                                                                                                                               | Status                                       |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| **PR 22a** (this) | Skeleton + `EventBus` + `inMemoryChannel` + `AcpChannel` types + `PermissionMediator` type-only stub                                                | this PR                                      |
+| **PR 22b**        | Lift `BridgeClient` + `createHttpAcpBridge` + `defaultSpawnChannelFactory` from `cli/src/serve/httpAcpBridge.ts`                                    | after PR 17 (#4282) and PR 14b (#4271) merge |
+| **PR 24**         | Implement the four `PermissionMediator` strategies (`first-responder`, `designated`, `consensus`, `local-only`) + pair-token revocation + audit log | Wave 5                                       |
+
+## What's here today
+
+- `eventBus` — per-session NDJSON pub/sub with bounded ring replay,
+  `Last-Event-ID` reconnect, and slow-client backpressure
+  (`slow_client_warning` → `client_evicted`).
+- `inMemoryChannel` — paired NDJSON streams without spawning a child;
+  used for in-process bridge tests and the parked Mode A
+  (`qwen --serve`) path.
+- `channel` — `AcpChannel` / `AcpChannelExitInfo` / `ChannelFactory`
+  type contract that `httpAcpBridge.ts` already injects via
+  `BridgeOptions.channelFactory`.
+- `permission` — type-only `PermissionMediator` interface,
+  `PermissionPolicy` literal union (4 strategies), and
+  `PermissionResolution` discriminated union. **No implementation
+  yet** — first-responder voting still lives in
+  `cli/src/serve/httpAcpBridge.ts BridgeClient.requestPermission`.
+  PR 24 will move that and add the other three policies behind this
+  interface.
+
+## What's not here yet
+
+- The bridge core itself (`BridgeClient`, `createHttpAcpBridge`,
+  `defaultSpawnChannelFactory`, all the `BridgeSession*` types).
+  It stays in `packages/cli/src/serve/httpAcpBridge.ts` until the
+  in-flight Wave 4 PRs that touch the bridge surface (#4282 PR 17 and
+  #4271 PR 14b) merge — moving it now would create a 3-way merge
+  on a 4400-LOC file for no win.
+- The per-session FileSystemService injection point (PR 18 #4250
+  introduced the boundary; PR 22b will parameterize bridge writes
+  through it instead of the inline `BridgeClient.writeTextFile`).
+
+## Backward compatibility
+
+`packages/cli/src/serve/eventBus.ts` and
+`packages/cli/src/serve/inMemoryChannel.ts` remain as one-line
+re-export wrappers, so every existing relative import inside
+`serve/` and the one external import in `cli/src/commands/serve.ts`
+keeps resolving without churn.
+
+`httpAcpBridge.ts` continues to export `AcpChannel` /
+`AcpChannelExitInfo` / `ChannelFactory` (now via re-export from this
+package) so any external consumer of those types is unaffected.
+
+## See also
+
+- #4175 Wave 5 PR 22 row
+- #3803 `Stage 1.5-prereq AcpChannel lift` (chiga0's original framing)
+- `httpAcpBridge.ts:1144-1154` (FIXME pointing at the four
+  `PermissionMediator` strategies this package now declares)
