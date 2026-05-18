@@ -4672,6 +4672,101 @@ describe('createHttpAcpBridge', () => {
       abort.abort();
       await bridge.shutdown();
     });
+
+    it('tombstones closed sessionIds so late notifications cannot leak into a future load of the same id (codex round 5 fix)', async () => {
+      // Codex round 5 finding: pre-fix, after a session was killed
+      // / closed, a late `extNotification` from its dying child for
+      // the same id would land in `earlyEvents`. If the SAME
+      // sessionId came back via `session/load`/`session/resume`
+      // within the 60s TTL, `drainEarlyEvents` would replay stale
+      // prior-session telemetry onto the NEW subscriber.
+      //
+      // Fix: every `byId.delete(sid)` site now calls
+      // `BridgeClient.markSessionClosed(sid)`, which tombstones the
+      // id (rejecting future `bufferEarlyEvent` calls for it) and
+      // purges any frames already buffered for it.
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          loadSessionImpl: () => ({ configOptions: [] }),
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+
+      // 1) Spawn session A — id = SESS_A.
+      const sess = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sessionId = sess.sessionId;
+      expect(sessionId).toBe(SESS_A);
+
+      // 2) Close session A — calls byId.delete + markSessionClosed.
+      await bridge.closeSession(sessionId);
+
+      // 3) Simulate a LATE notification from the (now-defunct)
+      // child for the closed sessionId. Pre-fix this would land in
+      // `earlyEvents`. Post-fix the tombstone rejects it.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+      // Give the bridge's read loop time to dispatch the notification.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // 4) Re-load the SAME persisted sessionId via session/load.
+      // createSessionEntry runs drainEarlyEvents — pre-fix the stale
+      // frame would be replayed onto the new session's bus.
+      const loaded = await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(loaded.sessionId).toBe(sessionId);
+
+      // 5) Subscribe with lastEventId: 0 to drain the replay ring.
+      // Post-fix, no `mcp_budget_warning` should be in the ring
+      // (the late notification was dropped at buffer time, not
+      // drained on registration).
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(loaded.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const collected: Array<{ type: string }> = [];
+      const drainPromise = (async () => {
+        for await (const e of iter) {
+          collected.push({ type: e.type });
+        }
+      })();
+      // Give the iterator a tick to pull replay frames.
+      await new Promise((r) => setTimeout(r, 50));
+      abort.abort();
+      await drainPromise;
+
+      // No mcp_budget_warning leaked through.
+      expect(collected.filter((e) => e.type === 'mcp_budget_warning')).toEqual(
+        [],
+      );
+
+      await bridge.shutdown();
+    });
   });
 
   describe('maxSessions cap (chiga0 Rec 3)', () => {

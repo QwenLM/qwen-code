@@ -1305,6 +1305,34 @@ class BridgeClient implements Client {
   >();
 
   /**
+   * PR 14b fix (codex review round 5): tombstone for closed/killed
+   * session ids. Pre-fix, `extNotification` buffered events for any
+   * unknown sessionId — including ids of just-closed sessions whose
+   * dying child fired one last `extNotification` between
+   * `byId.delete(sid)` and the channel actually exiting. If the SAME
+   * id was later re-registered via `session/load` or `session/resume`
+   * within the buffer's 60s TTL, `drainEarlyEvents` would replay
+   * stale prior-session telemetry (false budget warnings, refused
+   * server names from the OLD session) onto the NEW subscriber.
+   *
+   * Tombstone semantics:
+   * - Marked when the bridge removes a sessionId from `byId` (kill
+   *   path, channel.exited handler, closeSession).
+   * - Concurrently purges any in-flight `earlyEvents[id]` so a
+   *   buffered-but-undelivered frame can't leak either.
+   * - `bufferEarlyEvent` rejects tombstoned ids (the dying child's
+   *   late notification just gets dropped).
+   * - `drainEarlyEvents` clears the tombstone — a fresh
+   *   `createSessionEntry` for the same id is the legitimate
+   *   "load/resume of a persisted session id" case, and at that
+   *   point any stale event has already been rejected at buffer time.
+   * - TTL = `EARLY_EVENT_TTL_MS` (60s) — same as the early-event
+   *   buffer, so by the time a tombstone expires there can be no
+   *   stale frame for that id anywhere in the system.
+   */
+  private readonly tombstonedSessionIds = new Map<string, number>();
+
+  /**
    * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
    * method is recognized today — `qwen/notify/session/mcp-budget-event`
    * — translating the McpClientManager's budget-event payload into a
@@ -1376,6 +1404,13 @@ class BridgeClient implements Client {
     frame: Omit<BridgeEvent, 'id' | 'v'>,
   ): void {
     const now = Date.now();
+    // PR 14b fix (codex round 5): drop frames for ids the bridge has
+    // already marked closed/killed. Sweep + check before any other
+    // work so a malicious / buggy child can't keep appending
+    // post-mortem frames against an old id. Live ids that re-register
+    // (load/resume) clear their tombstone in `drainEarlyEvents`.
+    this.sweepExpiredTombstones(now);
+    if (this.tombstonedSessionIds.has(sessionId)) return;
     this.sweepExpiredEarlyEvents(now);
     let buf = this.earlyEvents.get(sessionId);
     if (!buf) {
@@ -1393,6 +1428,28 @@ class BridgeClient implements Client {
     }
   }
 
+  private sweepExpiredTombstones(now: number): void {
+    for (const [sid, expiresAt] of this.tombstonedSessionIds) {
+      if (expiresAt <= now) this.tombstonedSessionIds.delete(sid);
+    }
+  }
+
+  /**
+   * PR 14b fix (codex round 5): mark a sessionId as closed so a late
+   * `extNotification` from the dying child can't leak into the
+   * early-event buffer. Bridge factory calls this from every
+   * `byId.delete(sid)` site (kill path, channel.exited handler,
+   * closeSession). Idempotent on already-tombstoned ids — refreshes
+   * the TTL so a recently-killed id stays dead long enough for any
+   * in-flight stale frames to expire.
+   */
+  markSessionClosed(sessionId: string): void {
+    this.tombstonedSessionIds.set(sessionId, Date.now() + EARLY_EVENT_TTL_MS);
+    // Purge any frames already buffered for this id — they're now
+    // stale by definition (their session is dead).
+    this.earlyEvents.delete(sessionId);
+  }
+
   /**
    * PR 14b fix #1: drain any frames buffered for `sessionId` onto
    * `entry.events`. Bridge calls this immediately after
@@ -1407,6 +1464,14 @@ class BridgeClient implements Client {
    * unknown sessionIds.
    */
   drainEarlyEvents(sessionId: string, entry: SessionEntry): void {
+    // PR 14b fix (codex round 5): a fresh registration clears any
+    // tombstone for this id — this is the legitimate
+    // "load/resume of a persisted session id" case. Any stale
+    // pre-tombstone frame was already rejected by `bufferEarlyEvent`
+    // above; clearing the tombstone now means subsequent
+    // notifications for this re-attached session (which is now in
+    // `byId`) flow through the normal `entry.events.publish` path.
+    this.tombstonedSessionIds.delete(sessionId);
     const buf = this.earlyEvents.get(sessionId);
     if (!buf) return;
     for (const frame of buf.frames) entry.events.publish(frame);
@@ -2146,6 +2211,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             /* bus already closed */
           }
           byId.delete(sid);
+          // PR 14b fix (codex round 5): tombstone the id so any
+          // late `extNotification` from the dying child can't leak
+          // into the early-event buffer for a future load/resume of
+          // the same persisted session id.
+          info.client.markSessionClosed(sid);
           if (defaultEntry === sessEntry) defaultEntry = undefined;
           sessEntry.events.close();
         }
@@ -3292,6 +3362,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         resolvePending(id, { outcome: { outcome: 'cancelled' } });
       }
       byId.delete(sessionId);
+      // PR 14b fix (codex round 5): tombstone the closed sessionId
+      // so any late `extNotification` from the (now-defunct) child
+      // can't seed the early-event buffer and leak into a future
+      // load/resume of the same persisted id.
+      ci?.client.markSessionClosed(sessionId);
       try {
         entry.events.publish({
           type: 'session_closed',
@@ -3714,6 +3789,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
+      // PR 14b fix (codex round 5): tombstone the killed sessionId
+      // so any in-flight `extNotification` from the (about-to-be-
+      // killed) child can't seed the early-event buffer for a
+      // subsequent load/resume of the same persisted id. See the
+      // matching guard in BridgeClient.bufferEarlyEvent.
+      ci?.client.markSessionClosed(sessionId);
       // Resolve any still-pending permission as cancelled (matches the
       // shutdown path) so callers awaiting requestPermission unwind.
       for (const id of Array.from(entry.pendingPermissionIds)) {
