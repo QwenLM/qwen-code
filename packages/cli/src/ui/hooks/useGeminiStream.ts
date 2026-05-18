@@ -2232,9 +2232,13 @@ export const useGeminiStream = (
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
         for (const msg of drained) {
-          responsesToSend.push({
+          const midTurnUserMessage = {
             text: `\n[User message received during tool execution]: ${msg}`,
-          });
+          };
+          responsesToSend.push(midTurnUserMessage);
+          config
+            .getChatRecordingService()
+            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
           // Record in UI history so the transcript stays complete.
           addItem({ type: MessageType.USER, text: msg }, Date.now());
         }

@@ -105,6 +105,19 @@ export async function runQwenServe(
         `(127.0.0.1, localhost, ::1, or [::1]).`,
     );
   }
+  // Issue #4175 PR 15. `--require-auth` extends the "must have a token"
+  // rule to loopback as well. Boot-loud, like the non-loopback check
+  // above: silently dropping the flag when no token is configured
+  // would leave the operator believing the deployment is hardened
+  // when it isn't. Mention both the env var and the flag so log
+  // readers don't have to read the source to learn the fix.
+  if (opts.requireAuth && !token) {
+    throw new Error(
+      `Refusing to start with --require-auth set but no bearer token ` +
+        `configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or omit ` +
+        `--require-auth to keep the loopback developer default.`,
+    );
+  }
 
   // Resolve the bound workspace per #3803 §02 (1 daemon = 1 workspace).
   // Explicit `--workspace` wins; otherwise default to process.cwd().
@@ -168,6 +181,9 @@ export async function runQwenServe(
     deps.bridge ??
     createHttpAcpBridge({
       maxSessions: opts.maxSessions,
+      ...(opts.eventRingSize !== undefined
+        ? { eventRingSize: opts.eventRingSize }
+        : {}),
       boundWorkspace,
     });
   let actualPort = opts.port;
@@ -288,6 +304,17 @@ export async function runQwenServe(
       if (!token) {
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
+        );
+      } else if (opts.requireAuth) {
+        // The boot check above guarantees `token` is set whenever
+        // `--require-auth` is on, so this branch only fires alongside
+        // a successfully-authenticated daemon. The log line lets
+        // operators confirm the hardening is active without parsing
+        // `/capabilities` (and is a useful breadcrumb when triaging
+        // "why is loopback returning 401" tickets).
+        writeStderrLine(
+          'qwen serve: --require-auth enabled (bearer token mandatory ' +
+            'on every route, including loopback /health).',
         );
       }
 

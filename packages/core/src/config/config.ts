@@ -491,6 +491,8 @@ export interface ConfigParameters {
   };
   checkpointing?: boolean;
   fileCheckpointingEnabled?: boolean;
+  /** Directory where approved plan files are stored. Must resolve inside targetDir. */
+  plansDirectory?: string;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -823,6 +825,8 @@ export class Config {
   private readonly jsonFile: string | undefined;
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
+  private readonly plansDir: string;
+  private readonly plansDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -850,6 +854,8 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
+    this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -961,6 +967,7 @@ export class Config {
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.warnings = params.warnings ?? [];
+    this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
@@ -2484,27 +2491,142 @@ export class Config {
   }
 
   /**
+   * Returns the directory where this session's plan file is stored.
+   */
+  getPlansDir(): string {
+    return this.plansDir;
+  }
+
+  private assertPlansDirWithinTargetDir(): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      this.plansDir,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
+  private assertPlanFilePathWithinTargetDir(filePath: string): void {
+    if (!this.plansDirectoryConfigured) {
+      return;
+    }
+
+    Storage.assertPathWithinDirectory(
+      filePath,
+      this.targetDir,
+      `plansDirectory must resolve within the project root.`,
+    );
+  }
+
+  private addLegacyPlanLocationWarning(): void {
+    try {
+      if (!this.plansDirectoryConfigured) {
+        return;
+      }
+
+      const legacyPlansDir = Storage.getPlansDir();
+      const legacyPlanFiles = this.getPlanFileNames(legacyPlansDir);
+      if (legacyPlanFiles.length === 0) {
+        return;
+      }
+
+      const configuredPlanFiles = new Set(this.getPlanFileNames(this.plansDir));
+      const hiddenLegacyPlanFiles = legacyPlanFiles.filter(
+        (fileName) => !configuredPlanFiles.has(fileName),
+      );
+      if (hiddenLegacyPlanFiles.length === 0) {
+        return;
+      }
+
+      this.warnings.push(
+        `Warning: Saved plan files exist at ${legacyPlansDir}, but ` +
+          `plansDirectory is configured to use ${this.plansDir}. Move ` +
+          `existing plan files to ${this.plansDir} if you want to keep ` +
+          `using them.`,
+      );
+    } catch (err: unknown) {
+      const message = `Failed to check legacy plan directory migration warning: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      this.warnings.push(message);
+      this.debugLogger.warn(message, err);
+    }
+  }
+
+  private getPlanFileNames(plansDir: string): string[] {
+    try {
+      return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        return [];
+      }
+      if (code === 'EACCES' || code === 'EPERM') {
+        const message = `Failed to read plan directory ${plansDir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        this.warnings.push(message);
+        this.debugLogger.warn(message, err);
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
    * Returns the file path for this session's plan file.
    */
   getPlanFilePath(): string {
-    return Storage.getPlanFilePath(this.sessionId);
+    return path.join(
+      this.plansDir,
+      `${Storage.sanitizePlanSessionId(this.sessionId)}.md`,
+    );
   }
 
   /**
    * Saves a plan to disk for the current session.
    */
   savePlan(plan: string): void {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, plan, 'utf-8');
+    // Write to a temp file first, then atomically rename to avoid
+    // leaving a corrupted file if the process crashes mid-write.
+    const tmpPath = filePath + '.tmp';
+    fs.writeFileSync(tmpPath, plan, 'utf-8');
+    try {
+      fs.renameSync(tmpPath, filePath);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== 'EXDEV') {
+        throw err;
+      }
+
+      fs.copyFileSync(tmpPath, filePath);
+      fs.unlinkSync(tmpPath);
+    }
+    try {
+      this.assertPlanFilePathWithinTargetDir(filePath);
+    } catch (err) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // Ignore rollback errors; the containment check already failed.
+      }
+      throw err;
+    }
   }
 
   /**
    * Loads the plan for the current session, or returns undefined if none exists.
    */
   loadPlan(): string | undefined {
+    this.assertPlansDirWithinTargetDir();
     const filePath = this.getPlanFilePath();
+    this.assertPlanFilePathWithinTargetDir(filePath);
     try {
       return fs.readFileSync(filePath, 'utf-8');
     } catch (error: unknown) {

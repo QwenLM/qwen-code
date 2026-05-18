@@ -17,9 +17,33 @@ import {
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   EventBus,
+  DEFAULT_RING_SIZE,
   type BridgeEvent,
   type SubscribeOptions,
 } from './eventBus.js';
+import {
+  BridgeTimeoutError,
+  SERVE_STATUS_EXT_METHODS,
+  STATUS_SCHEMA_VERSION,
+  createIdleAcpPreflightCells,
+  createIdleWorkspaceMcpStatus,
+  createIdleWorkspaceProvidersStatus,
+  createIdleWorkspaceSkillsStatus,
+  mapDomainErrorToErrorKind,
+  type ServePreflightCell,
+  type ServePreflightKind,
+  type ServeSessionContextStatus,
+  type ServeSessionSupportedCommandsStatus,
+  type ServeStatusCell,
+  type ServeWorkspaceEnvStatus,
+  type ServeWorkspaceMcpStatus,
+  type ServeWorkspacePreflightStatus,
+  type ServeWorkspaceProvidersStatus,
+  type ServeWorkspaceSkillsStatus,
+} from './status.js';
+import { buildEnvStatusFromProcess } from './envSnapshot.js';
+import { canUseRipgrep } from '@qwen-code/qwen-code-core';
+import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
 import type {
   CancelNotification,
   Client,
@@ -108,6 +132,8 @@ export interface BridgeSession {
    * initiating client without trusting request bodies.
    */
   clientId?: string;
+  /** ISO 8601 timestamp of when the session was created. */
+  createdAt?: string;
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -130,11 +156,47 @@ export interface BridgeRestoredSession extends BridgeSession {
 export interface BridgeSessionSummary {
   sessionId: string;
   workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  hasActivePrompt: boolean;
+}
+
+export interface SessionMetadataUpdate {
+  displayName?: string;
 }
 
 export interface BridgeClientRequestContext {
   /** Daemon-issued client id echoed through the HTTP transport header. */
   clientId?: string;
+}
+
+/**
+ * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
+ * `Date.now()` epoch (ms) the bridge stored for this session/client
+ * pair — the same value future diagnostics and revocation policy
+ * (Wave 5 PR 24) will read. `clientId` is echoed only when the caller
+ * provided a trusted one through `X-Qwen-Client-Id`; anonymous
+ * heartbeats omit it but still bump the per-session timestamp.
+ */
+export interface BridgeHeartbeatResult {
+  sessionId: string;
+  clientId?: string;
+  lastSeenAt: number;
+}
+
+/**
+ * Read-only snapshot of last-seen timestamps the bridge has recorded for
+ * a session. `sessionLastSeenAt` is the most recent heartbeat across any
+ * client (anonymous or identified). `clientLastSeenAt` maps each
+ * registered `clientId` to its own last heartbeat. Returned by
+ * `getHeartbeatState` for in-process diagnostics; the eventual read-only
+ * `GET /session/:id/heartbeat-state` route (Wave 3 PR 12) will surface
+ * the same shape over HTTP.
+ */
+export interface BridgeHeartbeatState {
+  sessionLastSeenAt?: number;
+  clientLastSeenAt: ReadonlyMap<string, number>;
 }
 
 export interface HttpAcpBridge {
@@ -203,6 +265,32 @@ export interface HttpAcpBridge {
   ): AsyncIterable<BridgeEvent>;
 
   /**
+   * Explicitly close a live session. Force-closes even when other clients
+   * are attached — cancels any active prompt, resolves pending permissions
+   * as cancelled, publishes `session_closed`, closes the EventBus, and
+   * removes the session from daemon maps. Throws `SessionNotFoundError`
+   * for unknown ids (the SDK absorbs 404 to provide client-side
+   * idempotency). On-disk persisted sessions are NOT deleted — they can
+   * still be reloaded via `POST /session/:id/load`.
+   */
+  closeSession(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<void>;
+
+  /**
+   * Update mutable session metadata. Currently supports `displayName` only.
+   * Publishes a `session_metadata_updated` event when fields change.
+   * Returns the effective stored metadata. Throws `SessionNotFoundError`
+   * for unknown ids.
+   */
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: SessionMetadataUpdate,
+    context?: BridgeClientRequestContext,
+  ): SessionMetadataUpdate;
+
+  /**
    * Cast a vote on a pending `permission_request` (first-responder wins).
    * Returns true when the vote was accepted, false when the requestId is
    * unknown — either never existed or already resolved by another client.
@@ -214,11 +302,95 @@ export interface HttpAcpBridge {
   ): boolean;
 
   /**
+   * Cast a vote scoped to an explicit session route. This keeps the legacy
+   * first-responder behavior but lets clients avoid accidentally voting on a
+   * request id that belongs to another live session.
+   */
+  respondToSessionPermission(
+    sessionId: string,
+    requestId: string,
+    response: RequestPermissionResponse,
+    context?: BridgeClientRequestContext,
+  ): boolean;
+
+  /**
    * List all live sessions whose canonical workspace path matches the
    * supplied cwd. Empty array (not throw) when no sessions exist —
    * a session-picker UI shouldn't 404 just because the workspace is idle.
    */
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
+
+  /**
+   * Record a client heartbeat for the session. Bumps the per-session
+   * `sessionLastSeenAt` and, when a trusted `clientId` is supplied,
+   * the per-client entry in `clientLastSeenAt`. Throws
+   * `SessionNotFoundError` when the id is unknown and
+   * `InvalidClientIdError` when the supplied `clientId` is not
+   * registered for this session — the same shape `sendPrompt` /
+   * `setSessionModel` use, so HTTP routes can map it to `400
+   * invalid_client_id` consistently.
+   *
+   * The recorded timestamps are exposed via `getHeartbeatState`; this
+   * PR keeps them in-process only (future diagnostics route in PR 12,
+   * future revocation policy in PR 24).
+   */
+  recordHeartbeat(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): BridgeHeartbeatResult;
+
+  /**
+   * Read the bridge's recorded last-seen timestamps for a session.
+   * Returns `undefined` for unknown sessions. The map is a snapshot —
+   * callers must not mutate it. Stage 1 surfaces this only to in-
+   * process callers (tests, future read-only diagnostics routes).
+   */
+  getHeartbeatState(sessionId: string): BridgeHeartbeatState | undefined;
+
+  /**
+   * Read daemon-runtime MCP status for the bound workspace. Does not spawn an
+   * ACP child when the daemon is idle; idle daemons return initialized:false.
+   */
+  getWorkspaceMcpStatus(): Promise<ServeWorkspaceMcpStatus>;
+
+  /**
+   * Read daemon-runtime skill status for the bound workspace. Does not spawn an
+   * ACP child when the daemon is idle; idle daemons return initialized:false.
+   */
+  getWorkspaceSkillsStatus(): Promise<ServeWorkspaceSkillsStatus>;
+
+  /**
+   * Read daemon-runtime model-provider status for the bound workspace. Does
+   * not spawn an ACP child when the daemon is idle.
+   */
+  getWorkspaceProvidersStatus(): Promise<ServeWorkspaceProvidersStatus>;
+
+  /**
+   * Read the daemon-process environment snapshot for the bound workspace.
+   * Answered entirely from `process.*` state — does not consult ACP. Always
+   * returns `initialized: true`; `acpChannelLive` reports whether a child is
+   * currently up.
+   */
+  getWorkspaceEnvStatus(): Promise<ServeWorkspaceEnvStatus>;
+
+  /**
+   * Read daemon-runtime preflight diagnostics. Daemon-level cells (Node
+   * version, CLI entry, workspace dir, ripgrep, git, npm) are always
+   * populated. ACP-level cells (auth, mcp_discovery, skills, providers,
+   * tool_registry, egress) require a live ACP child — when the daemon is
+   * idle they are emitted with `status: 'not_started'`.
+   */
+  getWorkspacePreflightStatus(): Promise<ServeWorkspacePreflightStatus>;
+
+  /** Read the current ACP context/config state for a live session. */
+  getSessionContextStatus(
+    sessionId: string,
+  ): Promise<ServeSessionContextStatus>;
+
+  /** Read slash-command/skill command availability for a live session. */
+  getSessionSupportedCommandsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionSupportedCommandsStatus>;
 
   /**
    * Switch the active model service for a session. Forwards through ACP's
@@ -524,6 +696,22 @@ export interface BridgeOptions {
    */
   maxSessions?: number;
   /**
+   * Per-session SSE replay ring depth. Sets `ringSize` on every
+   * `new EventBus(...)` the bridge constructs (both fresh sessions
+   * and restored sessions). Defaults to `DEFAULT_RING_SIZE` (8000,
+   * #3803 §02 target). Must be a positive finite integer; `0` /
+   * `NaN` / negative throw at boot (fail-CLOSED — same posture as
+   * `maxSessions`, where silently disabling a backpressure knob on a
+   * config typo is worse than failing to start).
+   *
+   * Operators tune via `qwen serve --event-ring-size <n>`. Cost
+   * scales linearly with `ringSize`; each retained `BridgeEvent` is
+   * an object reference plus its serialized payload (text chunks /
+   * tool-call args / etc.), so the per-session memory ceiling is
+   * `ringSize × average-event-size` held until the session ends.
+   */
+  eventRingSize?: number;
+  /**
    * Bd1yh: per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
    * cancelled — the per-session FIFO can drain instead of poisoning
@@ -605,6 +793,12 @@ interface ChannelInfo {
    */
   pendingRestoreIds: Set<string>;
   /**
+   * Cached channel-close race for workspace-scoped status requests. Workspace
+   * status can be polled frequently by dashboards, so keep one promise per
+   * channel instead of attaching a new `.then()` to `channel.exited` per poll.
+   */
+  statusClosedReject?: Promise<never>;
+  /**
    * MUST be set to `true` synchronously by any teardown path BEFORE
    * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
    * as absent and spawns a fresh one — without this flag a concurrent
@@ -637,6 +831,8 @@ interface ChannelInfo {
 interface SessionEntry {
   sessionId: string;
   workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -719,6 +915,21 @@ interface SessionEntry {
    * had an ACP load/resume response, so attaches return `state: {}`.
    */
   restoreState?: BridgeSessionState;
+  /**
+   * Most recent heartbeat across any client on this session (Date.now()
+   * epoch ms). Set on every `recordHeartbeat` call regardless of whether
+   * the caller identified themselves; consumed by future diagnostics
+   * (PR 12) and revocation policy (PR 24). Undefined until the first
+   * heartbeat lands.
+   */
+  sessionLastSeenAt?: number;
+  /**
+   * Per-`clientId` last heartbeat (Date.now() epoch ms). Only populated
+   * when the heartbeat carried a trusted `X-Qwen-Client-Id`. Entries are
+   * dropped together with the parent session — there's no per-client
+   * eviction in this PR; revocation policy (PR 24) will own that.
+   */
+  clientLastSeenAt: Map<string, number>;
 }
 
 interface PendingPermission {
@@ -735,6 +946,27 @@ interface PendingPermission {
    * Stored as a Set for O(1) membership check.
    */
   allowedOptionIds: ReadonlySet<string>;
+}
+
+interface PermissionResolutionRecord {
+  requestId: string;
+  sessionId: string;
+  outcome: RequestPermissionResponse['outcome'];
+}
+
+// Bounded duplicate-vote cache. Stores only requestId/sessionId/outcome, so
+// 512 records stays small while covering normal UI reconnect/race windows.
+const MAX_RESOLVED_PERMISSION_RECORDS = 512;
+
+function isServeDebugLoggingEnabled(): boolean {
+  const value = process.env['QWEN_SERVE_DEBUG'];
+  if (!value) return false;
+  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+}
+
+function writeServeDebugLine(message: string): void {
+  if (!isServeDebugLoggingEnabled()) return;
+  writeStderrLine(`qwen serve debug: ${message}`);
 }
 
 /**
@@ -754,6 +986,27 @@ export class InvalidPermissionOptionError extends Error {
     this.name = 'InvalidPermissionOptionError';
     this.requestId = requestId;
     this.optionId = optionId;
+  }
+}
+
+const MAX_DISPLAY_NAME_LENGTH = 256;
+
+function hasControlCharacter(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export class InvalidSessionMetadataError extends Error {
+  readonly field: string;
+  constructor(field: string, reason: string) {
+    super(`Invalid session metadata: ${field} ${reason}`);
+    this.name = 'InvalidSessionMetadataError';
+    this.field = field;
   }
 }
 
@@ -1145,6 +1398,14 @@ class BridgeClient implements Client {
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_SESSIONS = 20;
+/**
+ * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
+ * typos before they OOM the daemon. At ~500 B per `BridgeEvent` an
+ * 1 000 000-frame ring already pins ~500 MB per session — well past
+ * any realistic workload. Not a security boundary (the flag is
+ * operator-controlled), just typo defense.
+ */
+const MAX_EVENT_RING_SIZE = 1_000_000;
 // Bd1yh: per-permission-request wall clock. Without this, an agent
 // calling `requestPermission` while no SSE subscriber is connected
 // would hang the per-session FIFO promptQueue forever (the prompt
@@ -1196,6 +1457,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     throw new TypeError(
       `Invalid sessionScope: ${JSON.stringify(defaultSessionScope)}. ` +
         `Expected 'single' or 'thread'.`,
+    );
+  }
+  // `eventRingSize` follows the same fail-CLOSED posture as
+  // `maxSessions`: silently disabling SSE backpressure on a config
+  // typo is worse than failing to start. Unlike `maxSessions` there
+  // is NO unlimited sentinel — an unbounded ring would grow forever.
+  // Soft upper bound MAX_EVENT_RING_SIZE catches operator typos
+  // (`--event-ring-size 80000000` instead of `8000000`); at 1M
+  // frames × ~500 B/frame the per-session ceiling is already
+  // ~500 MB, well past any legitimate use.
+  const eventRingSize = opts.eventRingSize ?? DEFAULT_RING_SIZE;
+  // `Number.isInteger` already rejects NaN / Infinity / non-finite
+  // — no separate `Number.isFinite` guard needed.
+  if (
+    !Number.isInteger(eventRingSize) ||
+    eventRingSize < 1 ||
+    eventRingSize > MAX_EVENT_RING_SIZE
+  ) {
+    throw new TypeError(
+      `Invalid eventRingSize: ${opts.eventRingSize}. ` +
+        `Must be a positive integer in [1, ${MAX_EVENT_RING_SIZE}].`,
     );
   }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
@@ -1291,6 +1573,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   // Daemon-wide pending permission table; requestIds are UUIDs so collisions
   // across sessions are infeasible in practice.
   const pendingPermissions = new Map<string, PendingPermission>();
+  const resolvedPermissions = new Map<string, PermissionResolutionRecord>();
+  const resolvedPermissionOrder: string[] = [];
   // Set by `shutdown()` so any in-flight `spawnOrAttach` that was
   // dispatched on an existing connection AFTER the shutdown snapshot
   // taken in `shutdown()` fails fast instead of creating a child the
@@ -1358,6 +1642,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (count === undefined) return;
     if (count <= 1) {
       entry.clientIds.delete(clientId);
+      // Drop the last-seen entry alongside the registration ref.
+      // Otherwise a long-lived daemon servicing a churn of disconnect/
+      // reconnect clients (each picking a fresh `clientId`) would
+      // accumulate stale heartbeat timestamps for clients that no
+      // longer exist — the very leak revocation policy (PR 24) is
+      // meant to plug.
+      entry.clientLastSeenAt.delete(clientId);
     } else {
       entry.clientIds.set(clientId, count - 1);
     }
@@ -1398,6 +1689,44 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     entry.pendingPermissionIds.add(p.requestId);
   };
 
+  const rememberResolvedPermission = (record: PermissionResolutionRecord) => {
+    if (!resolvedPermissions.has(record.requestId)) {
+      resolvedPermissionOrder.push(record.requestId);
+    }
+    resolvedPermissions.set(record.requestId, record);
+    while (resolvedPermissionOrder.length > MAX_RESOLVED_PERMISSION_RECORDS) {
+      const oldest = resolvedPermissionOrder.shift();
+      if (oldest !== undefined) resolvedPermissions.delete(oldest);
+    }
+  };
+
+  const publishPermissionAlreadyResolved = (
+    record: PermissionResolutionRecord,
+  ) => {
+    const entry = byId.get(record.sessionId);
+    if (!entry) return;
+    try {
+      writeServeDebugLine(
+        `permission ${JSON.stringify(record.requestId)} ` +
+          `for session ${JSON.stringify(record.sessionId)} was already ` +
+          'resolved; publishing duplicate-vote notification.',
+      );
+      entry.events.publish({
+        type: 'permission_already_resolved',
+        data: {
+          requestId: record.requestId,
+          sessionId: record.sessionId,
+          outcome: record.outcome,
+        },
+      });
+    } catch {
+      writeServeDebugLine(
+        `skipped duplicate-vote notification for permission ` +
+          `${JSON.stringify(record.requestId)} during shutdown.`,
+      );
+    }
+  };
+
   /** Resolve a single pending request and clean up its bookkeeping. */
   const resolvePending = (
     requestId: string,
@@ -1423,6 +1752,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* bus closed during shutdown */
       }
     }
+    rememberResolvedPermission({
+      requestId,
+      sessionId: pending.sessionId,
+      outcome: response.outcome,
+    });
     pending.resolve(response);
     return true;
   };
@@ -1762,6 +2096,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       workspaceCwd: entry.workspaceCwd,
       attached: false,
       clientId,
+      createdAt: entry.createdAt,
     };
   }
 
@@ -1914,15 +2249,76 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     return workspaceKey;
   };
 
+  const liveChannelInfo = (): ChannelInfo | undefined => {
+    if (!channelInfo || channelInfo.isDying) return undefined;
+    return channelInfo;
+  };
+
+  const channelInfoForEntry = (
+    entry: SessionEntry,
+  ): ChannelInfo | undefined => {
+    if (channelInfo?.channel === entry.channel) return channelInfo;
+    for (const info of aliveChannels) {
+      if (info.channel === entry.channel) return info;
+    }
+    return undefined;
+  };
+
+  const getChannelClosedReject = (info: ChannelInfo): Promise<never> => {
+    if (!info.statusClosedReject) {
+      info.statusClosedReject = info.channel.exited.then(() => {
+        throw new Error('agent channel closed mid-request (workspace status)');
+      });
+    }
+    return info.statusClosedReject;
+  };
+
+  const requestWorkspaceStatus = async <T>(
+    method: string,
+    idle: () => T,
+  ): Promise<T> => {
+    const info = liveChannelInfo();
+    if (!info) return idle();
+    const response = await withTimeout(
+      Promise.race([
+        info.connection.extMethod(method, { cwd: boundWorkspace }),
+        getChannelClosedReject(info),
+      ]),
+      initTimeoutMs,
+      method,
+    );
+    return response as unknown as T;
+  };
+
+  const requestSessionStatus = async <T>(
+    sessionId: string,
+    method: string,
+  ): Promise<T> => {
+    const entry = byId.get(sessionId);
+    if (!entry) throw new SessionNotFoundError(sessionId);
+    const info = channelInfoForEntry(entry);
+    if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+    const response = await Promise.race([
+      withTimeout(
+        entry.connection.extMethod(method, { sessionId }),
+        initTimeoutMs,
+        method,
+      ),
+      getTransportClosedReject(entry),
+    ]);
+    return response as unknown as T;
+  };
+
   const createSessionEntry = (
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = new EventBus(),
+    events = new EventBus(eventRingSize),
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
       workspaceCwd,
+      createdAt: new Date().toISOString(),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -1930,6 +2326,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       modelChangeQueue: Promise.resolve(),
       pendingPermissionIds: new Set(),
       clientIds: new Map(),
+      clientLastSeenAt: new Map(),
       attachCount: 0,
       spawnOwnerWantedKill: false,
     };
@@ -1987,6 +2384,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         workspaceCwd: existing.workspaceCwd,
         attached: true,
         clientId,
+        createdAt: existing.createdAt,
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
@@ -2045,6 +2443,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ...restored,
         attached: true,
         clientId: registerClient(entry, req.clientId),
+        createdAt: entry.createdAt,
       };
     }
 
@@ -2055,7 +2454,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = new EventBus();
+    const restoreEvents = new EventBus(eventRingSize);
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore
@@ -2161,6 +2560,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           workspaceCwd: racedEntry.workspaceCwd,
           attached: true,
           clientId,
+          createdAt: racedEntry.createdAt,
           state: racedEntry.restoreState ?? {},
         };
       }
@@ -2193,6 +2593,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         workspaceCwd: entry.workspaceCwd,
         attached: false,
         clientId,
+        createdAt: entry.createdAt,
         state,
       };
     })().finally(() => {
@@ -2313,6 +2714,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             workspaceCwd: existing.workspaceCwd,
             attached: true,
             clientId,
+            createdAt: existing.createdAt,
           };
         }
         // Coalesce: if another caller is already mid-spawn for this same
@@ -2570,6 +2972,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           resolveAnyTrustedClientId(context.clientId);
         }
       }
+      if (!pending) {
+        const record = resolvedPermissions.get(requestId);
+        if (record) {
+          publishPermissionAlreadyResolved(record);
+        }
+        return false;
+      }
       // BkwQI: validate the voter's optionId against the original
       // options the agent advertised. The route already enforces
       // "non-empty string" structurally; this layer enforces
@@ -2578,10 +2987,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `ProceedAlways*` when the prompt's `hideAlwaysAllow`
       // policy intentionally suppressed them).
       if (response.outcome.outcome === 'selected') {
-        if (
-          pending &&
-          !pending.allowedOptionIds.has(response.outcome.optionId)
-        ) {
+        if (!pending.allowedOptionIds.has(response.outcome.optionId)) {
           throw new InvalidPermissionOptionError(
             requestId,
             response.outcome.optionId,
@@ -2591,13 +2997,148 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return resolvePending(requestId, response, originatorClientId);
     },
 
+    respondToSessionPermission(sessionId, requestId, response, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const pending = pendingPermissions.get(requestId);
+      if (!pending) {
+        const record = resolvedPermissions.get(requestId);
+        if (record?.sessionId === sessionId) {
+          resolveTrustedClientId(entry, context?.clientId);
+          publishPermissionAlreadyResolved(record);
+        } else if (record) {
+          writeServeDebugLine(
+            `rejected permission vote ${JSON.stringify(requestId)} ` +
+              `for session ${JSON.stringify(sessionId)}; request belongs to ` +
+              `session ${JSON.stringify(record.sessionId)}.`,
+          );
+        }
+        return false;
+      }
+      if (pending.sessionId !== sessionId) {
+        writeServeDebugLine(
+          `rejected permission vote ${JSON.stringify(requestId)} ` +
+            `for session ${JSON.stringify(sessionId)}; request belongs to ` +
+            `session ${JSON.stringify(pending.sessionId)}.`,
+        );
+        return false;
+      }
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      if (
+        response.outcome.outcome === 'selected' &&
+        !pending.allowedOptionIds.has(response.outcome.optionId)
+      ) {
+        throw new InvalidPermissionOptionError(
+          requestId,
+          response.outcome.optionId,
+        );
+      }
+      return resolvePending(requestId, response, originatorClientId);
+    },
+
+    async closeSession(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      let originatorClientId: string | undefined;
+      if (context?.clientId !== undefined) {
+        originatorClientId = resolveTrustedClientId(entry, context.clientId);
+      }
+      writeStderrLine(
+        `qwen serve: closing session ${JSON.stringify(sessionId)}` +
+          (originatorClientId
+            ? ` by client ${JSON.stringify(originatorClientId)}`
+            : ''),
+      );
+      if (defaultEntry === entry) defaultEntry = undefined;
+      const ci = channelInfo;
+      if (ci && ci.channel === entry.channel) {
+        ci.sessionIds.delete(sessionId);
+      }
+      for (const id of Array.from(entry.pendingPermissionIds)) {
+        resolvePending(id, { outcome: { outcome: 'cancelled' } });
+      }
+      byId.delete(sessionId);
+      try {
+        entry.events.publish({
+          type: 'session_closed',
+          data: {
+            sessionId,
+            reason: 'client_close',
+            ...(originatorClientId ? { closedBy: originatorClientId } : {}),
+          },
+        });
+      } catch {
+        /* bus already closed */
+      }
+      // `session_closed` is terminal. Close the bus before ACP cancel so any
+      // late cancellation frames from the agent are intentionally dropped.
+      entry.events.close();
+      try {
+        await entry.connection.cancel({ sessionId });
+      } catch {
+        /* no active prompt or session already torn down */
+      }
+      if (ci && ci.sessionIds.size === 0 && ci.pendingRestoreIds.size === 0) {
+        ci.isDying = true;
+        await ci.channel.kill().catch((err) => {
+          writeStderrLine(
+            `qwen serve: closeSession channel kill failed for session ` +
+              `${JSON.stringify(sessionId)}: ${String(err)}`,
+          );
+        });
+      }
+    },
+
+    updateSessionMetadata(sessionId, metadata, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      if (context?.clientId !== undefined) {
+        resolveTrustedClientId(entry, context.clientId);
+      }
+      if (metadata.displayName !== undefined) {
+        if (
+          typeof metadata.displayName !== 'string' ||
+          metadata.displayName.length > MAX_DISPLAY_NAME_LENGTH
+        ) {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            `must be a string of at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
+          );
+        }
+        if (hasControlCharacter(metadata.displayName)) {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not contain control characters',
+          );
+        }
+        const nextDisplayName = metadata.displayName || undefined;
+        if (entry.displayName !== nextDisplayName) {
+          entry.displayName = nextDisplayName;
+          writeStderrLine(
+            `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
+              `displayName=${entry.displayName === undefined ? 'cleared' : 'set'}` +
+              (context?.clientId
+                ? ` by client ${JSON.stringify(context.clientId)}`
+                : ''),
+          );
+          try {
+            entry.events.publish({
+              type: 'session_metadata_updated',
+              data: { sessionId, displayName: entry.displayName },
+            });
+          } catch {
+            /* bus already closed */
+          }
+        }
+      }
+      return { displayName: entry.displayName };
+    },
+
     listWorkspaceSessions(workspaceCwd) {
       if (!path.isAbsolute(workspaceCwd)) return [];
-      // fast-path: under §02 single-workspace, string equality
-      // with boundWorkspace avoids a realpathSync syscall on
-      // every poll. If the literal doesn't match, canonicalize
-      // to handle symlink aliases; if that still doesn't match,
-      // this daemon doesn't own the workspace.
       const key =
         workspaceCwd === boundWorkspace
           ? boundWorkspace
@@ -2609,10 +3150,130 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           out.push({
             sessionId: entry.sessionId,
             workspaceCwd: entry.workspaceCwd,
+            createdAt: entry.createdAt,
+            displayName: entry.displayName,
+            clientCount: entry.clientIds.size,
+            hasActivePrompt: entry.activePromptOriginatorClientId !== undefined,
           });
         }
       }
       return out;
+    },
+
+    recordHeartbeat(sessionId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Validate the optional client id BEFORE bumping any timestamp so
+      // an unknown client doesn't get to advance the per-session
+      // watermark — that would let an attacker with a valid bearer
+      // token mask client absence by spamming heartbeats with random
+      // ids. `resolveTrustedClientId` throws `InvalidClientIdError`,
+      // which the route layer maps to `400 invalid_client_id`.
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const lastSeenAt = Date.now();
+      entry.sessionLastSeenAt = lastSeenAt;
+      if (clientId !== undefined) {
+        entry.clientLastSeenAt.set(clientId, lastSeenAt);
+      }
+      return {
+        sessionId: entry.sessionId,
+        ...(clientId !== undefined ? { clientId } : {}),
+        lastSeenAt,
+      };
+    },
+
+    getHeartbeatState(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) return undefined;
+      // Snapshot the client map so callers can't mutate the live one;
+      // `sessionLastSeenAt` is undefined for sessions that have never
+      // received a heartbeat (the typical state right after spawn).
+      return {
+        ...(entry.sessionLastSeenAt !== undefined
+          ? { sessionLastSeenAt: entry.sessionLastSeenAt }
+          : {}),
+        clientLastSeenAt: new Map(entry.clientLastSeenAt),
+      };
+    },
+
+    async getWorkspaceMcpStatus() {
+      return requestWorkspaceStatus(SERVE_STATUS_EXT_METHODS.workspaceMcp, () =>
+        createIdleWorkspaceMcpStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceSkillsStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceSkills,
+        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceProvidersStatus() {
+      return requestWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceProviders,
+        () => createIdleWorkspaceProvidersStatus(boundWorkspace),
+      );
+    },
+
+    async getWorkspaceEnvStatus() {
+      return buildEnvStatusFromProcess(boundWorkspace, !!liveChannelInfo());
+    },
+
+    async getWorkspacePreflightStatus() {
+      const daemonCells = await buildDaemonPreflightCells(boundWorkspace);
+      const acpChannelLive = !!liveChannelInfo();
+
+      let acpResponse:
+        | { cells: ServePreflightCell[]; errors?: ServeStatusCell[] }
+        | undefined;
+      let envelopeError: ServeStatusCell | undefined;
+      try {
+        acpResponse = await requestWorkspaceStatus(
+          SERVE_STATUS_EXT_METHODS.workspacePreflight,
+          () => ({ cells: createIdleAcpPreflightCells() }),
+        );
+      } catch (err) {
+        // Bridge-side timeout / channel close while consulting ACP. Daemon
+        // cells still render; envelope-level error tells the client which
+        // surface failed without sinking the whole route.
+        const errorKind = mapDomainErrorToErrorKind(err);
+        envelopeError = {
+          kind: 'preflight',
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+          ...(errorKind ? { errorKind } : {}),
+        };
+        acpResponse = { cells: createIdleAcpPreflightCells() };
+      }
+
+      const errors: ServeStatusCell[] = [
+        ...(acpResponse.errors ?? []),
+        ...(envelopeError ? [envelopeError] : []),
+      ];
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: boundWorkspace,
+        initialized: true as const,
+        acpChannelLive,
+        cells: [...daemonCells, ...acpResponse.cells],
+        ...(errors.length > 0 ? { errors } : {}),
+      };
+    },
+
+    async getSessionContextStatus(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionContext,
+      );
+    },
+
+    async getSessionSupportedCommandsStatus(sessionId) {
+      return requestSessionStatus(
+        sessionId,
+        SERVE_STATUS_EXT_METHODS.sessionSupportedCommands,
+      );
     },
 
     async setSessionModel(sessionId, req, context) {
@@ -3099,15 +3760,233 @@ async function withTimeout<T>(
 ): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const timeoutP = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`HttpAcpBridge ${label} timed out after ${ms}ms`)),
-      ms,
-    );
+    timer = setTimeout(() => reject(new BridgeTimeoutError(label, ms)), ms);
   });
   try {
     return await Promise.race([p, timeoutP]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * Daemon-side preflight cells. Always-answerable from the bridge process
+ * without consulting ACP; the corresponding ACP-side cells (auth, MCP, skills,
+ * providers, tool_registry, egress) are stitched in by `requestWorkspaceStatus`
+ * when a child is live, or fall back to `not_started` placeholders when idle.
+ */
+async function buildDaemonPreflightCells(
+  boundWorkspace: string,
+): Promise<ServePreflightCell[]> {
+  const REQUIRED_NODE_MAJOR = 22;
+
+  // Each builder returns (or eventually returns) one cell. We run them via
+  // `Promise.allSettled` after wrapping every call in `Promise.resolve().then`
+  // so that synchronous throws from any builder become rejected promises
+  // instead of escaping out of `Promise.all`'s array construction. A throw
+  // there would propagate up to the route handler and turn the whole
+  // `/workspace/preflight` envelope into a 500 — directly contradicting the
+  // design promise that "daemon cells always render even when ACP is sick"
+  // (see the route handler's catch ladder).
+  //
+  // For any rejected slot we synthesize an `error` cell with the slot's
+  // expected `kind` so the response shape (length, ordering, locality) is
+  // bit-for-bit the same regardless of failure modes.
+  const nodeVersionCell = (): ServePreflightCell => {
+    try {
+      const nodeVersion = process.versions.node;
+      const major = Number.parseInt(nodeVersion.split('.')[0] ?? '0', 10);
+      if (Number.isFinite(major) && major >= REQUIRED_NODE_MAJOR) {
+        return {
+          kind: 'node_version',
+          status: 'ok',
+          locality: 'daemon',
+          detail: {
+            version: nodeVersion,
+            required: `>=${REQUIRED_NODE_MAJOR}`,
+          },
+        };
+      }
+      return {
+        kind: 'node_version',
+        status: 'error',
+        errorKind: 'missing_binary',
+        error: `Node ${nodeVersion} is below the required >=${REQUIRED_NODE_MAJOR}.`,
+        hint: `Upgrade Node to v${REQUIRED_NODE_MAJOR} or newer.`,
+        locality: 'daemon',
+        detail: { version: nodeVersion, required: `>=${REQUIRED_NODE_MAJOR}` },
+      };
+    } catch (err) {
+      return {
+        kind: 'node_version',
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        locality: 'daemon',
+      };
+    }
+  };
+
+  // Mirrors `defaultSpawnChannelFactory`'s lookup so the preflight cell
+  // reflects the path the child would actually be spawned from.
+  const cliEntryCell = (): ServePreflightCell => {
+    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1] || '';
+    if (cliEntry) {
+      return {
+        kind: 'cli_entry',
+        status: 'ok',
+        locality: 'daemon',
+        detail: {
+          path: cliEntry,
+          source: process.env['QWEN_CLI_ENTRY']
+            ? 'QWEN_CLI_ENTRY'
+            : 'process.argv[1]',
+        },
+      };
+    }
+    return {
+      kind: 'cli_entry',
+      status: 'error',
+      errorKind: 'missing_binary',
+      error: 'Cannot determine CLI entry path for spawning the ACP child.',
+      hint: 'Set QWEN_CLI_ENTRY to the absolute path of the qwen entry script.',
+      locality: 'daemon',
+    };
+  };
+
+  const workspaceDirCell = async (): Promise<ServePreflightCell> => {
+    try {
+      const stat = await fs.stat(boundWorkspace);
+      if (stat.isDirectory()) {
+        return {
+          kind: 'workspace_dir',
+          status: 'ok',
+          locality: 'daemon',
+          detail: { path: boundWorkspace },
+        };
+      }
+      return {
+        kind: 'workspace_dir',
+        status: 'error',
+        errorKind: 'missing_file',
+        error: `Bound workspace path is not a directory: ${boundWorkspace}`,
+        locality: 'daemon',
+        detail: { path: boundWorkspace },
+      };
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err);
+      return {
+        kind: 'workspace_dir',
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        ...(errorKind ? { errorKind } : {}),
+        locality: 'daemon',
+        detail: { path: boundWorkspace },
+      };
+    }
+  };
+
+  type Slot = {
+    kind: ServePreflightKind;
+    run: () => ServePreflightCell | Promise<ServePreflightCell>;
+  };
+  const slots: Slot[] = [
+    { kind: 'node_version', run: nodeVersionCell },
+    { kind: 'cli_entry', run: cliEntryCell },
+    { kind: 'workspace_dir', run: workspaceDirCell },
+    {
+      kind: 'ripgrep',
+      run: () =>
+        safeCheck('ripgrep', async () => {
+          // Mirror runtime behavior: `Config.useBuiltinRipgrep` defaults to
+          // `true`, so `canUseRipgrep(true)` reports the *bundled* binary
+          // when no system `rg` is installed. Passing `false` here would
+          // tell users "ripgrep missing" while the runtime can still use
+          // the bundled one — a misleading warning.
+          const ok = await canUseRipgrep(true);
+          return ok
+            ? { status: 'ok' as const }
+            : {
+                status: 'warning' as const,
+                hint: 'Install ripgrep for faster grep tool execution.',
+              };
+        }),
+    },
+    {
+      kind: 'git',
+      run: () =>
+        safeCheck('git', async () => {
+          const v = await getGitVersion();
+          return v && v !== 'unknown'
+            ? { status: 'ok' as const, detail: { version: v } }
+            : { status: 'warning' as const, hint: 'git not found on PATH.' };
+        }),
+    },
+    {
+      kind: 'npm',
+      run: () =>
+        safeCheck('npm', async () => {
+          const v = await getNpmVersion();
+          return v && v !== 'unknown'
+            ? { status: 'ok' as const, detail: { version: v } }
+            : { status: 'warning' as const, hint: 'npm not found on PATH.' };
+        }),
+    },
+  ];
+
+  // `Promise.resolve().then(run)` coerces sync throws into rejected
+  // promises so `Promise.allSettled` can absorb them as `error` cells
+  // rather than letting them escape the route.
+  const settled = await Promise.allSettled(
+    slots.map((s) => Promise.resolve().then(s.run)),
+  );
+  return settled.map((result, i) => {
+    if (result.status === 'fulfilled') return result.value;
+    const err = result.reason;
+    const errorKind = mapDomainErrorToErrorKind(err);
+    return {
+      kind: slots[i]!.kind,
+      status: 'error' as const,
+      locality: 'daemon' as const,
+      error: err instanceof Error ? err.message : String(err),
+      ...(errorKind ? { errorKind } : {}),
+    };
+  });
+}
+
+async function safeCheck(
+  kind: 'ripgrep' | 'git' | 'npm',
+  body: () => Promise<{
+    status: 'ok' | 'warning';
+    detail?: Record<string, unknown>;
+    hint?: string;
+  }>,
+): Promise<ServePreflightCell> {
+  try {
+    const r = await body();
+    return {
+      kind,
+      status: r.status,
+      locality: 'daemon',
+      ...(r.detail ? { detail: r.detail } : {}),
+      ...(r.hint ? { hint: r.hint } : {}),
+    };
+  } catch (err) {
+    // Classify so SDK consumers can render structured remediation
+    // (`missing_binary` for ENOENT, `missing_file` for EACCES, etc.).
+    // Without this tag, the rg/git/npm catch path differs from the
+    // sync-builder catch paths above, which all classify their own
+    // errors. The outer `Promise.allSettled` catch in
+    // `buildDaemonPreflightCells` is unreachable for slots whose `run`
+    // is `() => safeCheck(...)`, because `safeCheck` always resolves
+    // (its own try/catch swallows). So this is the only place to tag.
+    const errorKind = mapDomainErrorToErrorKind(err);
+    return {
+      kind,
+      status: 'error',
+      error: err instanceof Error ? err.message : String(err),
+      locality: 'daemon',
+      ...(errorKind ? { errorKind } : {}),
+    };
   }
 }
 

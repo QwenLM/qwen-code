@@ -62,15 +62,21 @@ export function __resetActiveGoalStoreForTests(): void {
 // Terminal-state observers
 //
 // The Stop hook callback that drives /goal runs inside core, but the UI cards
-// for "Goal achieved" / "Goal aborted" need to land in CLI history. We bridge
-// the two with a module-scoped observer table that the CLI command populates
-// when it registers the goal and clears when the goal is unregistered.
+// for terminal outcomes need to land in CLI history. We bridge the two with a
+// module-scoped observer table that the CLI command populates when it
+// registers the goal and clears when the goal is unregistered.
 //
 // Observers are fire-and-forget — they MUST NOT throw or block the hook
 // callback; any side effect (e.g. context.ui.addItem) should be guarded.
 // ───────────────────────────────────────────────────────────────────────────
 
-export type GoalTerminalKind = 'achieved' | 'aborted';
+/**
+ * Terminal outcomes for an automatic `/goal` loop:
+ * - `achieved`: the judge found transcript evidence that satisfies the goal.
+ * - `aborted`: the loop stopped at a system safety limit.
+ * - `failed`: the judge found the goal is genuinely impossible this session.
+ */
+export type GoalTerminalKind = 'achieved' | 'aborted' | 'failed';
 
 export interface GoalTerminalEvent {
   kind: GoalTerminalKind;
@@ -119,8 +125,8 @@ export function notifyGoalTerminal(
 // Last-completed-goal cache
 //
 // Empty `/goal` after the active goal is gone should show the most recent
-// actually-finished goal. Only `achieved` and `aborted` qualify (those are
-// the `GoalTerminalKind`s); the user-driven `/goal clear` path emits a
+// actually-finished goal. Automatic terminal states (`achieved`, `aborted`,
+// and `failed`) qualify; the user-driven `/goal clear` path emits a
 // `cleared` history card directly and never flows through this notifier.
 // ───────────────────────────────────────────────────────────────────────────
 

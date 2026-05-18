@@ -16,6 +16,10 @@ import {
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
   tokenLimit,
+  getMCPDiscoveryState,
+  getMCPServerStatus,
+  MCPDiscoveryState,
+  MCPServerStatus,
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
@@ -69,12 +73,72 @@ import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import { loadCliConfig } from '../config/config.js';
-import { Session } from './session/Session.js';
-import { formatAcpModelId } from '../utils/acpModelUtils.js';
+import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  formatAcpModelId,
+  parseAcpBaseModelId,
+} from '../utils/acpModelUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
 import { runExitCleanup } from '../utils/cleanup.js';
+import {
+  ACP_PREFLIGHT_KINDS,
+  STATUS_SCHEMA_VERSION,
+  SERVE_STATUS_EXT_METHODS,
+  mapDomainErrorToErrorKind,
+  type AcpPreflightKind,
+  type ServeErrorKind,
+  type ServeMcpDiscoveryState,
+  type ServeMcpServerRuntimeStatus,
+  type ServeMcpTransport,
+  type ServePreflightCell,
+  type ServePreflightKind,
+  type ServeSessionContextStatus,
+  type ServeSessionSupportedCommandsStatus,
+  type ServeStatus,
+  type ServeStatusCell,
+  type ServeWorkspaceMcpServerStatus,
+  type ServeWorkspaceMcpStatus,
+  type ServeWorkspaceProviderModel,
+  type ServeWorkspaceProviderStatus,
+  type ServeWorkspaceProvidersStatus,
+  type ServeWorkspaceSkillStatus,
+  type ServeWorkspaceSkillsStatus,
+} from '../serve/status.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
+
+/**
+ * Env-var candidates per auth method, used by `buildAuthPreflightCell` for
+ * a side-effect-free presence check. Mirrors `AUTH_ENV_MAPPINGS` from
+ * `core/src/models/constants.ts` (which isn't on the public package
+ * surface). Keep in sync if a new provider is added there. Any auth method
+ * not listed here surfaces as `status: 'unknown'` on the cell rather than
+ * a false `auth_env_error` — full validation happens at session start.
+ *
+ * Drift detection: `AUTH_PREFLIGHT_AUDITED_AUTH_TYPES` below lists every
+ * `AuthType` enum value that has been triaged for this map (either keyed
+ * here, or explicitly waived for non-env-based auth like qwen-oauth). The
+ * paired test `AUTH_PREFLIGHT_AUDITED_AUTH_TYPES covers every AuthType`
+ * walks the public enum and fails CI when core adds a new auth method
+ * without a deliberate decision here.
+ */
+export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
+  Record<string, readonly string[]>
+> = {
+  openai: ['OPENAI_API_KEY'],
+  anthropic: ['ANTHROPIC_API_KEY'],
+  gemini: ['GEMINI_API_KEY'],
+  'vertex-ai': ['GOOGLE_API_KEY'],
+};
+
+/**
+ * Auth methods deliberately not env-keyed (e.g. OAuth-based, credential
+ * file). Listed here so the drift test recognizes them as triaged-but-
+ * waived rather than a missing entry.
+ */
+export const AUTH_PREFLIGHT_WAIVED_AUTH_TYPES: ReadonlySet<string> = new Set([
+  'qwen-oauth',
+]);
 
 export async function runAcpAgent(
   config: Config,
@@ -530,6 +594,625 @@ class QwenAgent implements Agent {
     await session.cancelPendingPrompt();
   }
 
+  private workspaceCwd(config: Config): string {
+    return config.getTargetDir();
+  }
+
+  private safeWorkspaceCwd(config: Config): string {
+    try {
+      return this.workspaceCwd(config);
+    } catch {
+      return '';
+    }
+  }
+
+  private mcpTransport(server: unknown): ServeMcpTransport {
+    if (
+      server &&
+      typeof server === 'object' &&
+      'type' in server &&
+      (server as { type?: unknown }).type === 'sdk'
+    ) {
+      return 'sdk';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { httpUrl?: unknown }).httpUrl === 'string'
+    ) {
+      return 'http';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { url?: unknown }).url === 'string'
+    ) {
+      return 'sse';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { tcp?: unknown }).tcp === 'string'
+    ) {
+      return 'websocket';
+    }
+    if (
+      server &&
+      typeof server === 'object' &&
+      typeof (server as { command?: unknown }).command === 'string'
+    ) {
+      return 'stdio';
+    }
+    return 'unknown';
+  }
+
+  private mcpStatus(status: MCPServerStatus): ServeMcpServerRuntimeStatus {
+    switch (status) {
+      case MCPServerStatus.CONNECTED:
+        return 'connected';
+      case MCPServerStatus.CONNECTING:
+        return 'connecting';
+      case MCPServerStatus.DISCONNECTED:
+      default:
+        return 'disconnected';
+    }
+  }
+
+  private mcpCellStatus(
+    status: MCPServerStatus,
+    disabled: boolean,
+  ): ServeStatus {
+    if (disabled) return 'disabled';
+    switch (status) {
+      case MCPServerStatus.CONNECTED:
+        return 'ok';
+      case MCPServerStatus.CONNECTING:
+        return 'warning';
+      case MCPServerStatus.DISCONNECTED:
+      default:
+        return 'error';
+    }
+  }
+
+  private discoveryState(): ServeMcpDiscoveryState {
+    const state = getMCPDiscoveryState();
+    switch (state) {
+      case MCPDiscoveryState.IN_PROGRESS:
+        return 'in_progress';
+      case MCPDiscoveryState.COMPLETED:
+        return 'completed';
+      case MCPDiscoveryState.NOT_STARTED:
+      default:
+        return 'not_started';
+    }
+  }
+
+  private buildWorkspaceMcpStatus(config: Config): ServeWorkspaceMcpStatus {
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const servers = config.getMcpServers() ?? {};
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        discoveryState: this.discoveryState(),
+        servers: Object.entries(servers).map(([name, server]) => {
+          const disabled = config.isMcpServerDisabled(name);
+          const rawStatus = getMCPServerStatus(name);
+          const out: ServeWorkspaceMcpServerStatus = {
+            kind: 'mcp_server',
+            status: this.mcpCellStatus(rawStatus, disabled),
+            name,
+            mcpStatus: this.mcpStatus(rawStatus),
+            transport: this.mcpTransport(server),
+            disabled,
+          };
+          const description =
+            server && typeof server === 'object'
+              ? (server as { description?: unknown }).description
+              : undefined;
+          const extensionName =
+            server && typeof server === 'object'
+              ? (server as { extensionName?: unknown }).extensionName
+              : undefined;
+          if (typeof description === 'string') {
+            out.description = description;
+          }
+          if (typeof extensionName === 'string') {
+            out.extensionName = extensionName;
+          }
+          return out;
+        }),
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: true,
+        servers: [],
+        errors: [this.errorCell('mcp', error)],
+      };
+    }
+  }
+
+  private errorCell(
+    kind: string,
+    error: unknown,
+    errorKind?: ServeErrorKind,
+  ): ServeStatusCell {
+    const inferred = errorKind ?? mapDomainErrorToErrorKind(error);
+    return {
+      kind,
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error),
+      ...(inferred ? { errorKind: inferred } : {}),
+    };
+  }
+
+  private async buildWorkspaceSkillsStatus(
+    config: Config,
+  ): Promise<ServeWorkspaceSkillsStatus> {
+    const skillManager = config.getSkillManager();
+    if (!skillManager) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.workspaceCwd(config),
+        initialized: true,
+        skills: [],
+      };
+    }
+
+    try {
+      const skills = await skillManager.listSkills();
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.workspaceCwd(config),
+        initialized: true,
+        skills: skills.map((skill): ServeWorkspaceSkillStatus => {
+          const modelInvocable = skill.disableModelInvocation !== true;
+          return {
+            kind: 'skill',
+            status: modelInvocable ? 'ok' : 'disabled',
+            name: skill.name,
+            description: skill.description,
+            level: skill.level,
+            modelInvocable,
+            ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+            ...(skill.model ? { model: skill.model } : {}),
+            ...(skill.extensionName
+              ? { extensionName: skill.extensionName }
+              : {}),
+          };
+        }),
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.workspaceCwd(config),
+        initialized: true,
+        skills: [],
+        errors: [this.errorCell('skills', error)],
+      };
+    }
+  }
+
+  private buildWorkspaceProvidersStatus(
+    config: Config,
+  ): ServeWorkspaceProvidersStatus {
+    try {
+      const workspaceCwd = this.workspaceCwd(config);
+      const currentAuthType = config.getAuthType?.();
+      const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
+      const currentModelId = activeRuntimeSnapshot
+        ? activeRuntimeSnapshot.id
+        : (config.getModel() || '').trim();
+      const hasCurrentModel = currentModelId.length > 0;
+      const currentAuth = activeRuntimeSnapshot?.authType ?? currentAuthType;
+      const currentAcpModelId =
+        hasCurrentModel && currentAuth
+          ? formatAcpModelId(currentModelId, currentAuth)
+          : currentModelId || undefined;
+      const providers = new Map<string, ServeWorkspaceProviderStatus>();
+
+      for (const model of config.getAllConfiguredModels()) {
+        const authType = String(model.authType);
+        let provider = providers.get(authType);
+        if (!provider) {
+          provider = {
+            kind: 'model_provider',
+            status: 'ok',
+            authType,
+            current: false,
+            models: [],
+          };
+          providers.set(authType, provider);
+        }
+
+        const effectiveModelId =
+          model.isRuntimeModel && model.runtimeSnapshotId
+            ? model.runtimeSnapshotId
+            : model.id;
+        const modelId = formatAcpModelId(effectiveModelId, model.authType);
+        const isCurrent =
+          currentAuth === model.authType &&
+          hasCurrentModel &&
+          (currentModelId === effectiveModelId ||
+            currentModelId === model.id ||
+            currentAcpModelId === modelId);
+        const providerModel: ServeWorkspaceProviderModel = {
+          modelId,
+          baseModelId: parseAcpBaseModelId(effectiveModelId),
+          name: model.label,
+          ...(model.description !== undefined
+            ? { description: model.description }
+            : {}),
+          contextLimit: model.contextWindowSize ?? tokenLimit(effectiveModelId),
+          isCurrent,
+          isRuntime: model.isRuntimeModel === true,
+        };
+        provider.models.push(providerModel);
+        if (isCurrent) provider.current = true;
+      }
+
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: true,
+        ...(currentAuth || currentAcpModelId
+          ? {
+              current: {
+                ...(currentAuth ? { authType: String(currentAuth) } : {}),
+                ...(currentAcpModelId ? { modelId: currentAcpModelId } : {}),
+              },
+            }
+          : {}),
+        providers: [...providers.values()],
+      };
+    } catch (error) {
+      return {
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd: this.safeWorkspaceCwd(config),
+        initialized: true,
+        providers: [],
+        errors: [this.errorCell('providers', error)],
+      };
+    }
+  }
+
+  private async buildAcpPreflightCells(
+    config: Config,
+  ): Promise<{ cells: ServePreflightCell[]; errors?: ServeStatusCell[] }> {
+    // Drive emission order from the shared `ACP_PREFLIGHT_KINDS` constant
+    // (also consumed by `createIdleAcpPreflightCells` in `serve/status.ts`)
+    // so the idle-placeholder list and the live builder cannot drift —
+    // adding a new ACP kind in the constant flags any builder dispatch
+    // gap as a TS exhaustiveness error in the switch below, instead of
+    // silently dropping the cell from one path or the other.
+    const builders: Record<
+      AcpPreflightKind,
+      () => ServePreflightCell | Promise<ServePreflightCell>
+    > = {
+      auth: () => this.buildAuthPreflightCell(config),
+      mcp_discovery: () => this.buildMcpDiscoveryPreflightCell(config),
+      skills: () => this.buildSkillsPreflightCell(config),
+      providers: () => this.buildProvidersPreflightCell(config),
+      tool_registry: () => this.buildToolRegistryPreflightCell(config),
+      egress: () => ({
+        kind: 'egress',
+        status: 'not_started',
+        locality: 'acp',
+        hint: 'egress probing lands in PR 14 (#4175)',
+      }),
+    };
+    const cells: ServePreflightCell[] = [];
+    for (const kind of ACP_PREFLIGHT_KINDS) {
+      cells.push(await builders[kind]());
+    }
+    return { cells };
+  }
+
+  private acpCell(
+    kind: ServePreflightKind,
+    spec: Omit<ServePreflightCell, 'kind' | 'locality'>,
+  ): ServePreflightCell {
+    return { kind, locality: 'acp', ...spec };
+  }
+
+  /**
+   * Pure auth preflight check. Looks up the well-known env var keys for the
+   * configured auth method (via `AUTH_ENV_MAPPINGS`) and reports whether at
+   * least one is present.
+   *
+   * Deliberately does NOT call `validateAuthMethod` from `cli/config/auth.ts`:
+   * that helper has side effects (reloads `.env` from disk via
+   * `loadEnvironment`, writes `process.env['GOOGLE_GENAI_USE_VERTEXAI']` for
+   * Vertex auth) which would let a read-only `GET /workspace/preflight`
+   * mutate daemon state and produce torn snapshots when racing
+   * `GET /workspace/env`. Full validation still happens at session start.
+   */
+  private buildAuthPreflightCell(config: Config): ServePreflightCell {
+    try {
+      const authType = config.getAuthType?.();
+      if (!authType) {
+        return this.acpCell('auth', {
+          status: 'warning',
+          errorKind: 'auth_env_error',
+          error: 'No auth method configured.',
+          hint: 'Run `qwen` and complete the auth flow, or set a provider env var.',
+          detail: { source: 'none', hasToken: false },
+        });
+      }
+      const apiKeyVars = AUTH_PREFLIGHT_ENV_KEYS[String(authType)] ?? [];
+      const presentVar = apiKeyVars.find((name: string) =>
+        Boolean(process.env[name]),
+      );
+      const hasToken = Boolean(presentVar);
+      // No env-var registration → either OAuth-style auth (qwen-oauth) or
+      // a custom provider whose key is sourced from settings rather than
+      // env. Surface as `unknown` (the SDK consumer can defer to the
+      // `/session` boot for definitive validation) rather than a false
+      // negative.
+      if (apiKeyVars.length === 0) {
+        return this.acpCell('auth', {
+          status: 'unknown',
+          hint: 'Auth credentials for this provider are not env-keyed; full validation runs at session start.',
+          detail: {
+            source: String(authType),
+            hasToken: 'unknown',
+            envVarCandidates: [],
+          },
+        });
+      }
+      return this.acpCell('auth', {
+        status: hasToken ? 'ok' : 'warning',
+        ...(hasToken
+          ? {}
+          : {
+              errorKind: 'auth_env_error' as const,
+              error: `None of the env vars [${apiKeyVars.join(', ')}] is set for authType '${String(authType)}'.`,
+              hint: `Set one of: ${apiKeyVars.join(' / ')}.`,
+            }),
+        detail: {
+          source: String(authType),
+          hasToken,
+          envVarCandidates: apiKeyVars,
+          ...(presentVar ? { presentVar } : {}),
+        },
+      });
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err) ?? 'auth_env_error';
+      return this.acpCell('auth', {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        errorKind,
+      });
+    }
+  }
+
+  private buildMcpDiscoveryPreflightCell(config: Config): ServePreflightCell {
+    try {
+      const discovery = this.discoveryState();
+      const servers = config.getMcpServers() ?? {};
+      const total = Object.keys(servers).length;
+      // Today `MCPServerStatus` is `{CONNECTED, CONNECTING, DISCONNECTED}`,
+      // but a future state (e.g. `ERROR`, `NEEDS_AUTH`) could be added.
+      // Bucketing it as `disconnected` would silently lose the distinction
+      // between "credential failed" and "idle, will spawn on demand".
+      // Track an explicit `unknown` count so unrecognized states surface in
+      // the cell `detail` rather than disappearing.
+      const counts = {
+        connected: 0,
+        connecting: 0,
+        disconnected: 0,
+        unknown: 0,
+      };
+      for (const name of Object.keys(servers)) {
+        const raw = getMCPServerStatus(name);
+        switch (raw) {
+          case MCPServerStatus.CONNECTED:
+            counts.connected += 1;
+            break;
+          case MCPServerStatus.CONNECTING:
+            counts.connecting += 1;
+            break;
+          case MCPServerStatus.DISCONNECTED:
+            counts.disconnected += 1;
+            break;
+          default:
+            counts.unknown += 1;
+            break;
+        }
+      }
+      const detail = { discoveryState: discovery, total, ...counts };
+
+      if (total === 0) {
+        return this.acpCell('mcp_discovery', {
+          status: 'ok',
+          detail,
+          hint: 'No MCP servers configured.',
+        });
+      }
+      if (counts.unknown > 0) {
+        return this.acpCell('mcp_discovery', {
+          status: 'warning',
+          errorKind: 'protocol_error',
+          error: `${counts.unknown}/${total} MCP server(s) in an unrecognized state.`,
+          detail,
+        });
+      }
+      if (counts.disconnected > 0 && discovery === 'completed') {
+        return this.acpCell('mcp_discovery', {
+          status: 'error',
+          errorKind: 'protocol_error',
+          error: `${counts.disconnected}/${total} MCP server(s) disconnected after discovery.`,
+          detail,
+        });
+      }
+      if (counts.connecting > 0 || discovery === 'in_progress') {
+        // No `errorKind`: this is a normal transitional state (just-spawned
+        // MCP servers haven't completed their handshake yet), not an
+        // `init_timeout`. The latter would push SDK consumers to render
+        // timeout-specific remediation ("increase init timeout") when the
+        // correct user action is simply "wait or retry shortly". A real
+        // timeout surfaces via `BridgeTimeoutError` from the bridge's
+        // `withTimeout`, mapped through `mapDomainErrorToErrorKind`.
+        return this.acpCell('mcp_discovery', {
+          status: 'warning',
+          error: `${counts.connecting}/${total} MCP server(s) still connecting.`,
+          detail,
+        });
+      }
+      return this.acpCell('mcp_discovery', { status: 'ok', detail });
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err);
+      return this.acpCell('mcp_discovery', {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        ...(errorKind ? { errorKind } : {}),
+      });
+    }
+  }
+
+  private async buildSkillsPreflightCell(
+    config: Config,
+  ): Promise<ServePreflightCell> {
+    // Whole body wrapped in try so a Config getter that throws
+    // synchronously (mock-style or future Config refactor) doesn't escape
+    // out of `buildAcpPreflightCells` and 500 the whole envelope.
+    try {
+      const skillManager = config.getSkillManager();
+      if (!skillManager) {
+        return this.acpCell('skills', {
+          status: 'disabled',
+          // `disabled` here is the structural state — Config has no
+          // SkillManager attached. That can mean the user opted out OR a
+          // mis-config silently dropped the manager; preflight cannot
+          // distinguish the two without settings introspection. Hint
+          // surfaces the ambiguity so operators investigate when
+          // unexpected.
+          hint: 'No SkillManager attached to Config; verify settings if you expected skills to load.',
+          detail: { configured: false },
+        });
+      }
+      const skills = await skillManager.listSkills();
+      return this.acpCell('skills', {
+        status: 'ok',
+        detail: { count: skills.length },
+      });
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err);
+      return this.acpCell('skills', {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        ...(errorKind ? { errorKind } : {}),
+      });
+    }
+  }
+
+  private buildProvidersPreflightCell(config: Config): ServePreflightCell {
+    try {
+      const models = config.getAllConfiguredModels();
+      const authType = config.getAuthType?.();
+      if (models.length === 0) {
+        // `authType` set but zero models = the next `POST /session` will
+        // fail. Report `error`, not `warning`: the daemon literally cannot
+        // serve a prompt in this state.
+        return this.acpCell('providers', {
+          status: authType ? 'error' : 'disabled',
+          ...(authType ? { errorKind: 'auth_env_error' } : {}),
+          ...(authType
+            ? {
+                error: `No model configured for authType ${String(authType)}.`,
+              }
+            : {}),
+          detail: { count: 0, authType: authType ? String(authType) : null },
+        });
+      }
+      const authTypes = new Set(models.map((m) => String(m.authType)));
+      return this.acpCell('providers', {
+        status: 'ok',
+        detail: {
+          count: models.length,
+          providers: [...authTypes],
+        },
+      });
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err) ?? 'auth_env_error';
+      return this.acpCell('providers', {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        errorKind,
+      });
+    }
+  }
+
+  private buildToolRegistryPreflightCell(config: Config): ServePreflightCell {
+    try {
+      const registry = config.getToolRegistry();
+      if (!registry) {
+        return this.acpCell('tool_registry', {
+          status: 'error',
+          errorKind: 'protocol_error',
+          error: 'Tool registry is not initialized.',
+        });
+      }
+      const tools = registry.getAllTools();
+      return this.acpCell('tool_registry', {
+        status: 'ok',
+        detail: { count: tools.length },
+      });
+    } catch (err) {
+      const errorKind = mapDomainErrorToErrorKind(err) ?? 'protocol_error';
+      return this.acpCell('tool_registry', {
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        errorKind,
+      });
+    }
+  }
+
+  private sessionOrThrow(sessionId: string): Session {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Session not found for id: ${sessionId}`,
+      );
+    }
+    return session;
+  }
+
+  private buildSessionContextStatus(
+    sessionId: string,
+  ): ServeSessionContextStatus {
+    const session = this.sessionOrThrow(sessionId);
+    const config = session.getConfig();
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      workspaceCwd: this.workspaceCwd(config),
+      state: {
+        models: this.buildAvailableModels(config),
+        modes: this.buildModesData(config),
+        configOptions: this.buildConfigOptions(config),
+      },
+    };
+  }
+
+  private async buildSessionSupportedCommandsStatus(
+    sessionId: string,
+  ): Promise<ServeSessionSupportedCommandsStatus> {
+    const session = this.sessionOrThrow(sessionId);
+    const { availableCommands, availableSkills } =
+      await buildAvailableCommandsSnapshot(session.getConfig());
+    return {
+      v: STATUS_SCHEMA_VERSION,
+      sessionId,
+      availableCommands,
+      availableSkills: availableSkills ?? [],
+    };
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -538,6 +1221,48 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case SERVE_STATUS_EXT_METHODS.workspaceMcp:
+        return this.buildWorkspaceMcpStatus(this.config) as unknown as Record<
+          string,
+          unknown
+        >;
+      case SERVE_STATUS_EXT_METHODS.workspaceSkills:
+        return (await this.buildWorkspaceSkillsStatus(
+          this.config,
+        )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspaceProviders:
+        return this.buildWorkspaceProvidersStatus(
+          this.config,
+        ) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspacePreflight:
+        return (await this.buildAcpPreflightCells(
+          this.config,
+        )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.sessionContext: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return this.buildSessionContextStatus(sessionId) as unknown as Record<
+          string,
+          unknown
+        >;
+      }
+      case SERVE_STATUS_EXT_METHODS.sessionSupportedCommands: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        return (await this.buildSessionSupportedCommandsStatus(
+          sessionId,
+        )) as unknown as Record<string, unknown>;
+      }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {

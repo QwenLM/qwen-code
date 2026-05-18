@@ -13,11 +13,15 @@ import {
 } from './DaemonClient.js';
 import type {
   DaemonEvent,
+  DaemonSessionContextStatus,
   DaemonSessionState,
   DaemonSession,
+  DaemonSessionSupportedCommandsStatus,
+  HeartbeatResult,
   PermissionResponse,
   PromptResult,
   SetModelResult,
+  SessionMetadataResult,
 } from './types.js';
 
 export interface DaemonSessionClientOptions {
@@ -51,7 +55,8 @@ export interface DaemonSessionSubscribeOptions extends SubscribeOptions {
  * IDE, and web backends: it binds one daemon session, forwards the existing
  * Stage 1 routes, and preserves SSE replay state. It intentionally does not
  * interpret daemon event payloads; typed event reducers belong to the protocol
- * schema layer.
+ * schema layer — see `asKnownDaemonEvent` and `reduceDaemonSessionEvent` in
+ * `./events.js` for the typed consumption surface.
  */
 export class DaemonSessionClient {
   readonly client: DaemonClient;
@@ -174,10 +179,32 @@ export class DaemonSessionClient {
     await this.client.cancel(this.sessionId, this.clientId);
   }
 
+  /**
+   * Bump the daemon's last-seen bookkeeping for this session. Adapters
+   * with a long-lived view of a session (TUI/IDE/web) can fire this on
+   * an interval to keep diagnostics fresh and feed PR 24 revocation
+   * policy. Forwards the bound `clientId` so identified clients update
+   * their per-client timestamp instead of just the session-wide one.
+   */
+  async heartbeat(): Promise<HeartbeatResult> {
+    return await this.client.heartbeat(this.sessionId, this.clientId);
+  }
+
   async setModel(modelId: string): Promise<SetModelResult> {
     return await this.client.setSessionModel(
       this.sessionId,
       modelId,
+      this.clientId,
+    );
+  }
+
+  async context(): Promise<DaemonSessionContextStatus> {
+    return await this.client.sessionContext(this.sessionId, this.clientId);
+  }
+
+  async supportedCommands(): Promise<DaemonSessionSupportedCommandsStatus> {
+    return await this.client.sessionSupportedCommands(
+      this.sessionId,
       this.clientId,
     );
   }
@@ -189,6 +216,32 @@ export class DaemonSessionClient {
     return await this.client.respondToPermission(
       requestId,
       response,
+      this.clientId,
+    );
+  }
+
+  async respondToSessionPermission(
+    requestId: string,
+    response: PermissionResponse,
+  ): Promise<boolean> {
+    return await this.client.respondToSessionPermission(
+      this.sessionId,
+      requestId,
+      response,
+      this.clientId,
+    );
+  }
+
+  async close(): Promise<void> {
+    return await this.client.closeSession(this.sessionId, this.clientId);
+  }
+
+  async updateMetadata(metadata: {
+    displayName?: string;
+  }): Promise<SessionMetadataResult> {
+    return await this.client.updateSessionMetadata(
+      this.sessionId,
+      metadata,
       this.clientId,
     );
   }
