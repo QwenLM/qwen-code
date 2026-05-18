@@ -74,6 +74,23 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('honors extra rate-limit codes on Error instances with status properties', () => {
+    const error = Object.assign(new Error('Provider-specific throttle'), {
+      status: 4999,
+    });
+
+    expect(
+      classifyRetryError(error, {
+        authType: AuthType.USE_OPENAI,
+        extraRetryErrorCodes: [4999],
+      }),
+    ).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'retryable',
+      reason: 'rate-limit',
+    });
+  });
+
   it('classifies SSE-embedded non-quota 429 errors as retryable rate limiting', () => {
     const error = new Error(
       'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-1","code":"Throttling.RateLimit","message":"Rate limit exceeded"}',
@@ -253,12 +270,15 @@ describe('classifyRetryError', () => {
       code: 'ETIMEDOUT',
     });
 
-    expect(classifyRetryError(error)).toMatchObject({
+    const classification = classifyRetryError(error);
+
+    expect(classification).toMatchObject({
       kind: 'transport',
       diagnosis: 'retryable',
       transportCode: 'ETIMEDOUT',
       reason: 'transport-error',
     });
+    expect(classification).not.toHaveProperty('providerCode');
   });
 
   it('classifies transport codes from Error causes as retryable', () => {

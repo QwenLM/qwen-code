@@ -9,6 +9,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
+import { isRateLimitError } from './rateLimit.js';
 import { getRetryAfterDelayMs, getRetryDelayMs } from './retryPolicy.js';
 import { classifyRetryError } from './retryErrorClassification.js';
 
@@ -36,6 +37,7 @@ export interface RetryOptions {
   shouldRetryOnError: (error: Error) => boolean;
   shouldRetryOnContent?: (content: GenerateContentResponse) => boolean;
   authType?: string;
+  extraRetryErrorCodes?: readonly number[];
   // Persistent retry mode options
   persistentMode?: boolean;
   persistentMaxBackoffMs?: number;
@@ -58,10 +60,15 @@ const DEFAULT_RETRY_OPTIONS: RetryOptions = {
  * @param error The error object.
  * @returns True if the error is a transient error, false otherwise.
  */
-function defaultShouldRetry(error: Error | unknown): boolean {
+function defaultShouldRetry(
+  error: Error | unknown,
+  extraRetryErrorCodes?: readonly number[],
+): boolean {
   const status = getErrorStatus(error);
   return (
-    status === 429 || (status !== undefined && status >= 500 && status < 600)
+    isRateLimitError(error, extraRetryErrorCodes) ||
+    status === 429 ||
+    (status !== undefined && status >= 500 && status < 600)
   );
 }
 
@@ -181,6 +188,7 @@ export async function retryWithBackoff<T>(
     initialDelayMs,
     maxDelayMs,
     authType,
+    extraRetryErrorCodes,
     shouldRetryOnError,
     shouldRetryOnContent,
     persistentMode,
@@ -193,6 +201,8 @@ export async function retryWithBackoff<T>(
     ...DEFAULT_RETRY_OPTIONS,
     ...cleanOptions,
   };
+  const hasCustomShouldRetryOnError =
+    typeof options?.shouldRetryOnError === 'function';
 
   const persistent = persistentMode ?? false;
   const maxBackoff = persistentMaxBackoffMs ?? PERSISTENT_MAX_BACKOFF_MS;
@@ -243,13 +253,18 @@ export async function retryWithBackoff<T>(
 
       // Classification is diagnostic-only in this PR; retry control still
       // follows shouldRetryOnError and the persistent retry policy below.
-      const retryDiagnostics = classifyRetryError(error, { authType });
+      const retryDiagnostics = classifyRetryError(error, {
+        authType,
+        extraRetryErrorCodes,
+      });
 
       // Determine if this error qualifies for persistent retry.
       // Persistent mode still respects shouldRetryOnError — callers can force
       // fast-fail even for transient errors if they explicitly return false.
       const isTransient = isTransientCapacityError(error);
-      const callerAllowsRetry = shouldRetryOnError(error as Error);
+      const callerAllowsRetry = hasCustomShouldRetryOnError
+        ? shouldRetryOnError(error as Error)
+        : defaultShouldRetry(error, extraRetryErrorCodes);
       const shouldPersist = persistent && isTransient && callerAllowsRetry;
 
       // Check if we've exhausted retries or shouldn't retry

@@ -24,6 +24,19 @@ import { getErrorStatus } from './errors.js';
 import { setSimulate429 } from './testUtils.js';
 import { AuthType } from '../core/contentGenerator.js';
 
+const { debugLoggerMock } = vi.hoisted(() => ({
+  debugLoggerMock: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('./debugLogger.js', () => ({
+  createDebugLogger: () => debugLoggerMock,
+}));
+
 // Helper to create a mock function that fails a certain number of times
 const createFailingFunction = (
   failures: number,
@@ -53,6 +66,7 @@ class NonRetryableError extends Error {
 describe('retryWithBackoff', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.clearAllMocks();
     // Disable 429 simulation for tests
     setSimulate429(false);
     // Suppress unhandled promise rejection warnings for tests that expect errors
@@ -83,6 +97,51 @@ describe('retryWithBackoff', () => {
     const result = await promise;
     expect(result).toBe('success');
     expect(mockFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('passes extra retry error codes into retry diagnostics', async () => {
+    const error = Object.assign(new Error('Provider-specific throttle'), {
+      status: 4999,
+    });
+    const mockFn = vi.fn().mockRejectedValueOnce(error).mockResolvedValue('ok');
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 2,
+      initialDelayMs: 10,
+      shouldRetryOnError: () => true,
+      extraRetryErrorCodes: [4999],
+    });
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).resolves.toBe('ok');
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Attempt 1 failed'),
+      expect.objectContaining({
+        kind: 'provider',
+        diagnosis: 'retryable',
+        reason: 'rate-limit',
+      }),
+      error,
+    );
+  });
+
+  it('retries caller-provided extra retry error codes by default', async () => {
+    const error = Object.assign(new Error('Provider-specific throttle'), {
+      status: 4999,
+    });
+    const mockFn = vi.fn().mockRejectedValueOnce(error).mockResolvedValue('ok');
+
+    const promise = retryWithBackoff(mockFn, {
+      maxAttempts: 2,
+      initialDelayMs: 10,
+      extraRetryErrorCodes: [4999],
+    });
+
+    await vi.runAllTimersAsync();
+
+    await expect(promise).resolves.toBe('ok');
+    expect(mockFn).toHaveBeenCalledTimes(2);
   });
 
   it('should throw an error if all attempts fail', async () => {

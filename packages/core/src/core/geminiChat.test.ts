@@ -84,6 +84,19 @@ const { mockLogContentRetry, mockLogContentRetryFailure } = vi.hoisted(() => ({
   mockLogContentRetryFailure: vi.fn(),
 }));
 
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
+
 vi.mock('../telemetry/loggers.js', () => ({
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
@@ -115,6 +128,7 @@ describe('GeminiChat', async () => {
 
     // Default mock implementation for tests that don't care about retry logic
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
+    vi.mocked(mockDebugLogger.warn).mockClear();
     mockGetHeapStatistics.mockReturnValue({
       used_heap_size: 0,
       heap_size_limit: Number.MAX_SAFE_INTEGER,
@@ -2270,6 +2284,75 @@ describe('GeminiChat', async () => {
                 'Success after Retry-After',
           ),
         ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should pass configured retry error codes into streamed retry diagnostics', async () => {
+      vi.useFakeTimers();
+
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'test-model',
+          retryErrorCodes: [4999],
+        });
+        const providerThrottle = Object.assign(
+          new StreamContentError('Provider-specific throttle'),
+          { status: 4999 },
+        );
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw providerThrottle;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Success after custom code retry' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-custom-retry-code',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        const secondPromise = iterator.next();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await secondPromise;
+
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+        }
+
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          'Rate limit retry scheduled',
+          expect.objectContaining({
+            classificationDiagnosis: 'retryable',
+            classificationReason: 'rate-limit',
+            errorKind: 'provider',
+          }),
+        );
       } finally {
         vi.useRealTimers();
       }

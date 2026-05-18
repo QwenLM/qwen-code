@@ -1196,6 +1196,8 @@ export class GeminiChat {
         return false;
       },
       authType: this.config.getContentGeneratorConfig()?.authType,
+      extraRetryErrorCodes:
+        this.config.getContentGeneratorConfig()?.retryErrorCodes,
       persistentMode: isUnattendedMode(),
       signal: params.config?.abortSignal,
       heartbeatFn: (info) => {

@@ -249,9 +249,7 @@ function getProviderFields(error: unknown): ProviderFields {
       ? String(source.code)
       : undefined;
   const providerCode =
-    error instanceof Error && rawCode?.startsWith('ERR_')
-      ? undefined
-      : rawCode;
+    error instanceof Error && rawCode?.startsWith('ERR_') ? undefined : rawCode;
   const requestId =
     typeof source.request_id === 'string'
       ? source.request_id
