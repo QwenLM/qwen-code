@@ -1226,6 +1226,51 @@ class BridgeClient implements Client {
     });
   }
 
+  /**
+   * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
+   * method is recognized today — `qwen/notify/session/mcp-budget-event`
+   * — translating the McpClientManager's budget-event payload into a
+   * session-scoped SSE frame. Unknown methods, unknown event kinds,
+   * and missing-or-unresolvable sessionIds are dropped silently for
+   * forward-compat (a future child can add new notification methods
+   * without breaking this handler; an older daemon can ignore them
+   * cleanly).
+   */
+  async extNotification(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    if (method !== 'qwen/notify/session/mcp-budget-event') return;
+    const sessionId = params['sessionId'];
+    if (typeof sessionId !== 'string') return;
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) return;
+    const kind = params['kind'];
+    const type =
+      kind === 'budget_warning'
+        ? 'mcp_budget_warning'
+        : kind === 'refused_batch'
+          ? 'mcp_child_refused_batch'
+          : undefined;
+    if (!type) return;
+    // Strip the routing fields (`v`, `sessionId`, `kind`) from the
+    // outbound `data` payload — the SSE frame already carries `v` at
+    // the envelope level (`EVENT_SCHEMA_VERSION`) and the session id
+    // is implicit from the endpoint, so duplicating them in `data`
+    // would be noise. `kind` is encoded as the frame `type`.
+    const { v: _v, sessionId: _sid, kind: _kind, ...rest } = params;
+    void _v;
+    void _sid;
+    void _kind;
+    entry.events.publish({
+      type,
+      data: rest,
+      ...(entry.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    });
+  }
+
   async writeTextFile(
     params: WriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {

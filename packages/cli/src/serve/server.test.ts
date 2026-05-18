@@ -107,6 +107,10 @@ const EXPECTED_STAGE1_FEATURES = [
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
   // refused per-server cells).
   'mcp_guardrails',
+  // Issue #4175 PR 14b. Always-on. Daemon emits typed push events for
+  // MCP budget state crossings (`mcp_budget_warning` with hysteresis,
+  // `mcp_child_refused_batch` coalesced per pass).
+  'mcp_guardrail_events',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -663,6 +667,18 @@ describe('createServeApp', () => {
       expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrails']).toEqual({
         since: 'v1',
         modes: ['warn', 'enforce'],
+      });
+    });
+
+    it('registers mcp_guardrail_events as a baseline tag (#4175 PR 14b)', () => {
+      // PR 14b's push events are unconditional once advertised — there's
+      // no operator toggle. So no `modes`, no entry in
+      // `CONDITIONAL_SERVE_FEATURES`. SDK consumers feature-detect via
+      // `caps.features.includes('mcp_guardrail_events')` before
+      // narrowing `mcp_budget_warning` / `mcp_child_refused_batch`
+      // frames through `KnownDaemonEvent`.
+      expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrail_events']).toEqual({
+        since: 'v1',
       });
     });
 

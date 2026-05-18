@@ -744,4 +744,303 @@ describe('daemon event schema', () => {
     // id observed (the original session_update at id=1).
     expect(state.lastEventId).toBe(1);
   });
+
+  // PR 14b: MCP guardrail push events. Mirrors the slow_client_warning
+  // test patterns (predicate validation + reducer state) — the two
+  // event types are siblings on the per-session SSE bus and use the
+  // same KnownDaemonEvent narrowing.
+  it('recognizes mcp_budget_warning frames as known events', () => {
+    const warning = {
+      id: 7,
+      v: 1,
+      type: 'mcp_budget_warning',
+      data: {
+        liveCount: 4,
+        reservedCount: 4,
+        budget: 4,
+        thresholdRatio: 0.75,
+        mode: 'warn',
+      },
+    };
+    const known = asKnownDaemonEvent(warning);
+    expect(known?.type).toBe('mcp_budget_warning');
+
+    // Schema: required numeric fields, exact-literal `thresholdRatio`,
+    // and `mode` constrained to `'warn' | 'enforce'`. Bad shapes are
+    // rejected so the reducer routes them through the
+    // `unrecognizedKnownEventCount` branch.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          // `thresholdRatio` must be the literal 0.75 (the only ratio
+          // PR 14b emits). A future PR adding 0.50 / 0.95 thresholds
+          // would extend both the daemon emit + this predicate.
+          thresholdRatio: 0.5,
+          mode: 'warn',
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'off', // off-mode never fires the warning — bad payload.
+        },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces mcp_budget_warning into the view state without ending the stream', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-1', phase: 'prompting' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 3,
+          reservedCount: 3,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      },
+      {
+        id: 3,
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'enforce',
+        },
+      },
+    ]);
+
+    expect(state.mcpBudgetWarningCount).toBe(2);
+    expect(state.lastMcpBudgetWarning).toEqual({
+      liveCount: 4,
+      reservedCount: 4,
+      budget: 4,
+      thresholdRatio: 0.75,
+      mode: 'enforce',
+    });
+    // Non-terminal — stream stays alive.
+    expect(state.alive).toBe(true);
+    expect(state.terminalEvent).toBeUndefined();
+    expect(state.lastEventId).toBe(3);
+  });
+
+  it('recognizes mcp_child_refused_batch frames as known events', () => {
+    const batch = {
+      id: 9,
+      v: 1,
+      type: 'mcp_child_refused_batch',
+      data: {
+        refusedServers: [
+          { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          { name: 'c', transport: 'http', reason: 'budget_exhausted' },
+        ],
+        budget: 1,
+        liveCount: 1,
+        reservedCount: 1,
+        mode: 'enforce',
+      },
+    };
+    const known = asKnownDaemonEvent(batch);
+    expect(known?.type).toBe('mcp_child_refused_batch');
+
+    // `mode: 'warn'` must be rejected — warn mode never refuses, so a
+    // refused-batch tagged with warn is protocol garbage. The
+    // reducer's safety net (`unrecognizedKnownEventCount`) catches it
+    // instead of letting the `last*` field hold a malformed shape.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'warn',
+        },
+      }),
+    ).toBeUndefined();
+
+    // Unknown transport family rejected (forward-compat: a future
+    // daemon emitting a new transport speaks a newer wire than this
+    // SDK release).
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'quic', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      }),
+    ).toBeUndefined();
+
+    // Bad reason rejected — only `'budget_exhausted'` is valid in
+    // PR 14b. Future causes extend the literal set.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'something_else' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      }),
+    ).toBeUndefined();
+
+    // Empty `refusedServers` is structurally valid (the daemon would
+    // never emit an empty batch — `emitRefusedBatchIfAny` is gated on
+    // `lastRefusedServerNames.length > 0` — but the SDK predicate
+    // doesn't enforce that invariant; it's a daemon-side correctness
+    // property, not a wire-format requirement). Verify the predicate
+    // accepts it so a future daemon contract change doesn't break
+    // adapters.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      }),
+    ).toBeDefined();
+  });
+
+  it('reduces mcp_child_refused_batch into the view state without ending the stream', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: { sessionId: 's-1', phase: 'prompting' },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      },
+      // Length-1 batch from `readResource` lazy-spawn refusal
+      // arrives next.
+      {
+        id: 3,
+        v: 1,
+        type: 'mcp_child_refused_batch',
+        data: {
+          refusedServers: [
+            { name: 'c', transport: 'http', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      },
+    ]);
+
+    expect(state.mcpRefusedBatchCount).toBe(2);
+    expect(state.lastMcpRefusedBatch).toEqual({
+      refusedServers: [
+        { name: 'c', transport: 'http', reason: 'budget_exhausted' },
+      ],
+      budget: 1,
+      liveCount: 1,
+      reservedCount: 1,
+      mode: 'enforce',
+    });
+    expect(state.alive).toBe(true);
+    expect(state.terminalEvent).toBeUndefined();
+    expect(state.lastEventId).toBe(3);
+  });
+
+  it('rejected MCP guardrail payloads route through unrecognizedKnownEventCount', () => {
+    // The reducer's safety net for "type matches a known type but
+    // schema fails": increments `unrecognizedKnownEventCount` and
+    // captures the raw event in `lastUnrecognizedKnownEvent`. Mirrors
+    // the slow_client_warning sibling pattern.
+    const state = reduceDaemonSessionEvent(reduceDaemonSessionEvents([]), {
+      id: 1,
+      v: 1,
+      type: 'mcp_child_refused_batch',
+      data: {
+        // `mode: 'warn'` is invalid (warn never refuses) — predicate
+        // rejects, reducer routes through the unrecognized branch.
+        refusedServers: [
+          { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+        ],
+        budget: 1,
+        liveCount: 1,
+        reservedCount: 1,
+        mode: 'warn',
+      },
+    });
+    expect(state.unrecognizedKnownEventCount).toBe(1);
+    expect(state.lastUnrecognizedKnownEvent?.type).toBe(
+      'mcp_child_refused_batch',
+    );
+    // Refused-batch counter NOT incremented — the malformed payload
+    // didn't reach the typed reducer arm.
+    expect(state.mcpRefusedBatchCount).toBe(0);
+    expect(state.lastMcpRefusedBatch).toBeUndefined();
+  });
 });

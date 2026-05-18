@@ -194,6 +194,8 @@ The token comparison is constant-time (SHA-256 + `crypto.timingSafeEqual`); 401 
 > ```
 >
 > This is **not** the same as claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE` (which gates startup concurrency); they're orthogonal. PR 23 will add a real shared MCP pool (a `scope: 'workspace'` cell in `budgets[]` alongside the per-session cell); PR 14 v1 is the in-process counter + soft enforcement on the existing per-session manager.
+>
+> **Push events (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14b).** SDK clients subscribed to `GET /session/:id/events` receive typed frames when budget thresholds cross — `mcp_budget_warning` (synthetic, fires once per upward 75% crossing with hysteresis re-arm at 37.5%, advertised via `mcp_guardrail_events`) and `mcp_child_refused_batch` (coalesced once per discovery pass under `enforce` mode; length-1 from `readResource` lazy-spawn refusal). The snapshot at `GET /workspace/mcp` is still the source-of-truth for state-after-reconnect; events are change-edges. Useful when dashboarding in real-time without polling.
 
 ## Default deployment threat model
 

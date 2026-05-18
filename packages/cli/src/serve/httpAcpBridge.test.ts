@@ -4369,6 +4369,210 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  // PR 14b: ext-notification handler for child→bridge MCP budget events.
+  // Translates `qwen/notify/session/mcp-budget-event` into session-scoped
+  // SSE frames (`mcp_budget_warning` / `mcp_child_refused_batch`).
+  describe('extNotification — MCP budget events (PR 14b)', () => {
+    it('publishes mcp_budget_warning when the child fires the warning event', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+
+      const collected: Array<{ id?: number; type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ id: e.id, type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('mcp_budget_warning');
+      // PR 14b drops the routing fields (`v`, `sessionId`, `kind`)
+      // from `data` since the SSE envelope already encodes them.
+      expect(collected[0]?.data).toEqual({
+        liveCount: 4,
+        reservedCount: 4,
+        budget: 4,
+        thresholdRatio: 0.75,
+        mode: 'warn',
+      });
+      expect(collected[0]?.id).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('publishes mcp_child_refused_batch when the child fires the refused-batch event', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          kind: 'refused_batch',
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      );
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('mcp_child_refused_batch');
+      expect(collected[0]?.data).toEqual({
+        refusedServers: [
+          { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+        ],
+        budget: 1,
+        liveCount: 1,
+        reservedCount: 1,
+        mode: 'enforce',
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops unknown extNotification methods, kinds, and missing sessionIds silently', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Unknown method — drop.
+      void capturedConn!.extNotification('qwen/notify/session/unknown-event', {
+        sessionId: session.sessionId,
+        kind: 'budget_warning',
+      });
+      // Missing sessionId — drop.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        { kind: 'budget_warning' },
+      );
+      // Unknown kind — drop.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        { sessionId: session.sessionId, kind: 'mystery_kind' },
+      );
+      // Resolvable sessionId but session id doesn't exist — drop.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          sessionId: 'nonexistent',
+          kind: 'budget_warning',
+          liveCount: 1,
+          reservedCount: 1,
+          budget: 1,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+      // Real event — must arrive AFTER all drops above.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+
+      const collected: Array<{ type: string }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type });
+        if (collected.length === 1) break;
+      }
+      // Exactly one event got through — the real one. The 4 dropped
+      // notifications produced no SSE frames.
+      expect(collected).toEqual([{ type: 'mcp_budget_warning' }]);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
       let n = 0;

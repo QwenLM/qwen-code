@@ -2095,6 +2095,150 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  // PR 14b: budget-event push channel. The manager's `setOnBudgetEvent`
+  // callback is wired by `newSessionConfig` AFTER `loadCliConfig` returns
+  // so the very first discovery pass's events are still in the
+  // registration window. The callback translates each event into a
+  // `connection.extNotification(qwen/notify/session/mcp-budget-event, ...)`
+  // payload that downstream BridgeClient turns into an SSE frame.
+  it('newSession wires McpClientManager.setOnBudgetEvent → extNotification with sessionId', async () => {
+    const sessionId = 'session-budget-events';
+    const innerConfig = await setupSessionMocks(sessionId);
+    // Stub `getToolRegistry().getMcpClientManager()` and capture the
+    // callback registered via `setOnBudgetEvent`. The fake manager
+    // doesn't care about the callback shape — the test invokes it
+    // synchronously with a hand-built event after registration.
+    let capturedCallback:
+      | ((event: Record<string, unknown>) => void)
+      | undefined;
+    const fakeManager = {
+      setOnBudgetEvent: vi.fn(
+        (cb: (event: Record<string, unknown>) => void) => {
+          capturedCallback = cb;
+        },
+      ),
+    };
+    (innerConfig as unknown as Record<string, unknown>)['getToolRegistry'] = vi
+      .fn()
+      .mockReturnValue({
+        getAllTools: () => [],
+        getMcpClientManager: () => fakeManager,
+      });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    // Spy connection: only `extNotification` is exercised here, but
+    // the AgentSideConnection contract is wide. Stubbing only what the
+    // PR 14b code path touches keeps the test focused.
+    const extNotification = vi.fn().mockResolvedValue(undefined);
+    const fakeConn = {
+      get closed() {
+        return mockConnectionState.promise;
+      },
+      extNotification,
+    };
+    const agent = capturedAgentFactory!(
+      fakeConn as unknown as AgentSideConnectionLike,
+    ) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // Manager's setOnBudgetEvent must have been called once with a
+    // function (the closure capturing the sessionId).
+    expect(fakeManager.setOnBudgetEvent).toHaveBeenCalledTimes(1);
+    expect(typeof capturedCallback).toBe('function');
+
+    // Fire a synthetic budget_warning through the captured callback —
+    // the wired extNotification must receive the same shape with
+    // `sessionId` inserted and `v: 1` envelope.
+    const warningEvent = {
+      kind: 'budget_warning' as const,
+      liveCount: 4,
+      reservedCount: 4,
+      budget: 4,
+      thresholdRatio: 0.75 as const,
+      mode: 'warn' as const,
+    };
+    capturedCallback!(warningEvent);
+
+    expect(extNotification).toHaveBeenCalledTimes(1);
+    expect(extNotification).toHaveBeenCalledWith(
+      'qwen/notify/session/mcp-budget-event',
+      {
+        v: 1,
+        sessionId,
+        ...warningEvent,
+      },
+    );
+
+    // Fire a refused_batch through the same callback — same routing,
+    // discriminated union shape preserved verbatim.
+    const refusedEvent = {
+      kind: 'refused_batch' as const,
+      refusedServers: [
+        { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+      ],
+      budget: 1,
+      liveCount: 1,
+      reservedCount: 1,
+      mode: 'enforce' as const,
+    };
+    capturedCallback!(refusedEvent);
+
+    expect(extNotification).toHaveBeenCalledTimes(2);
+    expect(extNotification).toHaveBeenLastCalledWith(
+      'qwen/notify/session/mcp-budget-event',
+      {
+        v: 1,
+        sessionId,
+        ...refusedEvent,
+      },
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('newSession is a no-op for budget wiring when getMcpClientManager is absent (defensive)', async () => {
+    // Older / stubbed `ToolRegistry` shapes may not expose
+    // `getMcpClientManager` (the bulk of older test fixtures stub
+    // ToolRegistry as `{ getAllTools: () => [] }`). The PR 14b code
+    // path uses optional chaining so the absence is silent — no
+    // throw, no extNotification call.
+    const innerConfig = await setupSessionMocks('session-no-mgr');
+    (innerConfig as unknown as Record<string, unknown>)['getToolRegistry'] = vi
+      .fn()
+      .mockReturnValue({ getAllTools: () => [] });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const extNotification = vi.fn().mockResolvedValue(undefined);
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+      extNotification,
+    } as unknown as AgentSideConnectionLike) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    // No manager → no wiring → no extNotification fires.
+    expect(extNotification).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 });
 
 // Regression coverage for the MR-review finding that ACP renameSession

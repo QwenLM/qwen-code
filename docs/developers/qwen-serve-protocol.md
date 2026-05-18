@@ -99,7 +99,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_set_model', 'client_identity', 'client_heartbeat',
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
  'workspace_providers', 'session_context', 'session_supported_commands',
- 'session_close', 'session_metadata', 'mcp_guardrails']
+ 'session_close', 'session_metadata', 'mcp_guardrails',
+ 'mcp_guardrail_events']
 ```
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
@@ -125,6 +126,13 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 | `require_auth` | the daemon was started with `--require-auth` (or `requireAuth: true` via the embedded API). Bearer token is mandatory on every route, including `/health` on loopback binds. |
 
 `mcp_guardrails` is **not** in this conditional table — it's an always-on tag, advertised whenever the binary supports the new `/workspace/mcp` budget fields, regardless of whether the operator configured a budget. Operators who haven't set `--mcp-client-budget` still get the new fields (with `budgetMode: 'off'`, `budgets: []`).
+
+`mcp_guardrail_events` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14b) advertises the typed SSE push events that surface MCP budget state crossings without a poll loop. Two frame types arrive on `GET /session/:id/events`:
+
+- `mcp_budget_warning` — fires once on the upward 75% crossing of `reservedSlots.size / clientBudget`. Re-arms only after the ratio drops below 37.5% (`MCP_BUDGET_REARM_FRACTION`). Mirrors PR 10's `slow_client_warning` hysteresis, but at the manager level rather than the per-subscriber backlog level. Payload: `{ liveCount, reservedCount, budget, thresholdRatio: 0.75, mode: 'warn' | 'enforce' }`. Fires under both `warn` and `enforce` modes; never under `off`.
+- `mcp_child_refused_batch` — fires at end of each `discoverAllMcpTools*` pass when one or more servers were refused, AND as a length-1 batch on the `readResource` lazy-spawn refusal path. Payload: `{ refusedServers: [{ name, transport, reason: 'budget_exhausted' }, ...], budget, liveCount, reservedCount, mode: 'enforce' }`. `mode` is the literal `'enforce'` because `warn` mode never refuses.
+
+Both events live in the per-session SSE replay ring (they carry an `id`) so a client reconnecting with `Last-Event-ID` resumes through them; the snapshot at `GET /workspace/mcp` is still the source-of-truth for state-after-extended-disconnect. Always-on once advertised — there is no conditional toggle. SDK reducer state (`DaemonSessionViewState`) exposes `mcpBudgetWarningCount`, `lastMcpBudgetWarning`, `mcpRefusedBatchCount`, `lastMcpRefusedBatch` for adapters that want simple lag-style UI.
 
 ## Routes
 
@@ -317,13 +325,16 @@ vars only; proxy URLs are stripped of credentials and reduced to
 
 Budget enforcement in PR 14 v1 is **per-session, not per-workspace**. Although Mode B daemons are `1 daemon = 1 workspace × N sessions` post-#4113 at the process level, the `McpClientManager` is constructed inside each ACP session's `Config` via `acpAgent.newSessionConfig`, so N sessions each enforce their own copy of the cap. The snapshot represents the bootstrap session's view. Wave 5 PR 23 introduces a workspace-scoped shared MCP pool that graduates this to true per-workspace enforcement.
 
-**Detecting budget pressure in v1 (no push events yet).** PR 14 v1 is snapshot-only — typed SSE push events (`mcp_budget_warning` + `mcp_child_refused_batch`) ship in PR 14b. Until then, operator dashboards poll `GET /workspace/mcp` and inspect the per-session budget cell (`budgets[0]`):
+**Detecting budget pressure.** Two surfaces, both populated post-PR-14b:
+
+- **Push events** (advertised via `mcp_guardrail_events`): subscribe to `GET /session/:id/events` and narrow `mcp_budget_warning` / `mcp_child_refused_batch` frames through `KnownDaemonEvent`. The state machine fires once per upward 75% crossing (re-armed below 37.5%); refusals are coalesced once per discovery pass under `enforce` mode.
+- **Snapshot poll** (advertised via `mcp_guardrails`): `GET /workspace/mcp` and inspect the per-session budget cell (`budgets[0]`):
 
 - `budgets[0].status === 'warning'` ⇔ `liveCount >= 0.75 * clientBudget` (matches the hysteresis threshold PR 14b's push event will use).
 - `budgets[0].status === 'error'` ⇔ `refusedCount > 0` (one or more servers refused this discovery pass).
 - `budgets[0].status === 'ok'` ⇔ below the 75% threshold AND no refusals.
 
-Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost.
+Recommended poll cadence: aligned with whatever already polls `/workspace/mcp`; the snapshot is cheap and the budget cell carries no extra discovery cost. SDK clients that subscribe to push events still benefit from the snapshot for state-after-extended-disconnect (the SSE replay ring depth is finite — `--event-ring-size`, default 8000 — so a client offline longer than the ring's coverage falls back to snapshot resync).
 
 ### `GET /workspace/skills`
 

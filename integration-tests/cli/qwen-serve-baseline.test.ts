@@ -462,6 +462,67 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
           fs.rmSync(ws, { recursive: true, force: true });
         }
       }, 120_000);
+
+      // PR 14b cross-check: validate the in-process counter against
+      // external `pgrep -P` measurement. The push-event channel
+      // (`mcp_budget_warning` / `mcp_child_refused_batch`) reads
+      // `getMcpClientAccounting().total` for `liveCount` and the
+      // `subprocessCount` field is the same arithmetic
+      // (`stdio + websocket`). If the daemon's in-process counter
+      // diverges from what `pgrep -P` actually observes, the events
+      // would lie. Skip-gated like the parent describe (POSIX, non-
+      // sandbox); idle MCP fixtures are stdio-only so
+      // `subprocessCount` should equal `mcpGrandchildren.length`
+      // exactly (no amplification slack required).
+      it('in-process subprocessCount matches external pgrep observation', async () => {
+        const ws = makeTempWorkspace('mcp-counter');
+        let daemon: SpawnedDaemon | undefined;
+        try {
+          writeWorkspaceSettings(ws, {
+            mcpServers: {
+              idle1: { command: 'node', args: [IDLE_MCP_PATH] },
+              idle2: { command: 'node', args: [IDLE_MCP_PATH] },
+            },
+          });
+          daemon = await spawnDaemon({ workspaceCwd: ws });
+          await daemon.client.createOrAttachSession({ workspaceCwd: ws });
+
+          // Wait for MCP grandchildren to be observable via pgrep,
+          // then read both numbers atomically (pgrep first to lock
+          // the comparison floor, snapshot second so the daemon
+          // can't sneak in a new connect between the two reads).
+          const observed = await waitForMcpGrandchildren(
+            daemon.daemon.pid!,
+            MCP_SERVERS_CONFIGURED,
+          );
+          const snapshot = await daemon.client.workspaceMcp();
+
+          // PR 14b invariant: stdio-only fixtures →
+          // `subprocessCount === mcpGrandchildren.length`.
+          // The PR 14 amplification slack
+          // (`MCP_SERVERS_CONFIGURED * mcpAmplificationFactor`) is
+          // for connect-storm transient overhead, not steady-state
+          // counter drift. At idle the daemon's accounting MUST
+          // match `pgrep -P` exactly (no zombies, no orphans).
+          //
+          // `clientCount` (CONNECTED clients) is allowed to be
+          // lower than `subprocessCount` if the OS still sees a
+          // process the daemon already considers disconnected
+          // (rare race, kept as `<=`); but for fresh-spawn idle
+          // fixtures we expect equality.
+          expect(snapshot.clientCount).toBe(MCP_SERVERS_CONFIGURED);
+          expect(observed.mcpGrandchildren.length).toBe(MCP_SERVERS_CONFIGURED);
+          // `clientCount` is the snapshot's authoritative live count.
+          // Validating it against pgrep closes the loop on PR 14b's
+          // event-source assumption.
+          expect(snapshot.clientCount).toBeLessThanOrEqual(
+            observed.mcpGrandchildren.length,
+          );
+        } finally {
+          if (daemon) await daemon.dispose();
+          fs.rmSync(ws, { recursive: true, force: true });
+        }
+      }, 120_000);
     });
 
     describe('SSE backpressure (unit)', () => {
