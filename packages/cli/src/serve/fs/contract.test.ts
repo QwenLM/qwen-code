@@ -17,7 +17,7 @@ import { canonicalizeWorkspace, resolveWithinWorkspace } from './paths.js';
 // fix and exists because the auto-fix at commit 7b0db4c3a promoted the
 // whole line to `import type`, erasing `isFsError` at runtime and
 // failing 11 tests in this file alone.
- 
+
 import { isFsError, type FsError, type FsErrorKind } from './errors.js';
 
 /**

@@ -744,4 +744,131 @@ describe('daemon event schema', () => {
     // id observed (the original session_update at id=1).
     expect(state.lastEventId).toBe(1);
   });
+
+  it('narrows memory_changed events and rejects malformed payloads', () => {
+    const valid: DaemonEvent = {
+      id: 7,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'workspace',
+        filePath: '/work/QWEN.md',
+        mode: 'append',
+        bytesWritten: 42,
+      },
+      originatorClientId: 'client-mem',
+    };
+    const known = asKnownDaemonEvent(valid);
+    expect(known?.type).toBe('memory_changed');
+    expect(isDaemonEventType(valid, 'memory_changed')).toBe(true);
+
+    // Malformed: scope outside the union → not narrowable.
+    const bad: DaemonEvent = {
+      id: 8,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'remote',
+        filePath: '/work/QWEN.md',
+        mode: 'append',
+        bytesWritten: 1,
+      },
+    };
+    expect(asKnownDaemonEvent(bad)).toBeUndefined();
+
+    // Missing required field (bytesWritten).
+    const missing: DaemonEvent = {
+      id: 9,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'workspace',
+        filePath: '/work/QWEN.md',
+        mode: 'append',
+      },
+    };
+    expect(asKnownDaemonEvent(missing)).toBeUndefined();
+  });
+
+  it('narrows agent_changed events and rejects malformed payloads', () => {
+    const valid: DaemonEvent = {
+      id: 10,
+      v: 1,
+      type: 'agent_changed',
+      data: { change: 'created', name: 'reviewer', level: 'project' },
+    };
+    expect(asKnownDaemonEvent(valid)?.type).toBe('agent_changed');
+
+    // change outside union.
+    const bad: DaemonEvent = {
+      id: 11,
+      v: 1,
+      type: 'agent_changed',
+      data: { change: 'mutated', name: 'x', level: 'project' },
+    };
+    expect(asKnownDaemonEvent(bad)).toBeUndefined();
+
+    // level outside union.
+    const badLevel: DaemonEvent = {
+      id: 12,
+      v: 1,
+      type: 'agent_changed',
+      data: { change: 'created', name: 'x', level: 'builtin' },
+    };
+    expect(asKnownDaemonEvent(badLevel)).toBeUndefined();
+  });
+
+  it('reduces memory_changed and agent_changed into lastWorkspaceMutation', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'memory_changed',
+        data: {
+          scope: 'workspace',
+          filePath: '/work/QWEN.md',
+          mode: 'append',
+          bytesWritten: 12,
+        },
+      },
+      {
+        id: 2,
+        v: 1,
+        type: 'agent_changed',
+        data: { change: 'updated', name: 'reviewer', level: 'project' },
+      },
+    ]);
+    // Latest event wins; type discriminator follows.
+    expect(state.lastWorkspaceMutationType).toBe('agent_changed');
+    expect(state.lastWorkspaceMutation).toEqual({
+      change: 'updated',
+      name: 'reviewer',
+      level: 'project',
+    });
+    // Both events are non-terminal.
+    expect(state.alive).toBe(true);
+    expect(state.terminalEvent).toBeUndefined();
+    expect(state.lastEventId).toBe(2);
+  });
+
+  it('preserves memory_changed snapshot when no agent_changed follows', () => {
+    const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+      id: 5,
+      v: 1,
+      type: 'memory_changed',
+      data: {
+        scope: 'global',
+        filePath: '/home/.qwen/QWEN.md',
+        mode: 'replace',
+        bytesWritten: 100,
+      },
+    });
+    expect(state.lastWorkspaceMutationType).toBe('memory_changed');
+    expect(state.lastWorkspaceMutation).toEqual({
+      scope: 'global',
+      filePath: '/home/.qwen/QWEN.md',
+      mode: 'replace',
+      bytesWritten: 100,
+    });
+  });
 });

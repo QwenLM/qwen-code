@@ -96,6 +96,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'workspace_memory',
+  'workspace_agents',
   'workspace_env',
   'workspace_preflight',
   'session_context',
@@ -547,6 +549,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     getHeartbeatState(sessionId) {
       heartbeatStateCalls.push(sessionId);
       return heartbeatStateImpl(sessionId);
+    },
+    publishWorkspaceEvent(_event) {
+      // Issue #4175 PR 16 — fakeBridge default is a no-op. Tests that
+      // assert on workspace fan-out override this through the dedicated
+      // route-level test files (workspaceMemory.test.ts /
+      // workspaceAgents.test.ts) where the real fan-out behavior is
+      // exercised against a live bridge.
+    },
+    knownClientIds() {
+      // Default empty set — workspace mutation tests opt in by
+      // overriding the bridge in their suite.
+      return new Set<string>();
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });

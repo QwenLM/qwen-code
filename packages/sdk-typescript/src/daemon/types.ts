@@ -347,6 +347,187 @@ export interface DaemonWorkspaceProvidersStatus {
   errors?: DaemonStatusCell[];
 }
 
+/**
+ * Issue #4175 PR 16: workspace memory snapshot returned from
+ * `GET /workspace/memory`. Mirrors the `kind / status / error?` cell
+ * pattern used by mcp/skills/providers — adapters can render any of
+ * the four with the same component.
+ */
+export type DaemonContextFileScope = 'workspace' | 'global';
+
+export interface DaemonWorkspaceMemoryFile {
+  kind: 'memory_file';
+  path: string;
+  scope: DaemonContextFileScope;
+  bytes: number;
+}
+
+export interface DaemonWorkspaceMemoryStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  files: DaemonWorkspaceMemoryFile[];
+  totalBytes: number;
+  fileCount: number;
+  ruleCount: number;
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * Body of `POST /workspace/memory`. `mode` defaults to `'append'`
+ * server-side when omitted; clients SHOULD send it explicitly so a
+ * future server-side default flip doesn't silently change semantics.
+ */
+export interface DaemonWriteMemoryRequest {
+  scope: DaemonContextFileScope;
+  content: string;
+  mode?: 'append' | 'replace';
+}
+
+export interface DaemonWriteMemoryResult {
+  ok: true;
+  filePath: string;
+  /**
+   * Bytes actually written by THIS request. `0` when the daemon
+   * short-circuited the write (`changed: false`) — e.g. whitespace-
+   * only append. NOT the on-disk file size; callers needing that
+   * should issue a `GET /workspace/memory` for the file's current
+   * `bytes`.
+   */
+  bytesWritten: number;
+  mode: 'append' | 'replace';
+  /**
+   * `true` when the daemon actually mutated the file on disk. `false`
+   * for whitespace-only `append` requests that short-circuited
+   * upstream — the route accepted the request as well-formed (200
+   * OK) but the helper detected the trimmed content was empty and
+   * skipped the write to avoid an mtime bump + a misleading
+   * `memory_changed` event. SDK consumers can branch on this to
+   * suppress redundant cache invalidation. Optional at the type
+   * level for forward-compat with daemons that predate the field —
+   * those return undefined and callers should treat that as
+   * `changed: true` (the legacy contract).
+   */
+  changed?: boolean;
+}
+
+/**
+ * Issue #4175 PR 16: subagent CRUD types. `agentType` on the wire is
+ * the `name` field from the agent's frontmatter (case-insensitive);
+ * `level` distinguishes project-/user-/builtin-/extension-level
+ * registrations. Built-in / extension agents are read-only — POST and
+ * DELETE return 403 `agent_readonly`.
+ */
+/**
+ * Storage level for a subagent definition.
+ *
+ * `project` / `user` / `builtin` are the levels the `qwen serve`
+ * daemon currently surfaces through `GET /workspace/agents` and the
+ * per-`agentType` detail route.
+ *
+ * `extension` and `session` are present on the union for forward-
+ * compat but the daemon does NOT return them today — the daemon-
+ * scoped `SubagentManager` is constructed against a stub `Config`
+ * whose `getActiveExtensions()` returns `[]` (extension plumbing has
+ * no entry point through the workspace daemon yet) and session-level
+ * subagents live in a runtime-only cache no CRUD route reads. SDK
+ * consumers writing exhaustive switches over `DaemonAgentLevel`
+ * should therefore include arms for both values but treat them as
+ * unreachable on today's route surface — having them on the type
+ * avoids a breaking SDK change when a future PR exposes either
+ * source.
+ */
+export type DaemonAgentLevel =
+  | 'project'
+  | 'user'
+  | 'builtin'
+  | 'extension'
+  | 'session';
+
+export interface DaemonWorkspaceAgentSummary {
+  kind: 'agent';
+  name: string;
+  description: string;
+  level: DaemonAgentLevel;
+  isBuiltin: boolean;
+  hasTools: boolean;
+  model?: string;
+  color?: string;
+  background?: boolean;
+  approvalMode?: string;
+  extensionName?: string;
+  filePath?: string;
+}
+
+export interface DaemonWorkspaceAgentDetail
+  extends DaemonWorkspaceAgentSummary {
+  systemPrompt: string;
+  tools?: string[];
+  disallowedTools?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
+}
+
+export interface DaemonWorkspaceAgentsStatus {
+  v: 1;
+  workspaceCwd: string;
+  agents: DaemonWorkspaceAgentSummary[];
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * Body of `POST /workspace/agents`. The daemon translates `scope` into
+ * the corresponding `SubagentLevel` (`workspace`→`project`,
+ * `global`→`user`).
+ */
+export interface DaemonCreateAgentRequest {
+  name: string;
+  description: string;
+  systemPrompt: string;
+  scope: 'workspace' | 'global';
+  tools?: string[];
+  disallowedTools?: string[];
+  model?: string;
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  color?: string;
+  approvalMode?: string;
+  background?: boolean;
+}
+
+/**
+ * Body of `POST /workspace/agents/:agentType`. `name` / `level` /
+ * `filePath` / `isBuiltin` are intentionally omitted — agent type
+ * comes from the URL, level is determined by the existing record, and
+ * the other two are server-managed.
+ */
+export interface DaemonUpdateAgentRequest {
+  description?: string;
+  systemPrompt?: string;
+  tools?: string[];
+  disallowedTools?: string[];
+  model?: string;
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  color?: string;
+  approvalMode?: string;
+  background?: boolean;
+}
+
+export interface DaemonAgentMutationResult {
+  ok: true;
+  agent: DaemonWorkspaceAgentDetail;
+  /**
+   * `true` when the daemon actually rewrote the agent definition;
+   * `false` when the request was a no-op (every supplied field
+   * already matched the existing record). The update route emits
+   * the field on every response (introduced alongside the no-op
+   * short-circuit in PR 16); create responses currently omit it
+   * because every successful create is a write — typed consumers
+   * should treat `undefined` as `true` (the legacy contract). This
+   * mirrors `DaemonWriteMemoryResult.changed`. Optional at the type
+   * level for forward-compat with daemons that predate the field.
+   */
+  changed?: boolean;
+}
+
 export type DaemonEnvKind =
   | 'runtime'
   | 'platform'

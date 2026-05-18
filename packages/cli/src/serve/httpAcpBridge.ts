@@ -349,6 +349,28 @@ export interface HttpAcpBridge {
   getHeartbeatState(sessionId: string): BridgeHeartbeatState | undefined;
 
   /**
+   * Issue #4175 PR 16: workspace-level event fan-out for mutations that
+   * change daemon-wide state (memory writes, agent CRUD). Publishes the
+   * event onto every live session's `EventBus` so SSE subscribers
+   * observe it through the existing per-session stream rather than a
+   * new workspace-level channel. Best-effort per session — a closed
+   * bus is silently skipped (mirrors the `permission_resolved`
+   * try/catch). When zero sessions are active the event drops on the
+   * floor; the route's read-after-write contract remains correct.
+   */
+  publishWorkspaceEvent(event: Omit<BridgeEvent, 'id' | 'v'>): void;
+
+  /**
+   * Issue #4175 PR 16: union of every live session's `clientIds`. Used
+   * by workspace-level mutation routes (memory write, agent CRUD) to
+   * validate the optional `X-Qwen-Client-Id` header without requiring
+   * a session id. Returns a snapshot — callers must not mutate.
+   * Wave 5 PR 24 will replace this with a workspace-scoped client
+   * registry decoupled from sessions.
+   */
+  knownClientIds(): ReadonlySet<string>;
+
+  /**
    * Read daemon-runtime MCP status for the bound workspace. Does not spawn an
    * ACP child when the daemon is idle; idle daemons return initialized:false.
    */
@@ -3233,6 +3255,61 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           : {}),
         clientLastSeenAt: new Map(entry.clientLastSeenAt),
       };
+    },
+
+    publishWorkspaceEvent(event) {
+      // Issue #4175 PR 16. Workspace-level mutations (memory writes /
+      // agent CRUD) need a fan-out path that doesn't require a session
+      // id. Iterate every live session's bus best-effort — a closed bus
+      // (mid-shutdown, or evicted under load) is silently skipped, same
+      // posture as `permission_resolved` at line 1717.
+      //
+      // We deliberately do NOT track delivery success per session here:
+      // the route handler's contract is "read-after-write" and any SSE
+      // subscriber that misses the event can re-fetch via the route's
+      // GET sibling. Stage 5 PR 24 PermissionMediator can layer a
+      // proper workspace event bus on top if adapters need stricter
+      // delivery semantics.
+      //
+      // Per-entry exceptions go to stderr in normal operation, but
+      // are downgraded to the debug channel when `shuttingDown` is
+      // true. `EventBus.publish` is documented never to throw (BX9_p
+      // contract at eventBus.ts:186), so anything landing here in
+      // normal ops is by definition unexpected — silencing it via
+      // QWEN_SERVE_DEBUG would let a true regression succeed at the
+      // route layer (200 OK) while SSE subscribers stop seeing
+      // events. The shutdown gate keeps the common race noise out of
+      // the production log without hiding actual bugs.
+      for (const entry of byId.values()) {
+        try {
+          entry.events.publish(event);
+        } catch (err) {
+          const detail =
+            `publishWorkspaceEvent: bus publish failed for session ` +
+            `${JSON.stringify(entry.sessionId)} (type=${event.type}): ` +
+            `${err instanceof Error ? err.message : String(err)}`;
+          if (shuttingDown) {
+            writeServeDebugLine(detail);
+          } else {
+            writeStderrLine(`qwen serve: ${detail}`);
+          }
+        }
+      }
+    },
+
+    knownClientIds() {
+      // Snapshot the union of every live session's stamped client ids.
+      // Returned as a fresh Set so callers can mutate-safely (the live
+      // per-session maps stay private). Workspace-level mutation routes
+      // use this to validate `X-Qwen-Client-Id` without owning a
+      // session id; PR 24 will replace it with a workspace-scoped
+      // registry that doesn't conflate session-attach with workspace-
+      // attach.
+      const out = new Set<string>();
+      for (const entry of byId.values()) {
+        for (const id of entry.clientIds.keys()) out.add(id);
+      }
+      return out;
     },
 
     async getWorkspaceMcpStatus() {
