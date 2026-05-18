@@ -3339,7 +3339,7 @@ function createFakeWindowsCurlCommand(fakeBin) {
       'if "!url!"=="" echo missing url or destination 1>&2 & exit /b 2',
       'if "!destination!"=="" echo missing url or destination 1>&2 & exit /b 2',
       'echo(!url! | findstr /I /C:"/releases/qwen-code/latest/VERSION" >nul && (',
-      '  > "!destination!" echo v0.0.0-smoke',
+      '  > "!destination!" echo 0.0.0-smoke',
       '  exit /b 0',
       ')',
       'echo(!url! | findstr /I /C:"/releases/qwen-code/v0.0.0-smoke/qwen-code-win-x64.zip" >nul && (',

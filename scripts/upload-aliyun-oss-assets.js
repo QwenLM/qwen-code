@@ -99,18 +99,31 @@ function parseUploadArgs(argv) {
 const MAX_UPLOAD_ATTEMPTS = 3;
 const INITIAL_BACKOFF_MS = 2000;
 
-function uploadAssets({ assets, bucket, config, prefix }) {
+function uploadAssets(
+  { assets, bucket, config, prefix },
+  { ossutilCommand = 'ossutil', ossutilCommandArgs = [] } = {},
+) {
   for (const asset of assets) {
     const key = `${prefix}/${path.basename(asset)}`;
-    uploadWithRetry(asset, bucket, key, config);
+    uploadWithRetry(asset, bucket, key, config, {
+      ossutilCommand,
+      ossutilCommandArgs,
+    });
   }
 }
 
-function uploadWithRetry(asset, bucket, key, config) {
+function uploadWithRetry(
+  asset,
+  bucket,
+  key,
+  config,
+  { ossutilCommand, ossutilCommandArgs },
+) {
   for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt += 1) {
     const result = spawnSync(
-      'ossutil',
+      ossutilCommand,
       [
+        ...ossutilCommandArgs,
         'cp',
         asset,
         `oss://${bucket}/${key}`,
