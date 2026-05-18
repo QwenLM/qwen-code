@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { Ignore } from '@qwen-code/qwen-code-core';
 import {
   FS_ACCESS_EVENT_TYPE,
@@ -786,6 +786,40 @@ describe('WorkspaceFileSystem - glob escape audit', () => {
     expect((denied!.data as { hint?: string }).hint).toMatch(
       /\d+ hit\(s\) that resolved outside workspace/,
     );
+    expect((denied!.data as { pattern?: string }).pattern).toBe('*.ts');
+  });
+
+  it('records fs.access with workspace-hashed pathHash and pattern field on glob success', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'one.ts'), 'a');
+    await h.fs.glob('*.ts');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob',
+    );
+    expect(access).toBeDefined();
+    const data = access!.data as { pathHash: string; pattern?: string };
+    expect(data.pattern).toBe('*.ts');
+    // Hash equals sha256(boundWorkspace) sliced to 16 hex chars —
+    // every glob audit row in this workspace shares the same
+    // pathHash, and `pattern` is the per-call signal.
+    const expectedHash = createHash('sha256')
+      .update(h.workspace)
+      .digest('hex')
+      .slice(0, 16);
+    expect(data.pathHash).toBe(expectedHash);
+  });
+
+  it('emits fs.denied with pattern when glob pattern is rejected as parse_error', async () => {
+    await expect(h.fs.glob('../../**')).rejects.toThrow(/'..' segments/);
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob' &&
+        (e.data as { errorKind: string }).errorKind === 'parse_error',
+    );
+    expect(denied).toBeDefined();
+    expect((denied!.data as { pattern?: string }).pattern).toBe('../../**');
   });
 });
 

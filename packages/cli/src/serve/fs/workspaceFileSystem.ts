@@ -681,6 +681,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           input: pattern,
           errorKind: 'symlink_escape',
           hint: `glob filtered ${escapedCount} hit(s) that resolved outside workspace`,
+          pattern,
         });
       }
       if (permissionErrorCount > 0) {
@@ -689,6 +690,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           input: pattern,
           errorKind: 'permission_denied',
           hint: `glob skipped ${permissionErrorCount} hit(s) due to EACCES/EPERM`,
+          pattern,
         });
       }
       if (transientErrorCount > 0) {
@@ -704,13 +706,23 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           // mappings).
           errorKind: 'io_error',
           hint: `glob skipped ${transientErrorCount} hit(s) due to transient I/O errors (EIO/EBUSY/ENAMETOOLONG/EMFILE)`,
+          pattern,
         });
       }
+      // `absolute: boundWorkspace` (rather than `cwd`) ties every
+      // glob audit row's `pathHash` to the workspace itself.
+      // Hashing `cwd` made each per-subdirectory glob produce a
+      // distinct hash with no operator-actionable difference (the
+      // raw path is privacy-gated). The literal `pattern` field is
+      // the per-call signal; `pathHash` is the workspace marker
+      // operators correlate across audit rows. Follow-up #4 from
+      // PR #4250.
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'glob',
-        absolute: cwd as ResolvedPath,
+        absolute: this.deps.boundWorkspace,
         durationMs: performance.now() - start,
         sizeBytes: out.length,
+        pattern,
       });
       return out;
     } catch (err) {
@@ -920,6 +932,13 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // actual cause (errno text, byte counts, glob pattern,
       // etc.) rather than just `errorKind` + `hint`.
       message: fs.message,
+      // For glob denials (parse_error pattern rejection,
+      // catastrophic walk failures) the input IS the pattern
+      // already; surfacing it on the dedicated `pattern` field
+      // keeps the schema parallel with successful `recordAccess`
+      // glob rows so consumers can `data.pattern` without
+      // branching on intent.
+      pattern: intent === 'glob' ? input : undefined,
     });
     return fs;
   }

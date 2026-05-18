@@ -149,6 +149,58 @@ describe('createAuditPublisher', () => {
     expect(events[0].data).not.toHaveProperty('hint');
   });
 
+  it('attaches pattern field for fs.access on glob intent', () => {
+    const { events, publisher, workspace } = setup();
+    publisher.recordAccess(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        absolute: workspace,
+        durationMs: 7,
+        sizeBytes: 12,
+        pattern: '**/*.ts',
+      },
+    );
+    expect(events[0].data).toMatchObject({
+      kind: FS_ACCESS_EVENT_TYPE,
+      intent: 'glob',
+      pattern: '**/*.ts',
+      pathHash: expectedHash(workspace),
+    });
+  });
+
+  it('attaches pattern field for fs.denied on glob intent', () => {
+    const { events, publisher } = setup();
+    publisher.recordDenied(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        input: '../../**',
+        errorKind: 'parse_error',
+        pattern: '../../**',
+      },
+    );
+    expect(events[0].data).toMatchObject({
+      kind: FS_DENIED_EVENT_TYPE,
+      intent: 'glob',
+      errorKind: 'parse_error',
+      pattern: '../../**',
+    });
+  });
+
+  it('omits pattern when not provided', () => {
+    const { events, publisher, workspace } = setup();
+    publisher.recordAccess(
+      { route: 'GET /file' },
+      {
+        intent: 'read',
+        absolute: path.join(workspace, 'a.ts') as ResolvedPath,
+        durationMs: 0,
+      },
+    );
+    expect(events[0].data).not.toHaveProperty('pattern');
+  });
+
   it('respects QWEN_AUDIT_RAW_PATHS=1 via env when includeRawPaths is unset', () => {
     const original = process.env['QWEN_AUDIT_RAW_PATHS'];
     process.env['QWEN_AUDIT_RAW_PATHS'] = '1';
