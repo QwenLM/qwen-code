@@ -219,11 +219,12 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         strategy,
       };
     } catch (error) {
-      // Distinguish deadline-triggered cancellation from real model errors
-      // so oncall debugging is not misled by the fallback log.
+      // Distinguish caller-driven aborts (user signal / new UserQuery /
+      // session cleanup / 30 s safety timeout) from real model errors so
+      // oncall debugging is not misled by the fallback log.
       if (error instanceof DOMException && error.name === 'AbortError') {
         debugLogger.debug(
-          'Model-driven auto-memory recall cancelled by deadline; heuristic result discarded.',
+          'Model-driven auto-memory recall aborted; heuristic result discarded.',
         );
       } else {
         debugLogger.warn(
@@ -234,8 +235,8 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
     }
   }
 
-  // If the caller's abort signal is already set (e.g. deadline fired), skip the
-  // heuristic fallback — the result would be discarded anyway.
+  // If the caller's abort signal is already set, skip the heuristic
+  // fallback — the result would be discarded anyway.
   if (options.abortSignal?.aborted) {
     return {
       prompt: '',

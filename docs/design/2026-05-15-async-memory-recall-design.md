@@ -119,7 +119,11 @@ if (
   this.pendingMemoryPrefetch = undefined;
   const result = await prefetchHandle.promise; // already settled, returns immediately
   if (result.prompt) {
-    systemReminders.push(result.prompt);
+    // unshift, not push: keep memory at the front of systemReminders so
+    // it leads the system-reminder block on UserQuery turns. (ToolResult
+    // turns instead append to requestToSend to preserve functionCall /
+    // functionResponse pairing — see below.)
+    systemReminders.unshift(result.prompt);
     for (const doc of result.selectedDocs) {
       this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
     }
