@@ -428,6 +428,11 @@ async function handleGetGlob(
  * response payload. Missing `boundWorkspace` means the app was
  * misconfigured; never fall back to returning absolute filesystem
  * paths to clients.
+ *
+ * Always emits POSIX-style separators so SDK consumers see the same
+ * shape regardless of the daemon's platform — `path.relative` on
+ * Windows yields backslashes, which would otherwise leak into
+ * `/file`, `/stat`, `/list`, and `/glob` response paths.
  */
 function workspaceRelative(req: Request, resolved: string): string {
   const boundWorkspace = (req.app.locals as { boundWorkspace?: string })
@@ -436,7 +441,8 @@ function workspaceRelative(req: Request, resolved: string): string {
     throw new Error('bound workspace is not configured');
   }
   const rel = path.relative(boundWorkspace, resolved);
-  return rel === '' ? '.' : rel;
+  if (rel === '') return '.';
+  return path.sep === '/' ? rel : rel.split(path.sep).join('/');
 }
 
 export function registerWorkspaceFileReadRoutes(
