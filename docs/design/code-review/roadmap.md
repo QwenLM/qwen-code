@@ -63,7 +63,7 @@
 
 **范围**：
 
-- 新增 `qwen review design-gate` helper，输出稳定 JSON contract（`PASS / ADVISORY_ONLY / BLOCK`）
+- 新增 `.github/scripts/design-gate.mjs` helper，输出稳定 JSON contract（`PASS / ADVISORY_ONLY / BLOCK`）。先用 repository-local script 调用已发布 CLI 的 `qwen --prompt` 能力，避免等待 qwen-code npm release；后续 release 后可迁回 `qwen review design-gate`
 - 在 review workflow 里新增 Design Gate step，放在调用 bundled `/review` 之前
 - 实现 4 组并行子检查（roadmap / architecture / 既有设计 / Claude Code 对标）
 - 给 Design Gate 提供 PR shape 摘要（package 边界、import/export 变化、公共 CLI/SDK/API 入口变化），避免它只凭文件路径判断架构合规
@@ -91,7 +91,7 @@
   - (b) 已有 PR 实现过
   - (c) by design 拒过 → **VIOLATION**
   - (d) 历史"坏"PR 信号
-- 在 `qwen review design-gate` / 相关 helper 中实现 `gh search prs/issues` 调用 + 评论 / linked issue 解析
+- 在 `.github/scripts/history-scan.mjs` / 相关 helper 中实现 `gh search prs/issues` 调用 + 评论 / linked issue 解析
 - by-design 拒绝检测使用 `gh search prs "<keywords> is:unmerged" --state closed --repo ...`，不使用不存在的 `--is` flag
 
 **不在此 PR**：
@@ -101,7 +101,7 @@
 
 **依赖**：Phase 4 合入（Design Gate 作为载体）。
 
-**预估改动**：~80 行 helper/subcommand 逻辑，可拆出 `qwen review history-scan` 供 Design Gate 复用。
+**预估改动**：~80 行 helper/subcommand 逻辑；第一版为 `.github/scripts/history-scan.mjs`，后续可迁移为 `qwen review history-scan` 供 Design Gate 复用。
 
 ## Phase 6：轮次抑制（独立 PR，需动上游 skill）
 

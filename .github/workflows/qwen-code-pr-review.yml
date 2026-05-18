@@ -342,6 +342,114 @@ jobs:
             write_output "should_review=true"
           fi
 
+      - name: 'Generate PR shape'
+        id: 'pr-shape'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+        run: |-
+          set -euo pipefail
+          mkdir -p .qwen/tmp
+          node .github/scripts/pr-shape.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER" \
+            --out ".qwen/tmp/qwen-review-pr-${PR_NUMBER}-shape.json"
+
+      - name: 'Scan review history'
+        id: 'history-scan'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+        run: |-
+          set -euo pipefail
+          node .github/scripts/history-scan.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER" \
+            --shape ".qwen/tmp/qwen-review-pr-${PR_NUMBER}-shape.json" \
+            --out ".qwen/tmp/qwen-review-pr-${PR_NUMBER}-history.json"
+
+      - name: 'Run Design Gate'
+        id: 'design-gate'
+        if: |-
+          steps.size.outputs.should_review == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          QWEN_DESIGN_GATE_LLM: "${{ vars.QWEN_DESIGN_GATE_LLM || 'true' }}"
+        run: |-
+          set -euo pipefail
+
+          gate_out=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-design-gate.json"
+          process_comment=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-design-gate-comment.md"
+          prompt_append=".qwen/tmp/qwen-review-pr-${PR_NUMBER}-design-gate-prompt.md"
+
+          node .github/scripts/design-gate.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --pr "$PR_NUMBER" \
+            --shape ".qwen/tmp/qwen-review-pr-${PR_NUMBER}-shape.json" \
+            --history ".qwen/tmp/qwen-review-pr-${PR_NUMBER}-history.json" \
+            --out "$gate_out" \
+            --process-comment-out "$process_comment" \
+            --prompt-append-out "$prompt_append"
+
+          status="$(jq -r '.status' "$gate_out")"
+          if [ "$status" = "BLOCK" ]; then
+            should_review="false"
+          else
+            should_review="true"
+          fi
+
+          {
+            echo "status=$status"
+            echo "should_review=$should_review"
+            echo "process_comment=$process_comment"
+            echo "prompt_append=$prompt_append"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            printf '### Qwen Design Gate\n\n'
+            cat "$process_comment"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Post Design Gate block comment'
+        if: |-
+          steps.design-gate.outputs.status == 'BLOCK' &&
+          steps.pr.outputs.should_comment == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          PROCESS_COMMENT: '${{ steps.design-gate.outputs.process_comment }}'
+        run: |-
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body-file "$PROCESS_COMMENT"
+
+      - name: 'Prepare final review prompt'
+        id: 'review-prompt'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          steps.design-gate.outputs.should_review == 'true'
+        env:
+          BASE_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
+          PROMPT_APPEND: '${{ steps.design-gate.outputs.prompt_append }}'
+        run: |-
+          set -euo pipefail
+
+          delimiter="QWEN_FINAL_REVIEW_PROMPT_$(date +%s%N)"
+          {
+            echo "review_prompt<<$delimiter"
+            printf '%s\n' "$BASE_PROMPT"
+            if [ -s "$PROMPT_APPEND" ]; then
+              printf '\n'
+              cat "$PROMPT_APPEND"
+            fi
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
       # Restore the bundled /review skill's per-PR cache only on synchronize.
       # The skill writes .qwen/review-cache/pr-<n>.json with the last reviewed
       # commit SHA so subsequent runs can scope review to the incremental
@@ -361,6 +469,7 @@ jobs:
         id: 'restore-cache'
         if: |-
           steps.size.outputs.should_review == 'true' &&
+          steps.design-gate.outputs.should_review == 'true' &&
           github.event_name == 'pull_request_target' &&
           github.event.action == 'synchronize'
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
@@ -373,13 +482,14 @@ jobs:
       - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
-          steps.size.outputs.should_review == 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.design-gate.outputs.should_review == 'true'
         uses: 'QwenLM/qwen-code-action@a08dc886c2094312d6cf2df08ba5fd0437c53339' # main pinned on 2026-05-14
         with:
           openai_api_key: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           openai_base_url: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           openai_model: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
-          prompt: '${{ steps.pr.outputs.review_prompt }}'
+          prompt: '${{ steps.review-prompt.outputs.review_prompt }}'
 
       - name: 'Post dry-run summary'
         if: |-
