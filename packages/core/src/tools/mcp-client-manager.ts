@@ -343,17 +343,31 @@ export class McpClientManager {
     // leave both unset and get `mode: 'off'` — the pre-PR-14 default.
     const resolved = budgetConfig ?? readBudgetFromEnv();
     let resolvedMode = resolved.budgetMode;
-    // PR 14 fix (review #4247 wenshao R8 #5): mirror
+    // PR 14 fix (review #4247 wenshao R8 #5 + R10 line 357): mirror
     // `readBudgetFromEnv`'s `(enforce|warn)`-without-budget
     // downgrade for the direct-`budgetConfig` path too. All
     // production callers (CLI handler, `runQwenServe`, env-var
     // fallback) validate upfront, but a future code path that
     // injects `budgetConfig` without running the validation
     // would re-introduce the silent fail-open. Defense in depth.
+    //
+    // R10 line 357: emit the same stderr breadcrumb the env-var
+    // path uses. Pre-R10 the env-var path logged on downgrade but
+    // this constructor path was silent — same operator-visibility
+    // failure mode (operator only sees `budgetMode: 'off'` after
+    // the fact via the snapshot). Now both paths surface the
+    // misconfiguration at boot, so a future caller that bypasses
+    // CLI / env-var validation can't ship a daemon that
+    // advertises `mcp_guardrails` while silently disabling
+    // enforcement.
     if (
       (resolvedMode === 'enforce' || resolvedMode === 'warn') &&
       resolved.clientBudget === undefined
     ) {
+      process.stderr.write(
+        `qwen serve: McpClientManager constructed with budgetMode=${resolvedMode} ` +
+          `but no clientBudget; downgrading to off.\n`,
+      );
       resolvedMode = 'off';
     }
     this.clientBudget = resolved.clientBudget;
@@ -1566,6 +1580,28 @@ export class McpClientManager {
         // on subsequent discovery passes. Reuses
         // `discoveryTimeoutFor` so per-server `discoveryTimeoutMs`
         // overrides apply uniformly across spawn paths.
+        //
+        // R10 line 1572 cleanup contract: when the timeout side
+        // wins the race, the catch below calls
+        // `await client.disconnect()` to abort the orphan
+        // `client.connect()` that's still pending in the
+        // background. This relies on `McpClient.disconnect()`
+        // cancelling an in-flight connect — closing the underlying
+        // transport (stdio child SIGTERM, WebSocket close frame,
+        // HTTP socket teardown) so the pending connect promise
+        // settles. If `disconnect()` on a never-completed connect
+        // were a no-op, the orphan transport would survive with
+        // no `this.clients` entry and `stop()` couldn't reach it.
+        // This same contract is relied on by
+        // `runWithDiscoveryTimeout`'s timeout handler (bulk +
+        // incremental paths), so all three spawn paths share the
+        // assumption — verified by the bulk path having shipped
+        // production-stable for several releases. Worth a unit
+        // test in a follow-up that exercises the
+        // disconnect-cancels-pending-connect invariant against
+        // a fixture that asserts the transport is actually torn
+        // down.
+
         const timeoutMs = this.discoveryTimeoutFor(serverConfig);
         let timeoutId: NodeJS.Timeout | undefined;
         await Promise.race([
