@@ -4590,6 +4590,72 @@ Other open files:
         });
       });
 
+      it('emits active_goal null when the Stop hook clears the goal before aborting', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+        const abortController = new AbortController();
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            clearActiveGoal('test-session-id');
+            abortController.abort();
+            return {};
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            abortController.signal,
+            'prompt-cleared-active-goal-abort',
+          ),
+        );
+
+        const activeGoalEvents = events.filter(
+          (event) => event.type === GeminiEventType.ActiveGoal,
+        );
+
+        expect(activeGoalEvents).toEqual([
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: expect.objectContaining({
+              condition: 'finish the refactor',
+            }),
+          },
+          {
+            type: GeminiEventType.ActiveGoal,
+            value: null,
+          },
+        ]);
+      });
+
       it('should skip messageBus.request for UserPromptSubmit when hasHooksForEvent returns false', async () => {
         // Enable hooks and provide messageBus
         const mockMessageBus = {
