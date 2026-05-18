@@ -21,7 +21,10 @@ import {
   normalizeMonitorCommand,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { findDangerousAllowRules } from './dangerousRules.js';
+import {
+  findDangerousAllowRules,
+  isDangerousAllowRule,
+} from './dangerousRules.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -757,6 +760,20 @@ export class PermissionManager {
         );
         return;
       }
+      // AUTO mode invariant: while dangerous allow rules are stripped,
+      // any newly added allow rule that is itself dangerous must be
+      // stashed alongside the strip rather than made active. Without
+      // this, a user clicking "Always allow" on a fallback prompt for
+      // a Bash invocation could persist `Bash` or `Bash(python *)` and
+      // every subsequent AUTO call would bypass the classifier. See
+      // dangerousRules.ts for the classifier-bypass criteria.
+      if (this.strippedAllowRules && isDangerousAllowRule(rule)) {
+        this.strippedAllowRules.session.push(rule);
+        debugLogger.info(
+          `Stashed newly added dangerous allow rule while in AUTO mode: ${rule.raw}`,
+        );
+        return;
+      }
       this.sessionRules.allow.push(rule);
     }
   }
@@ -811,6 +828,29 @@ export class PermissionManager {
     if (rule.invalid) {
       debugLogger.warn(
         `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
+      );
+      return rule;
+    }
+    // AUTO mode invariant: see addSessionAllowRule above. A dangerous
+    // allow rule persisted while in AUTO must not become active until
+    // the user exits AUTO — otherwise an "Always allow" choice on a
+    // fallback prompt would bypass the classifier from that point on.
+    // The settings.json write is still performed by the caller (this
+    // method only manages the in-memory ruleset), so the rule reaches
+    // disk and will activate normally on the next non-AUTO start.
+    if (
+      type === 'allow' &&
+      this.strippedAllowRules &&
+      isDangerousAllowRule(rule)
+    ) {
+      const exists = this.strippedAllowRules.persistent.some(
+        (r) => r.raw === rule.raw,
+      );
+      if (!exists) {
+        this.strippedAllowRules.persistent.push(rule);
+      }
+      debugLogger.info(
+        `Stashed newly added dangerous persistent allow rule while in AUTO mode: ${rule.raw}`,
       );
       return rule;
     }

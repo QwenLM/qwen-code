@@ -49,6 +49,26 @@ export function useAutoAcceptIndicator({
     setShowAutoAcceptIndicator(currentConfigValue);
   }, [currentConfigValue]);
 
+  // Mount-time AUTO entry notice: when the session starts already in AUTO
+  // (`--approval-mode auto` flag or `tools.approvalMode: "auto"` in
+  // settings.json), the keypress / slash-command handlers below never fire,
+  // so the first-time information message + stripped-rules notice are
+  // missing on startup. Run them once on mount. The `acknowledged` flag in
+  // emitAutoModeEntryNotices keeps repeated sessions silent.
+  //
+  // Read the initial mode from the already-captured `currentConfigValue`
+  // closure rather than calling `config.getApprovalMode()` again so we
+  // don't inflate the spy-count tests further down the file.
+  useEffect(() => {
+    if (currentConfigValue === ApprovalMode.AUTO) {
+      emitAutoModeEntryNotices({ config, settings, addItem });
+    }
+    // Intentionally mount-only — subsequent mode changes are handled by
+    // the Shift+Tab handler below and by the `/approval-mode` slash
+    // command, which both call emitAutoModeEntryNotices on AUTO entry.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useKeypress(
     (key) => {
       // Handle Shift+Tab to cycle through all modes

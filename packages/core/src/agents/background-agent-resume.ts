@@ -123,6 +123,7 @@ function normalizeApprovalMode(
     case 'plan':
     case 'default':
     case 'auto-edit':
+    case 'auto':
     case 'yolo':
       return value;
     default:
@@ -137,7 +138,9 @@ function reconcileResumedApprovalMode(
 ): ApprovalModeValue {
   if (
     isTrustedFolder ||
-    (persistedMode !== 'auto-edit' && persistedMode !== 'yolo')
+    (persistedMode !== 'auto-edit' &&
+      persistedMode !== 'auto' &&
+      persistedMode !== 'yolo')
   ) {
     return persistedMode;
   }

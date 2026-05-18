@@ -1480,6 +1480,17 @@ export async function loadCliConfig(
         denyUnlessAllowed(ToolNames.EDIT as ToolName);
         denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
+      case ApprovalMode.AUTO:
+        // AUTO uses an LLM classifier to gate Shell/Monitor/Edit/WriteFile at
+        // call time; but non-interactive mode has no UI for the classifier's
+        // fallback path, so apply the same denylist as DEFAULT to keep parity
+        // with the interactive AUTO safety guarantees (no zero-denial drift
+        // toward YOLO behavior).
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.MONITOR as ToolName);
+        denyUnlessAllowed(ToolNames.EDIT as ToolName);
+        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
+        break;
       case ApprovalMode.AUTO_EDIT:
         // Shell-like execute tools still require a prompt in auto-edit mode.
         denyUnlessAllowed(ToolNames.SHELL as ToolName);

@@ -233,10 +233,16 @@ export function resolveSubagentApprovalMode(
     const resolved = approvalModeToPermissionMode(
       agentApprovalMode as ApprovalMode,
     );
-    // Privileged modes require trusted folder
+    // Privileged modes require trusted folder. AUTO is privileged because
+    // its LLM classifier can auto-approve shell / network / agent calls
+    // without user prompts; allowing an untrusted-repo sub-agent definition
+    // to opt into AUTO would let the repo silently grant itself classifier-
+    // mediated automation.
     if (
       !isTrustedFolder &&
-      (resolved === PermissionMode.Yolo || resolved === PermissionMode.AutoEdit)
+      (resolved === PermissionMode.Yolo ||
+        resolved === PermissionMode.AutoEdit ||
+        resolved === PermissionMode.Auto)
     ) {
       return approvalModeToPermissionMode(parentApprovalMode);
     }
@@ -350,6 +356,18 @@ export async function createApprovalModeOverride(
   const override = Object.create(base) as any;
   override.getApprovalMode = (): ApprovalMode => mode;
   await rebuildToolRegistryOnOverride(override as Config, base);
+
+  // AUTO mode requires dangerous allow rules (broad Bash / Agent / Skill)
+  // to be stripped so the classifier still gates them. The normal entry
+  // hook is `Config.setApprovalMode` (config.ts:~2560); the lightweight
+  // override path bypasses that, so we trigger the strip directly here.
+  // The strip is idempotent (sentinel-guarded), shared with the parent
+  // PermissionManager, and persists until ApprovalMode is toggled away
+  // from AUTO — same lifecycle as the top-level entry path.
+  if (mode === ApprovalMode.AUTO) {
+    base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
+  }
+
   return override as Config;
 }
 
@@ -600,10 +618,14 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
   }
 
   override toAutoClassifierInput(params: AgentParams): Record<string, unknown> {
-    const prompt = params.prompt ?? '';
+    // Forward the full prompt (no truncation). The earlier 200-char preview
+    // hid any attack payload after character 200 from the classifier while
+    // the sub-agent itself received the full text — same shape of attack
+    // surface as truncating a shell command. Shell tools forward the full
+    // command for the same reason.
     return {
       subagent_type: params.subagent_type,
-      prompt_preview: prompt.slice(0, 200),
+      prompt: params.prompt ?? '',
     };
   }
 

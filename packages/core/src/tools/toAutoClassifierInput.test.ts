@@ -151,7 +151,11 @@ describe('SkillTool.toAutoClassifierInput', () => {
 // AgentTool ──────────────────────────────────────────────────────────────
 
 describe('AgentTool.toAutoClassifierInput', () => {
-  it('truncates prompt to 200 chars and forwards subagent_type', () => {
+  it('forwards full prompt and subagent_type (no truncation)', () => {
+    // Regression guard: prior implementation truncated to 200 chars, which
+    // hid attack payloads placed after character 200 from the classifier
+    // while the sub-agent still received the full text. Same attack surface
+    // as truncating a shell command.
     const longPrompt = 'task instruction '.repeat(50);
     const result = (
       AgentTool.prototype.toAutoClassifierInput as (
@@ -166,10 +170,7 @@ describe('AgentTool.toAutoClassifierInput', () => {
       },
     );
     expect(result['subagent_type']).toBe('coder');
-    expect(typeof result['prompt_preview']).toBe('string');
-    expect((result['prompt_preview'] as string).length).toBe(200);
-    expect((result['prompt_preview'] as string).length).toBeLessThan(
-      longPrompt.length,
-    );
+    expect(result['prompt']).toBe(longPrompt);
+    expect((result['prompt'] as string).length).toBe(longPrompt.length);
   });
 });

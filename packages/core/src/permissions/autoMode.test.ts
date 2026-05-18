@@ -32,7 +32,6 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       ToolNames.EXIT_PLAN_MODE,
       ToolNames.CRON_LIST,
       ToolNames.TASK_STOP,
-      ToolNames.SEND_MESSAGE,
     ];
     for (const tool of expected) {
       expect(SAFE_TOOL_ALLOWLIST.has(tool)).toBe(true);
@@ -50,6 +49,10 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       ToolNames.MONITOR,
       ToolNames.CRON_CREATE,
       ToolNames.CRON_DELETE,
+      // `send_message` injects arbitrary text into another running agent
+      // as a new instruction — the classifier must see destination + body
+      // so it can detect inter-agent steering toward destructive actions.
+      ToolNames.SEND_MESSAGE,
     ];
     for (const tool of forbidden) {
       expect(SAFE_TOOL_ALLOWLIST.has(tool)).toBe(false);
@@ -72,7 +75,6 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
         "list_directory",
         "lsp",
         "read_file",
-        "send_message",
         "structured_output",
         "task_stop",
         "todo_write",
@@ -264,29 +266,19 @@ describe('evaluateAutoMode — fast-path gating', () => {
     expect(decision.via).toBe('fast-path:allowlist');
   });
 
-  it('skips fast-paths and routes to classifier when pmForcedAsk=true', async () => {
-    // User wrote an explicit ask rule for Edit — fast-path must NOT auto-allow.
-    // We can't actually call the classifier here (no LLM), so we provide a
-    // config that throws when sideQuery is invoked — proving control reached
-    // L5.3 dispatch.
-    const cfg = {
-      ...(baseConfig as unknown as Record<string, unknown>),
-      getFastModel: () => undefined,
-      getModel: () => 'pretend-model',
-      getAutoModeSettings: () => ({}),
-      getToolRegistry: () => ({ getTool: () => undefined }),
-    } as unknown as Config;
-    const ac = new AbortController();
-    ac.abort();
-    await expect(
-      evaluateAutoMode({
-        ctx: { toolName: ToolNames.EDIT, filePath: `${cwd}/src/x.ts` },
-        pmForcedAsk: true,
-        toolParams: {},
-        messages: [],
-        config: cfg,
-        signal: ac.signal,
-      }),
-    ).rejects.toBeDefined();
+  it('routes to manual fallback (skipping classifier) when pmForcedAsk=true', async () => {
+    // User wrote an explicit ask rule — fast-paths AND classifier must be
+    // skipped. The PR auto-mode.md doc states "ask rules force manual
+    // confirmation"; without this leg, the classifier could approve and
+    // silently override the user's explicit intent.
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.EDIT, filePath: `${cwd}/src/x.ts` },
+      pmForcedAsk: true,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+    });
+    expect(decision.via).toBe('fallback');
   });
 });

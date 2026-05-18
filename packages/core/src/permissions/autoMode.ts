@@ -49,7 +49,11 @@ export const SAFE_TOOL_ALLOWLIST: ReadonlySet<string> = new Set<string>([
   // Background task coordination (peers' permission checks still apply)
   ToolNames.CRON_LIST,
   ToolNames.TASK_STOP,
-  ToolNames.SEND_MESSAGE,
+  // `send_message` is intentionally NOT in the allowlist: it injects
+  // arbitrary text into another running agent as a new instruction. The
+  // classifier MUST see the destination + message content so it can
+  // judge whether the inter-agent message is steering a peer toward
+  // destructive or exfiltrating actions.
 ]);
 
 /**
@@ -182,6 +186,15 @@ export async function evaluateAutoMode(
   // L5.2: hardcoded safe-tool allowlist. Same gate as L5.1.
   if (!input.pmForcedAsk && isInSafeToolAllowlist(input.ctx.toolName)) {
     return { via: 'fast-path:allowlist' };
+  }
+
+  // User wrote an explicit `permissions.ask` rule matching this call —
+  // honor that intent and route to manual confirmation instead of letting
+  // the classifier auto-approve. The fast-paths above already opt out for
+  // the same reason; the classifier path was the missing leg.
+  // (auto-mode.md documents this as "ask rules force manual confirmation".)
+  if (input.pmForcedAsk) {
+    return { via: 'fallback' };
   }
 
   // Caller (scheduler) has detected an armed fallback state; surface that

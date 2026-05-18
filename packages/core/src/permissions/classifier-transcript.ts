@@ -38,6 +38,19 @@ export interface PendingAction {
 }
 
 /**
+ * Maximum number of recent messages to include in the classifier transcript.
+ * Long autonomous sessions are AUTO mode's primary use case, so unbounded
+ * history will eventually overflow the fast classifier model's context
+ * window. After 2 consecutive overflow-induced unavailable verdicts the
+ * session falls back to manual approval, defeating the mode's purpose.
+ *
+ * 40 messages keeps the prompt comfortably within fast-model context budgets
+ * while preserving enough of the recent action chain for the classifier to
+ * apply its "untrusted tool-output" rule across a multi-step interaction.
+ */
+const MAX_TRANSCRIPT_MESSAGES = 40;
+
+/**
  * Build the `contents` array for the classifier sideQuery call.
  *
  * - Keeps user text (user intent is essential context).
@@ -45,6 +58,8 @@ export interface PendingAction {
  *   (projected through `toAutoClassifierInput`).
  * - Strips model text parts (anti-self-injection).
  * - Strips tool result parts (anti-untrusted-content-injection).
+ * - Truncates to the most recent {@link MAX_TRANSCRIPT_MESSAGES} messages
+ *   so very long sessions don't overflow the classifier context.
  * - Appends `pendingAction` as the final user-role text turn.
  *
  * Result: the classifier request only contains user-role text — no
@@ -58,7 +73,15 @@ export function buildClassifierContents(
 ): Content[] {
   const transcript: Content[] = [];
 
-  for (const msg of messages) {
+  // Slice to the recent window before processing. Truncating after the
+  // assistant/user/function filtering would produce uneven windows when a
+  // session accumulates many tool-result records.
+  const recent =
+    messages.length > MAX_TRANSCRIPT_MESSAGES
+      ? messages.slice(-MAX_TRANSCRIPT_MESSAGES)
+      : messages;
+
+  for (const msg of recent) {
     if (msg.role === 'user') {
       const textParts = (msg.parts ?? []).filter(
         (p): p is Part => typeof (p as Part).text === 'string',

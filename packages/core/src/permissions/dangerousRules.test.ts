@@ -95,6 +95,81 @@ describe('isDangerousBashRule', () => {
       }),
     ).toBe(false);
   });
+
+  // ── Regression guards added during PR #4151 review ────────────────────
+  describe('extended interpreter coverage', () => {
+    it.each([
+      'php',
+      'lua',
+      'julia',
+      'r',
+      'rscript',
+      'groovy',
+      'cargo',
+      'npm',
+      'pnpm',
+      'yarn',
+      'make',
+      'gradle',
+      'mvn',
+      'pwsh',
+      'powershell',
+      'awk',
+    ])('flags %s as a dangerous interpreter (bare name)', (interp) => {
+      expect(isDangerousBashRule(bashRule(interp))).toBe(true);
+    });
+
+    it.each([
+      'bun run *',
+      'deno run *',
+      'npm run *',
+      'cargo run *',
+      'pnpm exec *',
+    ])('flags multi-word interpreter subcommand %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
+    it.each([
+      '/usr/bin/python3 *',
+      '/opt/homebrew/bin/node *',
+      '/bin/bash -c *',
+    ])('flags absolute-path interpreter form %s', (s) => {
+      expect(isDangerousBashRule(bashRule(s))).toBe(true);
+    });
+
+    it('flags Monitor allow rules with the same interpreter logic', () => {
+      // Monitor is a long-running shell-command runner; broad allow rules
+      // on it bypass the AUTO classifier just like Bash(...) ones.
+      expect(
+        isDangerousBashRule({
+          raw: 'Monitor',
+          toolName: ToolNames.MONITOR,
+        }),
+      ).toBe(true);
+      expect(
+        isDangerousBashRule({
+          raw: 'Monitor(*)',
+          toolName: ToolNames.MONITOR,
+          specifier: '*',
+        }),
+      ).toBe(true);
+      expect(
+        isDangerousBashRule({
+          raw: 'Monitor(python*)',
+          toolName: ToolNames.MONITOR,
+          specifier: 'python*',
+        }),
+      ).toBe(true);
+      // Literal concrete Monitor command is NOT flagged.
+      expect(
+        isDangerousBashRule({
+          raw: 'Monitor(tail -f log)',
+          toolName: ToolNames.MONITOR,
+          specifier: 'tail -f log',
+        }),
+      ).toBe(false);
+    });
+  });
 });
 
 describe('isDangerousAgentRule', () => {

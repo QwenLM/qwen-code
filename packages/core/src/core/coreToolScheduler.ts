@@ -1335,7 +1335,20 @@ export class CoreToolScheduler {
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
 
           if (finalPermission === 'allow') {
-            // Auto-approve: tool is inherently safe (read-only) or PM allows
+            // Auto-approve: tool is inherently safe (read-only) or PM allows.
+            // In AUTO mode, also reset denialTracking so an L4 allow-rule
+            // match counts as a successful call and clears any in-flight
+            // block streak. Without this, a session sitting at
+            // consecutiveBlock=3 would keep auto-approving the allow-ruled
+            // call (correct), but the very next call that needed the
+            // classifier would still see shouldFallback==='true' and force
+            // manual approval — confusing UX given the previous allow-rule
+            // call just worked silently.
+            if (approvalMode === ApprovalMode.AUTO) {
+              this.config.setAutoModeDenialState(
+                recordAllow(this.config.getAutoModeDenialState()),
+              );
+            }
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,

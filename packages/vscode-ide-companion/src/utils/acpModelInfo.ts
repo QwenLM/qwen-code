@@ -118,6 +118,7 @@ const APPROVAL_MODE_VALUES: ApprovalModeValue[] = [
   'plan',
   'default',
   'auto-edit',
+  'auto',
   'yolo',
 ];
 

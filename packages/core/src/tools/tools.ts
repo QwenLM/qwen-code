@@ -243,14 +243,22 @@ export abstract class DeclarativeTool<
    *
    * Returns:
    *   - object: projected params to send to the classifier
-   *   - empty string: signals "no security relevance" — caller may skip
-   *     this tool entirely in the classifier transcript
-   *   - undefined (default): fall back to raw params
+   *   - empty string: signals "no security relevance" — the classifier
+   *     transcript will record only the tool name
+   *   - undefined: fall back to raw params (only safe when the tool is
+   *     known to have no sensitive params)
+   *
+   * Default is the empty-string sentinel — fail-closed: a third-party
+   * MCP tool (or any tool that has not opted in) does not leak its raw
+   * parameters (potentially containing API keys, tokens, file contents)
+   * into the classifier LLM prompt. Tools that want their args inspected
+   * by the classifier for safety judgement should override this and
+   * return an object with only the security-relevant fields.
    */
   toAutoClassifierInput(
     _params: TParams,
   ): Record<string, unknown> | string | undefined {
-    return undefined;
+    return '';
   }
 
   /**
