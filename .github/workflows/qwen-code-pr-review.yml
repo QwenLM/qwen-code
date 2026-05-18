@@ -260,12 +260,22 @@ jobs:
           # base content enters the PR (Update branch, rebase onto newer
           # base, or base retarget), which is exactly the boundary we
           # want to invalidate the cache on.
-          merge_base_sha="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
-            --jq '.merge_base_commit.sha // ""')"
-          if [ -z "$merge_base_sha" ]; then
-            echo "::error::Could not resolve PR merge base via gh api compare."
-            exit 1
+          #
+          # Skip merge-base for cross-repository PRs: the compare endpoint
+          # can fail to resolve fork SHAs in the base repo's namespace,
+          # which would abort this step (set -euo pipefail) before the
+          # is_cross_repository guard below has a chance to post the
+          # fork-rejection comment. Forks never reach the cache restore /
+          # save steps anyway because should_review is set to false.
+          merge_base_sha=""
+          if [ "$is_cross_repository" != "true" ]; then
+            merge_base_sha="$(gh api \
+              "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
+              --jq '.merge_base_commit.sha // ""')"
+            if [ -z "$merge_base_sha" ]; then
+              echo "::error::Could not resolve PR merge base via gh api compare."
+              exit 1
+            fi
           fi
 
           echo "changed_lines=$changed_lines" >> "$GITHUB_OUTPUT"
@@ -276,7 +286,11 @@ jobs:
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
           echo "Review branch: $base_ref ($base_sha) <- $head_owner/$head_repo:$head_ref ($head_sha)"
-          echo "Review merge base: $merge_base_sha"
+          if [ -n "$merge_base_sha" ]; then
+            echo "Review merge base: $merge_base_sha"
+          else
+            echo "Review merge base: (skipped for cross-repository PR)"
+          fi
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
 
           if [ "$is_cross_repository" = "true" ]; then
