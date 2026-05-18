@@ -107,6 +107,8 @@ function clearDaemonTuiReducerState(state: DaemonTuiReducerState): void {
 const MAX_TOOL_CALLS = 128;
 const MAX_PLAN_ENTRIES = 200;
 const MAX_DISPLAY_TEXT_LENGTH = 20_000;
+const MAX_UNKNOWN_EVENT_TYPES = 100;
+const MAX_UNSUPPORTED_PROTOCOL_VERSIONS = 20;
 const STOP_TIMEOUT_MS = 5_000;
 const ESC = String.fromCharCode(27);
 const OSC_RE = new RegExp(`${ESC}\\][\\s\\S]*?(?:\\x07|${ESC}\\\\)`, 'g');
@@ -117,6 +119,7 @@ const C1_CSI_RE = /\x9b[0-?]*[ -/]*[@-~]/g;
 const C1_STRING_RE = /[\x90\x98\x9e\x9f][\s\S]*?\x9c/g;
 const BIDI_CONTROL_RE = /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 const UNKNOWN_EVENT_TYPES = new Set<string>();
+const UNSUPPORTED_PROTOCOL_VERSIONS = new Set<string>();
 const debugLogger = createDebugLogger('DAEMON_TUI_ADAPTER');
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -419,9 +422,26 @@ function sanitizePermissionRequest(
   };
 }
 
+function sanitizePermissionOutcome(value: unknown): unknown | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const outcome = value['outcome'];
+  if (outcome === 'cancelled') {
+    return { outcome };
+  }
+  if (outcome === 'selected' && typeof value['optionId'] === 'string') {
+    return { outcome, optionId: sanitizeDisplayText(value['optionId']) };
+  }
+  return undefined;
+}
+
 function warnUnknownEventTypeOnce(event: DaemonTuiEvent): void {
   const eventType = sanitizeDisplayText(event.type);
   if (UNKNOWN_EVENT_TYPES.has(eventType)) {
+    return;
+  }
+  if (UNKNOWN_EVENT_TYPES.size >= MAX_UNKNOWN_EVENT_TYPES) {
     return;
   }
   UNKNOWN_EVENT_TYPES.add(eventType);
@@ -429,6 +449,18 @@ function warnUnknownEventTypeOnce(event: DaemonTuiEvent): void {
     eventType,
     eventId: event.id,
   });
+}
+
+function shouldReportUnsupportedProtocolVersion(version: unknown): boolean {
+  const sanitizedVersion = sanitizeDisplayText(String(version));
+  if (UNSUPPORTED_PROTOCOL_VERSIONS.has(sanitizedVersion)) {
+    return false;
+  }
+  if (UNSUPPORTED_PROTOCOL_VERSIONS.size >= MAX_UNSUPPORTED_PROTOCOL_VERSIONS) {
+    return false;
+  }
+  UNSUPPORTED_PROTOCOL_VERSIONS.add(sanitizedVersion);
+  return true;
 }
 
 export function reduceDaemonEventToTuiUpdates(
@@ -516,11 +548,12 @@ export function reduceDaemonEventToTuiUpdates(
       ) {
         return [];
       }
+      const outcome = sanitizePermissionOutcome(event.data['outcome']);
       return [
         {
           type: 'permission_resolved',
           requestId: event.data['requestId'],
-          outcome: event.data['outcome'],
+          outcome,
           daemonEventId: event.id,
         },
       ];
@@ -657,7 +690,7 @@ export class DaemonTuiAdapter {
         ? { ...result, stopReason: sanitizeReason(result.stopReason) }
         : result;
     } catch (error) {
-      this.reportDaemonFailure(error);
+      this.reportDaemonFailure(error, { disconnect: true });
       throw createSanitizedDaemonError(error);
     } finally {
       this.busy = false;
@@ -737,7 +770,17 @@ export class DaemonTuiAdapter {
         if (signal.aborted) {
           break;
         }
+        if (event.id !== undefined) {
+          this.lastSeenEventId = event.id;
+        }
         if ((event as { v?: unknown }).v !== 1) {
+          if (
+            !shouldReportUnsupportedProtocolVersion(
+              (event as { v?: unknown }).v,
+            )
+          ) {
+            continue;
+          }
           this.emit({
             type: 'history',
             item: {
@@ -749,9 +792,6 @@ export class DaemonTuiAdapter {
             daemonEventId: event.id,
           });
           continue;
-        }
-        if (event.id !== undefined) {
-          this.lastSeenEventId = event.id;
         }
         for (const update of reduceDaemonEventToTuiUpdates(
           event,
@@ -791,15 +831,23 @@ export class DaemonTuiAdapter {
     }
   }
 
-  private reportDaemonFailure(error: unknown): void {
-    if (this.lifecycle === 'running') {
-      this.lifecycle = 'stopping';
-      this.eventController?.abort();
-    }
+  private reportDaemonFailure(
+    error: unknown,
+    options: { disconnect?: boolean } = {},
+  ): void {
     const message = sanitizeReason(
       error instanceof Error ? error.message : String(error),
     );
-    this.emit({ type: 'disconnected', reason: message });
+    if (options.disconnect && this.lifecycle === 'running') {
+      this.lifecycle = 'stopping';
+      this.eventController?.abort();
+      this.emit({ type: 'disconnected', reason: message });
+      return;
+    }
+    this.emit({
+      type: 'history',
+      item: { type: 'error', text: `Daemon RPC failed: ${message}` },
+    });
   }
 
   private emit(update: DaemonTuiUpdate): void {
@@ -818,22 +866,32 @@ export class DaemonTuiAdapter {
 
   private async waitForPumpToDrain(pump: Promise<void>): Promise<boolean> {
     let timedOut = false;
-    await Promise.race([
-      pump.then(
-        () => undefined,
-        () => undefined,
-      ),
-      new Promise<void>((resolve) => {
-        setTimeout(() => {
-          timedOut = true;
-          resolve();
-        }, STOP_TIMEOUT_MS);
-      }),
-    ]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        pump.then(
+          () => undefined,
+          () => undefined,
+        ),
+        new Promise<void>((resolve) => {
+          timeout = setTimeout(() => {
+            timedOut = true;
+            resolve();
+          }, STOP_TIMEOUT_MS);
+          timeout.unref?.();
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) {
+        clearTimeout(timeout);
+      }
+    }
     return !timedOut;
   }
 
   private forceIdleAfterPumpTimeout(): void {
+    const staleController = this.eventController;
+    staleController?.abort();
     this.pumpGeneration += 1;
     const shouldRestart = this.restartAfterStop;
     this.restartAfterStop = false;

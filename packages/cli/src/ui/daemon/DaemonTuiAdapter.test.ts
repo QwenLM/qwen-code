@@ -548,7 +548,7 @@ describe('reduceDaemonEventToTuiUpdates', () => {
         type: 'permission_resolved',
         data: {
           requestId: 'req-1',
-          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          outcome: { outcome: 'selected', optionId: '\x1b[31mproceed_once' },
         },
       }),
     ).toEqual([
@@ -563,6 +563,22 @@ describe('reduceDaemonEventToTuiUpdates', () => {
     expect(
       reduceDaemonEventToTuiUpdates({
         id: 8,
+        v: 1,
+        type: 'permission_resolved',
+        data: { requestId: 'req-1', outcome: { outcome: 'selected' } },
+      }),
+    ).toEqual([
+      {
+        type: 'permission_resolved',
+        requestId: 'req-1',
+        outcome: undefined,
+        daemonEventId: 8,
+      },
+    ]);
+
+    expect(
+      reduceDaemonEventToTuiUpdates({
+        id: 9,
         v: 1,
         type: 'permission_request',
         data: { requestId: 'req-bad' },
@@ -672,6 +688,29 @@ describe('DaemonTuiAdapter', () => {
     throwingAdapter.start();
     throwingEvents.close();
     await expect(throwingAdapter.stop()).resolves.toBeUndefined();
+  });
+
+  it('reports unsupported daemon protocol versions once and advances replay state', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const onUpdate = vi.fn();
+    const adapter = new DaemonTuiAdapter({ session, onUpdate });
+
+    adapter.start();
+    events.push({ id: 41, v: 2 as 1, type: 'future_event', data: {} });
+    events.push({ id: 42, v: 2 as 1, type: 'future_event', data: {} });
+
+    await waitFor(() => expect(adapter.lastEventId).toBe(42));
+    const unsupportedUpdates = onUpdate.mock.calls.filter(
+      ([update]) =>
+        update.type === 'history' &&
+        update.item.type === 'error' &&
+        update.item.text.includes('Unsupported daemon protocol version'),
+    );
+    expect(unsupportedUpdates).toHaveLength(1);
+
+    events.close();
+    await adapter.stop();
   });
 
   it('forwards prompt, cancel, model switch, and permission votes', async () => {
@@ -860,7 +899,7 @@ describe('DaemonTuiAdapter', () => {
     await adapter.stop();
   });
 
-  it('reports daemon control failures from cancel/model/permission calls', async () => {
+  it('reports daemon control failures without dropping the event stream', async () => {
     const cancelEvents = new EventQueue();
     const cancelSession = createFakeSession(cancelEvents);
     const cancelUpdates = vi.fn();
@@ -874,9 +913,12 @@ describe('DaemonTuiAdapter', () => {
     );
     await expect(cancelAdapter.cancel()).rejects.toThrow('cancel down');
     expect(cancelUpdates).toHaveBeenCalledWith({
-      type: 'disconnected',
-      reason: 'cancel down',
+      type: 'history',
+      item: { type: 'error', text: 'Daemon RPC failed: cancel down' },
     });
+    expect(cancelUpdates).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'disconnected' }),
+    );
 
     const modelEvents = new EventQueue();
     const modelSession = createFakeSession(modelEvents);
@@ -891,9 +933,12 @@ describe('DaemonTuiAdapter', () => {
       'model down',
     );
     expect(modelUpdates).toHaveBeenCalledWith({
-      type: 'disconnected',
-      reason: 'model down',
+      type: 'history',
+      item: { type: 'error', text: 'Daemon RPC failed: model down' },
     });
+    expect(modelUpdates).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'disconnected' }),
+    );
 
     const voteEvents = new EventQueue();
     const voteSession = createFakeSession(voteEvents);
@@ -910,9 +955,12 @@ describe('DaemonTuiAdapter', () => {
       voteAdapter.approvePermission('req-1', 'proceed_once'),
     ).rejects.toThrow('vote down');
     expect(voteUpdates).toHaveBeenCalledWith({
-      type: 'disconnected',
-      reason: 'vote down',
+      type: 'history',
+      item: { type: 'error', text: 'Daemon RPC failed: vote down' },
     });
+    expect(voteUpdates).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'disconnected' }),
+    );
 
     cancelEvents.close();
     modelEvents.close();
