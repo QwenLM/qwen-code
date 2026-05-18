@@ -70,6 +70,10 @@ export interface TurnFileDiff {
    *  hunk generation was skipped to keep dialog memory bounded. The stats
    *  remain a best-effort line-count delta. */
   oversized: boolean;
+  /** True when either endpoint's content contains NUL bytes (the standard
+   *  binary sniff). Hunks are empty in that case — rendering them as text
+   *  would corrupt the terminal or freeze the renderer. */
+  isBinary: boolean;
 }
 
 export interface TurnDiff {
@@ -85,6 +89,14 @@ export interface TurnDiff {
 
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_DIR = 'file-history';
+/** Per-turn read-fanout cap. Each candidate file may read up to two backups,
+ *  so 500 files ≈ 1000 concurrent opens — safely under the typical 4096 fd
+ *  ceiling and well below `ulimit -n` defaults on Linux/macOS. */
+const MAX_TURN_DIFF_FILES = 500;
+/** How many bytes to scan for NUL when sniffing binary content. Matches
+ *  git's heuristic and is enough to catch the common cases (PNG/JPEG/PDF
+ *  headers, ELF/Mach-O magic) without re-scanning the entire file. */
+const BINARY_SNIFF_BYTES = 8 * 1024;
 
 function isENOENT(e: unknown): boolean {
   return (
@@ -328,6 +340,20 @@ async function readEndpointContent(
   );
   if (text === null) return 'unreadable';
   return { content: text, exists: true };
+}
+
+/**
+ * Cheap binary sniff: scan the first `BINARY_SNIFF_BYTES` characters for
+ * a NUL byte. Matches git's heuristic and keeps the dialog from feeding
+ * raw binary to the diff library / terminal renderer (which can produce
+ * garbage or freeze on certain payloads).
+ */
+function looksBinary(content: string): boolean {
+  const limit = Math.min(content.length, BINARY_SNIFF_BYTES);
+  for (let i = 0; i < limit; i++) {
+    if (content.charCodeAt(i) === 0) return true;
+  }
+  return false;
 }
 
 function countLines(text: string): number {
@@ -671,19 +697,25 @@ export class FileHistoryService {
         ? this.state.snapshots[targetIdx + 1]
         : undefined;
 
-    const candidatePaths = new Set<string>(
-      Object.keys(target.trackedFileBackups),
-    );
-    if (nextSnapshot) {
-      for (const p of Object.keys(nextSnapshot.trackedFileBackups)) {
-        candidatePaths.add(p);
-      }
-    } else {
-      for (const p of this.state.trackedFiles) candidatePaths.add(p);
-    }
+    // Candidates are restricted to files that target's snapshot actually
+    // tracked. A file that first shows up in the *next* snapshot's backups
+    // (because trackEdit added it during turn N+1) didn't change during
+    // turn N — including it would either fast-path to no-op or, worse,
+    // produce a phantom "new file" hunk attributed to the wrong turn.
+    // `trackEdit` mutates `mostRecent` in place, so by the time we read
+    // target.trackedFileBackups it already contains every file touched
+    // during target's turn, including newly created or deleted ones.
+    const candidatePaths = Object.keys(target.trackedFileBackups);
 
+    // Cap concurrent file reads. Each candidate reads up to two backups,
+    // so a 250-file turn would issue ~500 simultaneous opens — enough to
+    // hit ulimit -n on common CI configurations. The cap is bounded by
+    // the same constant the git path uses (MAX_FILES_FOR_DETAILS = 500
+    // files total), with two reads each → 1000 open()s worst case, still
+    // comfortably below the typical 4096 fd ceiling.
+    const cappedPaths = candidatePaths.slice(0, MAX_TURN_DIFF_FILES);
     const results = await Promise.all(
-      Array.from(candidatePaths, (trackingPath) =>
+      cappedPaths.map((trackingPath) =>
         this.computeTurnFileDiff(trackingPath, target, nextSnapshot),
       ),
     );
@@ -734,10 +766,18 @@ export class FileHistoryService {
     // we know without reading anything that the file did not change during
     // this turn. `makeSnapshot` reuses unchanged backups verbatim, so this
     // skips the bulk of files in any long-running session.
+    //
+    // Guard: require `beforeBackup !== undefined`. With the current
+    // candidatePaths construction (keys(target.trackedFileBackups) only)
+    // both endpoints can never both be undefined for a real input, but
+    // future refactors that broaden the candidate set should not let an
+    // `undefined === undefined` match silently swallow a newly created
+    // file as "unchanged".
     if (
       !afterFromWorktree &&
-      beforeBackup?.backupFileName === afterBackup?.backupFileName &&
-      beforeBackup?.version === afterBackup?.version
+      beforeBackup !== undefined &&
+      beforeBackup.backupFileName === afterBackup?.backupFileName &&
+      beforeBackup.version === afterBackup?.version
     ) {
       return null;
     }
@@ -766,6 +806,25 @@ export class FileHistoryService {
       return null;
     }
 
+    // Binary sniff: scanning either endpoint catches changes against a
+    // text→binary or binary→text flip. Feeding NUL-laced strings into
+    // `structuredPatch` and then through `DiffRenderer` can produce
+    // garbage output or hang the terminal, so surface them as a binary
+    // row with no hunks (mirrors the git path's binary handling).
+    const isBinary = looksBinary(beforeContent) || looksBinary(afterContent);
+    if (isBinary) {
+      return {
+        filePath,
+        hunks: [],
+        isNewFile: !beforeExists && afterExists,
+        isDeleted: beforeExists && !afterExists,
+        linesAdded: 0,
+        linesRemoved: 0,
+        oversized: false,
+        isBinary: true,
+      };
+    }
+
     // Cap the patch input to keep dialog memory bounded: a single 50MB
     // generated file should not allocate hundreds of MB of hunk strings
     // when `/diff` opens. Report the file with stats but no hunks; the
@@ -788,6 +847,7 @@ export class FileHistoryService {
         linesAdded: Math.max(0, afterLines - beforeLines),
         linesRemoved: Math.max(0, beforeLines - afterLines),
         oversized: true,
+        isBinary: false,
       };
     }
 
@@ -822,6 +882,7 @@ export class FileHistoryService {
       linesAdded,
       linesRemoved,
       oversized: false,
+      isBinary: false,
     };
   }
 

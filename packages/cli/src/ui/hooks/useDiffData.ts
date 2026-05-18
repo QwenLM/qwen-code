@@ -20,13 +20,22 @@ export interface CurrentDiffData {
 }
 
 /**
- * Loads "working tree vs HEAD" stats and hunks once when the hook mounts.
- * Mirrors the data shape `fetchGitDiff` already returns so renderers can be
+ * Loads "working tree vs HEAD" stats and hunks **once at mount**. Mirrors
+ * the data shape `fetchGitDiff` already returns so renderers can be
  * driven from a single contract — see `DiffDialog`.
  *
- * Failures are swallowed and surfaced as the empty result; the dialog
- * displays an explanatory empty-state instead of crashing, matching how
- * `/diff` already behaves in non-interactive mode (`diffCommand.ts`).
+ * Snapshot semantics: the dialog's "Current" tab reflects the state at
+ * the moment `/diff` was opened, not the live worktree. Re-fetching on
+ * every render would flicker the UI as users navigate between sources;
+ * users who want a fresh view can close and reopen `/diff`. The
+ * `cwd`-only dependency reinforces this — typing in another shell pane
+ * does not retrigger the fetch.
+ *
+ * Failures are swallowed and surfaced as the empty result (the dialog
+ * displays an explanatory empty-state instead of crashing), matching
+ * how non-interactive `/diff` already behaves. We log them at the debug
+ * level so an operator can still trace permission flips, corrupt index
+ * files, or other git failures.
  */
 export function useDiffData(cwd: string | undefined): CurrentDiffData {
   const [result, setResult] = useState<GitDiffResult | null>(null);
@@ -43,8 +52,16 @@ export function useDiffData(cwd: string | undefined): CurrentDiffData {
     }
     setLoading(true);
     Promise.all([
-      fetchGitDiff(cwd).catch(() => null),
-      fetchGitDiffHunks(cwd).catch(() => new Map<string, Hunk[]>()),
+      fetchGitDiff(cwd).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.debug('[DiffDialog] fetchGitDiff failed:', err);
+        return null;
+      }),
+      fetchGitDiffHunks(cwd).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.debug('[DiffDialog] fetchGitDiffHunks failed:', err);
+        return new Map<string, Hunk[]>();
+      }),
     ]).then(([statsRes, hunksRes]) => {
       if (cancelled) return;
       setResult(statsRes);

@@ -55,10 +55,16 @@ export function useTurnDiffs(
 
     Promise.all(
       userTurns.map(async (item, idx) => {
+        // Early-exit so a quick close → reopen doesn't keep paying for
+        // disk reads from the previous effect. The outer cancellation
+        // guard alone would still suppress setState, but the I/O would
+        // have already completed.
+        if (cancelled) return null;
         const promptId = (item as HistoryItemUser).promptId;
         if (!promptId) return null;
         try {
           const diff = await fileHistoryService.getTurnDiff(promptId);
+          if (cancelled) return null;
           if (!diff || diff.files.length === 0) return null;
           return {
             turnIndex: idx + 1,
@@ -72,8 +78,8 @@ export function useTurnDiffs(
     ).then((entries) => {
       if (cancelled) return;
       const usable = entries.filter((e): e is TurnDiffEntry => e !== null);
-      // Most recent first — claude-code does the same and it matches the
-      // mental model: hitting `/diff` is almost always "what just changed".
+      // Most recent first — matches the mental model: hitting `/diff`
+      // is almost always "what just changed".
       usable.reverse();
       setTurns(usable);
       setLoading(false);

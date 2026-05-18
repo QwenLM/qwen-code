@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import type { Hunk } from 'diff';
 import type {
@@ -89,24 +89,26 @@ export function DiffDialog({
   const [fileIndex, setFileIndex] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
 
-  // Keep selection sane as `sources` resolves asynchronously (turns load
-  // after the dialog mounts). Without this guard, an initial render with
-  // sources=[Current] followed by a turn append would silently shift the
-  // user off the source they were inspecting.
-  useEffect(() => {
-    if (sourceIndex >= sources.length) {
-      setSourceIndex(Math.max(0, sources.length - 1));
-    }
-  }, [sources, sourceIndex]);
+  // Derive clamped indexes inline rather than via a useEffect + setState.
+  // Effect-based clamping causes an extra render frame (the first paint
+  // uses the stale out-of-range index, the effect then schedules a
+  // setState that retriggers the render), which can look like a flicker
+  // in Ink. Computing on the fly keeps the dialog single-frame consistent
+  // when `sources` or `files` shrink between mount and resolve.
+  const safeSourceIndex = Math.min(
+    sourceIndex,
+    Math.max(0, sources.length - 1),
+  );
 
   // Reset file selection when switching sources — file lists between
-  // sources are unrelated.
+  // sources are unrelated. (This still needs an effect: it's mutating
+  // state rather than just clamping on read.)
   useEffect(() => {
     setFileIndex(0);
     setViewMode('list');
-  }, [sourceIndex]);
+  }, [safeSourceIndex]);
 
-  const activeSource = sources[sourceIndex];
+  const activeSource = sources[safeSourceIndex];
   const files = useMemo<UnifiedFile[]>(() => {
     if (!activeSource) return [];
     return activeSource.kind === 'current'
@@ -114,16 +116,8 @@ export function DiffDialog({
       : turnToFiles(activeSource.entry.diff);
   }, [activeSource, current.result]);
 
-  const selectedFile = files[fileIndex];
-
-  // Clamp file selection — file list shrinks when switching sources or
-  // when the underlying data updates (e.g. live tree changes during the
-  // dialog session, though uncommon).
-  useEffect(() => {
-    if (fileIndex >= files.length) {
-      setFileIndex(Math.max(0, files.length - 1));
-    }
-  }, [files, fileIndex]);
+  const safeFileIndex = Math.min(fileIndex, Math.max(0, files.length - 1));
+  const selectedFile = files[safeFileIndex];
 
   const stats = useMemo(() => {
     if (!activeSource) return { filesCount: 0, linesAdded: 0, linesRemoved: 0 };
@@ -143,56 +137,69 @@ export function DiffDialog({
     };
   }, [activeSource, current.result]);
 
-  const handleClose = useCallback(() => {
-    if (viewMode === 'detail') {
-      setViewMode('list');
+  // Refs let the keypress handler stay referentially stable across renders
+  // even though it reads varying state. Without this, every render would
+  // recreate the callback, churn `subscribe`/`unsubscribe` inside
+  // `useKeypress`, and add unnecessary work to every keystroke.
+  const viewModeRef = useRef(viewMode);
+  const sourcesLenRef = useRef(sources.length);
+  const filesLenRef = useRef(files.length);
+  const selectedFileRef = useRef(selectedFile);
+  const onCloseRef = useRef(onClose);
+  viewModeRef.current = viewMode;
+  sourcesLenRef.current = sources.length;
+  filesLenRef.current = files.length;
+  selectedFileRef.current = selectedFile;
+  onCloseRef.current = onClose;
+
+  const handleKeypress = useCallback((key: { name?: string }) => {
+    const name = key.name;
+    // Ctrl+C is intentionally NOT handled here — the AppContainer-level
+    // handler routes it through `closeAnyOpenDialog`, where this dialog
+    // is registered. Handling it both places would double-fire and could
+    // escalate to the exit prompt after the dialog already closed.
+    if (name === 'escape') {
+      if (viewModeRef.current === 'detail') {
+        setViewMode('list');
+      } else {
+        onCloseRef.current();
+      }
       return;
     }
-    onClose();
-  }, [viewMode, onClose]);
+    if (viewModeRef.current === 'detail') {
+      if (name === 'left' || name === 'backspace') {
+        setViewMode('list');
+      }
+      return;
+    }
+    if (name === 'left') {
+      setSourceIndex((i) => Math.max(0, i - 1));
+      return;
+    }
+    if (name === 'right') {
+      setSourceIndex((i) => Math.min(sourcesLenRef.current - 1, i + 1));
+      return;
+    }
+    if (name === 'up' || name === 'k') {
+      setFileIndex((i) => Math.max(0, i - 1));
+      return;
+    }
+    if (name === 'down' || name === 'j') {
+      setFileIndex((i) =>
+        Math.min(Math.max(0, filesLenRef.current - 1), i + 1),
+      );
+      return;
+    }
+    if (name === 'return') {
+      const sel = selectedFileRef.current;
+      if (sel && !sel.isBinary && !sel.oversized) {
+        setViewMode('detail');
+      }
+      return;
+    }
+  }, []);
 
-  useKeypress(
-    (key) => {
-      const name = key.name;
-      // Ctrl+C is intentionally NOT handled here — the AppContainer-level
-      // handler routes it through `closeAnyOpenDialog`, where this dialog
-      // is registered. Handling it both places would double-fire and
-      // could escalate to the exit prompt after the dialog already closed.
-      if (name === 'escape') {
-        handleClose();
-        return;
-      }
-      if (viewMode === 'detail') {
-        if (name === 'left' || name === 'backspace') {
-          setViewMode('list');
-        }
-        return;
-      }
-      if (name === 'left') {
-        setSourceIndex((i) => Math.max(0, i - 1));
-        return;
-      }
-      if (name === 'right') {
-        setSourceIndex((i) => Math.min(sources.length - 1, i + 1));
-        return;
-      }
-      if (name === 'up' || name === 'k') {
-        setFileIndex((i) => Math.max(0, i - 1));
-        return;
-      }
-      if (name === 'down' || name === 'j') {
-        setFileIndex((i) => Math.min(Math.max(0, files.length - 1), i + 1));
-        return;
-      }
-      if (name === 'return') {
-        if (selectedFile && !selectedFile.isBinary) {
-          setViewMode('detail');
-        }
-        return;
-      }
-    },
-    { isActive: true },
-  );
+  useKeypress(handleKeypress, { isActive: true });
 
   const { columns, rows } = useTerminalSize();
   const dialogWidth = Math.min(columns - 4, 110);
@@ -212,6 +219,15 @@ export function DiffDialog({
   const loadingNow =
     (activeSource?.kind === 'current' && current.loading) ||
     (activeSource?.kind === 'turn' && turnsLoading);
+
+  // For "Current" source, `stats.filesCount` may exceed `files.length`
+  // when `fetchGitDiff` capped `perFileStats` at MAX_FILES (=50). Surface
+  // the gap so users know the list isn't exhaustive — otherwise capped
+  // entries look indistinguishable from "everything fit".
+  const hiddenFileCount =
+    activeSource?.kind === 'current'
+      ? Math.max(0, stats.filesCount - files.length)
+      : 0;
 
   return (
     <Box
@@ -239,7 +255,7 @@ export function DiffDialog({
         </Text>
       </Box>
 
-      <SourceSwitcher sources={sources} sourceIndex={sourceIndex} />
+      <SourceSwitcher sources={sources} sourceIndex={safeSourceIndex} />
 
       <Box marginTop={1} flexDirection="column">
         {loadingNow ? (
@@ -253,11 +269,22 @@ export function DiffDialog({
             )}
           </Text>
         ) : viewMode === 'list' ? (
-          <FileList
-            files={files}
-            selectedIndex={fileIndex}
-            contentWidth={dialogWidth - 4}
-          />
+          <>
+            <FileList
+              files={files}
+              selectedIndex={safeFileIndex}
+              contentWidth={dialogWidth - 4}
+            />
+            {hiddenFileCount > 0 ? (
+              <Text color={theme.text.secondary}>
+                {' '}
+                {t('…and {{n}} more (showing first {{shown}})', {
+                  n: String(hiddenFileCount),
+                  shown: String(files.length),
+                })}
+              </Text>
+            ) : null}
+          </>
         ) : selectedFile ? (
           <FileDetail
             file={selectedFile}
@@ -375,14 +402,18 @@ function FileRow({
   maxPathChars: number;
 }): React.JSX.Element {
   const pointer = selected ? '› ' : '  ';
-  const tag = file.oversized
-    ? t(' (oversized — diff omitted)')
-    : file.isNewFile
-      ? t(' (new)')
-      : file.isDeleted
-        ? t(' (deleted)')
-        : file.isUntracked
-          ? t(' (untracked)')
+  // Tag priority: mutually exclusive states first (a file can't be both
+  // deleted and untracked), then capability flags. `isBinary` is omitted
+  // here because the stats column already renders an italic "binary"
+  // marker — duplicating it as a tag would just clutter the row.
+  const tag = file.isDeleted
+    ? t(' (deleted)')
+    : file.isUntracked
+      ? t(' (untracked)')
+      : file.oversized
+        ? t(' (oversized — diff omitted)')
+        : file.isNewFile
+          ? t(' (new)')
           : file.truncated
             ? t(' (truncated)')
             : '';
@@ -532,7 +563,12 @@ function perFileToUnified(path: string, s: PerFileStats): UnifiedFile {
     isBinary: !!s.isBinary,
     isUntracked: !!s.isUntracked,
     isDeleted: !!s.isDeleted,
-    isNewFile: !!s.isUntracked,
+    // `isNewFile` means "added in this turn" (snapshot before-state empty,
+    // after-state populated). Git's `untracked` is a different concept
+    // (never in HEAD/index) and is tagged separately — conflating them
+    // would mislead users about what `/rewind` can recover, since
+    // untracked files are not under file-history protection.
+    isNewFile: false,
     truncated: !!s.truncated || (!s.isBinary && total > MAX_LINES_PER_FILE),
     oversized: false,
   };
@@ -548,7 +584,10 @@ function turnFileToUnified(f: TurnFileDiff): UnifiedFile {
     displayPath: sanitizeFilenameForDisplay(f.filePath),
     added: f.linesAdded,
     removed: f.linesRemoved,
-    isBinary: false,
+    // Binary detection lives in core (`looksBinary` NUL-byte sniff): the
+    // snapshot is text content, so the renderer would otherwise feed
+    // garbage to DiffRenderer for a turn that edited an image.
+    isBinary: f.isBinary,
     isUntracked: false,
     isDeleted: f.isDeleted,
     isNewFile: f.isNewFile,
@@ -567,6 +606,10 @@ function hunksToUnifiedDiff(
     lines: string[];
   }>,
 ): string {
+  // A header-only string isn't a valid unified diff and would confuse
+  // DiffRenderer (which expects at least one `@@` block past `---/+++`).
+  // The FileDetail empty-text check then catches this as "no hunks".
+  if (hunks.length === 0) return '';
   // DiffRenderer expects unified-diff text starting with the file header so
   // its `--- /+++` skip works. We hand it a minimal envelope plus the hunk
   // headers and lines verbatim. Sanitize the embedded path to defang any

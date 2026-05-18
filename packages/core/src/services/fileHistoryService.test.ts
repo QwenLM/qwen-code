@@ -761,6 +761,80 @@ describe('FileHistoryService', () => {
     // huge file in history could blow up TUI memory when /diff opens.
     // Oversized rows now skip hunk construction but still surface in the
     // file list with best-effort line-count stats.
+    it('detects files deleted during a turn', async () => {
+      const file = join(projectDir, 'doomed.txt');
+      await writeFile(file, 'line a\nline b\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Simulate the tool deleting the file mid-turn.
+      await rm(file);
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === file);
+      expect(entry).toBeDefined();
+      expect(entry!.isDeleted).toBe(true);
+      expect(entry!.isNewFile).toBe(false);
+      expect(entry!.linesRemoved).toBeGreaterThan(0);
+    });
+
+    it('flags binary content with isBinary and skips hunk generation', async () => {
+      const file = join(projectDir, 'image.bin');
+      // PNG-ish header — NUL bytes within the sniff window trip the
+      // looksBinary heuristic.
+      await writeFile(file, '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Append more binary bytes so before !== after.
+      await writeFile(
+        file,
+        '\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00',
+      );
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === file);
+      expect(entry).toBeDefined();
+      expect(entry!.isBinary).toBe(true);
+      expect(entry!.hunks).toEqual([]);
+    });
+
+    // Files that target's snapshot didn't capture (e.g. they were first
+    // tracked in a later turn) must not show up in target's diff —
+    // otherwise we'd attribute a newer turn's edits to an earlier one.
+    it('does not attribute later-tracked files to earlier turns', async () => {
+      const fileA = join(projectDir, 'a.txt');
+      const fileB = join(projectDir, 'b.txt');
+      await writeFile(fileA, 'A1');
+
+      // Turn 1 only edits file A.
+      await service.makeSnapshot('p1');
+      await service.trackEdit(fileA);
+      await writeFile(fileA, 'A2');
+
+      // Turn 2 begins. makeSnapshot captures A's new state. File B does
+      // not exist yet and isn't tracked.
+      await service.makeSnapshot('p2');
+
+      // Turn 2 creates file B for the first time.
+      await service.trackEdit(fileB);
+      await writeFile(fileB, 'B1');
+
+      // Turn 3 begins. Now B is in trackedFiles → snapshot[2] captures it.
+      await service.makeSnapshot('p3');
+
+      // Turn 1's diff must reference only A, never B.
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const paths = turn1!.files.map((f) => f.filePath);
+      expect(paths).toContain(fileA);
+      expect(paths).not.toContain(fileB);
+    });
+
     it('flags oversized files instead of allocating large hunks', async () => {
       const file = join(projectDir, 'big.txt');
       // 1.5 MB > MAX_DIFF_SIZE_BYTES (1 MB)
