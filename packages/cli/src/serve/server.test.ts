@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { realpathSync } from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import request from 'supertest';
 import { createServeApp } from './server.js';
@@ -20,6 +23,7 @@ import {
   InvalidPermissionOptionError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceMismatchError,
   type BridgeSession,
   type BridgeSessionSummary,
   type BridgeSpawnRequest,
@@ -37,6 +41,16 @@ const baseOpts: ServeOptions = {
   port: 4170,
   mode: 'http-bridge',
 };
+
+// Workspace fixtures must round-trip through `path.resolve` so the
+// expected values match the canonicalized form the route produces on
+// every platform. On Windows `path.resolve('/work/bound')` returns
+// `D:\work\bound` (drive-relative absolute), so hardcoding `/work/bound`
+// as a literal makes the test fail on Windows CI even though the code
+// is correct. Mirror the pattern used by httpAcpBridge.test.ts (WS_A /
+// WS_B).
+const WS_BOUND = path.resolve(path.sep, 'work', 'bound');
+const WS_DIFFERENT = path.resolve(path.sep, 'work', 'different');
 
 interface FakeBridgeOpts {
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
@@ -199,6 +213,30 @@ describe('createServeApp', () => {
       expect(res.body.features).toEqual([...STAGE1_FEATURES]);
       expect(res.body.modelServices).toEqual([]);
     });
+
+    it('reports the bound workspace (#3803 §02)', async () => {
+      const app = createServeApp({ ...baseOpts, workspace: WS_BOUND });
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.workspaceCwd).toBe(WS_BOUND);
+    });
+
+    it('falls back to process.cwd() when --workspace is omitted', async () => {
+      const app = createServeApp(baseOpts);
+      const res = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      // `createServeApp` runs `canonicalizeWorkspace` on
+      // `process.cwd()`, which collapses symlinks via
+      // `realpathSync.native`. On macOS the default tmpdir is
+      // `/var/folders/...` whose canonical form is
+      // `/private/var/folders/...`; a raw `process.cwd()` assertion
+      // would diverge there. Use the same realpath the route does.
+      expect(res.body.workspaceCwd).toBe(realpathSync.native(process.cwd()));
+    });
   });
 
   describe('host allowlist (loopback bind)', () => {
@@ -277,26 +315,146 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session', () => {
-    it('400 when cwd is missing', async () => {
+    it('200 when cwd is omitted (falls back to bound workspace, #3803 §02)', async () => {
+      // 1 daemon = 1 workspace: the daemon binds to
+      // `opts.workspace ?? process.cwd()` at boot, so clients may
+      // omit `cwd` and the route falls back to the bound path.
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({});
-      expect(res.status).toBe(400);
-      expect(bridge.calls).toHaveLength(0);
+      expect(res.status).toBe(200);
+      expect(bridge.calls[0]?.workspaceCwd).toBe(WS_BOUND);
     });
 
     it('400 when cwd is relative', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
       const res = await request(app)
         .post('/session')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ cwd: 'relative/path' });
       expect(res.status).toBe(400);
       expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('400 when cwd is present but not a string (#3803 §02 — distinguishes omitted vs malformed)', async () => {
+      // Three non-string shapes a buggy client / orchestrator could
+      // serialize for the `cwd` field: `null`, a number, an object.
+      // Pre-fix the route treated all three the same as "omitted" and
+      // fell back to `boundWorkspace`, silently masking client bugs.
+      // Now the route distinguishes "absent" (legitimate §02 fallback)
+      // from "present but malformed" (client-side bug → 400 + actionable
+      // error message). Empty string still falls through to the
+      // `path.isAbsolute` check (and 400s there with the
+      // "absolute path when provided" message).
+      const malformed: unknown[] = [null, 123, { foo: 'bar' }, []];
+      for (const cwd of malformed) {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toMatch(/must be a string absolute path/);
+        // Bridge must NOT be touched — silent fallback regressions
+        // would otherwise let the malformed input hit `spawnOrAttach`.
+        expect(bridge.calls).toHaveLength(0);
+      }
+    });
+
+    it('400 when cwd is the empty string', async () => {
+      // Empty string is technically a string so the type-check above
+      // lets it through; `path.isAbsolute('')` is false so the
+      // "must be an absolute path when provided" branch catches it.
+      // Important: the `'cwd' in body` presence test means an empty
+      // string is NOT treated as omitted (which would fall back to
+      // boundWorkspace) — empty-string is the strongest "client
+      // explicitly passed nothing useful" signal we have.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: '' });
+      expect(res.status).toBe(400);
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('400 when cwd exceeds MAX_WORKSPACE_PATH_LENGTH (memory amplification guard)', async () => {
+      // Real filesystem paths fit well under PATH_MAX (4096 on Linux).
+      // A multi-MB `cwd` is either a malformed client or a memory-
+      // amplification attempt — `WorkspaceMismatchError` interpolates
+      // `requested` into `.message` twice, `sendBridgeError` writes it
+      // to stderr, and `res.json` echoes it again, so a ~10 MB body
+      // (right under express.json's 10 MB cap) would amplify to
+      // ~60 MB/request × maxConnections. The route caps the input
+      // before any of those echoes.
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      // Build an absolute path of MAX+1 chars. `path.isAbsolute`
+      // sees the leading `/` and the length cap fires before the
+      // isAbsolute branch — verifying both invariants in one go.
+      const longCwd = `/${'a'.repeat(4096)}`;
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: longCwd });
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/exceeds the 4096-character limit/);
+      // Bridge must NOT be touched — silent fallback or pass-through
+      // would defeat the cap.
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('400 workspace_mismatch when bridge rejects cross-workspace cwd (#3803 §02)', async () => {
+      // Single-workspace mode: bridge throws WorkspaceMismatchError
+      // when the route forwards a non-bound cwd. Route translates
+      // to 400 with code `workspace_mismatch` + both paths in the
+      // body so orchestrator-aware clients can route correctly.
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => {
+          throw new WorkspaceMismatchError(WS_BOUND, req.workspaceCwd);
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: WS_DIFFERENT });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'workspace_mismatch',
+        boundWorkspace: WS_BOUND,
+        requestedWorkspace: WS_DIFFERENT,
+      });
     });
 
     it('200 with the BridgeSession shape on success', async () => {
@@ -503,29 +661,64 @@ describe('createServeApp', () => {
 
   describe('GET /workspace/:id/sessions', () => {
     it('returns the list returned by the bridge', async () => {
+      // #3803 §02 (commit 0c6e963cd): the route now rejects
+      // cross-workspace queries with 400 workspace_mismatch (so
+      // orchestrators don't mistake "no sessions here" for
+      // "workspace is idle"). Bind the daemon to the same workspace
+      // we'll query so the happy path runs.
       const bridge = fakeBridge({
         listImpl: () => [
-          { sessionId: 's-1', workspaceCwd: '/work/a' },
-          { sessionId: 's-2', workspaceCwd: '/work/a' },
+          { sessionId: 's-1', workspaceCwd: WS_BOUND },
+          { sessionId: 's-2', workspaceCwd: WS_BOUND },
         ],
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
       const res = await request(app)
-        .get(`/workspace/${encodeURIComponent('/work/a')}/sessions`)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(2);
-      expect(bridge.listCalls).toEqual(['/work/a']);
+      expect(bridge.listCalls).toEqual([WS_BOUND]);
     });
 
     it('returns an empty array when no sessions exist for the workspace', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
       const res = await request(app)
-        .get(`/workspace/${encodeURIComponent('/work/idle')}/sessions`)
+        .get(`/workspace/${encodeURIComponent(WS_BOUND)}/sessions`)
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ sessions: [] });
+    });
+
+    it('400 workspace_mismatch when querying a cross-workspace path (#3803 §02)', async () => {
+      // Pin the §02 cross-workspace rejection: querying any path
+      // that doesn't canonicalize to the bound workspace gets a 400
+      // with `code: 'workspace_mismatch'` and both paths in the
+      // body — so an orchestrator-aware client can route to / spawn
+      // the right daemon. The bridge MUST NOT be touched (a silent
+      // fallback would defeat the whole purpose of §02).
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const res = await request(app)
+        .get(`/workspace/${encodeURIComponent(WS_DIFFERENT)}/sessions`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('workspace_mismatch');
+      expect(res.body.boundWorkspace).toBe(WS_BOUND);
+      expect(bridge.listCalls).toHaveLength(0);
     });
 
     it('400 when :id does not decode to an absolute path', async () => {
@@ -1098,6 +1291,83 @@ describe('runQwenServe', () => {
         token: 'irrelevant',
       }),
     ).rejects.toThrow(/Invalid --hostname/);
+  });
+
+  it('--workspace flows end-to-end and surfaces on /capabilities (#3803 §02)', async () => {
+    // Use process.cwd() so the boot-time existence check passes — any
+    // real absolute directory works. The bridge canonicalizes this
+    // once at boot; `/capabilities.workspaceCwd` returns the canonical
+    // form, NOT the raw input. Tests inject a fake bridge here so we
+    // verify the route layer's canonicalization (not the bridge's),
+    // making this a true E2E that doesn't require a real `qwen --acp`
+    // child.
+    const bridge = fakeBridge();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: process.cwd(),
+      },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const caps = await (
+      await fetch(`http://127.0.0.1:${port}/capabilities`)
+    ).json();
+    // Canonical form per `canonicalizeWorkspace` — realpath of cwd
+    // (handles symlinks like `/var` → `/private/var` on macOS).
+    const expected = await import('node:fs').then((m) =>
+      m.realpathSync.native(process.cwd()),
+    );
+    expect(caps.workspaceCwd).toBe(expected);
+  });
+
+  it('rejects --workspace pointing at a non-existent directory (BkUyD followup — boot-loud over opaque ENOENT)', async () => {
+    // Without the boot-time stat check, `canonicalizeWorkspace`'s
+    // ENOENT fallback to `path.resolve` would let the daemon boot
+    // pointed at a non-existent directory; every `POST /session`
+    // would then spawn a `qwen --acp` child with that cwd and the
+    // agent would fail with an opaque ENOENT.
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: `/tmp/qwen-serve-no-such-path-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      }),
+    ).rejects.toThrow(/directory does not exist/);
+  });
+
+  it('rejects --workspace pointing at a regular file', async () => {
+    // Pointing the daemon at a file (vs. a directory) is operator error
+    // — the agent would fail at child-spawn time with ENOTDIR. Catch
+    // it at boot for a clearer error message.
+    //
+    // `fileURLToPath` (not `new URL(...).pathname`) — on Windows the
+    // latter returns `/C:/path/...` with a leading slash, which
+    // `statSync` resolves as path-from-current-drive-root and the
+    // test would then see ENOENT instead of the expected
+    // "not a directory" branch.
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: fileURLToPath(import.meta.url),
+      }),
+    ).rejects.toThrow(/exists but is not a directory/);
+  });
+
+  it('rejects relative --workspace at boot', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: 'relative/path',
+      }),
+    ).rejects.toThrow(/must be an absolute path/);
   });
 
   it('drains the bridge before closing the listener', async () => {

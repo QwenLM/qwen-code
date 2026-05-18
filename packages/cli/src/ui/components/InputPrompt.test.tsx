@@ -1243,7 +1243,7 @@ describe('InputPrompt', () => {
     await wait();
 
     stdin.write('/export md');
-    await wait();
+    await wait(350);
     expect(stripAnsi(lastFrame() ?? '')).toContain('/export md');
 
     // Pressing Down must cycle to the NEXT format (json).

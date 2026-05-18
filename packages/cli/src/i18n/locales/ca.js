@@ -1809,26 +1809,6 @@ export default {
   'Loading suggestions...': "S'estan carregant els suggeriments...",
   'Show per-item context usage breakdown.':
     "Mostrar el desglossament de l'ús del context per element.",
-  'Manage dynamic translation cache':
-    'Gestionar la memòria cau de traducció dinàmica',
-  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
-    "Retraduir les descripcions de les ordres de barra dinàmiques carregades per a l'idioma de la interfície actual",
-  'Clear cached translations for the current UI language':
-    "Esborrar les traduccions emmagatzemades a la memòria cau per a l'idioma de la interfície actual",
-  'Manage AI translation for dynamic slash command descriptions':
-    "Gestionar la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'Enable AI translation for dynamic slash command descriptions':
-    "Activar la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'Disable AI translation for dynamic slash command descriptions':
-    "Desactivar la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'Show AI translation status for dynamic slash command descriptions':
-    "Mostrar l'estat de la traducció amb IA de les descripcions dinàmiques d'ordres slash",
-  'AI translation for dynamic slash command descriptions is {{status}}.':
-    "La traducció amb IA de les descripcions dinàmiques d'ordres slash està {{status}}.",
-  'AI translation for dynamic slash command descriptions is now enabled.':
-    "La traducció amb IA de les descripcions dinàmiques d'ordres slash ara està activada.",
-  'AI translation for dynamic slash command descriptions is now disabled.':
-    "La traducció amb IA de les descripcions dinàmiques d'ordres slash ara està desactivada.",
   'Lock release warning': "Avís d'alliberament del bloqueig",
   'Metadata write warning': "Avís d'escriptura de metadades",
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

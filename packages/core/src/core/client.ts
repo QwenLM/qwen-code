@@ -17,6 +17,7 @@ import { SpanStatusCode } from '@opentelemetry/api';
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -83,9 +84,13 @@ import {
 import { reportError } from '../utils/errorReporting.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
-import { flatMapTextParts } from '../utils/partUtils.js';
+import {
+  flatMapTextParts,
+  prependToFirstTextPart,
+} from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
 
 // Hook types and utilities
 import {
@@ -94,12 +99,12 @@ import {
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
 import { partToString } from '../utils/partUtils.js';
-import { createHookOutput } from '../hooks/types.js';
+import { createHookOutput, SessionStartSource } from '../hooks/types.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
 import { type File, type IdeContext } from '../ide/types.js';
-import type { StopHookOutput } from '../hooks/types.js';
+import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE,
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
@@ -138,6 +143,11 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
   selectedDocs: [],
   strategy: 'none',
 };
+
+function wrapIdeContext(contextText: string): string {
+  const safeContextText = escapeSystemReminderTags(contextText);
+  return `<system-reminder>\n${safeContextText}\n</system-reminder>`;
+}
 
 /**
  * Resolve the auto-memory recall promise with a hard deadline.
@@ -184,6 +194,7 @@ const SKILL_WRITE_TOOL_NAMES: ReadonlySet<string> = new Set([
 
 export class GeminiClient {
   private chat?: GeminiChat;
+  private initializedSessionId: string | undefined;
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
@@ -194,6 +205,8 @@ export class GeminiClient {
   private lastSentIdeContext: IdeContext | undefined;
   private forceFullIdeContext = true;
   private pendingRecallAbortController: AbortController | undefined;
+  private lastSessionStartContext: string | undefined;
+  private lastSessionStartSource: SessionStartSource | undefined;
 
   /**
    * Promises for pending background memory tasks (dream / extract).
@@ -214,8 +227,13 @@ export class GeminiClient {
     this.loopDetector = new LoopDetectionService(config);
   }
 
-  async initialize() {
-    this.lastPromptId = this.config.getSessionId();
+  async initialize(sessionStartSource?: SessionStartSource) {
+    const sessionId = this.config.getSessionId();
+    this.lastPromptId = sessionId;
+
+    if (this.isInitialized() && this.initializedSessionId === sessionId) {
+      return;
+    }
 
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
@@ -226,7 +244,10 @@ export class GeminiClient {
       const resumedHistory = buildApiHistoryFromConversation(
         resumedSessionData.conversation,
       );
-      await this.startChat(resumedHistory);
+      await this.startChat(
+        resumedHistory,
+        sessionStartSource ?? SessionStartSource.Resume,
+      );
       this.getChat().setLastPromptTokenCount(
         uiTelemetryService.getLastPromptTokenCount(),
       );
@@ -234,8 +255,14 @@ export class GeminiClient {
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
     } else {
-      await this.startChat();
+      if (sessionStartSource !== undefined) {
+        await this.startChat(undefined, sessionStartSource);
+      } else {
+        await this.startChat();
+      }
     }
+
+    this.initializedSessionId = sessionId;
   }
 
   /**
@@ -369,9 +396,13 @@ export class GeminiClient {
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
+    recordStartupEvent('gemini_tools_updated', {
+      toolCount: toolDeclarations.length,
+    });
   }
 
   async resetChat(): Promise<void> {
+    this.initializedSessionId = undefined;
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.lastApiCompletionTimestamp = null;
     // startChat() rewrites the chat to its initial state. Any prior
@@ -393,7 +424,8 @@ export class GeminiClient {
     // compression should keep previously-revealed tools so the model can
     // continue using them without re-running ToolSearch.
     this.config.getToolRegistry().clearRevealedDeferredTools();
-    await this.startChat();
+    await this.startChat(undefined, SessionStartSource.Clear);
+    this.initializedSessionId = this.config.getSessionId();
   }
 
   getLoopDetectionService(): LoopDetectionService {
@@ -435,7 +467,85 @@ export class GeminiClient {
     );
   }
 
-  async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
+  /**
+   * Rebuilds the main-session system instruction from the current
+   * `userMemory` / model / prompt overrides and re-binds it to the live chat.
+   *
+   * Use this after mutating inputs that feed into the system instruction
+   * (e.g. user memory refreshed from `output-language.md`) so the change
+   * takes effect on the next turn without restarting the session. No-op if
+   * no chat has been started yet.
+   */
+  async refreshSystemInstruction(): Promise<void> {
+    if (!this.chat) {
+      return;
+    }
+    const toolRegistry = this.config.getToolRegistry();
+    await toolRegistry.warmAll();
+    const deferredSummary = toolRegistry.getDeferredToolSummary();
+    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
+    const deferredTools = toolSearchAvailable
+      ? deferredSummary.filter(
+          (t) => !toolRegistry.isDeferredToolRevealed(t.name),
+        )
+      : undefined;
+    this.chat.setSystemInstruction(
+      this.getMainSessionSystemInstruction(deferredTools),
+    );
+    if (this.lastSessionStartContext && this.lastSessionStartSource) {
+      this.chat.applySessionStartContext(
+        this.lastSessionStartContext,
+        this.lastSessionStartSource,
+      );
+    }
+  }
+
+  private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
+    switch (approvalMode) {
+      case ApprovalMode.DEFAULT:
+        return PermissionMode.Default;
+      case ApprovalMode.PLAN:
+        return PermissionMode.Plan;
+      case ApprovalMode.AUTO_EDIT:
+        return PermissionMode.AutoEdit;
+      case ApprovalMode.YOLO:
+        return PermissionMode.Yolo;
+      default:
+        return PermissionMode.Default;
+    }
+  }
+
+  private async fireSessionStartHook(
+    source: SessionStartSource,
+  ): Promise<string | undefined> {
+    const hookSystem = this.config.getHookSystem();
+    if (
+      this.config.getDisableAllHooks() ||
+      !hookSystem ||
+      !this.config.hasHooksForEvent('SessionStart')
+    ) {
+      return undefined;
+    }
+
+    try {
+      const output = await hookSystem.fireSessionStartEvent(
+        source,
+        this.config.getModel() ?? '',
+        this.toPermissionMode(this.config.getApprovalMode()),
+      );
+      return output?.getAdditionalContext()?.trim() || undefined;
+    } catch (err) {
+      this.config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
+      return undefined;
+    }
+  }
+
+  async startChat(
+    extraHistory?: Content[],
+    sessionStartSource = extraHistory
+      ? SessionStartSource.Resume
+      : SessionStartSource.Startup,
+  ): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
@@ -511,6 +621,20 @@ export class GeminiClient {
         uiTelemetryService,
       );
 
+      const sessionStartAdditionalContext =
+        await this.fireSessionStartHook(sessionStartSource);
+      this.lastSessionStartContext = sessionStartAdditionalContext;
+      this.lastSessionStartSource = sessionStartAdditionalContext
+        ? sessionStartSource
+        : undefined;
+
+      if (sessionStartAdditionalContext) {
+        this.chat.applySessionStartContext(
+          sessionStartAdditionalContext,
+          sessionStartSource,
+        );
+      }
+
       await this.setTools();
 
       return this.chat;
@@ -575,7 +699,7 @@ export class GeminiClient {
       }
 
       const contextParts = [
-        "Here is the user's editor context. This is for your information only.",
+        "Here is the user's current editor context. Use it when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
         contextLines.join('\n'),
       ];
 
@@ -705,7 +829,7 @@ export class GeminiClient {
       }
 
       const contextParts = [
-        "Here is a summary of changes in the user's editor context. This is for your information only.",
+        "Here is a summary of changes in the user's current editor context. Use it with the previous editor context when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
         changeLines.join('\n'),
       ];
 
@@ -1046,8 +1170,8 @@ export class GeminiClient {
           const m = mcResult.meta;
           debugLogger.debug(
             `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-              `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
-              `kept last ${m.toolsKept}`,
+              `cleared ${m.toolsCleared} tool result(s) + ${m.mediaCleared} media (~${m.tokensSaved} tokens), ` +
+              `kept ${m.toolsKept} tool / ${m.mediaKept} media`,
           );
         }
       }
@@ -1131,19 +1255,24 @@ export class GeminiClient {
         !!lastMessage &&
         lastMessage.role === 'model' &&
         (lastMessage.parts?.some((p) => 'functionCall' in p) || false);
+      let ideContextText: string | undefined;
+      let nextIdeContext: IdeContext | undefined;
+      let shouldUpdateIdeContextState = false;
 
       if (this.config.getIdeMode() && !hasPendingToolCall) {
         const { contextParts, newIdeContext } = this.getIdeContextParts(
           this.forceFullIdeContext || history.length === 0,
         );
         if (contextParts.length > 0) {
-          this.getChat().addHistory({
-            role: 'user',
-            parts: [{ text: contextParts.join('\n') }],
-          });
+          ideContextText = wrapIdeContext(contextParts.join('\n'));
+          nextIdeContext = newIdeContext;
+          shouldUpdateIdeContextState = true;
+        } else {
+          debugLogger.debug(
+            'IDE mode enabled but no context parts generated (forceFull=%s)',
+            this.forceFullIdeContext,
+          );
         }
-        this.lastSentIdeContext = newIdeContext;
-        this.forceFullIdeContext = false;
       }
 
       // Check for arena control signal before starting a new turn
@@ -1167,10 +1296,16 @@ export class GeminiClient {
       // Determine the model to use for this turn
       const model = options?.modelOverride ?? this.config.getModel();
 
-      // append system reminders to the request
-      let requestToSent = await flatMapTextParts(request, async (text) => [
+      // Assemble the outgoing request. IDE context is merged into the
+      // user prompt's first text part, then on UserQuery / Cron turns
+      // the system reminders block is prepended in front of everything
+      // so the final shape is: [systemReminders..., ideContext + user prompt].
+      let requestToSend = await flatMapTextParts(request, async (text) => [
         text,
       ]);
+      if (ideContextText) {
+        requestToSend = prependToFirstTextPart(requestToSend, ideContextText);
+      }
       if (
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
@@ -1224,11 +1359,18 @@ export class GeminiClient {
           }
         }
 
-        requestToSent = [...systemReminders, ...requestToSent];
+        requestToSend = [...systemReminders, ...requestToSend];
       }
 
-      const resultStream = turn.run(model, requestToSent, signal);
+      const resultStream = turn.run(model, requestToSend, signal);
+      let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
+        if (shouldUpdateIdeContextState && !didUpdateIdeContextState) {
+          this.lastSentIdeContext = nextIdeContext;
+          this.forceFullIdeContext = false;
+          didUpdateIdeContextState = true;
+        }
+
         if (!this.config.getSkipLoopDetection()) {
           if (this.loopDetector.addAndCheck(event)) {
             const loopType = this.loopDetector.getLastLoopType();
@@ -1253,13 +1395,31 @@ export class GeminiClient {
 
         // Re-send a full IDE context blob on the next regular message — auto
         // compaction inside chat.sendMessageStream may have summarized away
-        // the previous IDE-context turn.
+        // the previous merged IDE context.
         if (event.type === GeminiEventType.ChatCompressed) {
           this.forceFullIdeContext = true;
+          void this.fireSessionStartHook(SessionStartSource.Compact)
+            .then((compactAdditionalContext) => {
+              if (!compactAdditionalContext || !this.chat) {
+                return;
+              }
+              this.lastSessionStartContext = compactAdditionalContext;
+              this.lastSessionStartSource = SessionStartSource.Compact;
+              this.chat.applySessionStartContext(
+                compactAdditionalContext,
+                SessionStartSource.Compact,
+              );
+            })
+            .catch((error) => {
+              this.config
+                .getDebugLogger()
+                .warn(`SessionStart hook failed: ${error}`);
+            });
         }
 
         yield event;
         if (event.type === GeminiEventType.Error) {
+          this.forceFullIdeContext = true;
           if (arenaAgentClient) {
             const errorMsg =
               event.value instanceof Error
@@ -1517,16 +1677,18 @@ export class GeminiClient {
           // main model's config. The retry authType is resolved alongside so that
           // provider-specific checks (e.g. QWEN_OAUTH quota detection) reference
           // the target model's provider.
-          const { contentGenerator, retryAuthType } = await this.config
-            .getBaseLlmClient()
-            .resolveForModel(model);
+          const {
+            contentGenerator,
+            retryAuthType,
+            model: requestModel,
+          } = await this.config.getBaseLlmClient().resolveForModel(model);
 
           const apiCall = () => {
-            currentAttemptModel = model;
+            currentAttemptModel = requestModel;
 
             return contentGenerator.generateContent(
               {
-                model,
+                model: requestModel,
                 config: requestConfig,
                 contents,
               },
@@ -1584,6 +1746,8 @@ export class GeminiClient {
     force: boolean = false,
     signal?: AbortSignal,
   ): Promise<ChatCompressionInfo> {
+    const previousSessionStartContext = this.lastSessionStartContext;
+    const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
       this.config.getModel(),
@@ -1592,7 +1756,19 @@ export class GeminiClient {
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const compressedHistory = this.getChat().getHistory();
-      await this.startChat(compressedHistory);
+      await this.startChat(compressedHistory, SessionStartSource.Compact);
+      if (
+        !this.lastSessionStartContext &&
+        previousSessionStartContext &&
+        previousSessionStartSource
+      ) {
+        this.lastSessionStartContext = previousSessionStartContext;
+        this.lastSessionStartSource = previousSessionStartSource;
+        this.getChat().applySessionStartContext(
+          previousSessionStartContext,
+          previousSessionStartSource,
+        );
+      }
       // startChat() creates a new GeminiChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still
       // resolve to the file_unchanged placeholder. Clear so post-compaction
@@ -1601,7 +1777,8 @@ export class GeminiClient {
       this.config.getFileReadCache().clear();
       this.getChat().setLastPromptTokenCount(info.newTokenCount);
       // Re-send a full IDE context blob on the next regular message —
-      // compression dropped the previous context turn from history.
+      // compression may have summarized away the merged IDE context
+      // that lived inside the previous user prompt.
       this.forceFullIdeContext = true;
     }
     return info;

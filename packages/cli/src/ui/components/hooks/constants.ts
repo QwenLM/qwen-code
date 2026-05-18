@@ -94,6 +94,22 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 0, description: t('use hook decision if provided') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.TodoCreated]: [
+      { code: 0, description: t('allow todo creation') },
+      {
+        code: 2,
+        description: t('block todo creation and show reason to model'),
+      },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
+    [HookEventName.TodoCompleted]: [
+      { code: 0, description: t('allow todo completion') },
+      {
+        code: 2,
+        description: t('block todo completion and show reason to model'),
+      },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
   };
   return exitCodesMap[eventName] || [];
 }
@@ -121,6 +137,8 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.PermissionRequest]: t(
       'When a permission dialog is displayed',
     ),
+    [HookEventName.TodoCreated]: t('When a new todo item is created'),
+    [HookEventName.TodoCompleted]: t('When a todo item is marked as completed'),
   };
   return descriptions[eventName] || '';
 }
@@ -163,6 +181,12 @@ export function getHookDescription(eventName: string): string {
     ),
     [HookEventName.PermissionRequest]: t(
       'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+    ),
+    [HookEventName.TodoCreated]: t(
+      'Input to command is JSON with todo_id, todo_content, todo_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
+    ),
+    [HookEventName.TodoCompleted]: t(
+      'Input to command is JSON with todo_id, todo_content, previous_status, all_todos, and phase. In validation, output JSON with decision (allow/block/deny) and reason. In postWrite, block/deny is ignored.',
     ),
   };
   return descriptions[eventName] || '';

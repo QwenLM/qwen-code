@@ -795,6 +795,54 @@ describe('HookAggregator', () => {
     });
   });
 
+  describe('Todo events - mergeWithOrLogic', () => {
+    it('should block TodoCreated when any hook blocks', () => {
+      const outputs: HookOutput[] = [
+        { reason: 'policy violation', decision: 'block' },
+        { reason: 'looks fine', decision: 'allow' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.TodoCreated,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.TodoCreated,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('policy violation\nlooks fine');
+    });
+
+    it('should block TodoCompleted when a later hook allows', () => {
+      const outputs: HookOutput[] = [
+        { reason: 'already completed elsewhere', decision: 'block' },
+        { reason: 'completion approved', decision: 'allow' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.TodoCompleted,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.TodoCompleted,
+      );
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe(
+        'already completed elsewhere\ncompletion approved',
+      );
+    });
+  });
+
   describe('StopFailure - fire-and-forget special handling', () => {
     it('should always return success true for StopFailure', () => {
       const results: HookExecutionResult[] = [
