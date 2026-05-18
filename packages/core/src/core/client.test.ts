@@ -14,6 +14,9 @@ import {
   type Mock,
 } from 'vitest';
 
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
 import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
@@ -1438,8 +1441,31 @@ describe('Gemini Client (client.ts)', () => {
     const clearMock = vi.fn();
     vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
       clear: clearMock,
+      // Returns true = "entry found and disarmed" (the common case).
+      markReadEvictedFromHistory: vi.fn().mockReturnValue(true),
     } as unknown as ReturnType<Config['getFileReadCache']>);
     return clearMock;
+  }
+
+  /**
+   * Like {@link mockFileReadCacheClear} but also exposes the
+   * `markReadEvictedFromHistory` spy — the surgical per-file fast-path
+   * disarm that microcompaction now uses instead of a blanket wipe
+   * (issue #4239).
+   */
+  function mockFileReadCacheStub(): {
+    clear: ReturnType<typeof vi.fn>;
+    markReadEvictedFromHistory: ReturnType<typeof vi.fn>;
+  } {
+    const clear = vi.fn();
+    // Default: every disarm matches an entry (true). Tests that need
+    // the inode-miss fallback override the return value per-call.
+    const markReadEvictedFromHistory = vi.fn().mockReturnValue(true);
+    vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+      clear,
+      markReadEvictedFromHistory,
+    } as unknown as ReturnType<Config['getFileReadCache']>);
+    return { clear, markReadEvictedFromHistory };
   }
 
   describe('thinking block idle cleanup and latch', () => {
@@ -1495,16 +1521,30 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('microcompaction FileReadCache invalidation', () => {
-    function makeReadFileResponses(count: number): Content[] {
+    let mcTmpDir: string;
+
+    // Real on-disk files so client.ts's `fsPromises.stat(filePath)` (used
+    // to resolve a blanked path to its inode) succeeds. `node:fs` is
+    // mocked in this suite but `node:fs/promises` is not.
+    async function makeReadFileResponses(count: number): Promise<{
+      history: Content[];
+      paths: string[];
+    }> {
       const out: Content[] = [];
+      const paths: string[] = [];
       for (let i = 0; i < count; i++) {
+        const p = join(mcTmpDir, `${i}.ts`);
+        await writeFile(p, `content of ${i}`);
+        paths.push(p);
+        const callId = `mc-call-${i}`;
         out.push({
           role: 'model',
           parts: [
             {
               functionCall: {
+                id: callId,
                 name: 'read_file',
-                args: { file_path: `/x/${i}.ts` },
+                args: { file_path: p },
               },
             },
           ],
@@ -1514,6 +1554,7 @@ describe('Gemini Client (client.ts)', () => {
           parts: [
             {
               functionResponse: {
+                id: callId,
                 name: 'read_file',
                 response: { output: `content of ${i}` },
               },
@@ -1521,10 +1562,11 @@ describe('Gemini Client (client.ts)', () => {
           ],
         });
       }
-      return out;
+      return { history: out, paths };
     }
 
-    beforeEach(() => {
+    beforeEach(async () => {
+      mcTmpDir = await mkdtemp(join(tmpdir(), 'qwen-mc-cache-'));
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: GeminiEventType.Content, value: 'response' };
@@ -1532,14 +1574,19 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('clears the cache after microcompaction strips old read_file results', async () => {
+    afterEach(async () => {
+      await rm(mcTmpDir, { recursive: true, force: true });
+    });
+
+    it('disarms the fast-path for blanked files instead of wiping the cache (issue #4239)', async () => {
       // Default test fixture: toolResultsThresholdMinutes = 60,
       // toolResultsNumToKeep = 5. Six read_file results + a 90-minute
-      // idle gap means the oldest one gets cleared, so the if-meta
-      // branch in sendMessageStream fires and must invalidate the cache.
-      const cacheClear = mockFileReadCacheClear();
+      // idle gap means the oldest one gets blanked. The read-before-write
+      // state must survive (no clear()); only the one blanked file's
+      // fast-path is disarmed via markReadEvictedFromHistory.
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
 
-      const history = makeReadFileResponses(6);
+      const { history } = await makeReadFileResponses(6);
       const setHistory = vi.fn();
       client['chat'] = {
         addHistory: vi.fn(),
@@ -1559,13 +1606,229 @@ describe('Gemini Client (client.ts)', () => {
       }
 
       expect(setHistory).toHaveBeenCalled();
-      expect(cacheClear).toHaveBeenCalled();
+      // The blanket wipe is gone — read-before-write state is preserved.
+      expect(clear).not.toHaveBeenCalled();
+      // Exactly the one blanked file (oldest of 6, keepRecent=5) had its
+      // fast-path disarmed.
+      expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
     });
 
-    it('does not clear the cache when the idle gap is below the threshold', async () => {
-      const cacheClear = mockFileReadCacheClear();
+    it('falls back to a blanket clear when blanked reads cannot be linked to a path (id-less provider)', async () => {
+      // Provider did not populate functionCall.id, so microcompaction
+      // cannot recover the blanked reads' file paths. Leaving their
+      // fast-path armed would serve a dangling placeholder, so the
+      // client must fall back to the old safe blanket wipe.
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
 
-      const history = makeReadFileResponses(6);
+      const idless: Content[] = [];
+      for (let i = 0; i < 6; i++) {
+        idless.push({
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { file_path: join(mcTmpDir, `${i}.ts`) },
+              },
+            },
+          ],
+        });
+        idless.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: `content of ${i}` },
+              },
+            },
+          ],
+        });
+      }
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(idless),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-3',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(clear).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('falls back to a blanket clear when an evicted path cannot be stat’d (Codex P2)', async () => {
+      // Path is recovered (id linkage present) so it lands in
+      // evictedReadPaths, but the file does not exist on disk, so the
+      // client's stat fails. Leaving the entry armed would risk a
+      // dangling placeholder, so it must fall back to the safe wipe.
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const history: Content[] = [];
+      for (let i = 0; i < 6; i++) {
+        const callId = `mc-missing-${i}`;
+        // Path inside mcTmpDir that is never created.
+        const p = join(mcTmpDir, `ghost-${i}.ts`);
+        history.push({
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: callId,
+                name: 'read_file',
+                args: { file_path: p },
+              },
+            },
+          ],
+        });
+        history.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'read_file',
+                response: { output: `content of ${i}` },
+              },
+            },
+          ],
+        });
+      }
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-4',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(clear).toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
+    });
+
+    it('falls back to a blanket clear on a MIXED batch — one path on disk, one a ghost (mimo F9)', async () => {
+      // Most realistic production case: several files evicted, most on
+      // disk, one deleted since. A single unresolvable path must still
+      // force the safe blanket wipe rather than a partial disarm.
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      // keepRecent = 5 in this suite, so 7 results blank the 2 oldest:
+      // index 0 (real, stats OK) and index 1 (ghost, stat fails).
+      const realPath = join(mcTmpDir, 'mixed-real.ts');
+      await writeFile(realPath, 'real content');
+      const ghostPath = join(mcTmpDir, 'mixed-ghost.ts'); // never created
+
+      const history: Content[] = [];
+      for (let i = 0; i < 7; i++) {
+        const callId = `mc-mixed-${i}`;
+        const p =
+          i === 0
+            ? realPath
+            : i === 1
+              ? ghostPath
+              : join(mcTmpDir, `mixed-keep-${i}.ts`);
+        history.push({
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: callId,
+                name: 'read_file',
+                args: { file_path: p },
+              },
+            },
+          ],
+        });
+        history.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'read_file',
+                response: { output: `content of ${i}` },
+              },
+            },
+          ],
+        });
+      }
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-mixed',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // The ghost path makes the batch not-fully-disarmed → safe wipe.
+      expect(clear).toHaveBeenCalled();
+      // The on-disk path was still attempted before the batch was
+      // deemed unresolvable.
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+    });
+
+    it('falls back to a blanket clear when an evicted path stats to a different inode (Codex P2)', async () => {
+      // Path stats fine, but resolves to an inode the cache never
+      // recorded (file replaced / symlink retargeted since the read),
+      // so markReadEvictedFromHistory finds no entry and returns false.
+      // A stale entry could stay armed, so fall back to the safe wipe.
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+      markReadEvictedFromHistory.mockReturnValue(false);
+
+      const { history } = await makeReadFileResponses(6);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-5',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // It attempted the surgical disarm, found no entry, then wiped.
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+      expect(clear).toHaveBeenCalled();
+    });
+
+    it('does not touch the cache when the idle gap is below the threshold', async () => {
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      const { history } = await makeReadFileResponses(6);
       client['chat'] = {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(history),
@@ -1584,7 +1847,8 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(cacheClear).not.toHaveBeenCalled();
+      expect(clear).not.toHaveBeenCalled();
+      expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
   });
 
