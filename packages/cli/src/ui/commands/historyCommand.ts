@@ -8,6 +8,7 @@ import type { SlashCommand, MessageActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
+import { stripSuppressOnRestore } from '../utils/resumeHistoryUtils.js';
 
 const collapseOnResumeCommand: SlashCommand = {
   name: 'collapse-on-resume',
@@ -78,18 +79,7 @@ const expandNowCommand: SlashCommand = {
     // Remove suppressOnRestore from all items and drop collapse summary items.
     const updated = history
       .filter((item) => item.display?.kind !== 'collapse-summary')
-      .map((item) => {
-        if (!item.display) {
-          return item;
-        }
-        const { suppressOnRestore: _suppressOnRestore, ...restDisplay } =
-          item.display;
-        return {
-          ...item,
-          display:
-            Object.keys(restDisplay).length > 0 ? restDisplay : undefined,
-        };
-      });
+      .map(stripSuppressOnRestore);
     loadHistory(updated);
     refreshStatic();
 

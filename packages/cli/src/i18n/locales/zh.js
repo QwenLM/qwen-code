@@ -1783,6 +1783,8 @@ export default {
   'History expanded.': '历史记录已展开。',
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
     '用法：/history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '历史记录已折叠：{{n}} 条消息已隐藏。使用 /history expand-now 展开。',
 
   // === Same-as-English optimization ===
   ' (not in model registry)': '（不在模型注册表中）',

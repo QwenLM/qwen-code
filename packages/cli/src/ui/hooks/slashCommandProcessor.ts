@@ -39,6 +39,7 @@ import type {
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import { historyCommand } from '../commands/historyCommand.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
@@ -136,6 +137,8 @@ export const useSlashCommandProcessor = (
   logger: Logger | null,
   setSessionName?: (name: string | null) => void,
 ) => {
+  // Ref avoids adding `history` to the commandContext useMemo deps,
+  // which would cause a full context rebuild on every history append.
   const historyRef = useRef(history);
   useEffect(() => {
     historyRef.current = history;
@@ -646,7 +649,7 @@ export const useSlashCommandProcessor = (
                   };
                 case 'message':
                   if (result.messageType === 'info') {
-                    if (resolvedCommandPath[0] !== 'history') {
+                    if (resolvedCommandPath[0] !== historyCommand.name) {
                       addMessage({
                         type: MessageType.INFO,
                         content: result.content,

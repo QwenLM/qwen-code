@@ -523,13 +523,27 @@ function applyResumeDisplayPolicy(
 function createHistoryCollapseSummaryItem(
   messageCount: number,
 ): HistoryItemInfo & { display: { kind: 'collapse-summary' } } {
+  const n = String(messageCount);
   return {
     type: MessageType.INFO,
     text: t(
       'History collapsed: {{n}} messages hidden. Use /history expand-now to show.',
-      { n: String(messageCount) },
+      { n },
     ),
     display: { kind: 'collapse-summary' },
+  };
+}
+
+/**
+ * Strips the suppressOnRestore flag from a history item's display property.
+ * Used when rewinding into collapsed history to ensure rewound items remain visible.
+ */
+export function stripSuppressOnRestore(item: HistoryItem): HistoryItem {
+  if (!item.display?.suppressOnRestore) return item;
+  const { suppressOnRestore: _, ...rest } = item.display;
+  return {
+    ...item,
+    display: Object.keys(rest).length > 0 ? rest : undefined,
   };
 }
 

@@ -62,8 +62,9 @@ import {
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import {
-  buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
+  buildResumedHistoryItems,
+  stripSuppressOnRestore,
 } from './utils/resumeHistoryUtils.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -118,6 +119,7 @@ import {
   computeApiTruncationIndex,
   isRealUserTurn,
 } from './utils/historyMapping.js';
+import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
@@ -499,6 +501,13 @@ export const AppContainer = (props: AppContainerProps) => {
           collapseOnResume,
         );
         historyManager.loadHistory(historyItems);
+
+        // Re-arm any `/goal` that was active when the prior session ended.
+        try {
+          restoreGoalFromHistory(historyItems, config, historyManager.addItem);
+        } catch {
+          // Restore is best-effort — never block resume on it.
+        }
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -2345,14 +2354,7 @@ export const AppContainer = (props: AppContainerProps) => {
           // Strip suppressOnRestore flags so rewound items remain visible
           const truncatedUi = originalHistory
             .filter((h) => h.id < userItem.id)
-            .map((h) => {
-              if (!h.display?.suppressOnRestore) return h;
-              const { suppressOnRestore: _, ...rest } = h.display;
-              return {
-                ...h,
-                display: Object.keys(rest).length > 0 ? rest : undefined,
-              };
-            });
+            .map(stripSuppressOnRestore);
           historyManager.loadHistory(truncatedUi);
 
           refreshStatic();
