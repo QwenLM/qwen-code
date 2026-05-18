@@ -1597,6 +1597,8 @@ export class GeminiClient {
           MessageBusType.HOOK_EXECUTION_RESPONSE,
         );
 
+        // Stop hook callbacks can mutate active goal state during request().
+        // Capture it before cancellation returns so clear events are not lost.
         const activeGoalAfterStopHook = getActiveGoal(
           this.config.getSessionId(),
         );

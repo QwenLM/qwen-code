@@ -4634,7 +4634,7 @@ Other open files:
           client.sendMessageStream(
             [{ text: 'Hi' }],
             abortController.signal,
-            'prompt-cleared-active-goal-abort',
+            'prompt-cleared-active-goal-then-aborted',
           ),
         );
 
