@@ -1788,6 +1788,18 @@ function toDeviceFlowStateBody(
   // `mutate({ strict: true })`), so the blast radius was small, but
   // multi-client setups sharing a single daemon token could otherwise
   // enumerate other clients' verification codes.
+  //
+  // **Threat model (PR #4291 follow-up review by Copilot):** this gate
+  // is BEST-EFFORT ATTRIBUTION, not authentication. `X-Qwen-Client-Id`
+  // is a syntactic header, not bound to a server-validated identity —
+  // anyone holding the bearer token can spoof it. The bearer token IS
+  // the auth boundary; this gate exists to prevent ACCIDENTAL
+  // cross-client reads in well-behaved multi-SDK setups (and to keep
+  // GET symmetric with the POST take-over shape closed out in
+  // round-12 #6 of #4255). A determined attacker who has compromised
+  // the daemon bearer token already wins; locking down GET further
+  // would require binding identity into bearer-token issuance, which
+  // is a separate architectural change.
   const callerIsInitiator =
     view.initiatorClientId !== undefined &&
     callerClientId !== undefined &&

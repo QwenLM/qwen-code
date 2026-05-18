@@ -729,6 +729,12 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
           line['status'] === 'failed' && line['errorKind'] === 'upstream_error',
       );
       expect(auditFailure).toBeDefined();
+      // PR #4291 follow-up review (Qwen Code review summary 🔵 Low):
+      // poll-tick must NOT reschedule itself after a timeout-driven
+      // upstream_error (the entry has already transitioned to error
+      // state; another poll would be a `entry.status !== 'pending'`
+      // no-op at best, log noise at worst). Pin the invariant.
+      expect(provider.pollCount).toBe(1);
     } finally {
       registry.dispose();
     }
@@ -1059,6 +1065,66 @@ describe('DeviceFlowRegistry — persist failure paths (fold-in 10 #1)', () => {
       expect(cancelledEvent).toBeDefined();
       // First-writer-wins: sdk-A drove the transition.
       expect(cancelledEvent?.clientId).toBe('sdk-A');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('cancellerClientId is first-writer-wins even when the first canceller is anonymous (no clientId)', async () => {
+    // PR #4291 follow-up review (Copilot): the first version of the
+    // first-writer-wins guard used `entry.cancellerClientId === undefined`
+    // as the gate, which silently broke when the first canceller was
+    // anonymous: `cancel(id, undefined)` left the field undefined, and
+    // a later `cancel(id, 'sdk-B')` saw the gate as still open and
+    // overwrote attribution. The fix decouples the "have we recorded a
+    // canceller" question (`cancellerRecorded` flag) from the "do we
+    // have a clientId" question. An anonymous first canceller still
+    // flips the flag, blocking any later writer.
+    const provider = new FakeProvider();
+    let rejectPersist!: (err: Error) => void;
+    const persistPromise = new Promise<{ expiresAt?: number }>(
+      (_resolve, reject) => {
+        rejectPersist = reject;
+      },
+    );
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: () => persistPromise,
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // First (anonymous) canceller wins. cancellerClientId stays
+      // undefined; cancellerRecorded is now true.
+      const first = registry.cancel(view.deviceFlowId);
+      expect(first).toEqual({ alreadyTerminal: false });
+      // Second canceller IS identified — but the first-writer-wins
+      // gate must reject the overwrite.
+      const second = registry.cancel(view.deviceFlowId, 'sdk-B');
+      expect(second).toEqual({ alreadyTerminal: false });
+      rejectPersist(new Error('aborted: cancel during persist'));
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('cancelled');
+      const cancelledEvent = events.find(
+        (e) =>
+          e.emission.type === 'cancelled' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(cancelledEvent).toBeDefined();
+      // The deferred SSE event must NOT carry sdk-B as originator —
+      // the anonymous first writer wins, so `entry.cancellerClientId`
+      // stays undefined, and the runPollTick deferred-cancel branch
+      // falls back to `entry.initiatorClientId` (which is also
+      // undefined here because `start()` itself was anonymous). The
+      // critical assertion: sdk-B did NOT silently take credit.
+      expect(cancelledEvent?.clientId).not.toBe('sdk-B');
     } finally {
       registry.dispose();
     }

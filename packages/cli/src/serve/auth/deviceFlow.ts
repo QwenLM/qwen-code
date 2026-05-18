@@ -518,6 +518,18 @@ interface DeviceFlowEntry {
    * 9 review thread #5.
    */
   cancellerClientId?: string;
+  /**
+   * First-writer-wins flag. Set the moment ANY `cancel()` call drives
+   * this entry into `cancelRequestedDuringPersist` — including the
+   * anonymous case where `cancellerClientId` stays `undefined`. The
+   * flag is decoupled from `cancellerClientId` because the latter
+   * being `undefined` is BOTH "no canceller has driven the transition
+   * yet" AND "an anonymous canceller drove the transition" — using it
+   * as the gate would let a later identified canceller silently
+   * overwrite an earlier anonymous one. PR #4255 follow-up review
+   * (Copilot on #4291): closes the anonymous-first canceller bug.
+   */
+  cancellerRecorded?: boolean;
 }
 
 export interface DeviceFlowRegistryDeps {
@@ -939,8 +951,21 @@ export class DeviceFlowRegistry {
       // event should be attributed to whoever actually drove the
       // transition first. Subsequent callers stay in the audit trail
       // through their own `audit.record(...)` line below.
-      if (cancellerClientId && entry.cancellerClientId === undefined) {
-        entry.cancellerClientId = cancellerClientId;
+      //
+      // PR #4291 follow-up review (Copilot): the gate is `cancellerRecorded`
+      // (a separate flag), NOT `cancellerClientId === undefined`. The earlier
+      // shape silently broke when the first canceller was anonymous: their
+      // `cancel(id, undefined)` left `cancellerClientId` undefined, so the
+      // next identified `cancel(id, 'sdk-B')` saw the gate as still open
+      // and overwrote the attribution. Decoupling the "have we recorded a
+      // canceller" question from the "do we have a clientId" question fixes
+      // it: an anonymous first canceller still flips the flag, blocking
+      // any later writer.
+      if (!entry.cancellerRecorded) {
+        entry.cancellerRecorded = true;
+        if (cancellerClientId) {
+          entry.cancellerClientId = cancellerClientId;
+        }
       }
       try {
         entry.cancelController.abort(new Error('cancel during persist'));

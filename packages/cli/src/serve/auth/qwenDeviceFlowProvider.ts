@@ -200,18 +200,49 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
           ? mapRfc8628OAuthCode(err.oauthError)
           : 'upstream_error';
       // PR #4255 follow-up review thread (deepseek-v4-pro): mirror the
-      // `start()` path's stderr audit — `poll()` failures (non-RFC-8628,
-      // non-`authorization_pending` / `slow_down` throws like JSON
-      // parse errors, WAF HTML, proxy 503) previously had no operator
-      // breadcrumb; SSE/HTTP only carried the static `upstream_error`
-      // hint. Without raw detail in stderr the on-call has no way to
-      // distinguish WAF block from network reset from malformed JSON
-      // at 3 AM. The truncator caps the kept prefix below container
-      // log-aggregator per-line limits.
-      const detail = err instanceof Error ? err.message : String(err);
-      writeStderrLine(
-        `[serve] qwen device-flow poll failed (raw, errorKind=${errorKind}): ${truncateForStderr(detail)}`,
-      );
+      // `start()` path's stderr audit so on-call can distinguish WAF
+      // block from network reset from malformed JSON at 3 AM.
+      //
+      // Two follow-up tightenings (Copilot review on #4291):
+      //
+      // 1. **Skip abort-driven errors.** When `cancel()` / `dispose()`
+      //    aborts the in-flight `fetch`, the underlying client throws
+      //    a DOMException-like `AbortError` (or fetch wraps it as
+      //    `TypeError: aborted`). That's a normal lifecycle event,
+      //    not a failure — emitting a stderr "poll failed" line for
+      //    every cancel would pollute the operator audit.
+      //
+      // 2. **Don't echo raw `err.message`.** `pollDeviceToken` POSTs
+      //    `device_code` + `code_verifier` (PKCE) per RFC 8628 §3.4.
+      //    A WAF / reverse proxy that echoes the request body in its
+      //    error response would put those bearer-equivalent values
+      //    into daemon stderr — violating the BrandedSecret-style
+      //    "secrets never appear in logs" contract the registry
+      //    depends on. Log STRUCTURED diagnostics only:
+      //    `QwenOAuthPollError.oauthError` (RFC 8628 §3.5 enum), or
+      //    for non-OAuth errors, just the constructor name + a
+      //    bounded message length so the on-call still gets a
+      //    breadcrumb without the request-body echo path.
+      const aborted =
+        opts.signal.aborted ||
+        (err instanceof Error && err.name === 'AbortError');
+      if (!aborted) {
+        let safeDetail: string;
+        if (err instanceof QwenOAuthPollError) {
+          // Structured upstream OAuth error envelope — no raw body.
+          safeDetail = `oauthError=${err.oauthError ?? '(missing)'}`;
+        } else if (err instanceof Error) {
+          // Non-OAuth (network / parse / unexpected upstream shape).
+          // The constructor name + length is enough for triage; the
+          // raw message MAY contain WAF-echoed request body fields.
+          safeDetail = `${err.name} (message ${err.message.length} bytes; raw suppressed to avoid echoing device_code/PKCE)`;
+        } else {
+          safeDetail = `<non-Error throw: ${typeof err}>`;
+        }
+        writeStderrLine(
+          `[serve] qwen device-flow poll failed (errorKind=${errorKind}): ${truncateForStderr(safeDetail)}`,
+        );
+      }
       return {
         kind: 'error',
         errorKind,
