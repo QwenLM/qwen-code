@@ -164,6 +164,70 @@ async function awaitCompletion(
   return await pollUntilTerminal(client, start, clientId, opts);
 }
 
+/**
+ * Read the daemon's view of a device flow, mapping a 404 from the
+ * GET endpoint to a synthetic terminal `error`/`not_found_or_evicted`
+ * state instead of letting `DaemonHttpError(404)` escape. PR #4255
+ * fold-in 7 review thread #4: extracted from the inline catch in
+ * `pollUntilTerminal` so the timeout-ceiling final read uses the same
+ * logic — without this, the ceiling read would reject with a raw
+ * `DaemonHttpError` if the daemon evicted the entry exactly at the
+ * boundary, breaking `awaitCompletion`'s "always returns a settled
+ * `DaemonDeviceFlowState`" contract.
+ */
+async function getDeviceFlowOrSynthetic404(
+  client: DaemonClient,
+  start: {
+    deviceFlowId: string;
+    providerId: DaemonAuthProviderId;
+  },
+  clientId: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<DaemonDeviceFlowState> {
+  try {
+    return await client.getDeviceFlow(start.deviceFlowId, {
+      clientId,
+      signal,
+    });
+  } catch (err: unknown) {
+    if (err instanceof DaemonHttpError && err.status === 404) {
+      // PR #4255 fold-in 3 (#4): a 404 here can mean (a) the entry
+      // expired and the sweeper reaped it past the terminal grace
+      // window, (b) the daemon was restarted and lost the registry,
+      // (c) the deviceFlowId was wrong / spoofed. The earlier
+      // synthetic `'expired'` status conflated all three. Surface
+      // `status: 'error'` + `errorKind: 'not_found_or_evicted'` so
+      // SDK consumers can distinguish "your flow expired during your
+      // disconnect" from "this id was never valid on this daemon."
+      return {
+        deviceFlowId: start.deviceFlowId,
+        providerId: start.providerId,
+        status: 'error',
+        errorKind: 'not_found_or_evicted',
+        hint: 'device-flow not found on daemon (evicted past terminal grace, daemon restart, or unknown deviceFlowId)',
+        createdAt: Date.now(),
+      };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Validate an `AwaitCompletionOptions` numeric field. PR #4255
+ * fold-in 7 review thread #5: `NaN` / `Infinity` from a misbehaving
+ * caller would otherwise produce a `ceiling` of `NaN` (so `now >=
+ * ceiling` is always `false` — the loop runs forever) or a
+ * `setTimeout(NaN)` (Node clamps to a 1 ms delay — tight polling
+ * loop). Reject non-finite-positive values; when the caller's intent
+ * was sloppy ("a long timeout") they fall back to the documented
+ * default rather than getting a pathological loop.
+ */
+function sanitizePositiveMs(raw: number | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  return raw;
+}
+
 async function pollUntilTerminal(
   client: DaemonClient,
   start: {
@@ -179,12 +243,18 @@ async function pollUntilTerminal(
   opts: AwaitCompletionOptions,
 ): Promise<DaemonDeviceFlowState> {
   const signal = opts.signal;
-  const ceiling = opts.timeoutMs
-    ? Date.now() + opts.timeoutMs
+  // PR #4255 fold-in 7 review thread #5: validate caller-supplied
+  // numeric inputs BEFORE composing the ceiling / interval. NaN /
+  // Infinity slip past the original `?? default` form (they're
+  // truthy-ish) and break the loop's wall-clock guard.
+  const sanitizedTimeoutMs = sanitizePositiveMs(opts.timeoutMs);
+  const sanitizedPollOverrideMs = sanitizePositiveMs(opts.pollOverrideMs);
+  const ceiling = sanitizedTimeoutMs
+    ? Date.now() + sanitizedTimeoutMs
     : start.expiresAt + DEVICE_FLOW_EXPIRY_GRACE_MS;
   let interval = Math.max(
     1_000,
-    opts.pollOverrideMs ?? start.intervalMs ?? 5_000,
+    sanitizedPollOverrideMs ?? start.intervalMs ?? 5_000,
   );
   let lastIntervalMs = interval;
   while (true) {
@@ -193,34 +263,17 @@ async function pollUntilTerminal(
     }
     const now = Date.now();
     if (now >= ceiling) {
-      // Final read so the caller still gets the daemon's current view.
-      return await client.getDeviceFlow(start.deviceFlowId, { clientId });
+      // PR #4255 fold-in 7 #4: route the ceiling read through the
+      // same 404-aware helper as the loop body. A 404 at the
+      // boundary is a settled state, not a throw.
+      return await getDeviceFlowOrSynthetic404(client, start, clientId, signal);
     }
-    let snapshot: DaemonDeviceFlowState;
-    try {
-      snapshot = await client.getDeviceFlow(start.deviceFlowId, { clientId });
-    } catch (err: unknown) {
-      if (err instanceof DaemonHttpError && err.status === 404) {
-        // PR #4255 fold-in 3 (#4): a 404 here can mean (a) the entry
-        // expired and the sweeper reaped it past the terminal grace
-        // window, (b) the daemon was restarted and lost the registry,
-        // (c) the deviceFlowId was wrong / spoofed. The earlier
-        // synthetic `'expired'` status conflated all three. Surface
-        // `status: 'error'` + `errorKind: 'not_found_or_evicted'`
-        // so SDK consumers can distinguish "your flow expired during
-        // your disconnect" from "this id was never valid on this
-        // daemon."
-        return {
-          deviceFlowId: start.deviceFlowId,
-          providerId: start.providerId,
-          status: 'error',
-          errorKind: 'not_found_or_evicted',
-          hint: 'device-flow not found on daemon (evicted past terminal grace, daemon restart, or unknown deviceFlowId)',
-          createdAt: now,
-        };
-      }
-      throw err;
-    }
+    const snapshot = await getDeviceFlowOrSynthetic404(
+      client,
+      start,
+      clientId,
+      signal,
+    );
     if (snapshot.intervalMs && snapshot.intervalMs !== lastIntervalMs) {
       lastIntervalMs = snapshot.intervalMs;
       interval = snapshot.intervalMs;

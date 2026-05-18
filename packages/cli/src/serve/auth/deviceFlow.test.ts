@@ -13,7 +13,11 @@ import {
   unsafeRevealSecret,
   DEVICE_FLOW_DEFAULT_INTERVAL_MS,
   DEVICE_FLOW_MAX_CONCURRENT,
+  DEVICE_FLOW_MAX_EXPIRES_IN_SEC,
+  DEVICE_FLOW_MAX_INTERVAL_MS,
+  DEVICE_FLOW_PERSIST_TIMEOUT_MS,
   DEVICE_FLOW_SLOW_DOWN_BUMP_MS,
+  DEVICE_FLOW_START_TIMEOUT_MS,
   DEVICE_FLOW_TERMINAL_GRACE_MS,
   DeviceFlowRegistry,
   TooManyActiveDeviceFlowsError,
@@ -107,6 +111,12 @@ class FakeProvider implements DeviceFlowProvider {
   startError: Error | undefined;
   expiresIn = 600; // 10 minutes
   interval: number | undefined = undefined;
+  /** Test hook: when `true`, `start()` returns a Promise that NEVER
+   *  resolves and ignores the supplied `signal`. Models a misbehaving
+   *  / future provider whose underlying I/O isn't abortable —
+   *  registry's authoritative timeout (Promise.race) is the only
+   *  thing that can rescue the await. PR #4255 fold-in 7 #1. */
+  startHangs = false;
   /** Most recent `opts.signal` observed by `poll`. Test hook for the
    *  abort-mid-poll assertion: after `registry.cancel(...)`, this
    *  signal MUST report `.aborted === true` so the upstream HTTP
@@ -124,6 +134,13 @@ class FakeProvider implements DeviceFlowProvider {
   }> {
     this.startCount += 1;
     if (this.startError) throw this.startError;
+    if (this.startHangs) {
+      // Never resolves and intentionally ignores `signal` — models a
+      // non-cooperative provider. Registry's Promise.race timeout is
+      // what must rescue this `await`.
+      await new Promise<never>(() => {});
+      throw new Error('unreachable');
+    }
     return {
       deviceCode: brandSecret(`device-${this.startCount}`),
       pkceVerifier: brandSecret(`pkce-${this.startCount}`),
@@ -562,6 +579,98 @@ describe('DeviceFlowRegistry — polling state machine', () => {
       for (const pattern of forbiddenPatterns) {
         expect(src).not.toMatch(pattern);
       }
+    }
+  });
+});
+
+describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
+  it('start() rejects when a non-abortable provider.start() hangs past START_TIMEOUT_MS (#1)', async () => {
+    const provider = new FakeProvider();
+    provider.startHangs = true;
+    const built = buildRegistry(provider);
+    const { registry, env } = built;
+    try {
+      const startPromise = registry.start({ providerId: 'qwen-oauth' });
+      // Let the registry register its race timer.
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_START_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await expect(startPromise).rejects.toThrow(/start timeout/);
+      // Critical: inFlightStarts slot must be released so a future
+      // POST creates a fresh flow rather than re-attaching to the
+      // hung promise.
+      provider.startHangs = false;
+      await expect(
+        registry.start({ providerId: 'qwen-oauth' }),
+      ).resolves.toMatchObject({ attached: false });
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('persist() that hangs past PERSIST_TIMEOUT_MS maps to persist_failed (#2)', async () => {
+    const provider = new FakeProvider();
+    // Single poll tick returns success whose persist() never resolves.
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: () =>
+          new Promise<{ expiresAt?: number; accountAlias?: string }>(
+            () => undefined,
+          ),
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      // Drive the first poll → success → enters persist race.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Now advance past the persist timeout.
+      env.clock.tick(DEVICE_FLOW_PERSIST_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('error');
+      expect(snapshot?.errorKind).toBe('persist_failed');
+      const failed = events.find(
+        (e) =>
+          e.emission.type === 'failed' &&
+          e.emission.data.errorKind === 'persist_failed',
+      );
+      expect(failed).toBeDefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('clamps an extreme expiresIn to DEVICE_FLOW_MAX_EXPIRES_IN_SEC (#3)', async () => {
+    const provider = new FakeProvider();
+    provider.expiresIn = 1e12; // years; would pin singleton without clamp
+    const built = buildRegistry(provider);
+    const { registry, env } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      const ttlMs = (view.expiresAt ?? 0) - env.clock.now;
+      expect(ttlMs).toBeLessThanOrEqual(DEVICE_FLOW_MAX_EXPIRES_IN_SEC * 1000);
+      expect(ttlMs).toBeGreaterThan(0);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('clamps an extreme interval to DEVICE_FLOW_MAX_INTERVAL_MS (#3)', async () => {
+    const provider = new FakeProvider();
+    provider.interval = 1e9; // billions of seconds; setTimeout(huge) is dropped
+    const built = buildRegistry(provider);
+    const { registry } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      expect(view.intervalMs).toBeLessThanOrEqual(DEVICE_FLOW_MAX_INTERVAL_MS);
+    } finally {
+      registry.dispose();
     }
   });
 });

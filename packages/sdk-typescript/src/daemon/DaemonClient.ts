@@ -1095,11 +1095,18 @@ export class DaemonClient {
 
   async getDeviceFlow(
     deviceFlowId: string,
-    opts: { clientId?: string } = {},
+    opts: { clientId?: string; signal?: AbortSignal } = {},
   ): Promise<DaemonDeviceFlowState> {
+    // PR #4255 fold-in 7 review thread #6: forward `signal` into
+    // `fetchWithTimeout`, which composes it with the per-request
+    // `fetchTimeoutMs` controller. Without this, an `awaitCompletion`
+    // caller that aborts mid-poll could not cancel the in-flight GET
+    // — only the post-await guard would notice, but that runs only
+    // after the body is already settled (or the daemon-side
+    // `fetchTimeoutMs` fires, which can be 30s+).
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/auth/device-flow/${encodeURIComponent(deviceFlowId)}`,
-      { headers: this.headers({}, opts.clientId) },
+      { headers: this.headers({}, opts.clientId), signal: opts.signal },
       async (res) => {
         if (!res.ok) {
           throw await this.failOnError(

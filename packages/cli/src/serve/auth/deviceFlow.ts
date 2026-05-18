@@ -50,6 +50,28 @@ export const DEVICE_FLOW_PERSIST_TIMEOUT_MS = 30_000;
  * PR #4255 review fold-in 3 (#2).
  */
 export const DEVICE_FLOW_START_TIMEOUT_MS = 30_000;
+/**
+ * Operator-safe upper bound on the IdP-provided `expires_in`. RFC
+ * 8628 §6.1 calls 5–30 minutes "reasonable"; 1 hour is the practical
+ * ceiling for any well-behaved IdP. PR #4255 fold-in 7 review thread
+ * #3: `Number.isFinite + > 0` keeps NaN/Infinity out, but a malicious
+ * or buggy IdP returning `1e12` still pins the per-provider singleton
+ * for years and ties up an entry slot the entire time. Clamping
+ * silently bounds the worst case to 1 hour — an IdP that genuinely
+ * needs longer is not RFC 8628 compliant.
+ */
+export const DEVICE_FLOW_MAX_EXPIRES_IN_SEC = 60 * 60;
+/**
+ * Upper bound on the polling interval. RFC 8628's normal `interval`
+ * + `slow_down` bumps live in the 5–30 s range; values past 60 s
+ * indicate an IdP misbehaving (or, more likely, `1e12` from a
+ * fuzzed/buggy response). Capping keeps `setTimeout` from being
+ * scheduled with a value that Node's scheduler clamps to
+ * `TIMEOUT_MAX` (≈24.8 d) — at which point the poll never fires
+ * within the entry's `expiresAt` window. PR #4255 fold-in 7 review
+ * thread #3.
+ */
+export const DEVICE_FLOW_MAX_INTERVAL_MS = 60_000;
 
 // PR #4255 fold-in 6 review thread #2: derive the type from the
 // supported-providers tuple so adding/removing a provider id
@@ -650,26 +672,36 @@ export class DeviceFlowRegistry {
     provider: DeviceFlowProvider,
   ): Promise<{ view: DeviceFlowPublicView; attached: boolean }> {
     const cancelController = new AbortController();
-    // PR #4255 review fold-in 3 (#2): bound `provider.start()` with a
-    // hard timeout. Without this, a hung IdP leaves the
-    // `inFlightStarts` slot occupied forever and blocks every
-    // subsequent POST for the same providerId until daemon restart.
-    // The timer aborts the start's signal so a signal-aware provider
-    // can tear down its in-flight `fetch`; the timeout-rejected
-    // promise unwinds through `start()`'s `finally` which clears the
-    // `inFlightStarts` entry.
-    const startTimer = this.schedule(DEVICE_FLOW_START_TIMEOUT_MS, () => {
-      try {
-        cancelController.abort(new Error('device-flow start timeout'));
-      } catch {
-        // best-effort
-      }
-    });
+    // PR #4255 fold-in 3 #2 + fold-in 7 #1: bound `provider.start()`
+    // with an authoritative registry-side timeout via `Promise.race`.
+    // The earlier shape only ABORTED the signal on timeout — but a
+    // provider that ignored the signal (non-abortable I/O, future
+    // implementer who forgot to thread `signal` to `fetch`) would
+    // leave the `await` hanging forever, pinning the `inFlightStarts`
+    // slot until daemon restart. Racing against a rejecting timer
+    // makes the timeout authoritative regardless of provider
+    // cooperation, while the abort still lets cooperative providers
+    // tear down their in-flight `fetch` for cleanup.
     let startResult: DeviceFlowStartResult;
+    let startTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      startResult = await provider.start({ signal: cancelController.signal });
+      startResult = await new Promise<DeviceFlowStartResult>(
+        (resolve, reject) => {
+          startTimer = this.schedule(DEVICE_FLOW_START_TIMEOUT_MS, () => {
+            try {
+              cancelController.abort(new Error('device-flow start timeout'));
+            } catch {
+              // best-effort
+            }
+            reject(new Error('device-flow start timeout'));
+          });
+          provider
+            .start({ signal: cancelController.signal })
+            .then(resolve, reject);
+        },
+      );
     } finally {
-      this.clearScheduled(startTimer);
+      if (startTimer !== undefined) this.clearScheduled(startTimer);
     }
     // PR #4255 review S6: dispose() may have run while we awaited
     // `provider.start()`. If we proceed past this point the resulting
@@ -690,21 +722,37 @@ export class DeviceFlowRegistry {
     // an upstream `device_code` slot until daemon restart. Reject
     // non-finite-positive values and fall back to RFC 8628's
     // suggested ceiling (10 min) so the entry still expires.
+    //
+    // PR #4255 fold-in 7 review thread #3: also clamp the upper end
+    // — an extreme finite value like `1e12` is finite-and-positive
+    // but would pin the singleton for ~30,000 years. Cap at
+    // `DEVICE_FLOW_MAX_EXPIRES_IN_SEC` so a malformed/malicious IdP
+    // can't tie up a per-provider slot beyond an operator-safe
+    // bound.
     const expiresInSec =
       Number.isFinite(startResult.expiresIn) && startResult.expiresIn > 0
-        ? startResult.expiresIn
+        ? Math.min(startResult.expiresIn, DEVICE_FLOW_MAX_EXPIRES_IN_SEC)
         : 600;
     const expiresAt = this.now() + expiresInSec * 1000;
     // Same defense for `interval`: a non-finite-positive value would
     // schedule a `setTimeout(NaN)` (fires immediately) or
     // `setTimeout(Infinity)` (scheduler clamps to TIMEOUT_MAX). RFC
     // 8628 recommends a 5s default when the IdP omits `interval`.
+    // PR #4255 fold-in 7 review thread #3: also clamp upper bound —
+    // `interval: 1e12` is finite-and-positive but Node's scheduler
+    // would either clamp to TIMEOUT_MAX (≈24.8 d, never fires within
+    // the entry's expiresAt) or drop. Cap at
+    // `DEVICE_FLOW_MAX_INTERVAL_MS` so the poll fires within a
+    // reasonable window regardless of upstream input.
     const intervalSec =
       Number.isFinite(startResult.interval) &&
       (startResult.interval as number) > 0
         ? (startResult.interval as number)
         : DEVICE_FLOW_DEFAULT_INTERVAL_MS / 1000;
-    const intervalMs = Math.max(1_000, intervalSec * 1000);
+    const intervalMs = Math.min(
+      DEVICE_FLOW_MAX_INTERVAL_MS,
+      Math.max(1_000, intervalSec * 1000),
+    );
     const entry: DeviceFlowEntry = {
       deviceFlowId: randomUUID(),
       providerId: params.providerId,
@@ -902,34 +950,49 @@ export class DeviceFlowRegistry {
         this.schedulePoll(entry, provider);
         return;
       case 'success': {
-        // PR #4255 review C3 + fold-in 5 (#1): bound persist() with
-        // both the entry's cancelController signal AND a hard timeout
-        // so a hung filesystem can't pin the entry in `pending`
-        // indefinitely. Set `entry.persistInFlight` for the duration
-        // so `cancel()` and the sweeper SKIP transition+emit during
-        // this window — they just register intent (or no-op) and let
-        // the persist resolution decide the terminal state.
+        // PR #4255 review C3 + fold-in 5 #1 + fold-in 7 #2: bound
+        // persist() with both the entry's cancelController signal
+        // AND an authoritative registry-side timeout via
+        // `Promise.race`. The earlier shape only ABORTED the signal
+        // on timeout — but a provider whose `persist()` performs
+        // non-abortable I/O (a future provider that does `mkdir` /
+        // `chmod` / `mv` outside the abortable `fs.writeFile`
+        // pathway) would leave this `await` hanging until process
+        // restart, pinning the flow in `pending` and blocking
+        // same-provider starts. Racing against a rejecting timer
+        // makes the timeout authoritative regardless of provider
+        // cooperation; on rejection we fall through to the error
+        // branch which maps to `persist_failed`.
+        //
+        // Set `entry.persistInFlight` for the duration so `cancel()`
+        // and the sweeper SKIP transition+emit during this window —
+        // they just register intent (or no-op) and let the persist
+        // resolution decide the terminal state.
         let metadata: { expiresAt?: number; accountAlias?: string } = {};
         let persistError: unknown;
-        const persistTimeout = this.schedule(
-          DEVICE_FLOW_PERSIST_TIMEOUT_MS,
-          () => {
-            try {
-              entry.cancelController.abort(new Error('persist timeout'));
-            } catch {
-              // best-effort
-            }
-          },
-        );
+        let persistTimer: ReturnType<typeof setTimeout> | undefined;
         entry.persistInFlight = true;
         try {
-          metadata = await result.persist({
-            signal: entry.cancelController.signal,
+          metadata = await new Promise<{
+            expiresAt?: number;
+            accountAlias?: string;
+          }>((resolve, reject) => {
+            persistTimer = this.schedule(DEVICE_FLOW_PERSIST_TIMEOUT_MS, () => {
+              try {
+                entry.cancelController.abort(new Error('persist timeout'));
+              } catch {
+                // best-effort
+              }
+              reject(new Error('persist timeout'));
+            });
+            result
+              .persist({ signal: entry.cancelController.signal })
+              .then(resolve, reject);
           });
         } catch (err: unknown) {
           persistError = err;
         } finally {
-          this.clearScheduled(persistTimeout);
+          if (persistTimer !== undefined) this.clearScheduled(persistTimer);
           entry.persistInFlight = false;
         }
         if (this.disposed) return;
