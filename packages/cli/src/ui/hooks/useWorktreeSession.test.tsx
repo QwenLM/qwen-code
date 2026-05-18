@@ -9,11 +9,12 @@ import { renderHook } from '@testing-library/react';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type {
- Config ,
+import {
   writeWorktreeSession,
   clearWorktreeSession,
-  type WorktreeSession } from '@qwen-code/qwen-code-core';
+  type Config,
+  type WorktreeSession,
+} from '@qwen-code/qwen-code-core';
 import { useWorktreeSession } from './useWorktreeSession.js';
 
 const SESSION_ID = 'test-session-id';
