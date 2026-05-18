@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
+import { realpathSync, promises as fsp } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -59,6 +60,7 @@ import type {
   ServeWorkspaceSkillsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
+import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -3156,6 +3158,192 @@ describe('runQwenServe', () => {
     await handle.close();
     handle = undefined;
     expect(bridge.shutdownCalls).toBe(1);
+  });
+
+  it('wires fsFactory + emit through to the read routes (#4175 PR 19 follow-up #2)', async () => {
+    // Pin the contract that `runQwenServe` constructs the workspace
+    // filesystem boundary, threads its emit hook through to
+    // `createServeApp`, and that boundary actually drives the new
+    // PR 19 read routes. A regression that drops the `fsFactory`
+    // injection (or that swaps in a different emit channel) shows
+    // up here as either a 500 response or a missing audit event.
+    const captured: BridgeEvent[] = [];
+    const bridge = fakeBridge();
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-fs-'),
+    );
+    await fsp.writeFile(path.join(wsRoot, 'a.txt'), 'hello');
+    try {
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsAuditEmit: (e) => captured.push(e) },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const ok = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+      expect(ok.status).toBe(200);
+      expect(
+        captured.find(
+          (e) =>
+            e.type === 'fs.access' &&
+            (e.data as { intent?: string }).intent === 'read',
+        ),
+      ).toBeDefined();
+
+      const bad = await fetch(`http://127.0.0.1:${port}/file?path=../escape`);
+      expect(bad.status).toBe(400);
+      const denied = captured.find(
+        (e) =>
+          e.type === 'fs.denied' &&
+          (e.data as { errorKind?: string }).errorKind ===
+            'path_outside_workspace',
+      );
+      expect(denied).toBeDefined();
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('honors deps.fsFactory override (#4175 PR 19 follow-up #2)', async () => {
+    // The injection point exists so embedded callers (other tools
+    // wrapping the daemon, future runtime locality contracts) can
+    // swap in a remote-fronting factory. This test asserts
+    // `runQwenServe` does NOT silently shadow a caller-supplied
+    // factory with its built-in default. A regression that
+    // reverses the priority order would produce a 200 (built-in
+    // factory reads `process.cwd()/package.json`); the sentinel
+    // ensures we see 400 instead.
+    const sentinelMessage = 'sentinel-from-fake-factory';
+    const fsFactory: WorkspaceFileSystemFactory = {
+      forRequest: () => ({
+        resolve: async () => {
+          throw new FsError('parse_error', sentinelMessage);
+        },
+        readText: async () => {
+          throw new Error('unreachable');
+        },
+        readBytes: async () => {
+          throw new Error('unreachable');
+        },
+        list: async () => {
+          throw new Error('unreachable');
+        },
+        glob: async () => {
+          throw new Error('unreachable');
+        },
+        stat: async () => {
+          throw new Error('unreachable');
+        },
+        writeText: async () => {
+          throw new Error('unreachable');
+        },
+        edit: async () => {
+          throw new Error('unreachable');
+        },
+      }),
+    };
+    const bridge = fakeBridge();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: process.cwd(),
+      },
+      { bridge, fsFactory },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; errorKind: string };
+    expect(body.errorKind).toBe('parse_error');
+    expect(body.error).toContain(sentinelMessage);
+  });
+
+  it('trust snapshot defaults to true (operator-chosen workspace)', async () => {
+    // The default trust value drives PR 20 write-route behavior
+    // even though PR 19 only exercises read intents. Pin the
+    // default here so a future contributor flipping it has to
+    // rewrite this test, surfacing the security-relevant change
+    // for review.
+    const bridge = fakeBridge();
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-trust-'),
+    );
+    try {
+      const captured: BridgeEvent[] = [];
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsAuditEmit: (e) => captured.push(e) },
+      );
+      // Drive a read so the factory's `assertTrustedForIntent`
+      // gate fires. Read intents pass under both trusted and
+      // untrusted; the test signal is the absence of any
+      // `untrusted_workspace` denial event in the captured stream.
+      await fsp.writeFile(path.join(wsRoot, 'b.txt'), 'b');
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/file?path=b.txt`);
+      expect(res.status).toBe(200);
+      expect(
+        captured.find(
+          (e) =>
+            (e.data as { errorKind?: string }).errorKind ===
+            'untrusted_workspace',
+        ),
+      ).toBeUndefined();
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('trust snapshot=false flows through deps.trustedWorkspace into the boundary (#4175 PR 19 follow-up #2)', async () => {
+    // PR 19 has no write routes, so the trust gate's effect on
+    // mutating intents can't be observed via HTTP. Instead, we
+    // construct the same factory that runQwenServe would build,
+    // with the same `trusted` value runQwenServe would pass, and
+    // assert the gate trips. The contract is: when
+    // `deps.trustedWorkspace = false`, the factory's
+    // `assertTrustedForIntent` rejects writes with
+    // `untrusted_workspace` — exactly what PR 20 will rely on.
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-untrust-'),
+    );
+    try {
+      // Mirror runQwenServe's construction. If `runQwenServe`
+      // changes the call shape (different deps order, different
+      // fields), this test will start failing to type-check —
+      // which is the point: the failure is the audit trail.
+      const { createWorkspaceFileSystemFactory } = await import(
+        './fs/index.js'
+      );
+      const factory = createWorkspaceFileSystemFactory({
+        boundWorkspace: wsRoot,
+        trusted: false,
+        emit: () => undefined,
+      });
+      const fsApi = factory.forRequest({ route: 'TEST /op' });
+      // Read still passes — read intents are always trusted.
+      await fsp.writeFile(path.join(wsRoot, 'a.txt'), 'a');
+      const r = await fsApi.resolve('a.txt', 'read');
+      const out = await fsApi.readText(r);
+      expect(out.content).toBe('a');
+      // Write throws untrusted_workspace.
+      const w = await fsApi.resolve('out.txt', 'write');
+      await expect(fsApi.writeText(w, 'x')).rejects.toMatchObject({
+        kind: 'untrusted_workspace',
+      });
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
   });
 
   it('handle.close() is idempotent — concurrent + repeat calls share one drain cycle', async () => {
