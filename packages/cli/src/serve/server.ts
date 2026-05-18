@@ -1744,14 +1744,34 @@ function toDeviceFlowStartResponseBody(
     deviceFlowId: view.deviceFlowId,
     providerId: view.providerId,
     status: view.status,
-    userCode: view.userCode ?? '',
-    verificationUri: view.verificationUri ?? '',
     expiresAt: view.expiresAt ?? 0,
     intervalMs: view.intervalMs ?? 0,
     attached,
   };
-  if (view.verificationUriComplete) {
-    body['verificationUriComplete'] = view.verificationUriComplete;
+  // PR #4291 follow-up review (gpt-5.5, #3): policy consistency with
+  // `toDeviceFlowStateBody` — only the original starter sees the
+  // verification material. Earlier shape unconditionally returned
+  // `userCode` / `verificationUri` / `verificationUriComplete` on
+  // every POST, including the `attached: true` take-over case, so any
+  // bearer-token holder that POSTed `providerId: <existing>` got the
+  // verification code another client started. That bypassed the
+  // closed-out GET redaction completely. Apply the same gate here.
+  // Fresh starts naturally pass the gate because `view.initiatorClientId`
+  // was set from the same `callerClientId` on this very request.
+  // Take-over callers that don't match the initiator now see the
+  // public envelope only. The both-undefined branch preserves the
+  // anonymous-start → anonymous-reattach use case.
+  const callerIsInitiator =
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId);
+  if (callerIsInitiator) {
+    body['userCode'] = view.userCode ?? '';
+    body['verificationUri'] = view.verificationUri ?? '';
+    if (view.verificationUriComplete) {
+      body['verificationUriComplete'] = view.verificationUriComplete;
+    }
   }
   // PR #4255 round-12 #6 (gpt-5.5 review CzHOK): minor info-leak
   // close-out — only echo `initiatorClientId` back to a take-over

@@ -4156,6 +4156,102 @@ describe('auth device-flow routes', () => {
     expect(fakeProvider.startCount()).toBe(1);
   });
 
+  it('POST take-over only echoes userCode/verificationUri/initiatorClientId to caller matching the initiator (#4291 follow-up review)', async () => {
+    // PR #4291 follow-up review (gpt-5.5, #3): policy consistency.
+    // The closed-out GET redaction (don't echo userCode to non-
+    // initiator callers) was bypassable via POST take-over —
+    // any bearer-token holder POSTing the same `providerId` got
+    // `attached: true` AND the original starter's verification
+    // material. Now the same caller-clientId gate applies. Fresh
+    // starts naturally pass (caller IS initiator); take-overs by
+    // a different clientId see only the public envelope.
+    const { app } = buildApp({ token: 'tkn' });
+    // Starter identifies as sdk-A.
+    const first = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A')
+      .send({ providerId: 'qwen-oauth' });
+    expect(first.status).toBe(201);
+    // Fresh starter MUST see the verification material — they ARE
+    // the initiator.
+    expect(first.body.userCode).toBe('USER-1');
+    expect(first.body.verificationUri).toBe('https://idp.example/verify');
+    expect(first.body.initiatorClientId).toBe('sdk-A');
+
+    // Different SDK take-over — must NOT see verification fields.
+    const takeoverDifferent = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-B')
+      .send({ providerId: 'qwen-oauth' });
+    expect(takeoverDifferent.status).toBe(200);
+    expect(takeoverDifferent.body.attached).toBe(true);
+    expect(takeoverDifferent.body.deviceFlowId).toBe(first.body.deviceFlowId);
+    expect(takeoverDifferent.body).not.toHaveProperty('userCode');
+    expect(takeoverDifferent.body).not.toHaveProperty('verificationUri');
+    expect(takeoverDifferent.body).not.toHaveProperty(
+      'verificationUriComplete',
+    );
+    expect(takeoverDifferent.body).not.toHaveProperty('initiatorClientId');
+
+    // Anonymous take-over against an identified-start — must NOT see
+    // verification fields either (mismatched: identified vs anonymous).
+    const takeoverAnon = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(takeoverAnon.status).toBe(200);
+    expect(takeoverAnon.body.attached).toBe(true);
+    expect(takeoverAnon.body).not.toHaveProperty('userCode');
+
+    // Same-id take-over (sdk-A again) — DOES see the material.
+    const takeoverSame = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A')
+      .send({ providerId: 'qwen-oauth' });
+    expect(takeoverSame.status).toBe(200);
+    expect(takeoverSame.body.attached).toBe(true);
+    expect(takeoverSame.body.userCode).toBe('USER-1');
+    expect(takeoverSame.body.initiatorClientId).toBe('sdk-A');
+  });
+
+  it('POST take-over preserves the anonymous-start → anonymous-reattach use case', async () => {
+    // PR #4291 follow-up review (gpt-5.5, #3): the both-undefined
+    // branch of `callerIsInitiator` keeps the legitimate "anonymous
+    // start, anonymous re-attach (e.g., process restart, no
+    // persisted clientId)" use case working. Without this, every
+    // anonymous re-attach would silently lose the userCode.
+    const { app } = buildApp({ token: 'tkn' });
+    const first = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(first.status).toBe(201);
+    expect(first.body.userCode).toBe('USER-1');
+
+    const reattach = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(reattach.status).toBe(200);
+    expect(reattach.body.attached).toBe(true);
+    expect(reattach.body.deviceFlowId).toBe(first.body.deviceFlowId);
+    // Both-undefined: anonymous initiator, anonymous re-attach → same
+    // caller. Verification fields ARE returned.
+    expect(reattach.body.userCode).toBe('USER-1');
+    expect(reattach.body.verificationUri).toBe('https://idp.example/verify');
+    // No initiatorClientId echoed (none was set originally).
+    expect(reattach.body).not.toHaveProperty('initiatorClientId');
+  });
+
   it('GET /workspace/auth/device-flow/:id returns 200 for known + 404 for unknown', async () => {
     const { app } = buildApp({ token: 'tkn' });
     const post = await request(app)

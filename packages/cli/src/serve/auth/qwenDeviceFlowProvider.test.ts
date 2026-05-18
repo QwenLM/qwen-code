@@ -96,11 +96,41 @@ describe('QwenOAuthDeviceFlowProvider.poll() — stderr audit branches', () => {
     expect(stderrLines).toHaveLength(0);
   });
 
-  it('skips stderr audit when pollDeviceToken throws AbortError (cancel/dispose lifecycle)', async () => {
-    // `cancel()` / `dispose()` aborts the AbortController; the
+  it('skips stderr audit when AbortError is thrown AND the registry-owned signal is aborted (cancel/dispose lifecycle)', async () => {
+    // `cancel()` / `dispose()` aborts the AbortController and the
     // underlying fetch throws an `AbortError`-like exception. This
-    // is normal lifecycle, NOT a failure — emitting a stderr line
-    // would pollute the operator audit with every cancel.
+    // is normal lifecycle. The post-await `opts.signal.aborted`
+    // check is what proves WE caused the abort — that's the gate,
+    // not the error name itself.
+    const abortErr = new Error('The operation was aborted.');
+    abortErr.name = 'AbortError';
+    const controller = new AbortController();
+    const provider = new QwenOAuthDeviceFlowProvider(
+      fakeClient({
+        pollDeviceToken: async () => {
+          controller.abort();
+          throw abortErr;
+        },
+      }),
+    );
+    const result = await provider.poll(makeState(), {
+      signal: controller.signal,
+    });
+    expect(result.kind).toBe('error');
+    if (result.kind === 'error') {
+      expect(result.errorKind).toBe('upstream_error');
+    }
+    expect(stderrLines).toHaveLength(0);
+  });
+
+  it('LOGS unexpected AbortError when the registry-owned signal is NOT aborted (transport / proxy / undici)', async () => {
+    // PR #4291 follow-up review (gpt-5.5, #1): an `AbortError` can
+    // come from sources we did NOT initiate — upstream IdP TCP RST,
+    // proxy timeout, undici/node-fetch wrapping unrelated transport
+    // failures as AbortError. Earlier shape silently dropped these
+    // because of the `err.name === 'AbortError'` skip; now we only
+    // skip when WE caused the abort. Unexpected AbortError must
+    // still produce a stderr breadcrumb.
     const abortErr = new Error('The operation was aborted.');
     abortErr.name = 'AbortError';
     const provider = new QwenOAuthDeviceFlowProvider(
@@ -111,13 +141,20 @@ describe('QwenOAuthDeviceFlowProvider.poll() — stderr audit branches', () => {
       }),
     );
     const result = await provider.poll(makeState(), {
+      // Signal NOT aborted — the abort came from an upstream source.
       signal: new AbortController().signal,
     });
     expect(result.kind).toBe('error');
     if (result.kind === 'error') {
       expect(result.errorKind).toBe('upstream_error');
     }
-    expect(stderrLines).toHaveLength(0);
+    expect(stderrLines).toHaveLength(1);
+    const line = stderrLines[0];
+    // Routes through the non-OAuth Error path (name + length).
+    expect(line).toContain('AbortError');
+    expect(line).toContain('raw suppressed');
+    // Negative: the raw message is NOT echoed.
+    expect(line).not.toContain('The operation was aborted.');
   });
 
   it('skips stderr audit when signal.aborted is set after the throw, even for non-AbortError errors', async () => {
@@ -261,5 +298,48 @@ describe('QwenOAuthDeviceFlowProvider.poll() — stderr audit branches', () => {
     expect(stderrLines).toHaveLength(1);
     expect(stderrLines[0]).toContain('errorKind=access_denied');
     expect(stderrLines[0]).toContain('oauthError=access_denied');
+  });
+
+  it('sanitizes control characters and ANSI escapes in attacker-controlled oauthError before stderr interpolation', async () => {
+    // PR #4291 follow-up review (gpt-5.5, #2): the OAuth `error` field
+    // comes directly from the upstream JSON. A compromised IdP / WAF
+    // / proxy can return a value containing newlines, terminal control
+    // characters, or ANSI escape sequences — interpolating that
+    // verbatim into a stderr line would forge additional log entries
+    // or inject color/cursor-movement sequences into operator
+    // terminals. `sanitizeForStderr` strips C0/C1 controls + DEL.
+    const malicious =
+      'slow_down\n[serve] FORGED LOG ENTRY 2026-01-01\x1b[31mRED\x1b[0m';
+    const provider = new QwenOAuthDeviceFlowProvider(
+      fakeClient({
+        pollDeviceToken: async () => {
+          throw new QwenOAuthPollError({
+            oauthError: malicious,
+            description: 'attacker-supplied',
+            status: 400,
+          });
+        },
+      }),
+    );
+    const result = await provider.poll(makeState(), {
+      signal: new AbortController().signal,
+    });
+    expect(result.kind).toBe('error');
+    expect(stderrLines).toHaveLength(1);
+    const line = stderrLines[0];
+    // The forged log line text MUST NOT appear as a real second line.
+    // Implementation replaces \n with `?`, so the body is on a single
+    // line and the second `[serve]` no longer leads a line.
+    expect(line.split('\n').length).toBe(2); // single content line + trailing newline
+    // ANSI escape \x1b is gone.
+    expect(line).not.toContain('\x1b[31m');
+    expect(line).not.toContain('\x1b[0m');
+    // Newline inside the value is gone.
+    expect(line).not.toMatch(/\n\[serve\] FORGED/);
+    // The literal text after the controls is preserved (operator can
+    // still see what the IdP claimed) — only the harmful bytes are
+    // replaced.
+    expect(line).toContain('FORGED LOG ENTRY');
+    expect(line).toContain('RED');
   });
 });
