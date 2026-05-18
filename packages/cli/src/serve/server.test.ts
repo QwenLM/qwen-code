@@ -4584,6 +4584,43 @@ describe('auth device-flow routes', () => {
     expect(differentCaller.body).not.toHaveProperty('initiatorClientId');
   });
 
+  it('GET /workspace/auth/device-flow/:id returns 400 invalid_client_id when X-Qwen-Client-Id is malformed (qwen-latest review N3)', async () => {
+    // PR #4291 follow-up review (qwen-latest, N3): the GET handler's
+    // strict-clientId behavior — added in this PR to drive the
+    // `callerIsInitiator` gate — was documented in JSDoc but not
+    // pinned in CI. A future refactor that removes or reorders the
+    // `parseClientIdHeader` call would silently revert the contract
+    // change. Pin: a malformed header (>128 chars or invalid chars)
+    // returns 400 `invalid_client_id` from THIS specific GET route.
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+
+    // Over-length: 129 chars.
+    const tooLong = 'a'.repeat(129);
+    const tooLongRes = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', tooLong);
+    expect(tooLongRes.status).toBe(400);
+    expect(tooLongRes.body.code).toBe('invalid_client_id');
+
+    // Invalid characters (spaces / quotes — anything outside the
+    // allowed token charset).
+    const badChars = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'has spaces and "quotes"');
+    expect(badChars.status).toBe(400);
+    expect(badChars.body.code).toBe('invalid_client_id');
+  });
+
   it('GET /workspace/auth/device-flow/:id returns userCode for an anonymously-started flow when the GET caller is also anonymous', async () => {
     // PR #4291 follow-up review (qwen-latest, #3): the original
     // gate required both `initiatorClientId` AND `callerClientId`

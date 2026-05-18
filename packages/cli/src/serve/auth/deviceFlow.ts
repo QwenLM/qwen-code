@@ -1184,7 +1184,21 @@ export class DeviceFlowRegistry {
             clientId: entry.initiatorClientId,
             status: 'failed',
             errorKind: 'upstream_error',
-            hint: `lost_late_poll_after_timeout: provider.poll() resolved kind=${latePollResult.kind} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
+            // PR #4291 follow-up review (qwen-latest, N1): the late-
+            // poll resolve branch fires when `provider.poll()` returns
+            // a result AFTER our race timer settled the wrapper. For a
+            // cooperative provider whose abort path resolves to
+            // `{kind: 'error', errorKind: 'upstream_error'}` (the Qwen
+            // implementation does this in response to AbortError), the
+            // "response" is just the abort-cooperation path — the IdP
+            // could be completely down. Don't assert "responsive but
+            // slow" on the error kind: route operators correctly by
+            // distinguishing "real late response" (pending / slow_down /
+            // success) from "provider's abort cooperation" (error).
+            hint:
+              latePollResult.kind === 'error'
+                ? `lost_late_poll_after_timeout: provider.poll() resolved kind=error after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — likely abort-driven cooperation; IdP responsiveness unknown`
+                : `lost_late_poll_after_timeout: provider.poll() resolved kind=${latePollResult.kind} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
           });
         },
         (lateErr: unknown) => {

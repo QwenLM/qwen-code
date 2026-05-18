@@ -19,6 +19,7 @@ import {
   DEVICE_FLOW_POLL_TIMEOUT_MS,
   DEVICE_FLOW_SLOW_DOWN_BUMP_MS,
   DEVICE_FLOW_START_TIMEOUT_MS,
+  DeviceFlowPollTimeoutError,
   DEVICE_FLOW_TERMINAL_GRACE_MS,
   DeviceFlowRegistry,
   TooManyActiveDeviceFlowsError,
@@ -814,6 +815,167 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
       expect(lateAudit?.['hint']).toContain(
         `${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling`,
       );
+      // PR #4291 follow-up review (qwen-latest, N1): kind=pending is a
+      // real late response (the IdP eventually responded), so the
+      // "responsive but slow" hint is appropriate here. The negative
+      // is the kind === 'error' branch (separately tested below).
+      expect(lateAudit?.['hint']).toContain('IdP is responsive but slow');
+      expect(lateAudit?.['hint']).not.toContain('abort-driven');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('records lost_late_poll_after_timeout with abort-driven hint when late resolution is kind=error (qwen-latest review N1)', async () => {
+    // PR #4291 follow-up review (qwen-latest, N1): when the registry
+    // race timer aborts `entry.cancelController.signal`, a cooperative
+    // provider's `pollDeviceToken({signal})` typically throws
+    // AbortError; the provider's catch then resolves to
+    // `{kind: 'error', errorKind: 'upstream_error'}`. This success
+    // handler fires with `latePollResult.kind === 'error'`. Earlier
+    // shape would have audited "IdP is responsive but slow" — but the
+    // IdP could be totally down; the "response" is just the provider's
+    // abort cooperation. Pin the corrected attribution.
+    const provider = new FakeProvider();
+    let resolveLate!: (r: DeviceFlowPollResult) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>((resolve) => {
+      resolveLate = resolve;
+    });
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Cooperative abort path: provider resolves to error AFTER the
+      // race timer fired.
+      resolveLate({
+        kind: 'error',
+        errorKind: 'upstream_error',
+        hint: 'aborted by signal',
+      });
+      await flushAsync();
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      expect(lateAudit?.['hint']).toContain('kind=error');
+      // The corrected hint MUST NOT claim the IdP is responsive.
+      expect(lateAudit?.['hint']).not.toContain('IdP is responsive but slow');
+      expect(lateAudit?.['hint']).toContain('abort-driven cooperation');
+      expect(lateAudit?.['hint']).toContain('IdP responsiveness unknown');
+      // dispose the entry to keep the test isolated.
+      void view;
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('records lost_late_poll_after_timeout when provider.poll() REJECTS after the race timeout (qwen-latest review N2)', async () => {
+    // PR #4291 follow-up review (qwen-latest, N2): the late observer
+    // also has an `onRejected` branch covering three sub-paths that
+    // were previously zero-tested:
+    //   1. `if (lateErr instanceof DeviceFlowPollTimeoutError) return;`
+    //      (don't double-audit our own race-timer rejection)
+    //   2. The `detail.length > 256` truncation tail
+    //   3. The audit record for the rejection itself
+    // Late rejection is realistic: TCP RST or proxy 502 arriving 1s
+    // past the 30s ceiling.
+    const provider = new FakeProvider();
+    let rejectLate!: (e: Error) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>(
+      (_resolve, reject) => {
+        rejectLate = reject;
+      },
+    );
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Late upstream failure (NOT our own DeviceFlowPollTimeoutError).
+      // Use a long-enough message to exercise the truncation tail.
+      const longDetail = `connection reset by peer ${'x'.repeat(400)}`;
+      rejectLate(new Error(longDetail));
+      await flushAsync();
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      expect(lateAudit?.['errorKind']).toBe('upstream_error');
+      expect(lateAudit?.['hint']).toContain('rejected after');
+      expect(lateAudit?.['hint']).toContain(
+        `${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling`,
+      );
+      expect(lateAudit?.['hint']).toContain('connection reset by peer');
+      // Truncation tail must appear (long detail > 256 bytes).
+      expect(lateAudit?.['hint']).toContain('bytes]');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it("does NOT double-audit when late rejection is the registry's own DeviceFlowPollTimeoutError (qwen-latest review N2 guard)", async () => {
+    // PR #4291 follow-up review (qwen-latest, N2): the late-rejection
+    // observer must filter out our own timer rejection — otherwise a
+    // single timeout would produce two audit lines (one from the
+    // wrapper catch, one from the late-rejection observer). The
+    // guard is `if (lateErr instanceof DeviceFlowPollTimeoutError)
+    // return;`. Pin it.
+    const provider = new FakeProvider();
+    let rejectLate!: (e: Error) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>(
+      (_resolve, reject) => {
+        rejectLate = reject;
+      },
+    );
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Reject with the SAME sentinel the registry uses internally.
+      // The original wrapper catch already recorded a failed audit
+      // (the "real" failure for this entry). The late observer must
+      // NOT add a `lost_late_poll_after_timeout` line.
+      rejectLate(new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS));
+      await flushAsync();
+      const lateAudits = auditLines.filter((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudits).toHaveLength(0);
     } finally {
       registry.dispose();
     }

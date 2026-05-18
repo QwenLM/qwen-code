@@ -748,6 +748,34 @@ export function createServeApp(
       }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
+      // PR #4291 follow-up review (qwen-latest, N4): when the
+      // `callerIsInitiator` gate redacts the verification fields,
+      // operators triaging "SDK got HTTP 200 but no userCode" have
+      // zero signal in daemon stderr / audit. The redaction happens
+      // INSIDE the body shaper which doesn't have an audit sink, so
+      // the route handler is the right layer to record it. Use
+      // QWEN_SERVE_DEBUG-gated stderr (rather than unconditional
+      // audit) — multi-SDK setups sharing a bearer token will cause
+      // legitimate "different caller GETs same flow" traffic that
+      // would otherwise flood production logs. Operators who hit
+      // the symptom can flip QWEN_SERVE_DEBUG=1 and get the
+      // breadcrumb on the next reproduction.
+      const callerIsInitiator =
+        (view.initiatorClientId === undefined && clientId === undefined) ||
+        (view.initiatorClientId !== undefined &&
+          clientId !== undefined &&
+          clientId === view.initiatorClientId);
+      if (
+        !callerIsInitiator &&
+        process.env['QWEN_SERVE_DEBUG'] &&
+        !['0', 'false', 'off', 'no'].includes(
+          (process.env['QWEN_SERVE_DEBUG'] ?? '').trim().toLowerCase(),
+        )
+      ) {
+        writeStderrLine(
+          `qwen serve debug: GET /workspace/auth/device-flow/${id} redacted verification fields — caller-clientId mismatch (initiator=${view.initiatorClientId ?? 'anonymous'}, caller=${clientId ?? 'anonymous'})`,
+        );
+      }
       res.status(200).json(toDeviceFlowStateBody(view, clientId));
     },
   );
