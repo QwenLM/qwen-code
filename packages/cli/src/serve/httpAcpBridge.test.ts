@@ -45,7 +45,11 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
   SessionNotFoundError,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
   WorkspaceMismatchError,
   type AcpChannel,
   type BridgeOptions,
@@ -4513,15 +4517,29 @@ describe('createHttpAcpBridge', () => {
         { persist: true },
         undefined,
       );
-      // Session A receives both the session-scoped event and the
-      // workspace-scoped mirror; collect two events.
+      // #4297 fold-in 1: requester gets the event exactly once (via
+      // its own session-scoped publish); the broadcast skips the
+      // requester so the SDK reducer's `approvalModeChangedCount`
+      // increments by 1, not 2, on the requesting client.
       const aFirst = await itA.next();
-      const aSecond = await itA.next();
-      const aTypes = [aFirst.value?.type, aSecond.value?.type];
-      expect(aTypes.filter((t) => t === 'approval_mode_changed').length).toBe(
-        2,
-      );
-      // Session B receives only the workspace-scoped mirror.
+      expect(aFirst.value?.type).toBe('approval_mode_changed');
+      expect(aFirst.value?.data).toMatchObject({
+        sessionId: a.sessionId,
+        previous: 'default',
+        next: 'yolo',
+        persisted: true,
+      });
+      // Race A's next event against a 50ms timer to confirm no second
+      // delivery (which would be the duplicate the broadcast used to
+      // produce).
+      const aTimedSecond = await Promise.race([
+        itA.next().then((v) => ({ kind: 'event' as const, v })),
+        new Promise((r) => setTimeout(r, 50)).then(() => ({
+          kind: 'timeout' as const,
+        })),
+      ]);
+      expect(aTimedSecond.kind).toBe('timeout');
+      // Peer session B still receives the workspace-scoped mirror.
       const bFirst = await itB.next();
       expect(bFirst.value?.type).toBe('approval_mode_changed');
       expect(bFirst.value?.data).toMatchObject({
@@ -4699,6 +4717,185 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('restartMcpServer (#4297 fold-in 1, addresses #3260501141)', () => {
+    /**
+     * Build a channel factory whose ACP `extMethod` handler returns a
+     * configurable response for `qwen/control/workspace/mcp/restart`.
+     * Reusable across happy-path / soft-skip / hard-error tests so each
+     * test's intent is the response shape, not the boilerplate.
+     */
+    function restartFactory(
+      respond: (
+        params: Record<string, unknown>,
+      ) =>
+        | Record<string, unknown>
+        | Promise<Record<string, unknown>>
+        | Promise<never>,
+    ): ChannelFactory {
+      return async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/workspace/mcp/restart') {
+              return Promise.resolve(respond(params));
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+    }
+
+    it('returns the restarted shape on success and broadcasts mcp_server_restarted', async () => {
+      const bridge = makeBridge({
+        channelFactory: restartFactory(() => ({
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 1234,
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.restartMcpServer('docs', undefined);
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: true,
+        durationMs: 1234,
+      });
+      const next = await it.next();
+      expect(next.value?.type).toBe('mcp_server_restarted');
+      expect(next.value?.data).toMatchObject({
+        serverName: 'docs',
+        durationMs: 1234,
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('returns the soft-skip shape and broadcasts mcp_server_restart_refused', async () => {
+      const bridge = makeBridge({
+        channelFactory: restartFactory(() => ({
+          serverName: 'docs',
+          restarted: false,
+          skipped: true,
+          reason: 'budget_would_exceed',
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const result = await bridge.restartMcpServer('docs', undefined);
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: false,
+        skipped: true,
+        reason: 'budget_would_exceed',
+      });
+      const next = await it.next();
+      expect(next.value?.type).toBe('mcp_server_restart_refused');
+      expect(next.value?.data).toMatchObject({
+        serverName: 'docs',
+        reason: 'budget_would_exceed',
+      });
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('translates ACP mcp_server_not_found into McpServerNotFoundError', async () => {
+      // The ACP child raises a JSON-RPC error whose `data.errorKind` is
+      // `'mcp_server_not_found'` for unknown server names. The bridge
+      // re-instantiates the typed class so `sendBridgeError` can map
+      // it to a stable HTTP 404 — without this the route would fall
+      // through to the generic 500 handler.
+      const bridge = makeBridge({
+        channelFactory: restartFactory(
+          () =>
+            Promise.reject(
+              new RequestError(-32004, 'MCP server not configured: "ghost"', {
+                errorKind: 'mcp_server_not_found',
+                serverName: 'ghost',
+              }),
+            ) as Promise<never>,
+        ),
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const err = await bridge
+        .restartMcpServer('ghost', undefined)
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(McpServerNotFoundError);
+      expect((err as McpServerNotFoundError).serverName).toBe('ghost');
+      await bridge.shutdown();
+    });
+
+    it('translates ACP mcp_restart_failed into McpServerRestartFailedError', async () => {
+      // Post-discover, the ACP child checks the live MCP server status
+      // and raises a JSON-RPC error with `errorKind:
+      // 'mcp_restart_failed'` when the server didn't reach CONNECTED.
+      // The bridge re-instantiates the typed class so the route maps
+      // it to HTTP 502 + `errorKind: 'protocol_error'`.
+      const bridge = makeBridge({
+        channelFactory: restartFactory(
+          () =>
+            Promise.reject(
+              new RequestError(
+                -32099,
+                'MCP server "docs" did not reach a connected state',
+                {
+                  errorKind: 'mcp_restart_failed',
+                  serverName: 'docs',
+                  mcpStatus: 'DISCONNECTED',
+                },
+              ),
+            ) as Promise<never>,
+        ),
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const err = await bridge
+        .restartMcpServer('docs', undefined)
+        .catch((e) => e);
+      expect(err).toBeInstanceOf(McpServerRestartFailedError);
+      expect((err as McpServerRestartFailedError).serverName).toBe('docs');
+      expect((err as McpServerRestartFailedError).mcpStatus).toBe(
+        'DISCONNECTED',
+      );
+      await bridge.shutdown();
+    });
+
+    it('stamps mcp_server_restarted with the originator clientId when supplied', async () => {
+      const bridge = makeBridge({
+        channelFactory: restartFactory(() => ({
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 0,
+        })),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      await bridge.restartMcpServer('docs', session.clientId);
+      const next = await it.next();
+      expect(next.value?.originatorClientId).toBe(session.clientId);
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
   describe('initWorkspace (#4175 Wave 4 PR 17)', () => {
     /**
      * Per-test workspace temp dir so the bridge's writeFile lands on a
@@ -4804,7 +5001,10 @@ describe('createHttpAcpBridge', () => {
           contextFilename: 'docs/AGENTS.md',
         });
         const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
-        expect(err).toBeInstanceOf(Error);
+        // #4297 fold-in 1 (16:32:44-round S1): typed class so
+        // `sendBridgeError` can map to 400 rather than 500.
+        expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+        expect((err as WorkspaceInitSymlinkError).kind).toBe('parent');
         expect((err as Error).message).toMatch(
           /parent path that resolves outside the bound workspace/,
         );
@@ -4818,6 +5018,61 @@ describe('createHttpAcpBridge', () => {
       } finally {
         await fsp.rm(escapeTarget, { recursive: true, force: true });
       }
+    });
+
+    it('rejects writes when the target file itself is a symlink (#4297 fold-in 1)', async () => {
+      // The original PR 17 boundary guard: `lstat(target)` should
+      // refuse to follow a symlink at the QWEN.md path. Without this
+      // test, a future refactor that drops the `lstat` could silently
+      // re-open path traversal through this strict-gated mutation
+      // route. Pairs with the parent-symlink test above to lock both
+      // boundary checks under unit coverage.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-target-symlink-'),
+      );
+      try {
+        const externalFile = path.join(escapeTarget, 'EXTERNAL.md');
+        await fsp.writeFile(externalFile, '# external', 'utf8');
+        await fsp.symlink(externalFile, path.join(tmpWs, 'QWEN.md'));
+        const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+        const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+        expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+        expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+        expect((err as Error).message).toMatch(/is a symlink/);
+        // External file untouched.
+        expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects writes when contextFilename resolves outside the workspace (#4297 fold-in 1)', async () => {
+      // The pre-canonicalize textual `withinWorkspace` check at
+      // `httpAcpBridge.ts:~4045`: a `context.fileName: '../outside.md'`
+      // is the simplest config-error escape. Locking it under a typed
+      // assertion means a future path-arithmetic refactor that
+      // weakens the check fails this test instead of silently
+      // re-opening the boundary.
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        contextFilename: '../outside.md',
+      });
+      const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+      expect(err).toBeInstanceOf(WorkspaceInitPathEscapeError);
+      expect((err as WorkspaceInitPathEscapeError).filename).toBe(
+        '../outside.md',
+      );
+      expect((err as Error).message).toMatch(
+        /resolves outside the bound workspace/,
+      );
+      // Confirm no file was created at the escape target.
+      const sibling = path.resolve(tmpWs, '..', 'outside.md');
+      expect(
+        await fsp
+          .stat(sibling)
+          .then(() => true)
+          .catch(() => false),
+      ).toBe(false);
     });
 
     it('accepts writes when a parent directory is a real subdir (#4282 fold-in 5 P2-4)', async () => {

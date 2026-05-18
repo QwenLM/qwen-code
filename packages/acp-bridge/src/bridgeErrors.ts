@@ -194,6 +194,50 @@ export class WorkspaceInitConflictError extends Error {
 }
 
 /**
+ * #4297 fold-in 1 (16:32:44-round S1). Thrown by `initWorkspace` when
+ * the configured `context.fileName` resolves outside the bound
+ * workspace via path arithmetic (e.g. `../outside.md`). Translated
+ * to HTTP 400 by the route — distinguishable from a generic 500 so
+ * an operator sees "your workspace config is wrong" rather than
+ * "the daemon is broken." The `filename` and `boundWorkspace`
+ * fields let clients display a precise diagnostic.
+ */
+export class WorkspaceInitPathEscapeError extends Error {
+  readonly filename: string;
+  readonly boundWorkspace: string;
+  constructor(filename: string, boundWorkspace: string) {
+    super(
+      `Configured workspace context filename ${JSON.stringify(filename)} ` +
+        `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
+        `Refusing to write.`,
+    );
+    this.name = 'WorkspaceInitPathEscapeError';
+    this.filename = filename;
+    this.boundWorkspace = boundWorkspace;
+  }
+}
+
+/**
+ * #4297 fold-in 1 (16:32:44-round S1). Thrown by `initWorkspace` when
+ * the target file is itself a symlink, OR when the parent path
+ * canonicalizes (via `realpath`) outside the bound workspace.
+ * Translated to HTTP 400 by the route — same operator-clarity
+ * rationale as `WorkspaceInitPathEscapeError`. `target` is the
+ * resolved path the bridge attempted, `kind` distinguishes the two
+ * symlink scenarios for diagnostics.
+ */
+export class WorkspaceInitSymlinkError extends Error {
+  readonly target: string;
+  readonly kind: 'target' | 'parent';
+  constructor(target: string, kind: 'target' | 'parent', detail: string) {
+    super(detail);
+    this.name = 'WorkspaceInitSymlinkError';
+    this.target = target;
+    this.kind = kind;
+  }
+}
+
+/**
  * #4282 fold-in 1 (gpt-5.5 C5). Thrown by `restartMcpServer` when the
  * caller asks for a server name that isn't in the daemon's
  * `McpServers` config. Translated to HTTP 404 + structured body by

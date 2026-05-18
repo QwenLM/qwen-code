@@ -132,6 +132,8 @@ import {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
@@ -146,6 +148,8 @@ export {
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   MAX_WORKSPACE_PATH_LENGTH,
@@ -461,6 +465,7 @@ function hasControlCharacter(value: string): boolean {
 }
 
 // `InvalidSessionMetadataError`, `WorkspaceInitConflictError`,
+// `WorkspaceInitPathEscapeError`, `WorkspaceInitSymlinkError`,
 // `McpServerNotFoundError`, `McpServerRestartFailedError` lifted to
 // `@qwen-code/acp-bridge/bridgeErrors` in #4175 PR 22b — see the
 // consolidated re-export block earlier in this file.
@@ -2098,26 +2103,71 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
 
   /**
    * Fan-out an event to every live session bus. PR 17 mutation events
-   * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`)
-   * call this; semantically identical to PR 16's
-   * `publishWorkspaceEvent` member on the bridge object (same
-   * `byId.values()` iteration, same per-entry try/catch posture).
-   * Kept as a local closure alias rather than a member method because
-   * call sites within the bridge implementation can't invoke own
-   * methods through `this` here. PR 16's richer success/failure
-   * accounting (per-entry shutdown/debug logging) lives only on the
-   * member version — these PR 17 events are best-effort, so the
-   * simpler swallow-and-skip is acceptable.
+   * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`,
+   * persisted `approval_mode_changed` mirror) call this.
+   *
+   * Mirrors PR 16's `publishWorkspaceEvent` member: per-entry
+   * success/failure accounting + an "ALL buses dropped" stderr
+   * elevation so monitoring catches the all-closed-during-shutdown
+   * scenario. Was a local swallow-and-skip until #4297 fold-in 1
+   * picked up the suggestion to align with the instrumented path.
+   *
+   * Kept as a local closure rather than a member method because call
+   * sites within the bridge implementation run inside the factory
+   * scope where `this` is not yet the proxy.
+   *
+   * Optional `skipSessionId` — when set, that session is excluded
+   * from the broadcast. Used by `setSessionApprovalMode` to avoid
+   * delivering `approval_mode_changed` twice to the requesting
+   * session (which already received the session-scoped publish on
+   * its own bus). Without the skip, the SDK reducer's
+   * `approvalModeChangedCount` reaches 2 for a single mutation on
+   * the requesting client.
    */
   const broadcastWorkspaceEvent = (
     envelope: Omit<BridgeEvent, 'id' | 'v'>,
+    skipSessionId?: string,
   ): void => {
-    for (const entry of byId.values()) {
-      try {
-        entry.events.publish(envelope);
-      } catch {
-        /* bus closed for this session; skip */
+    const sessions = Array.from(byId.values());
+    let successCount = 0;
+    let failureCount = 0;
+    for (const entry of sessions) {
+      if (skipSessionId !== undefined && entry.sessionId === skipSessionId) {
+        continue;
       }
+      try {
+        const published = entry.events.publish(envelope);
+        if (published === undefined) {
+          failureCount += 1;
+          writeServeDebugLine(
+            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+          );
+        } else {
+          successCount += 1;
+        }
+      } catch (err) {
+        failureCount += 1;
+        const detail =
+          `broadcastWorkspaceEvent: bus publish failed for session ` +
+          `${JSON.stringify(entry.sessionId)} (type=${envelope.type}): ` +
+          `${err instanceof Error ? err.message : String(err)}`;
+        if (shuttingDown) {
+          writeServeDebugLine(detail);
+        } else {
+          writeStderrLine(`qwen serve: ${detail}`);
+        }
+      }
+    }
+    // Only elevate when the broadcast had at least one eligible
+    // recipient (excluding the skipped requester) and ALL of them
+    // dropped the event. Single-session workspaces with the requester
+    // skipped naturally produce zero recipients — that's not an
+    // "all dropped" condition, just nobody to deliver to.
+    const eligible = sessions.length - (skipSessionId !== undefined ? 1 : 0);
+    if (eligible > 0 && successCount === 0 && !shuttingDown) {
+      writeStderrLine(
+        `qwen serve: broadcastWorkspaceEvent type=${envelope.type} dropped on ALL ${failureCount} session bus(es); SSE subscribers will miss this event (GET fallback still authoritative)`,
+      );
     }
   };
 
@@ -3469,17 +3519,26 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // spawn an ACP child. The session-scoped publish above remains the
       // authoritative signal for the requesting session (and carries the
       // sessionId in `data`); the workspace mirror is informational.
+      //
+      // #4297 fold-in 1: skip the requesting session in the broadcast.
+      // The session-scoped publish above already delivered the event on
+      // its own bus, so a broadcast that included it would double-count
+      // in the SDK reducer's `approvalModeChangedCount` (peers see 1,
+      // requester used to see 2 — silent contract violation).
       if (persisted) {
-        broadcastWorkspaceEvent({
-          type: 'approval_mode_changed',
-          data: {
-            sessionId: entry.sessionId,
-            previous: response.previous,
-            next: response.current,
-            persisted,
+        broadcastWorkspaceEvent(
+          {
+            type: 'approval_mode_changed',
+            data: {
+              sessionId: entry.sessionId,
+              previous: response.previous,
+              next: response.current,
+              persisted,
+            },
+            ...(originatorClientId ? { originatorClientId } : {}),
           },
-          ...(originatorClientId ? { originatorClientId } : {}),
-        });
+          entry.sessionId,
+        );
       }
       return {
         sessionId: entry.sessionId,
@@ -3638,11 +3697,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         target === boundWorkspace ||
         target.startsWith(boundWorkspace + path.sep);
       if (!withinWorkspace) {
-        throw new Error(
-          `Configured workspace context filename ${JSON.stringify(filename)} ` +
-            `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
-            `Refusing to write.`,
-        );
+        throw new WorkspaceInitPathEscapeError(filename, boundWorkspace);
       }
       // #4282 fold-in 5 (Codex P2-4). The textual `withinWorkspace`
       // and final-component `lstat` checks miss intermediate symlinks
@@ -3661,7 +3716,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         parentCanonical === wsCanonical ||
         parentCanonical.startsWith(wsCanonical + path.sep);
       if (!parentWithinWorkspace) {
-        throw new Error(
+        throw new WorkspaceInitSymlinkError(
+          target,
+          'parent',
           `Configured workspace context filename ${JSON.stringify(filename)} ` +
             `has a parent path that resolves outside the bound workspace ` +
             `(parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
@@ -3683,13 +3740,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       try {
         const lst = await fs.lstat(target);
         if (lst.isSymbolicLink()) {
-          throw new Error(
+          throw new WorkspaceInitSymlinkError(
+            target,
+            'target',
             `Workspace context file ${JSON.stringify(target)} is a symlink. ` +
               `Refusing to follow it for write — replace the symlink with a ` +
               `regular file (or remove it) before re-running init.`,
           );
         }
       } catch (err) {
+        if (err instanceof WorkspaceInitSymlinkError) throw err;
         const code = (err as { code?: unknown } | null | undefined)?.code;
         if (code !== 'ENOENT') throw err;
         // ENOENT — target doesn't exist; fresh create is fine.
