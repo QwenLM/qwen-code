@@ -641,4 +641,95 @@ describe('FileHistoryService', () => {
       expect(stats).toBeUndefined();
     });
   });
+
+  describe('getTurnDiff', () => {
+    it('returns undefined when disabled', async () => {
+      const disabled = new FileHistoryService('s', false, projectDir);
+      expect(await disabled.getTurnDiff('p1')).toBeUndefined();
+    });
+
+    it('returns undefined when the prompt has no snapshot', async () => {
+      expect(await service.getTurnDiff('missing')).toBeUndefined();
+    });
+
+    it('diffs a turn against the next snapshot', async () => {
+      const file = join(projectDir, 'a.txt');
+      await writeFile(file, 'line1\nline2\nline3\n');
+
+      // Turn 1 begins — captures pre-edit state — then the tool would
+      // modify the file. We mirror that order: makeSnapshot → trackEdit
+      // → mutate. This is the same sequence `client.ts` follows on
+      // every UserQuery turn.
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'line1\nLINE2_EDITED\nline3\n');
+
+      // Turn 2 begins — this snapshot becomes the "after" for turn 1.
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      expect(turn1!.files).toHaveLength(1);
+      expect(turn1!.files[0].filePath).toBe(file);
+      expect(turn1!.files[0].linesAdded).toBe(1);
+      expect(turn1!.files[0].linesRemoved).toBe(1);
+      expect(turn1!.files[0].isNewFile).toBe(false);
+      expect(turn1!.files[0].isDeleted).toBe(false);
+      expect(turn1!.stats.filesChanged).toBe(1);
+    });
+
+    it('compares the latest turn against the live worktree', async () => {
+      const file = join(projectDir, 'b.txt');
+      await writeFile(file, 'before');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'after-edit-1\nafter-edit-2');
+
+      const turn = await service.getTurnDiff('p1');
+      expect(turn).toBeDefined();
+      expect(turn!.files).toHaveLength(1);
+      // 2 added lines (or 1 add + content change depending on diff alg)
+      expect(
+        turn!.files[0].linesAdded + turn!.files[0].linesRemoved,
+      ).toBeGreaterThan(0);
+    });
+
+    it('flags newly created files', async () => {
+      const file = join(projectDir, 'new.txt');
+
+      // Pre-existing snapshot with no tracked files.
+      await service.makeSnapshot('p1');
+      // Now the tool creates the file mid-turn 1. trackEdit captures
+      // the pre-state (file does not exist).
+      await service.trackEdit(file);
+      await writeFile(file, 'fresh content\n');
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === file);
+      expect(entry).toBeDefined();
+      expect(entry!.isNewFile).toBe(true);
+      expect(entry!.isDeleted).toBe(false);
+      expect(entry!.linesAdded).toBeGreaterThan(0);
+    });
+
+    it('skips files with no change between snapshots', async () => {
+      const file = join(projectDir, 'untouched.txt');
+      await writeFile(file, 'stable\n');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // No actual modification before next snapshot.
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      // The file got tracked but content is identical — should not appear
+      // in the per-turn diff.
+      expect(turn1!.files).toHaveLength(0);
+      expect(turn1!.stats.filesChanged).toBe(0);
+    });
+  });
 });

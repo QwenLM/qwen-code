@@ -15,7 +15,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { diffLines } from 'diff';
+import { diffLines, structuredPatch, type Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -56,6 +56,26 @@ export interface DiffStats {
 export interface RewindResult {
   filesChanged: string[];
   filesFailed: string[];
+}
+
+export interface TurnFileDiff {
+  filePath: string;
+  hunks: Hunk[];
+  isNewFile: boolean;
+  isDeleted: boolean;
+  linesAdded: number;
+  linesRemoved: number;
+}
+
+export interface TurnDiff {
+  promptId: string;
+  timestamp: Date;
+  files: TurnFileDiff[];
+  stats: {
+    filesChanged: number;
+    linesAdded: number;
+    linesRemoved: number;
+  };
 }
 
 const MAX_SNAPSHOTS = 100;
@@ -563,6 +583,170 @@ export class FileHistoryService {
       deletions += r.stats?.deletions || 0;
     }
     return { filesChanged, insertions, deletions };
+  }
+
+  /**
+   * Compute the file-level diff produced *during* the turn identified by
+   * `promptId`. The turn's snapshot captures the workspace state at the
+   * start of that turn (before any of its tool-driven edits), so:
+   *   - "before" = this snapshot's backups
+   *   - "after"  = the next snapshot's backups, or the live worktree if this
+   *               is the most recent turn
+   *
+   * Only files whose backup pointer differs between the two endpoints (or
+   * whose content differs in the most-recent-turn case) are returned.
+   * Files that the snapshotter failed to capture are silently skipped:
+   * we can't produce a meaningful per-turn diff without a known "before",
+   * and surfacing a wrong hunk is worse than hiding the row.
+   */
+  async getTurnDiff(promptId: string): Promise<TurnDiff | undefined> {
+    if (!this.enabled) return undefined;
+
+    const targetIdx = this.state.snapshots.findIndex(
+      (s) => s.promptId === promptId,
+    );
+    if (targetIdx < 0) return undefined;
+
+    const target = this.state.snapshots[targetIdx]!;
+    const nextSnapshot =
+      targetIdx + 1 < this.state.snapshots.length
+        ? this.state.snapshots[targetIdx + 1]
+        : undefined;
+
+    const candidatePaths = new Set<string>(
+      Object.keys(target.trackedFileBackups),
+    );
+    if (nextSnapshot) {
+      for (const p of Object.keys(nextSnapshot.trackedFileBackups)) {
+        candidatePaths.add(p);
+      }
+    } else {
+      for (const p of this.state.trackedFiles) candidatePaths.add(p);
+    }
+
+    const results = await Promise.all(
+      Array.from(candidatePaths, (trackingPath) =>
+        this.computeTurnFileDiff(trackingPath, target, nextSnapshot),
+      ),
+    );
+
+    const files: TurnFileDiff[] = [];
+    let totalAdded = 0;
+    let totalRemoved = 0;
+    for (const r of results) {
+      if (!r) continue;
+      files.push(r);
+      totalAdded += r.linesAdded;
+      totalRemoved += r.linesRemoved;
+    }
+    files.sort((a, b) => a.filePath.localeCompare(b.filePath));
+
+    return {
+      promptId,
+      timestamp: target.timestamp,
+      files,
+      stats: {
+        filesChanged: files.length,
+        linesAdded: totalAdded,
+        linesRemoved: totalRemoved,
+      },
+    };
+  }
+
+  private async computeTurnFileDiff(
+    trackingPath: string,
+    before: FileHistorySnapshot,
+    after: FileHistorySnapshot | undefined,
+  ): Promise<TurnFileDiff | null> {
+    const filePath = this.maybeExpandFilePath(trackingPath);
+
+    const beforeBackup = before.trackedFileBackups[trackingPath];
+    if (beforeBackup?.failed) return null;
+
+    let afterBackup: FileHistoryBackup | undefined;
+    let afterFromWorktree = false;
+    if (after) {
+      afterBackup = after.trackedFileBackups[trackingPath];
+      if (afterBackup?.failed) return null;
+    } else {
+      afterFromWorktree = true;
+    }
+
+    if (
+      !afterFromWorktree &&
+      beforeBackup?.backupFileName ===
+        (afterBackup?.backupFileName ?? undefined) &&
+      beforeBackup?.version === afterBackup?.version
+    ) {
+      return null;
+    }
+
+    const beforeContent = beforeBackup
+      ? beforeBackup.backupFileName === null
+        ? ''
+        : ((await readFileOrNull(
+            resolveBackupPath(beforeBackup.backupFileName, this.sessionId),
+          )) ?? '')
+      : '';
+    const beforeExists = !!beforeBackup && beforeBackup.backupFileName !== null;
+
+    let afterContent: string;
+    let afterExists: boolean;
+    if (afterFromWorktree) {
+      const live = await readFileOrNull(filePath);
+      afterContent = live ?? '';
+      afterExists = live !== null;
+    } else if (afterBackup) {
+      if (afterBackup.backupFileName === null) {
+        afterContent = '';
+        afterExists = false;
+      } else {
+        afterContent =
+          (await readFileOrNull(
+            resolveBackupPath(afterBackup.backupFileName, this.sessionId),
+          )) ?? '';
+        afterExists = true;
+      }
+    } else {
+      afterContent = beforeContent;
+      afterExists = beforeExists;
+    }
+
+    if (beforeContent === afterContent && beforeExists === afterExists) {
+      return null;
+    }
+
+    const patch = structuredPatch(
+      filePath,
+      filePath,
+      beforeContent,
+      afterContent,
+      '',
+      '',
+      { context: 3 },
+    );
+
+    let linesAdded = 0;
+    let linesRemoved = 0;
+    for (const h of patch.hunks) {
+      for (const line of h.lines) {
+        if (line.startsWith('+')) linesAdded++;
+        else if (line.startsWith('-')) linesRemoved++;
+      }
+    }
+
+    if (patch.hunks.length === 0 && linesAdded === 0 && linesRemoved === 0) {
+      return null;
+    }
+
+    return {
+      filePath,
+      hunks: patch.hunks,
+      isNewFile: !beforeExists && afterExists,
+      isDeleted: beforeExists && !afterExists,
+      linesAdded,
+      linesRemoved,
+    };
   }
 
   private findSnapshot(promptId: string): FileHistorySnapshot | undefined {

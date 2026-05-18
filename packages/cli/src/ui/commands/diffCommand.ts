@@ -13,20 +13,16 @@ import {
   CommandKind,
   type CommandContext,
   type MessageActionReturn,
+  type OpenDialogActionReturn,
   type SlashCommand,
 } from './types.js';
 import { t } from '../../i18n/index.js';
-import {
-  MessageType,
-  type DiffRenderModel,
-  type DiffRenderRow,
-  type HistoryItemDiffStats,
-} from '../types.js';
+import { type DiffRenderModel, type DiffRenderRow } from '../types.js';
 import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 
 async function diffAction(
   context: CommandContext,
-): Promise<MessageActionReturn | void> {
+): Promise<MessageActionReturn | OpenDialogActionReturn | void> {
   const { config } = context.services;
   if (!config) {
     return {
@@ -34,6 +30,13 @@ async function diffAction(
       messageType: 'error',
       content: t('Configuration not available.'),
     };
+  }
+
+  // Interactive mode: open the per-turn diff dialog. Non-interactive / ACP
+  // paths keep the plain-text "working tree vs HEAD" summary so pipes, logs,
+  // and remote transports that don't speak Ink still get legible output.
+  if (context.executionMode === 'interactive') {
+    return { type: 'dialog', dialog: 'diff' };
   }
 
   const cwd = config.getWorkingDir() || config.getProjectRoot();
@@ -77,19 +80,6 @@ async function diffAction(
   }
 
   const model = buildDiffRenderModel(result);
-
-  // Interactive path: dispatch a structured history item so `DiffStatsDisplay`
-  // can render with theme colors. Non-interactive / ACP stay on the
-  // plain-text MessageActionReturn path so pipes, logs, and transports that
-  // don't speak Ink still see legible output.
-  if (context.executionMode === 'interactive') {
-    const item: HistoryItemDiffStats = {
-      type: MessageType.DIFF_STATS,
-      model,
-    };
-    context.ui.addItem(item, Date.now());
-    return;
-  }
 
   return {
     type: 'message',

@@ -69,7 +69,12 @@ describe('diffCommand', () => {
 
   it('errors when getWorkingDir and getProjectRoot both return empty', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
+    // Non-interactive mode runs the fetchGitDiff path that actually needs a
+    // cwd. Interactive mode short-circuits to opening the dialog (the
+    // dialog's own hooks tolerate a missing cwd by showing the empty state),
+    // so the cwd guard only fires off the dialog path.
     const noCwdContext = createMockCommandContext({
+      executionMode: 'non_interactive',
       services: {
         config: {
           getWorkingDir: () => '',
@@ -301,75 +306,26 @@ describe('diffCommand interactive mode', () => {
     mockFetchGitDiff = vi.mocked(fetchGitDiff);
   });
 
-  it('dispatches a diff_stats history item instead of returning text', async () => {
+  it('opens the diff dialog without touching git or the history', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
     const ctx = makeInteractiveContext();
-    mockFetchGitDiff.mockResolvedValue({
-      stats: { filesCount: 2, linesAdded: 7, linesRemoved: 3 },
-      perFileStats: new Map([
-        ['src/a.ts', { added: 5, removed: 2, isBinary: false }],
-        ['src/b.ts', { added: 2, removed: 1, isBinary: false }],
-      ]),
-    } satisfies GitDiffResult);
 
     const result = await diffCommand.action(ctx, '');
-    expect(result).toBeUndefined();
-    expect(ctx.ui.addItem).toHaveBeenCalledTimes(1);
-    const call = (ctx.ui.addItem as Mock).mock.calls[0][0];
-    expect(call.type).toBe('diff_stats');
-    expect(call.model).toMatchObject({
-      filesCount: 2,
-      linesAdded: 7,
-      linesRemoved: 3,
-      hiddenCount: 0,
-    });
-    expect(call.model.rows).toHaveLength(2);
-    expect(call.model.rows[0]).toMatchObject({
-      filename: 'src/a.ts',
-      added: 5,
-      removed: 2,
-      isBinary: false,
-      isUntracked: false,
-    });
-  });
-
-  it('still returns a plain-text info message for the "clean tree" case', async () => {
-    if (!diffCommand.action) throw new Error('Command has no action');
-    const ctx = makeInteractiveContext();
-    mockFetchGitDiff.mockResolvedValue({
-      stats: { filesCount: 0, linesAdded: 0, linesRemoved: 0 },
-      perFileStats: new Map(),
-    } satisfies GitDiffResult);
-
-    const result = await diffCommand.action(ctx, '');
-    expect(result).toMatchObject({ type: 'message', messageType: 'info' });
+    expect(result).toEqual({ type: 'dialog', dialog: 'diff' });
+    // Dialog ownership: the data fetch happens inside the dialog's hooks,
+    // not in the command. Asserting we *don't* call git here keeps the
+    // contract from regressing to the old "summary in scroll history"
+    // behavior, which paid for a git fetch before the user could even
+    // see the picker.
+    expect(mockFetchGitDiff).not.toHaveBeenCalled();
     expect(ctx.ui.addItem).not.toHaveBeenCalled();
   });
 
-  it('still returns an error MessageActionReturn when fetchGitDiff throws', async () => {
+  it('errors when config is unavailable even in interactive mode', async () => {
     if (!diffCommand.action) throw new Error('Command has no action');
-    const ctx = makeInteractiveContext();
-    mockFetchGitDiff.mockRejectedValueOnce(new Error('boom'));
-
+    const ctx = createMockCommandContext({ executionMode: 'interactive' });
     const result = await diffCommand.action(ctx, '');
     expect(result).toMatchObject({ type: 'message', messageType: 'error' });
-    expect(ctx.ui.addItem).not.toHaveBeenCalled();
-  });
-
-  it('propagates hiddenCount to the history item for fast-path results', async () => {
-    if (!diffCommand.action) throw new Error('Command has no action');
-    const ctx = makeInteractiveContext();
-    mockFetchGitDiff.mockResolvedValue({
-      stats: { filesCount: 60, linesAdded: 100, linesRemoved: 20 },
-      perFileStats: new Map([
-        ['src/a.ts', { added: 1, removed: 0, isBinary: false }],
-      ]),
-    } satisfies GitDiffResult);
-
-    await diffCommand.action(ctx, '');
-    const call = (ctx.ui.addItem as Mock).mock.calls[0][0];
-    expect(call.model.hiddenCount).toBe(59);
-    expect(call.model.rows).toHaveLength(1);
   });
 });
 
