@@ -89,8 +89,15 @@ const SHELL_LIKE_TOOLS: readonly string[] = Object.freeze([
  */
 function isInterpreterToken(rawToken: string): boolean {
   if (!rawToken) return false;
-  // Strip trailing wildcards / colons / arguments after `:`
-  const noWildcard = rawToken.replace(/[*]+$/, '');
+  // Strip trailing wildcards. Using a manual loop instead of `/[*]+$/`
+  // both because the regex form trips CodeQL's polynomial-regex
+  // heuristic (CodeQL 222) and because end-of-string trim is O(n) by
+  // construction here.
+  let end = rawToken.length;
+  while (end > 0 && rawToken.charCodeAt(end - 1) === 42 /* '*' */) {
+    end--;
+  }
+  const noWildcard = rawToken.slice(0, end);
   const beforeColon = noWildcard.split(':')[0];
   // Last path segment so `/usr/bin/python3` → `python3`
   const lastSegment = (beforeColon ?? '').split('/').pop() ?? '';

@@ -251,11 +251,23 @@ export async function classifyAction(
  */
 export function sanitizeClassifierReason(raw: string): string {
   if (!raw) return raw;
+
+  // Drop `<...>` pseudo-tags ("<system>...", "<user>...") that could be
+  // parsed as control fences by the main model's prompt.
+  //
+  // Replace iteratively until the string stabilises. A single `/g` pass
+  // can leave residual `<>` if the input was crafted to overlap (CodeQL
+  // 223). Bounded by a small iteration cap so the loop is always O(n)
+  // regardless of how the attacker structures the string.
+  let stripped = raw;
+  for (let i = 0; i < 8; i++) {
+    const next = stripped.replace(/<[^>]*>/g, '');
+    if (next === stripped) break;
+    stripped = next;
+  }
+
   return (
-    raw
-      // Drop `<...>` pseudo-tags ("<system>...", "<user>...") that could
-      // be parsed as control fences by the main model's prompt.
-      .replace(/<[^>]*>/g, '')
+    stripped
       // Collapse newlines / runs of whitespace — defeats multi-paragraph
       // attempts to stage a fake "instruction block".
       .replace(/\s+/g, ' ')
