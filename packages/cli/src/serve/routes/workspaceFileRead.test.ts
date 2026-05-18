@@ -87,6 +87,24 @@ describe('GET /file', () => {
     expect(res.body.sizeBytes).toBe(12);
   });
 
+  it('returns the requested line window', async () => {
+    await fsp.writeFile(
+      path.join(h.workspace, 'multiline.txt'),
+      'one\ntwo\nthree\n',
+    );
+    const res = await request(h.app)
+      .get('/file?path=multiline.txt&line=2&limit=1')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      kind: 'file',
+      path: 'multiline.txt',
+      content: 'two',
+      originalLineCount: 4,
+      truncated: true,
+    });
+  });
+
   it('attaches Cache-Control: no-store and X-Content-Type-Options: nosniff', async () => {
     await fsp.writeFile(path.join(h.workspace, 'a.txt'), 'x');
     const res = await request(h.app)
@@ -145,6 +163,14 @@ describe('GET /file', () => {
     expect(res.body.errorKind).toBe('parse_error');
   });
 
+  it('rejects malformed line with parse_error 400', async () => {
+    const res = await request(h.app)
+      .get('/file?path=a.txt&line=abc')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(400);
+    expect(res.body.errorKind).toBe('parse_error');
+  });
+
   it('requires the path query param', async () => {
     const res = await request(h.app).get('/file').set('Host', loopbackHost());
     expect(res.status).toBe(400);
@@ -192,6 +218,25 @@ describe('GET /stat', () => {
       .set('Host', loopbackHost());
     expect(res.status).toBe(200);
     expect(res.body.type).toBe('directory');
+  });
+
+  it('returns 404 path_not_found for missing entries', async () => {
+    const res = await request(h.app)
+      .get('/stat?path=nosuch.txt')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(404);
+    expect(res.body.errorKind).toBe('path_not_found');
+  });
+
+  it('returns 500 rather than leaking paths when boundWorkspace is missing', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'a.txt'), 'hi');
+    delete (h.app.locals as { boundWorkspace?: string }).boundWorkspace;
+    const res = await request(h.app)
+      .get('/stat?path=a.txt')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(500);
+    expect(res.body.errorKind).toBe('internal_error');
+    expect(JSON.stringify(res.body)).not.toContain(h.workspace);
   });
 
   it('returns 400 symlink_escape when target points outside the workspace', async () => {
@@ -352,6 +397,38 @@ describe('GET /glob', () => {
         expect(typeof m).toBe('string');
       }
     }
+  });
+
+  it('drops ignored glob matches by default and includes them with includeIgnored=1', async () => {
+    await teardown(h);
+    h = await makeHarness({ ignore: new Ignore().add(['secret.ts']) });
+    await fsp.writeFile(path.join(h.workspace, 'public.ts'), '');
+    await fsp.writeFile(path.join(h.workspace, 'secret.ts'), '');
+
+    const filtered = await request(h.app)
+      .get('/glob?pattern=*.ts')
+      .set('Host', loopbackHost());
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.matches).toContain('public.ts');
+    expect(filtered.body.matches).not.toContain('secret.ts');
+
+    const all = await request(h.app)
+      .get('/glob?pattern=*.ts&includeIgnored=1')
+      .set('Host', loopbackHost());
+    expect(all.status).toBe(200);
+    expect(all.body.matches.sort()).toEqual(['public.ts', 'secret.ts']);
+  });
+
+  it('scopes glob matches to cwd', async () => {
+    await fsp.mkdir(path.join(h.workspace, 'sub'));
+    await fsp.writeFile(path.join(h.workspace, 'root.ts'), '');
+    await fsp.writeFile(path.join(h.workspace, 'sub', 'inside.ts'), '');
+    const res = await request(h.app)
+      .get('/glob?pattern=*.ts&cwd=sub')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(200);
+    expect(res.body.cwd).toBe('sub');
+    expect(res.body.matches).toEqual(['sub/inside.ts']);
   });
 
   it('returns 400 parse_error when maxResults is malformed', async () => {

@@ -30,6 +30,13 @@ import {
 export const MAX_LIST_ENTRIES = 2000;
 
 /**
+ * Hard cap for `GET /file?limit=` line-window reads. Kept separate
+ * from `MAX_LIST_ENTRIES` so directory listing pagination changes do
+ * not accidentally alter file line slicing semantics.
+ */
+export const MAX_FILE_LINE_LIMIT = 2000;
+
+/**
  * Default cap when the caller omits `?maxResults` on `GET /glob`.
  * Mirrors the orchestrator's default behavior (no cap) clipped to a
  * concrete number so route consumers see consistent ceilings without
@@ -86,7 +93,7 @@ export function sendFsError(res: Response, err: unknown, route: string): void {
   }
   writeStderrLine(
     `qwen serve: ${route} unexpected error: ${
-      err instanceof Error ? (err.stack ?? err.message) : String(err)
+      err instanceof Error ? err.message : String(err)
     }`,
   );
   res.status(500).json({
@@ -190,12 +197,12 @@ interface RegisterDeps {
 async function handleGetFile(
   req: Request,
   res: Response,
-  _deps: RegisterDeps,
+  deps: RegisterDeps,
 ): Promise<void> {
   const ROUTE = 'GET /file';
   const factory = getFsFactory(req, res);
   if (!factory) return;
-  const clientId = _deps.parseClientId(req, res);
+  const clientId = deps.parseClientId(req, res);
   if (clientId === null) return;
   const queryPath = requireStringQuery(res, req.query['path'], 'path', ROUTE);
   if (queryPath === null) return;
@@ -219,12 +226,12 @@ async function handleGetFile(
     });
     return;
   }
-  const limit = parseIntInRange(req.query['limit'], 1, MAX_LIST_ENTRIES);
+  const limit = parseIntInRange(req.query['limit'], 1, MAX_FILE_LINE_LIMIT);
   if (limit === null) {
     applyReadHeaders(res);
     res.status(400).json({
       errorKind: 'parse_error',
-      error: `\`limit\` must be a positive integer in [1, ${MAX_LIST_ENTRIES}]`,
+      error: `\`limit\` must be a positive integer in [1, ${MAX_FILE_LINE_LIMIT}]`,
       status: 400,
     });
     return;
@@ -257,12 +264,12 @@ async function handleGetFile(
 async function handleGetStat(
   req: Request,
   res: Response,
-  _deps: RegisterDeps,
+  deps: RegisterDeps,
 ): Promise<void> {
   const ROUTE = 'GET /stat';
   const factory = getFsFactory(req, res);
   if (!factory) return;
-  const clientId = _deps.parseClientId(req, res);
+  const clientId = deps.parseClientId(req, res);
   if (clientId === null) return;
   const queryPath = requireStringQuery(res, req.query['path'], 'path', ROUTE);
   if (queryPath === null) return;
@@ -289,12 +296,12 @@ async function handleGetStat(
 async function handleGetList(
   req: Request,
   res: Response,
-  _deps: RegisterDeps,
+  deps: RegisterDeps,
 ): Promise<void> {
   const ROUTE = 'GET /list';
   const factory = getFsFactory(req, res);
   if (!factory) return;
-  const clientId = _deps.parseClientId(req, res);
+  const clientId = deps.parseClientId(req, res);
   if (clientId === null) return;
   const queryPath = requireStringQuery(res, req.query['path'], 'path', ROUTE);
   if (queryPath === null) return;
@@ -334,12 +341,12 @@ async function handleGetList(
 async function handleGetGlob(
   req: Request,
   res: Response,
-  _deps: RegisterDeps,
+  deps: RegisterDeps,
 ): Promise<void> {
   const ROUTE = 'GET /glob';
   const factory = getFsFactory(req, res);
   if (!factory) return;
-  const clientId = _deps.parseClientId(req, res);
+  const clientId = deps.parseClientId(req, res);
   if (clientId === null) return;
   const pattern = requireStringQuery(
     res,
@@ -401,9 +408,7 @@ async function handleGetGlob(
     // (e.g. `pattern=.` resolving to the workspace itself) renders
     // as `'.'` rather than the empty string `path.relative` returns
     // — keeps the response shape consistent with `/file`, `/list`,
-    // `/stat`. Helper also handles the `boundWorkspace` undefined
-    // edge case (test embeds that skip the fixture) so the route
-    // doesn't carry its own fallback branch.
+    // `/stat`.
     const relMatches = trimmed.map((m) => workspaceRelative(req, m as string));
     applyReadHeaders(res);
     res.status(200).json({
@@ -422,15 +427,16 @@ async function handleGetGlob(
 
 /**
  * Compute the workspace-relative form of a `ResolvedPath` for the
- * response payload. Falls back to the absolute path when
- * `boundWorkspace` is not on `app.locals` (older test embeds that
- * skipped the fixture); production always sets it via
- * `createServeApp`.
+ * response payload. Missing `boundWorkspace` means the app was
+ * misconfigured; never fall back to returning absolute filesystem
+ * paths to clients.
  */
 function workspaceRelative(req: Request, resolved: string): string {
   const boundWorkspace = (req.app.locals as { boundWorkspace?: string })
     .boundWorkspace;
-  if (!boundWorkspace) return resolved;
+  if (!boundWorkspace) {
+    throw new Error('bound workspace is not configured');
+  }
   const rel = path.relative(boundWorkspace, resolved);
   return rel === '' ? '.' : rel;
 }
