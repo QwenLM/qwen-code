@@ -16,12 +16,7 @@ import {
 } from '@agentclientprotocol/sdk';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { canonicalizeWorkspace } from './fs/paths.js';
-import {
-  EventBus,
-  DEFAULT_RING_SIZE,
-  type BridgeEvent,
-  type SubscribeOptions,
-} from './eventBus.js';
+import { EventBus, DEFAULT_RING_SIZE, type BridgeEvent } from './eventBus.js';
 import {
   BridgeTimeoutError,
   SERVE_CONTROL_EXT_METHODS,
@@ -34,14 +29,7 @@ import {
   mapDomainErrorToErrorKind,
   type ServePreflightCell,
   type ServePreflightKind,
-  type ServeSessionContextStatus,
-  type ServeSessionSupportedCommandsStatus,
   type ServeStatusCell,
-  type ServeWorkspaceEnvStatus,
-  type ServeWorkspaceMcpStatus,
-  type ServeWorkspacePreflightStatus,
-  type ServeWorkspaceProvidersStatus,
-  type ServeWorkspaceSkillsStatus,
 } from './status.js';
 import { buildEnvStatusFromProcess } from './envSnapshot.js';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -54,14 +42,11 @@ import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
 import type {
   CancelNotification,
   Client,
-  LoadSessionResponse,
   PromptRequest,
-  PromptResponse,
   ReadTextFileRequest,
   ReadTextFileResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
-  ResumeSessionResponse,
   SessionNotification,
   SetSessionModelRequest,
   SetSessionModelResponse,
@@ -98,531 +83,40 @@ import type {
  * route handlers don't need to change.
  */
 
-export interface BridgeSpawnRequest {
-  /** Absolute path to the workspace root the child inherits as cwd. */
-  workspaceCwd: string;
-  /** Optional explicit model service id; falls back to settings default. */
-  modelServiceId?: string;
-  /**
-   * Optional echo of a daemon-issued client id from a previous attach to the
-   * same live session. Unknown ids are ignored on create/attach and replaced
-   * with a freshly stamped id.
-   */
-  clientId?: string;
-  /**
-   * Per-request override for `sessionScope`. When set, takes precedence
-   * over the bridge-wide default (`BridgeOptions.sessionScope`, which
-   * direct embeds may set at construction time; the production daemon
-   * has no CLI flag for it today and currently always uses `'single'`).
-   * When omitted, the bridge-wide default applies — preserving exact
-   * pre-#4175-PR-5 behavior for any caller that doesn't set the field.
-   *
-   * Resolves the FIXME at `BridgeOptions.sessionScope` (#3803 — VSCode
-   * needing per-window isolation against a daemon defaulting to
-   * `'single'`) and unblocks the baseline harness from honestly
-   * measuring per-session cost (the harness in
-   * `qwen-serve-baseline.test.ts` notes it cannot surface the P1 MCP
-   * N×M amplification under the shared default).
-   */
-  sessionScope?: 'single' | 'thread';
-}
+// Bridge types (BridgeSpawnRequest / BridgeSession / BridgeRestoreSessionRequest /
+// BridgeSessionState / BridgeRestoredSession / BridgeSessionSummary /
+// SessionMetadataUpdate / BridgeClientRequestContext / BridgeHeartbeatResult /
+// BridgeHeartbeatState / HttpAcpBridge interface) lifted to
+// `@qwen-code/acp-bridge/bridgeTypes` in #4175 PR 22b. Imported AND
+// re-exported so existing relative callers keep resolving and the local
+// factory + BridgeClient code below can still reference the types.
+import type {
+  BridgeSpawnRequest,
+  BridgeSession,
+  BridgeRestoreSessionRequest,
+  BridgeSessionState,
+  BridgeRestoredSession,
+  BridgeSessionSummary,
+  SessionMetadataUpdate,
+  BridgeClientRequestContext,
+  BridgeHeartbeatResult,
+  BridgeHeartbeatState,
+  HttpAcpBridge,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+export type {
+  BridgeSpawnRequest,
+  BridgeSession,
+  BridgeRestoreSessionRequest,
+  BridgeSessionState,
+  BridgeRestoredSession,
+  BridgeSessionSummary,
+  SessionMetadataUpdate,
+  BridgeClientRequestContext,
+  BridgeHeartbeatResult,
+  BridgeHeartbeatState,
+  HttpAcpBridge,
+};
 
-export interface BridgeSession {
-  sessionId: string;
-  workspaceCwd: string;
-  /** True if this attach reused an existing session under `sessionScope: 'single'`. */
-  attached: boolean;
-  /**
-   * Opaque daemon-issued id for the attaching HTTP client. Subsequent
-   * session-scoped requests may echo it so daemon events can identify the
-   * initiating client without trusting request bodies.
-   */
-  clientId?: string;
-  /** ISO 8601 timestamp of when the session was created. */
-  createdAt?: string;
-}
-
-export interface BridgeRestoreSessionRequest {
-  /** Session id to restore through ACP `session/load` or `session/resume`. */
-  sessionId: string;
-  /** Absolute path to the workspace root the child inherits as cwd. */
-  workspaceCwd: string;
-  /** Optional echo of a daemon-issued client id for this session. */
-  clientId?: string;
-}
-
-export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
-
-export interface BridgeRestoredSession extends BridgeSession {
-  /** ACP state returned by `session/load` / `session/resume`. */
-  state: BridgeSessionState;
-}
-
-/** Sparse summary used by `GET /workspace/:id/sessions`. */
-export interface BridgeSessionSummary {
-  sessionId: string;
-  workspaceCwd: string;
-  createdAt: string;
-  displayName?: string;
-  clientCount: number;
-  hasActivePrompt: boolean;
-}
-
-export interface SessionMetadataUpdate {
-  displayName?: string;
-}
-
-export interface BridgeClientRequestContext {
-  /** Daemon-issued client id echoed through the HTTP transport header. */
-  clientId?: string;
-}
-
-/**
- * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
- * `Date.now()` epoch (ms) the bridge stored for this session/client
- * pair — the same value future diagnostics and revocation policy
- * (Wave 5 PR 24) will read. `clientId` is echoed only when the caller
- * provided a trusted one through `X-Qwen-Client-Id`; anonymous
- * heartbeats omit it but still bump the per-session timestamp.
- */
-export interface BridgeHeartbeatResult {
-  sessionId: string;
-  clientId?: string;
-  lastSeenAt: number;
-}
-
-/**
- * Read-only snapshot of last-seen timestamps the bridge has recorded for
- * a session. `sessionLastSeenAt` is the most recent heartbeat across any
- * client (anonymous or identified). `clientLastSeenAt` maps each
- * registered `clientId` to its own last heartbeat. Returned by
- * `getHeartbeatState` for in-process diagnostics; the eventual read-only
- * `GET /session/:id/heartbeat-state` route (Wave 3 PR 12) will surface
- * the same shape over HTTP.
- */
-export interface BridgeHeartbeatState {
-  sessionLastSeenAt?: number;
-  clientLastSeenAt: ReadonlyMap<string, number>;
-}
-
-export interface HttpAcpBridge {
-  /**
-   * Create a new session, or — under `sessionScope: 'single'` — attach to an
-   * existing session for the same workspace.
-   */
-  spawnOrAttach(req: BridgeSpawnRequest): Promise<BridgeSession>;
-
-  /**
-   * Load an existing persisted session and replay its history through
-   * session_update notifications. Returns `attached: true` when the requested
-   * session is already live in this daemon.
-   */
-  loadSession(req: BridgeRestoreSessionRequest): Promise<BridgeRestoredSession>;
-
-  /**
-   * Resume an existing persisted session without requesting history replay.
-   * Returns `attached: true` when the requested session is already live in
-   * this daemon.
-   */
-  resumeSession(
-    req: BridgeRestoreSessionRequest,
-  ): Promise<BridgeRestoredSession>;
-
-  /**
-   * Forward a prompt to the agent. Concurrent prompts against the same
-   * session FIFO-serialize through a per-session queue (ACP guarantees
-   * "one active prompt per session"). Throws `SessionNotFoundError` when
-   * the id is unknown.
-   *
-   * Optional `signal` — abort cancels the in-flight prompt by sending an
-   * ACP `cancel` notification to the agent (which causes the agent to
-   * resolve its `prompt()` with `stopReason: 'cancelled'`). Used by the
-   * SSE route to propagate `req.on('close')` so a disconnected HTTP
-   * client unblocks the per-session FIFO instead of poisoning it.
-   */
-  sendPrompt(
-    sessionId: string,
-    req: PromptRequest,
-    signal?: AbortSignal,
-    context?: BridgeClientRequestContext,
-  ): Promise<PromptResponse>;
-
-  /**
-   * Cancel the in-flight prompt on the session. ACP-side this is a
-   * notification, not a request — the agent acknowledges by resolving the
-   * active `prompt()` with a `cancelled` stop reason. Throws
-   * `SessionNotFoundError` when the id is unknown.
-   */
-  cancelSession(
-    sessionId: string,
-    req?: CancelNotification,
-    context?: BridgeClientRequestContext,
-  ): Promise<void>;
-
-  /**
-   * Subscribe to the session's event stream. Returns an AsyncIterable that
-   * yields published events; supports `Last-Event-ID` reconnect through
-   * `opts.lastEventId`. Throws `SessionNotFoundError` when the id is
-   * unknown.
-   */
-  subscribeEvents(
-    sessionId: string,
-    opts?: SubscribeOptions,
-  ): AsyncIterable<BridgeEvent>;
-
-  /**
-   * Explicitly close a live session. Force-closes even when other clients
-   * are attached — cancels any active prompt, resolves pending permissions
-   * as cancelled, publishes `session_closed`, closes the EventBus, and
-   * removes the session from daemon maps. Throws `SessionNotFoundError`
-   * for unknown ids (the SDK absorbs 404 to provide client-side
-   * idempotency). On-disk persisted sessions are NOT deleted — they can
-   * still be reloaded via `POST /session/:id/load`.
-   */
-  closeSession(
-    sessionId: string,
-    context?: BridgeClientRequestContext,
-  ): Promise<void>;
-
-  /**
-   * Update mutable session metadata. Currently supports `displayName` only.
-   * Publishes a `session_metadata_updated` event when fields change.
-   * Returns the effective stored metadata. Throws `SessionNotFoundError`
-   * for unknown ids.
-   */
-  updateSessionMetadata(
-    sessionId: string,
-    metadata: SessionMetadataUpdate,
-    context?: BridgeClientRequestContext,
-  ): SessionMetadataUpdate;
-
-  /**
-   * Cast a vote on a pending `permission_request` (first-responder wins).
-   * Returns true when the vote was accepted, false when the requestId is
-   * unknown — either never existed or already resolved by another client.
-   */
-  respondToPermission(
-    requestId: string,
-    response: RequestPermissionResponse,
-    context?: BridgeClientRequestContext,
-  ): boolean;
-
-  /**
-   * Cast a vote scoped to an explicit session route. This keeps the legacy
-   * first-responder behavior but lets clients avoid accidentally voting on a
-   * request id that belongs to another live session.
-   */
-  respondToSessionPermission(
-    sessionId: string,
-    requestId: string,
-    response: RequestPermissionResponse,
-    context?: BridgeClientRequestContext,
-  ): boolean;
-
-  /**
-   * List all live sessions whose canonical workspace path matches the
-   * supplied cwd. Empty array (not throw) when no sessions exist —
-   * a session-picker UI shouldn't 404 just because the workspace is idle.
-   */
-  listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
-
-  /**
-   * Record a client heartbeat for the session. Bumps the per-session
-   * `sessionLastSeenAt` and, when a trusted `clientId` is supplied,
-   * the per-client entry in `clientLastSeenAt`. Throws
-   * `SessionNotFoundError` when the id is unknown and
-   * `InvalidClientIdError` when the supplied `clientId` is not
-   * registered for this session — the same shape `sendPrompt` /
-   * `setSessionModel` use, so HTTP routes can map it to `400
-   * invalid_client_id` consistently.
-   *
-   * The recorded timestamps are exposed via `getHeartbeatState`; this
-   * PR keeps them in-process only (future diagnostics route in PR 12,
-   * future revocation policy in PR 24).
-   */
-  recordHeartbeat(
-    sessionId: string,
-    context?: BridgeClientRequestContext,
-  ): BridgeHeartbeatResult;
-
-  /**
-   * Read the bridge's recorded last-seen timestamps for a session.
-   * Returns `undefined` for unknown sessions. The map is a snapshot —
-   * callers must not mutate it. Stage 1 surfaces this only to in-
-   * process callers (tests, future read-only diagnostics routes).
-   */
-  getHeartbeatState(sessionId: string): BridgeHeartbeatState | undefined;
-
-  /**
-   * Issue #4175 PR 16: workspace-level event fan-out for mutations that
-   * change daemon-wide state (memory writes, agent CRUD). Publishes the
-   * event onto every live session's `EventBus` so SSE subscribers
-   * observe it through the existing per-session stream rather than a
-   * new workspace-level channel. Best-effort per session — a closed
-   * bus is silently skipped (mirrors the `permission_resolved`
-   * try/catch). When zero sessions are active the event drops on the
-   * floor; the route's read-after-write contract remains correct.
-   */
-  publishWorkspaceEvent(event: Omit<BridgeEvent, 'id' | 'v'>): void;
-
-  /**
-   * Issue #4175 PR 16: union of every live session's `clientIds`. Used
-   * by workspace-level mutation routes (memory write, agent CRUD) to
-   * validate the optional `X-Qwen-Client-Id` header without requiring
-   * a session id. Returns a snapshot — callers must not mutate.
-   * Wave 5 PR 24 will replace this with a workspace-scoped client
-   * registry decoupled from sessions.
-   */
-  knownClientIds(): ReadonlySet<string>;
-
-  /**
-   * Read daemon-runtime MCP status for the bound workspace. Does not spawn an
-   * ACP child when the daemon is idle; idle daemons return initialized:false.
-   */
-  getWorkspaceMcpStatus(): Promise<ServeWorkspaceMcpStatus>;
-
-  /**
-   * Read daemon-runtime skill status for the bound workspace. Does not spawn an
-   * ACP child when the daemon is idle; idle daemons return initialized:false.
-   */
-  getWorkspaceSkillsStatus(): Promise<ServeWorkspaceSkillsStatus>;
-
-  /**
-   * Read daemon-runtime model-provider status for the bound workspace. Does
-   * not spawn an ACP child when the daemon is idle.
-   */
-  getWorkspaceProvidersStatus(): Promise<ServeWorkspaceProvidersStatus>;
-
-  /**
-   * Read the daemon-process environment snapshot for the bound workspace.
-   * Answered entirely from `process.*` state — does not consult ACP. Always
-   * returns `initialized: true`; `acpChannelLive` reports whether a child is
-   * currently up.
-   */
-  getWorkspaceEnvStatus(): Promise<ServeWorkspaceEnvStatus>;
-
-  /**
-   * Read daemon-runtime preflight diagnostics. Daemon-level cells (Node
-   * version, CLI entry, workspace dir, ripgrep, git, npm) are always
-   * populated. ACP-level cells (auth, mcp_discovery, skills, providers,
-   * tool_registry, egress) require a live ACP child — when the daemon is
-   * idle they are emitted with `status: 'not_started'`.
-   */
-  getWorkspacePreflightStatus(): Promise<ServeWorkspacePreflightStatus>;
-
-  /** Read the current ACP context/config state for a live session. */
-  getSessionContextStatus(
-    sessionId: string,
-  ): Promise<ServeSessionContextStatus>;
-
-  /** Read slash-command/skill command availability for a live session. */
-  getSessionSupportedCommandsStatus(
-    sessionId: string,
-  ): Promise<ServeSessionSupportedCommandsStatus>;
-
-  /**
-   * Switch the active model service for a session. Forwards through ACP's
-   * (currently unstable) `unstable_setSessionModel` and broadcasts a
-   * `model_switched` event so cross-client UIs reflect the change.
-   * Throws `SessionNotFoundError` for unknown ids.
-   */
-  setSessionModel(
-    sessionId: string,
-    req: SetSessionModelRequest,
-    context?: BridgeClientRequestContext,
-  ): Promise<SetSessionModelResponse>;
-
-  /**
-   * Change the approval mode of a live session and broadcast an
-   * `approval_mode_changed` event. Forwards through the
-   * `qwen/control/session/approval_mode` ACP extMethod so the change
-   * lands inside the ACP child's own `Config` instance.
-   *
-   * `opts.persist === true` also writes `tools.approvalMode` to the
-   * workspace settings file so a future ACP child or a future daemon
-   * restart picks up the new default. Default is ephemeral
-   * (`persist: false`) — the remote caller does not pollute the
-   * user's on-disk settings unless they ask for it.
-   *
-   * Throws `SessionNotFoundError` for unknown sessions. The ACP-side
-   * trust-folder rejection surfaces as a `TrustGateError` from core
-   * which the route maps via `mapDomainErrorToErrorKind` to
-   * `auth_env_error`.
-   */
-  setSessionApprovalMode(
-    sessionId: string,
-    mode: ApprovalMode,
-    opts: { persist: boolean },
-    context?: BridgeClientRequestContext,
-  ): Promise<{
-    sessionId: string;
-    mode: ApprovalMode;
-    previous: ApprovalMode;
-    persisted: boolean;
-  }>;
-
-  /**
-   * Add or remove a tool name from the workspace's `tools.disabled`
-   * settings list and fan-out a `tool_toggled` event to every live
-   * session SSE bus. Does NOT consult the ACP child — settings are
-   * file IO the daemon owns directly. Already-registered tools in
-   * active sessions stay registered until the next ACP child spawn
-   * (`tools.disabled` is consulted at `Config` construction time, so
-   * the toggle takes effect on the next workspace-wide refresh).
-   *
-   * Unknown tool names are accepted: the daemon has no authoritative
-   * tool registry to validate against (built-ins live inside the ACP
-   * child, MCP tools are discovered post-spawn). Pre-disabling a
-   * not-yet-installed MCP tool is a legitimate use case.
-   *
-   * Throws when the daemon was constructed without a
-   * `persistDisabledTools` callback — direct embeds / tests must opt
-   * in to write semantics.
-   */
-  setWorkspaceToolEnabled(
-    toolName: string,
-    enabled: boolean,
-    originatorClientId: string | undefined,
-  ): Promise<{ toolName: string; enabled: boolean }>;
-
-  /**
-   * Scaffold an empty `QWEN.md` (or whatever
-   * `getCurrentGeminiMdFilename()` returns) at the bound workspace
-   * root. Mechanical only — does NOT invoke the LLM. The caller is
-   * expected to follow up with `POST /session/:id/prompt` if it wants
-   * AI-driven content fill.
-   *
-   * Default refuses to overwrite: when the target file already exists
-   * with non-whitespace content, throws `WorkspaceInitConflictError`
-   * (translated to HTTP 409 by the route). `opts.force === true`
-   * overwrites unconditionally.
-   *
-   * Fan-outs a `workspace_initialized` event with `{path, action:
-   * 'created' | 'overwrote'}` to every live session SSE bus.
-   */
-  initWorkspace(
-    opts: { force?: boolean },
-    originatorClientId: string | undefined,
-  ): Promise<{
-    path: string;
-    action: 'created' | 'overwrote' | 'noop';
-  }>;
-
-  /**
-   * Restart a configured MCP server through the ACP child's
-   * `McpClientManager`. Pre-checks the live budget snapshot from PR 14
-   * v1 and returns a structured "skipped" response (200 OK) for soft
-   * refusals (in-flight discovery, server disabled, restart would
-   * push live count over budget under `enforce` mode). Hard errors
-   * (server not configured at all, `McpClientManager` unavailable)
-   * propagate as ACP errors → mapped to HTTP 4xx/5xx by the route.
-   *
-   * On success, fan-outs `mcp_server_restarted` to every live session
-   * SSE bus with `{serverName, durationMs}`. On soft skip, fan-outs
-   * `mcp_server_restart_refused` with `{serverName, reason}`.
-   *
-   * Throws `SessionNotFoundError`-like (via `SERVE_CONTROL_EXT_METHODS`
-   * routing) when no ACP channel is alive — restart requires a live
-   * `McpClientManager` instance, which only exists inside a spawned
-   * ACP child.
-   */
-  restartMcpServer(
-    serverName: string,
-    originatorClientId: string | undefined,
-  ): Promise<
-    | { serverName: string; restarted: true; durationMs: number }
-    | {
-        serverName: string;
-        restarted: false;
-        skipped: true;
-        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
-      }
-  >;
-
-  /**
-   * Kill the agent process for the session and remove it from the maps.
-   * Used by the HTTP route layer to reap orphans created when a client
-   * disconnects mid-spawn (the server-side child kept being created
-   * even though no caller will ever know the sessionId). Idempotent —
-   * unknown / already-dead sessions are no-ops.
-   */
-  /**
-   * Tear down a session — kill the child, drop from maps, publish
-   * `session_died`. Idempotent on already-dead sessions.
-   *
-   * `requireZeroAttaches: true` makes the call a no-op when at
-   * least one other client has called `spawnOrAttach` for this
-   * entry and got `attached: true`. Used by the disconnect-reaper
-   * in `server.ts` so a fast reattach by client B doesn't lose its
-   * session to client A's "I disconnected mid-spawn" cleanup.
-   */
-  killSession(
-    sessionId: string,
-    opts?: { requireZeroAttaches?: boolean },
-  ): Promise<void>;
-
-  /**
-   * Roll back a prior attach: decrement `attachCount` and, if the
-   * session now has neither attaching clients (`attachCount === 0`)
-   * nor live SSE subscribers, reap it.
-   *
-   * Called from the server's `POST /session` route handler when the
-   * attaching client disconnected before the response could be
-   * written (`!res.writable && session.attached === true`). Without
-   * this, the BQ9tV `attachCount`-based race guard would persist
-   * monotonically: once any attach bumped the counter, the
-   * spawn-owner's disconnect-reaper would never run again — even if
-   * the attacher themselves disconnected (tanzhenxin issue 2). This
-   * is the symmetric "I bumped, but my socket died so the bump is
-   * fictitious" cleanup. When `clientId` is provided, the daemon-issued
-   * identity reference acquired by that failed attach is released too;
-   * echoed ids are ref-counted so a failed reconnect does not revoke an
-   * older live owner of the same id.
-   */
-  detachClient(sessionId: string, clientId?: string): Promise<void>;
-
-  /** Test/inspection hook: number of live sessions. */
-  readonly sessionCount: number;
-
-  /** Test/inspection hook: number of permission requests awaiting a vote. */
-  readonly pendingPermissionCount: number;
-
-  /**
-   * Bd1y6: synchronous force-kill of every live channel. Called by
-   * the runQwenServe SIGINT/SIGTERM handler when the operator
-   * double-taps — the second signal can't afford the async
-   * `shutdown()` Promise that the first signal is still in the
-   * middle of. Without this, `process.exit(1)` would leave agent
-   * children running after the daemon vanishes.
-   */
-  killAllSync(): void;
-
-  /** Close all live child processes; called on daemon shutdown. */
-  shutdown(): Promise<void>;
-
-  /**
-   * Issue #4175 PR 21 — best-effort fan-out of a workspace-scoped event
-   * (no `sessionId`) to every live session bus. Used by routes that
-   * make workspace-level state changes — e.g. device-flow auth — so SSE
-   * subscribers attached to any session learn about the change.
-   *
-   * **Best-effort semantics:** swallowed bus failures (closed bus,
-   * subscriber overflow) do NOT throw. Workspace events are
-   * authoritative via the GET routes; SSE is the convenience path.
-   *
-   * Removed in PR #4255 fold-in 9: PR 16 (#4249) landed
-   * `publishWorkspaceEvent` with identical fan-out semantics; the
-   * closed-bus + all-failed-stderr operator-visibility features
-   * that PR 21 added here have been folded INTO
-   * `publishWorkspaceEvent`. Use that helper for all workspace-
-   * scoped fan-outs (memory, agents, auth device-flow, future).
-   */
-}
-
-/**
- * Routes catch this to map to HTTP 404. Distinct from generic Error so the
- * route layer doesn't have to brittle-match on message text.
- */
 // Bridge errors lifted to `@qwen-code/acp-bridge/bridgeErrors` in
 // #4175 PR 22b. `MAX_WORKSPACE_PATH_LENGTH` lifted to
 // `@qwen-code/acp-bridge/workspacePaths` in the same slice.
