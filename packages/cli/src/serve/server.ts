@@ -43,6 +43,7 @@ import {
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,
 } from './fs/index.js';
+import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
 
 /**
  * Build a no-op fs-audit emitter that logs a warning every
@@ -237,6 +238,11 @@ export function createServeApp(
   // a generic record; we cast to keep a precise property name.
   (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
     fsFactory;
+  // Surface the bound workspace on `app.locals` so the PR 19 read
+  // routes can compute workspace-relative response paths without
+  // re-resolving. Same canonical form `/capabilities` advertises
+  // and the bridge enforces — keeping every layer in agreement.
+  (app.locals as { boundWorkspace?: string }).boundWorkspace = boundWorkspace;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -399,6 +405,17 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
     }
+  });
+
+  // Issue #4175 PR 19 — read-only workspace file routes
+  // (`GET /file|/list|/glob|/stat`). Registered after the workspace
+  // diagnostics routes so the file surface sits next to its sibling
+  // workspace-scoped reads and shares the same auth posture (no
+  // `mutate()` gate; only the global `bearerAuth` middleware
+  // applies). Mutation file routes (`POST /file/write|/edit`) come
+  // in PR 20.
+  registerWorkspaceFileReadRoutes(app, {
+    parseClientId: parseClientIdHeader,
   });
 
   app.post('/session', mutate(), async (req, res) => {

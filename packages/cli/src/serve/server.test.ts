@@ -107,6 +107,9 @@ const EXPECTED_STAGE1_FEATURES = [
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
   // refused per-server cells).
   'mcp_guardrails',
+  // Issue #4175 PR 19. Always-on. Daemon exposes the read-only file
+  // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`.
+  'workspace_file_read',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
