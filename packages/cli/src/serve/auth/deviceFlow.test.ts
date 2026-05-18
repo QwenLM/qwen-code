@@ -432,6 +432,55 @@ describe('DeviceFlowRegistry — start / public view', () => {
       reg.dispose();
     }
   });
+
+  it('caps at DEVICE_FLOW_MAX_CONCURRENT under CONCURRENT distinct-provider starts (round-13 #1)', async () => {
+    // PR #4255 round-13 #1 (gpt-5.5 review C1gh0): the sequential
+    // cap test above established the accounting rule, but only the
+    // CONCURRENT case exposes the bug fix. Pre-fix:
+    // `countActive()` counted only `byProvider`; concurrent
+    // `start()` calls for MAX+1 distinct providers all reach the
+    // cap check synchronously (before any awaits), all see count=0
+    // (no byProvider entries yet), and all pass. Post-fix: the
+    // counter includes `inFlightStarts.size`, so the second concurrent
+    // caller sees count=1, the third count=2, and the (MAX+1)th
+    // caller is rejected.
+    const providers = new Map<DeviceFlowProviderId, FakeProvider>();
+    for (let i = 0; i < DEVICE_FLOW_MAX_CONCURRENT + 1; i += 1) {
+      providers.set(
+        `provider-${i}` as DeviceFlowProviderId,
+        new FakeProvider(),
+      );
+    }
+    const env = makeClockAndScheduler();
+    const events = makeEventSink();
+    const reg = new DeviceFlowRegistry({
+      events: events.sink,
+      resolveProvider: (id) => providers.get(id),
+      now: env.now,
+      schedule: env.schedule as never,
+      scheduleInterval: env.scheduleInterval as never,
+      clearScheduled: env.clearScheduled as never,
+      clearScheduledInterval: env.clearScheduledInterval as never,
+    });
+    try {
+      const results = await Promise.allSettled(
+        Array.from({ length: DEVICE_FLOW_MAX_CONCURRENT + 1 }, (_, i) =>
+          reg.start({
+            providerId: `provider-${i}` as DeviceFlowProviderId,
+          }),
+        ),
+      );
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter((r) => r.status === 'rejected');
+      expect(fulfilled).toHaveLength(DEVICE_FLOW_MAX_CONCURRENT);
+      expect(rejected).toHaveLength(1);
+      expect(
+        rejected[0]!.status === 'rejected' ? rejected[0]!.reason : null,
+      ).toBeInstanceOf(TooManyActiveDeviceFlowsError);
+    } finally {
+      reg.dispose();
+    }
+  });
 });
 
 describe('DeviceFlowRegistry — polling state machine', () => {

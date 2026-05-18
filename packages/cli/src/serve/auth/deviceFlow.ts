@@ -953,13 +953,31 @@ export class DeviceFlowRegistry {
     return { alreadyTerminal: false };
   }
 
-  /** Active = pending; terminal entries in grace don't count toward the cap. */
+  /**
+   * Active = pending entries already installed in `byProvider` PLUS
+   * in-flight starts that haven't yet completed `provider.start()`.
+   * Terminal entries in grace don't count toward the cap.
+   *
+   * PR #4255 round-13 #1 (gpt-5.5 review C1gh0): including
+   * `inFlightStarts.size` here closes a workspace-wide cap bypass.
+   * Concurrent starts for `DEVICE_FLOW_MAX_CONCURRENT + 1` DISTINCT
+   * providers all run to their first await synchronously: each
+   * checks the cap before any has populated `byProvider`, and each
+   * passes (count = 0). All `MAX+1` then `await provider.start()`,
+   * eventually installing more than the documented four pending
+   * flows. Adding `inFlightStarts.size` makes the accounting
+   * include the not-yet-installed reservations — the second
+   * concurrent caller sees `count = 1`, the third `count = 2`, and
+   * so on. `byProvider` and `inFlightStarts` are disjoint by
+   * construction (the existing-pending-entry fast-path catches any
+   * provider with both), so simple addition cannot double-count.
+   */
   private countActive(): number {
     let n = 0;
     for (const entry of this.byProvider.values()) {
       if (entry.status === 'pending') n += 1;
     }
-    return n;
+    return n + this.inFlightStarts.size;
   }
 
   private schedulePoll(entry: DeviceFlowEntry, provider: DeviceFlowProvider) {
