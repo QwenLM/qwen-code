@@ -272,7 +272,7 @@
           "order": 7,
           "type": "boolean",
           "default": false,
-          "description": "Experimental: route the IDE webview through a running qwen serve daemon instead of spawning a local ACP child process."
+          "description": "Experimental: route the IDE webview through a loopback qwen serve daemon instead of spawning a local ACP child process. The daemon owns runtime execution for the same workspace."
         }
       }
     },

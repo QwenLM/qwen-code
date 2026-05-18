@@ -5,8 +5,12 @@
  */
 
 /**
- * Daemon-backed IDE connection spike. It mirrors the ACP process connection
- * shape while replacing the local child process with a qwen serve session.
+ * Daemon-backed IDE connection spike.
+ *
+ * This is a daemon-native event consumer: prompts and session events travel
+ * through DaemonSessionClient, then get projected into the existing ACP-shaped
+ * webview callbacks. It intentionally avoids PTY proxying and does not own a
+ * separate runtime/event protocol.
  */
 
 import type {
@@ -114,7 +118,8 @@ function validateDaemonBaseUrl(baseUrl: string): string {
   }
   if (!isLoopbackHostname(url.hostname)) {
     throw new Error(
-      `Daemon baseUrl must target a loopback address, got "${url.hostname}"`,
+      `Daemon baseUrl must target a loopback address for this local IDE ` +
+        `draft, got "${url.hostname}"`,
     );
   }
   return url.href;
@@ -147,10 +152,18 @@ export function createSdkDaemonSessionFactory(): DaemonIdeSessionFactory {
       baseUrl: validateDaemonBaseUrl(opts.baseUrl),
       token: opts.token,
     });
-    const session = await SdkDaemonSessionClient.createOrAttach(daemon, {
-      workspaceCwd: opts.workspaceCwd,
-      modelServiceId: opts.modelServiceId,
-    });
+    let session: DaemonIdeSessionClient;
+    try {
+      session = await SdkDaemonSessionClient.createOrAttach(daemon, {
+        workspaceCwd: opts.workspaceCwd,
+        modelServiceId: opts.modelServiceId,
+      });
+    } catch (error) {
+      const message = toSafeErrorMessage(error);
+      throw new Error(
+        `Failed to attach IDE to daemon workspace "${opts.workspaceCwd ?? ''}": ${message}`,
+      );
+    }
     if (opts.lastEventId !== undefined) {
       session.setLastEventId?.(opts.lastEventId);
     }

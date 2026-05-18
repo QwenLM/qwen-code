@@ -28,8 +28,13 @@ export type DaemonAcpConnectionOptionsProvider =
   () => DaemonAcpConnectionOptions;
 
 /**
- * Adapter that lets the existing IDE manager/webview path exercise the daemon
- * transport without spawning a local ACP child process.
+ * Daemon-native IDE adapter for the local-IDE + local-daemon draft path.
+ *
+ * The existing webview still talks to an AcpConnection-shaped facade, but the
+ * facade sends prompts through DaemonIdeConnection/DaemonSessionClient instead
+ * of spawning a local ACP child process. This keeps the draft adapter small and
+ * flag-gated while preserving the server/client/runtime boundary: IDE code does
+ * not import daemon EventBus internals and the daemon remains the runtime owner.
  *
  * It intentionally preserves AcpConnection's public shape so the first
  * daemon-backed IDE draft can stay small and fully flag-gated. Unsupported
@@ -38,6 +43,8 @@ export type DaemonAcpConnectionOptionsProvider =
  */
 export class DaemonAcpConnection extends AcpConnection {
   private readonly daemon = new DaemonIdeConnection();
+  // Mutable because each webview session may provide its own local workspace
+  // path. In this draft that path must also be visible to the local daemon.
   private daemonWorkingDir = process.cwd();
 
   constructor(
@@ -51,6 +58,8 @@ export class DaemonAcpConnection extends AcpConnection {
     workingDir: string = process.cwd(),
     _extraArgs: string[] = [],
   ): Promise<void> {
+    // Daemon mode does not spawn the CLI entrypoint; the running qwen serve
+    // instance owns runtime startup, auth, tools, MCP, skills, and files.
     this.daemonWorkingDir = workingDir;
     this.wireDaemonCallbacks();
     const options = this.optionsProvider();
@@ -67,6 +76,8 @@ export class DaemonAcpConnection extends AcpConnection {
   override async authenticate(
     _methodId?: string,
   ): Promise<AuthenticateResponse> {
+    // Auth is brokered by the daemon server. This ACP-shaped method remains a
+    // no-op until the IDE consumes daemon auth/status routes directly.
     return {} as AuthenticateResponse;
   }
 
@@ -100,6 +111,8 @@ export class DaemonAcpConnection extends AcpConnection {
   override async setMode(
     _modeId: ApprovalModeValue,
   ): Promise<SetSessionModeResponse> {
+    // Approval-mode mutation needs a daemon control-plane route before the IDE
+    // draft can forward this safely.
     return {} as SetSessionModeResponse;
   }
 
@@ -109,6 +122,8 @@ export class DaemonAcpConnection extends AcpConnection {
     baseUrl: string | null;
     apiKeyEnvKey: string | null;
   }> {
+    // The daemon owns provider credentials and active model state. This draft
+    // only exposes the daemon transport identity to keep legacy UI code stable.
     return {
       authType: 'daemon',
       model: null,
@@ -118,6 +133,8 @@ export class DaemonAcpConnection extends AcpConnection {
   }
 
   override async listSessions(): Promise<ListSessionsResponse> {
+    // Until the IDE consumes daemon session list/load routes, expose only the
+    // attached daemon session to avoid implying full session-manager parity.
     const sessionId = this.daemon.currentSessionId;
     return {
       sessions: sessionId

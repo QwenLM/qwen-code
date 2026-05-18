@@ -36,6 +36,14 @@ import {
 } from '../../services/settingsWriter.js';
 import { parseInsightMessage } from '@qwen-code/qwen-code-core';
 
+/**
+ * Creates the agent manager for this webview instance.
+ *
+ * The daemon path is intentionally local-IDE + local-daemon only in this draft:
+ * the extension still owns the editor UI, while qwen serve owns runtime,
+ * tools, MCP, skills, and files for the same workspace. Setting changes apply
+ * to newly created managers; existing sessions are not hot-swapped.
+ */
 function createAgentManagerFromConfiguration(): QwenAgentManager {
   const config = vscode.workspace.getConfiguration('qwen-code');
   const useDaemon = config.get<boolean>('experimentalDaemonIde') === true;
