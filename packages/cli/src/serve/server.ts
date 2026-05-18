@@ -1440,6 +1440,21 @@ export function createServeApp(
         });
         return;
       }
+      // #4282 fold-in 2 (deepseek SV1): cap the tool name length so
+      // an extremely long path parameter can't bloat the workspace
+      // settings file. Sized at 256 to comfortably accommodate the
+      // longest legitimate MCP qualified names
+      // (`mcp__<server>__<tool>`) while staying well under any
+      // settings-file pathological-input concern. Mirrors the
+      // explicit caps on `cwd` (`MAX_WORKSPACE_PATH_LENGTH`) and
+      // `X-Qwen-Client-Id` (`MAX_CLIENT_ID_LENGTH`).
+      if (toolName.length > MAX_TOOL_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Tool name exceeds ${MAX_TOOL_NAME_LENGTH}-character limit`,
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
       const body = safeBody(req);
       const enabled = body['enabled'];
       if (typeof enabled !== 'boolean') {
@@ -1822,6 +1837,8 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
 
 const CLIENT_ID_HEADER = 'x-qwen-client-id';
 const MAX_CLIENT_ID_LENGTH = 128;
+/** #4282 fold-in 2 (deepseek SV1) — see /workspace/tools/:name/enable. */
+const MAX_TOOL_NAME_LENGTH = 256;
 const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';

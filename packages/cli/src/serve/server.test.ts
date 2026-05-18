@@ -120,13 +120,17 @@ const EXPECTED_STAGE1_FEATURES = [
   // hash-aware text mutation routes behind the strict mutation gate.
   'workspace_file_bytes',
   'workspace_file_write',
-  // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
-  'auth_device_flow',
-  // #4175 Wave 4 PR 17.
+  // #4175 Wave 4 PR 17. Mutation control routes (approval mode toggle,
+  // workspace tool enable/disable, init scaffold, MCP server restart).
   'session_approval_mode_control',
   'workspace_tool_toggle',
   'workspace_init',
   'workspace_mcp_restart',
+  // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
+  // Registry order on origin/main has PR 21 appended last, so the
+  // baseline assertion below mirrors that even though PR 21 landed
+  // before PR 17 chronologically.
+  'auth_device_flow',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally

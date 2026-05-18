@@ -222,6 +222,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_tool_toggle',
       'workspace_init',
       'workspace_mcp_restart',
+      'auth_device_flow',
     ]);
   });
 });

@@ -252,6 +252,40 @@ describe('ToolRegistry', () => {
       expect(next.getTool('live-tool')).toBeUndefined();
       expect(registry.getTool('live-tool')).toBeDefined();
     });
+
+    it('honors disabledTools against the renamed name when an MCP tool collides with a lazy factory (#4282 fold-in 2 CV3)', async () => {
+      // Operator disabled `mcp__rogue-server__structured_output` —
+      // the renamed-and-exposed name. The MCP tool comes in as
+      // `structured_output`, collides with the registered lazy
+      // factory, and gets auto-qualified. The post-rename re-check
+      // must observe the disabled set against the FINAL registration
+      // name and skip the insertion.
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: ['mcp__rogue-server__structured_output'],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      registry.registerFactory(
+        'structured_output',
+        async () => new MockTool({ name: 'structured_output' }),
+      );
+      const collidingMcp = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'rogue-server',
+        'structured_output',
+        'description',
+        {},
+      );
+      registry.registerTool(collidingMcp);
+      // The renamed MCP tool must NOT have been inserted.
+      expect(
+        registry.getTool('mcp__rogue-server__structured_output'),
+      ).toBeUndefined();
+      // The lazy factory still owns the canonical name.
+      const resolved = await registry.ensureTool('structured_output');
+      expect(resolved).toBeDefined();
+      expect(resolved).not.toBeInstanceOf(DiscoveredMCPTool);
+    });
   });
 
   describe('getAllTools', () => {

@@ -875,15 +875,22 @@ export function reduceDaemonSessionEvent(
     case 'auth_device_flow_failed':
     case 'auth_device_flow_cancelled':
       return base;
+    // #4282 fold-in 2 (gpt-5.5 SV3): for the 5 PR 17 mutation events,
+    // copy `event.originatorClientId` (envelope-level) into the stored
+    // snapshot. Without this, consumers reading
+    // `lastApprovalModeChange` / `lastToolToggle` / `lastWorkspaceInit`
+    // / `lastMcpRestart{,Refused}` cannot tell whether the mutation
+    // originated from themselves — even though the raw event carried
+    // that information at the envelope level. `mergeOriginator`
+    // preserves any pre-existing `data.originatorClientId` (which the
+    // daemon does NOT currently populate, but the field exists on the
+    // Data interfaces) and falls back to the envelope.
     case 'approval_mode_changed':
-      // #4175 Wave 4 PR 17. Non-terminal — just refreshes the
-      // approval-mode mirror. UIs render the new mode + count for
-      // "this session has been retoggled N times" diagnostics.
       return {
         ...base,
         approvalMode: event.data.next,
         approvalModeChangedCount: base.approvalModeChangedCount + 1,
-        lastApprovalModeChange: event.data,
+        lastApprovalModeChange: mergeOriginator(event.data, event),
       };
     case 'tool_toggled':
       // Workspace-scoped — same `tool_toggled` envelope is fan-out to
@@ -892,7 +899,7 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         toolToggleCount: base.toolToggleCount + 1,
-        lastToolToggle: event.data,
+        lastToolToggle: mergeOriginator(event.data, event),
       };
     case 'workspace_initialized':
       // Workspace-scoped fan-out. Non-terminal — just records that a
@@ -900,19 +907,19 @@ export function reduceDaemonSessionEvent(
       return {
         ...base,
         workspaceInitCount: base.workspaceInitCount + 1,
-        lastWorkspaceInit: event.data,
+        lastWorkspaceInit: mergeOriginator(event.data, event),
       };
     case 'mcp_server_restarted':
       return {
         ...base,
         mcpRestartCount: base.mcpRestartCount + 1,
-        lastMcpRestart: event.data,
+        lastMcpRestart: mergeOriginator(event.data, event),
       };
     case 'mcp_server_restart_refused':
       return {
         ...base,
         mcpRestartRefusedCount: base.mcpRestartRefusedCount + 1,
-        lastMcpRestartRefused: event.data,
+        lastMcpRestartRefused: mergeOriginator(event.data, event),
       };
     default: {
       const _exhaustive: never = event;
@@ -1377,6 +1384,25 @@ function isAuthDeviceFlowErrorKind(
   // exhaustively in consumer `switch` statements; unknown kinds fall
   // into the `(string & {})` arm of the union for graceful handling.
   return typeof value === 'string' && value.length > 0;
+}
+
+/**
+ * #4282 fold-in 2 (gpt-5.5 SV3). PR 17 mutation events carry
+ * `originatorClientId` at the SSE envelope level, separate from
+ * `event.data`. Reducer snapshots used to store only `event.data`,
+ * leaving consumers unable to tell self-originated mutations apart.
+ * This helper stamps the envelope's originator onto the stored
+ * snapshot, preserving any pre-existing `data.originatorClientId`
+ * (which the daemon does not currently populate, but the field is
+ * declared on the Data interfaces).
+ */
+function mergeOriginator<T extends { originatorClientId?: string }>(
+  data: T,
+  event: { originatorClientId?: string },
+): T {
+  if (data.originatorClientId !== undefined) return data;
+  if (event.originatorClientId === undefined) return data;
+  return { ...data, originatorClientId: event.originatorClientId };
 }
 
 function isApprovalModeChangedData(

@@ -1671,6 +1671,18 @@ class BridgeClient implements Client {
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
+/**
+ * #4282 fold-in 2 (gpt-5.5 CV2). Bridge-race deadline for the
+ * `workspace/mcp/:server/restart` ACP extMethod. The MCP manager's
+ * per-server discovery deadline can be up to 5 minutes
+ * (`McpClientManager.MAX_DISCOVERY_TIMEOUT_MS`), so reusing
+ * `initTimeoutMs` (10s) here produced a guaranteed false-timeout for
+ * any stdio MCP server slower than 10s while the ACP child kept
+ * reconnecting in the background. The bridge race is purely a safety
+ * net against a completely wedged ACP channel; it should be at least
+ * as long as the slowest legitimate per-server discovery.
+ */
+const MCP_RESTART_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_SESSIONS = 20;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
@@ -2597,18 +2609,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   };
 
   /**
-   * Fan-out an event to every live session bus in the daemon. Used by
-   * workspace-scoped mutation routes (#4175 Wave 4 PR 17) — the
-   * `tool_toggled` and `mcp_server_restarted` events are not session-
-   * scoped, but every active SSE subscriber should still see them so
-   * cross-client UIs stay in sync. Errors from individual buses (e.g.
-   * already-closed) are swallowed — a single torn-down session must
-   * not block the broadcast to its peers.
-   *
-   * Named `broadcastWorkspaceEvent` to leave room for PR 16's
-   * forthcoming `publishWorkspaceEvent` — the post-merge fold-in
-   * collapses the two helpers (PR 21 #4255 follows the same naming
-   * convention to ease that consolidation).
+   * Fan-out an event to every live session bus. PR 17 mutation events
+   * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`)
+   * call this; semantically identical to PR 16's
+   * `publishWorkspaceEvent` member on the bridge object (same
+   * `byId.values()` iteration, same per-entry try/catch posture).
+   * Kept as a local closure alias rather than a member method because
+   * call sites within the bridge implementation can't invoke own
+   * methods through `this` here. PR 16's richer success/failure
+   * accounting (per-entry shutdown/debug logging) lives only on the
+   * member version — these PR 17 events are best-effort, so the
+   * simpler swallow-and-skip is acceptable.
    */
   const broadcastWorkspaceEvent = (
     envelope: Omit<BridgeEvent, 'id' | 'v'>,
@@ -3923,7 +3934,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
               { serverName },
             ),
-            initTimeoutMs,
+            MCP_RESTART_TIMEOUT_MS,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
           ),
           getChannelClosedReject(info),
@@ -3985,6 +3996,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // `--memory-file-name` overrides). No ACP roundtrip, no LLM
       // call — clients that want AI-fill follow up with
       // `POST /session/:id/prompt`.
+      //
+      // FIXME(#4282 fold-in 2 — deepseek SV2): this route uses
+      // `node:fs/promises` directly instead of routing through
+      // `WorkspaceFileSystem` (PR 18 boundary), so it produces no
+      // `fs.access`/`fs.denied` audit trail and skips
+      // `assertTrustedForIntent`. The bridge doesn't have an
+      // `fsFactory` plumbed at the bridge layer today — the boundary
+      // is constructed per-request inside `createServeApp` for PR 19+
+      // routes. A follow-up will hoist the factory into
+      // `BridgeOptions` so daemon-level routes (init, future
+      // workspace ops) can share the same trust + audit posture.
+      // Impact today is low: the daemon binds to a workspace the
+      // operator chose and the trust dialog flow doesn't yet exist
+      // for the daemon. The CV1 symlink reject below covers the
+      // immediate boundary-escape concern.
       const filename = getCurrentGeminiMdFilename();
       // #4282 gpt-5.5 C1 fold-in: `getCurrentGeminiMdFilename()` is
       // settings-controlled. A daemon configured with
@@ -4002,6 +4028,30 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
             `Refusing to write.`,
         );
+      }
+      // #4282 fold-in 2 (gpt-5.5 CV1): the textual `withinWorkspace`
+      // check above only validates the JOINED path, but a file at
+      // `target` that's a symlink can still point outside the
+      // workspace. Without an explicit `lstat` reject, `force: true`
+      // would follow the link and truncate the external target; a
+      // dangling-symlink pointing outside would also let `writeFile`
+      // create the external target. Reject symlinks at the boundary
+      // — PR 18's `WorkspaceFileSystem` will provide the proper
+      // chain-aware resolution + audit hooks once `initWorkspace`
+      // routes through that boundary (tracked as a follow-up).
+      try {
+        const lst = await fs.lstat(target);
+        if (lst.isSymbolicLink()) {
+          throw new Error(
+            `Workspace context file ${JSON.stringify(target)} is a symlink. ` +
+              `Refusing to follow it for write — replace the symlink with a ` +
+              `regular file (or remove it) before re-running init.`,
+          );
+        }
+      } catch (err) {
+        const code = (err as { code?: unknown } | null | undefined)?.code;
+        if (code !== 'ENOENT') throw err;
+        // ENOENT — target doesn't exist; fresh create is fine.
       }
       let existingSize: number | undefined;
       let action: 'created' | 'overwrote' | 'noop' = 'created';

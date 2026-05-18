@@ -250,6 +250,20 @@ export class ToolRegistry {
         );
       }
     }
+    // #4282 fold-in 2 (gpt-5.5 CV3): re-check the disabled set against
+    // the FINAL registration name. Without this, an MCP tool that
+    // collides with a lazy factory and gets renamed via
+    // `asFullyQualifiedTool()` (e.g. `structured_output` →
+    // `mcp__server__structured_output`) would slip past the up-front
+    // `isToolDisabled(tool.name)` gate above when the operator
+    // disabled the renamed-and-exposed name. Re-evaluating after the
+    // rename closes that hole.
+    if (this.isToolDisabled(tool.name)) {
+      debugLogger.info(
+        `Tool "${tool.name}" skipped (post-rename): present in disabledTools set.`,
+      );
+      return;
+    }
     this.tools.set(tool.name, tool);
   }
 
