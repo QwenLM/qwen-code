@@ -4026,6 +4026,74 @@ describe('useGeminiStream', () => {
         expect(errorItem).toBeUndefined();
       });
     });
+
+    // Regression for #4169: when a pending retry error is cleared as the user
+    // starts a new turn, the error must be committed to the persistent
+    // history first — otherwise running /status (or any new turn) silently
+    // discards the failure the user was investigating.
+    it('commits pending retry error to history (without hint) when a new query starts', async () => {
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'First error' } },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('First query');
+      });
+
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeDefined();
+      });
+
+      // Sanity check: the error has NOT yet been committed to history while
+      // it lives as a pending retry item.
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'error' }),
+        expect.any(Number),
+      );
+
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Second response',
+          };
+        })(),
+      );
+
+      await act(async () => {
+        await result.current.submitQuery('Second query');
+      });
+
+      // The pending error is now committed to history…
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'error' }),
+          expect.any(Number),
+        );
+      });
+
+      // …and the retry hint is stripped, since it is no longer actionable.
+      const errorCommit = mockAddItem.mock.calls.find(
+        ([item]) => item && typeof item === 'object' && item.type === 'error',
+      );
+      expect(errorCommit?.[0]).not.toHaveProperty('hint');
+
+      // The pending region is cleared, as before.
+      const errorItem = result.current.pendingHistoryItems.find(
+        (item) => item.type === 'error',
+      );
+      expect(errorItem).toBeUndefined();
+    });
   });
 
   describe('Concurrent Execution Prevention', () => {

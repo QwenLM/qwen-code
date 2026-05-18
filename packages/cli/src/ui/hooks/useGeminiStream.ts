@@ -1688,6 +1688,11 @@ export const useGeminiStream = (
           pendingRetryCountdownItemRef.current ||
           pendingRetryErrorItemRef.current
         ) {
+          const pendingError = pendingRetryErrorItemRef.current;
+          if (pendingError && pendingError.type === 'error') {
+            const { hint: _hint, ...errorWithoutHint } = pendingError;
+            addItem(errorWithoutHint, userMessageTimestamp);
+          }
           clearRetryCountdown();
         }
       }
