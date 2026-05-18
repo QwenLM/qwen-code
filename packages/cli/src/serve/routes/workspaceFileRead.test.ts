@@ -308,6 +308,52 @@ describe('GET /glob', () => {
     expect(res.body.errorKind).toBe('parse_error');
   });
 
+  it('reports truncated=false when match count equals maxResults exactly', async () => {
+    // Probe-then-trim: pre-fixup the route inferred `truncated` from
+    // `length === maxResults`, false-positive when the workspace
+    // happens to hold exactly N matches. After the fixup the
+    // boundary probes `cap + 1` so `truncated` is only true when
+    // there really were more matches.
+    await fsp.writeFile(path.join(h.workspace, 'a.ts'), '');
+    await fsp.writeFile(path.join(h.workspace, 'b.ts'), '');
+    await fsp.writeFile(path.join(h.workspace, 'c.ts'), '');
+    const res = await request(h.app)
+      .get('/glob?pattern=*.ts&maxResults=3')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(3);
+    expect(res.body.truncated).toBe(false);
+  });
+
+  it('reports truncated=true when boundary saw more matches than maxResults', async () => {
+    for (const name of ['a.ts', 'b.ts', 'c.ts', 'd.ts']) {
+      await fsp.writeFile(path.join(h.workspace, name), '');
+    }
+    const res = await request(h.app)
+      .get('/glob?pattern=*.ts&maxResults=2')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(200);
+    expect(res.body.count).toBe(2);
+    expect(res.body.truncated).toBe(true);
+  });
+
+  it('normalizes a root match to "." instead of empty string', async () => {
+    // `pattern=.` resolves to the workspace itself; `path.relative`
+    // returns "" but the response shape expects "." (matches
+    // /file/list/stat). The route uses the shared
+    // `workspaceRelative` helper to normalize.
+    const res = await request(h.app)
+      .get('/glob?pattern=.')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(200);
+    if (res.body.matches.length > 0) {
+      for (const m of res.body.matches) {
+        expect(m).not.toBe('');
+        expect(typeof m).toBe('string');
+      }
+    }
+  });
+
   it('returns 400 parse_error when maxResults is malformed', async () => {
     const res = await request(h.app)
       .get('/glob?pattern=*&maxResults=zero')

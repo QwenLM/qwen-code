@@ -3213,10 +3213,12 @@ describe('runQwenServe', () => {
     // wrapping the daemon, future runtime locality contracts) can
     // swap in a remote-fronting factory. This test asserts
     // `runQwenServe` does NOT silently shadow a caller-supplied
-    // factory with its built-in default. A regression that
-    // reverses the priority order would produce a 200 (built-in
-    // factory reads `process.cwd()/package.json`); the sentinel
-    // ensures we see 400 instead.
+    // factory with its built-in default. A regression that ignored
+    // `deps.fsFactory` and fell back to the built-in factory would
+    // resolve `a.txt` against `process.cwd()`, find no such file,
+    // and return 404 `path_not_found`. The sentinel-throwing
+    // factory ensures we see 400 with `sentinel-from-fake-factory`
+    // in the body — proof the override actually drives the request.
     const sentinelMessage = 'sentinel-from-fake-factory';
     const fsFactory: WorkspaceFileSystemFactory = {
       forRequest: () => ({

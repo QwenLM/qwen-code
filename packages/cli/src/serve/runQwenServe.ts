@@ -15,7 +15,7 @@ import {
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { createServeApp } from './server.js';
+import { createDefaultFsAuditEmit, createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
 import {
   createWorkspaceFileSystemFactory,
@@ -296,24 +296,24 @@ export async function runQwenServe(
   // the warning-emit fallback in `createServeApp` makes any silent
   // drop visible in operator logs.
   const trustedWorkspace = deps.trustedWorkspace ?? true;
+  // Reuse `createDefaultFsAuditEmit` so the throttle behavior here
+  // matches what `createServeApp`'s built-in fallback would emit.
+  // The earlier per-event `writeStderrLine` would print one line for
+  // every `/file` / `/list` / `/glob` / `/stat` audit event under
+  // normal traffic — a workspace scan can flood operator logs in
+  // seconds. The shared helper warns once + every 100th drop and
+  // includes payload context (errorKind / intent / pathHash), so a
+  // genuine wiring regression still surfaces but routine audit
+  // traffic stays quiet. Future PR 21 SSE fan-out replaces this
+  // default with the workspace-scoped event channel; until then the
+  // throttled stderr warning is the canonical "emit channel orphaned"
+  // breadcrumb.
   const fsFactory =
     deps.fsFactory ??
     createWorkspaceFileSystemFactory({
       boundWorkspace,
       trusted: trustedWorkspace,
-      emit:
-        deps.fsAuditEmit ??
-        ((event: BridgeEvent) => {
-          // Default emit: stderr warning so a wiring regression
-          // that orphans the audit channel is visible. Throttled
-          // by the inner factory in `createServeApp` when used as
-          // its built-in fallback, so this branch only fires when
-          // a caller explicitly opts into runQwenServe's emit
-          // wiring without supplying their own hook (rare).
-          writeStderrLine(
-            `qwen serve: fs audit emit pre-wire: type=${event.type}`,
-          );
-        }),
+      emit: deps.fsAuditEmit ?? createDefaultFsAuditEmit(),
     });
   const app = createServeApp(opts, () => actualPort, {
     bridge,

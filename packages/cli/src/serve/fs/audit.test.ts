@@ -149,8 +149,12 @@ describe('createAuditPublisher', () => {
     expect(events[0].data).not.toHaveProperty('hint');
   });
 
-  it('attaches pattern field for fs.access on glob intent', () => {
-    const { events, publisher, workspace } = setup();
+  it('attaches pattern field for fs.access on glob intent in raw-paths mode', () => {
+    // `pattern` rides on the same privacy gate as `relPath` /
+    // `message` — glob patterns commonly carry path fragments
+    // (`src/secrets/*.env`, `/Users/alice/ws/**`), so they're
+    // suppressed unless the operator opted into raw paths.
+    const { events, publisher, workspace } = setup({ includeRawPaths: true });
     publisher.recordAccess(
       { route: 'GET /glob' },
       {
@@ -169,8 +173,8 @@ describe('createAuditPublisher', () => {
     });
   });
 
-  it('attaches pattern field for fs.denied on glob intent', () => {
-    const { events, publisher } = setup();
+  it('attaches pattern field for fs.denied on glob intent in raw-paths mode', () => {
+    const { events, publisher } = setup({ includeRawPaths: true });
     publisher.recordDenied(
       { route: 'GET /glob' },
       {
@@ -186,6 +190,39 @@ describe('createAuditPublisher', () => {
       errorKind: 'parse_error',
       pattern: '../../**',
     });
+  });
+
+  it('strips pattern from fs.access in privacy mode (default)', () => {
+    // Default `includeRawPaths: false`. Even though the orchestrator
+    // passed a literal pattern, the publisher must not echo it —
+    // glob patterns can leak path content the operator opted out of
+    // logging.
+    const { events, publisher, workspace } = setup();
+    publisher.recordAccess(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        absolute: workspace,
+        durationMs: 1,
+        pattern: 'src/secrets/*.env',
+      },
+    );
+    expect(events[0].data).not.toHaveProperty('pattern');
+    expect(events[0].data).not.toHaveProperty('relPath');
+  });
+
+  it('strips pattern from fs.denied in privacy mode (default)', () => {
+    const { events, publisher } = setup();
+    publisher.recordDenied(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        input: '../../**',
+        errorKind: 'parse_error',
+        pattern: '../../**',
+      },
+    );
+    expect(events[0].data).not.toHaveProperty('pattern');
   });
 
   it('omits pattern when not provided', () => {

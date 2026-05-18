@@ -62,7 +62,7 @@ import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
  * per-session emit, so legitimate production traffic never hits
  * the warning.
  */
-function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
+export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
   const WARN_EVERY = 100;
   let droppedCount = 0;
   return (event: BridgeEvent) => {

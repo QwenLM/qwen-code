@@ -224,7 +224,7 @@ async function handleGetFile(
     applyReadHeaders(res);
     res.status(400).json({
       errorKind: 'parse_error',
-      error: '`limit` must be a positive integer in [1, 2000]',
+      error: `\`limit\` must be a positive integer in [1, ${MAX_LIST_ENTRIES}]`,
       status: 400,
     });
     return;
@@ -372,21 +372,39 @@ async function handleGetGlob(
   });
   const start = performance.now();
   try {
+    // Resolve `cwd` with `intent: 'list'` rather than `'glob'`. The
+    // request-level `pattern` query and the directory-level `cwd`
+    // are independent inputs; tagging the cwd resolve as a "glob
+    // intent" caused `recordAndWrap` (which auto-derives
+    // `data.pattern` from `intent === 'glob'`) to record the cwd
+    // string as the glob pattern on resolution failure — corrupting
+    // audit data for cases like `?cwd=../outside&pattern=*.ts`.
+    // `'list'` is the right semantic shape (cwd is a directory we
+    // intend to walk) and the trust + path-resolution behavior is
+    // identical (both are read-shaped intents under `policy.ts`).
     const cwdResolved = cwdString
-      ? await fs.resolve(cwdString, 'glob')
+      ? await fs.resolve(cwdString, 'list')
       : undefined;
-    const matches = await fs.glob(pattern, {
+    // Probe with `cap + 1` so `truncated` reflects whether the
+    // boundary actually had more results to give. Inferring
+    // truncation purely from `length === cap` false-positives when
+    // the workspace happens to contain exactly `cap` matches.
+    const cap = maxResults ?? DEFAULT_GLOB_MAX_RESULTS;
+    const probe = await fs.glob(pattern, {
       cwd: cwdResolved,
       includeIgnored,
-      maxResults: maxResults ?? DEFAULT_GLOB_MAX_RESULTS,
+      maxResults: cap + 1,
     });
-    const boundWorkspace = (req.app.locals as { boundWorkspace?: string })
-      .boundWorkspace;
-    const relMatches = matches.map((m) =>
-      boundWorkspace
-        ? path.relative(boundWorkspace, m as string)
-        : (m as string),
-    );
+    const truncated = probe.length > cap;
+    const trimmed = truncated ? probe.slice(0, cap) : probe;
+    // Use the shared `workspaceRelative` helper so a root match
+    // (e.g. `pattern=.` resolving to the workspace itself) renders
+    // as `'.'` rather than the empty string `path.relative` returns
+    // — keeps the response shape consistent with `/file`, `/list`,
+    // `/stat`. Helper also handles the `boundWorkspace` undefined
+    // edge case (test embeds that skip the fixture) so the route
+    // doesn't carry its own fallback branch.
+    const relMatches = trimmed.map((m) => workspaceRelative(req, m as string));
     applyReadHeaders(res);
     res.status(200).json({
       kind: 'glob',
@@ -394,7 +412,7 @@ async function handleGetGlob(
       cwd: cwdString ?? '',
       matches: relMatches,
       count: relMatches.length,
-      truncated: relMatches.length === (maxResults ?? DEFAULT_GLOB_MAX_RESULTS),
+      truncated,
       durationMs: Math.round(performance.now() - start),
     });
   } catch (err) {
