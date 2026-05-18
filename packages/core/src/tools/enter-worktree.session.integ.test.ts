@@ -74,7 +74,11 @@ describe('EnterWorktreeTool — WorktreeSession sidecar', () => {
     expect(session!.slug).toBe('session-test');
     expect(session!.worktreePath).toContain('session-test');
     expect(session!.worktreeBranch).toBe('worktree-session-test');
-    expect(session!.originalCwd).toBe(repoRoot);
+    // Compare via path.normalize so the assertion holds on Windows,
+    // where Node's fs.mkdtemp returns backslash-separated paths but
+    // git's rev-parse --show-toplevel (which enter_worktree captures
+    // as originalCwd via getRepoTopLevel) returns forward slashes.
+    expect(path.normalize(session!.originalCwd)).toBe(path.normalize(repoRoot));
     expect(session!.originalBranch).toBe('main');
     // Full SHA from `git rev-parse HEAD`, not the short form.
     expect(session!.originalHeadCommit).toMatch(/^[0-9a-f]{40}$/);
