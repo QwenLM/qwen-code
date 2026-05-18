@@ -6,7 +6,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, constants as fsConstants } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import {
@@ -3831,19 +3831,43 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           await fh.close();
         }
       } else if (action === 'overwrote') {
-        // FIXME (#4297 fold-in 5, addresses #3260836305): the
-        // `force: true` overwrite path still has a TOCTOU window —
-        // the symlink check above is point-in-time and `writeFile`
-        // here will follow a race-substituted symlink. The original
-        // FIXME at the top of `initWorkspace` plans migration to
-        // `WorkspaceFileSystem` (PR 18 boundary), which will close
-        // this via `O_NOFOLLOW`-aware open. Until then, the
-        // documented trust posture (daemon binds to an
-        // operator-chosen workspace, no cross-user write access in
-        // the Stage 1 deployment shape) accepts this gap. The
-        // `'wx'`-based create path above is the more common case
-        // and is now race-safe.
-        await fs.writeFile(target, '', 'utf8');
+        // #4297 fold-in 7 (gpt-5.5 critical, addresses #3262615446):
+        // close the TOCTOU window on the `force: true` path with
+        // `O_WRONLY|O_TRUNC|O_NOFOLLOW`. `O_NOFOLLOW` causes
+        // `open()` to fail with ELOOP if the final component is a
+        // symlink — even if a local writer races a symlink in
+        // between our `lstat`/`readFile` checks and this open, the
+        // open refuses rather than truncating the link target.
+        // (The symbol exists on Linux/macOS; on Windows the constant
+        // is 0/no-op since the OS always follows symlinks, which
+        // is consistent with the documented Stage-1 trust posture
+        // there — Windows daemon support is best-effort.)
+        let fh: import('node:fs/promises').FileHandle;
+        try {
+          fh = await fs.open(
+            target,
+             
+            fsConstants.O_WRONLY | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
+          );
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          if (code === 'ELOOP' || code === 'ENOENT') {
+            throw new WorkspaceInitSymlinkError(
+              target,
+              'target',
+              `Workspace context file ${JSON.stringify(target)} could not ` +
+                `be opened with O_NOFOLLOW (${String(code)}); the path may ` +
+                `have been swapped to a symlink between the absence check ` +
+                `and the overwrite. Refusing to follow it.`,
+            );
+          }
+          throw err;
+        }
+        try {
+          await fh.writeFile('', 'utf8');
+        } finally {
+          await fh.close();
+        }
       }
       broadcastWorkspaceEvent({
         type: 'workspace_initialized',

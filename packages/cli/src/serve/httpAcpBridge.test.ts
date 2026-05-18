@@ -4959,6 +4959,67 @@ describe('createHttpAcpBridge', () => {
       expect(await fsp.readFile(target, 'utf8')).toBe('');
     });
 
+    it('force:true overwrite refuses an O_NOFOLLOW ELOOP race (#4297 fold-in 7 TOCTOU)', async () => {
+      // Pin the new `O_WRONLY|O_TRUNC|O_NOFOLLOW` open path on the
+      // overwrote branch. Pre-fold-in-7 the overwrite used plain
+      // `fs.writeFile` and could be redirected outside `boundWorkspace`
+      // by a local writer racing a symlink between the lstat/readFile
+      // checks and the write. Now `O_NOFOLLOW` causes open() to fail
+      // with ELOOP on a symlink — translated to
+      // `WorkspaceInitSymlinkError(kind: 'target')`.
+      //
+      // Test strategy: pre-write a regular file so action lands on
+      // `overwrote`, then mock `fs.lstat` and `fs.readFile` to lie
+      // about the file (pretend it's still a regular file with non-
+      // whitespace content), but pre-replace the on-disk file with a
+      // symlink so `fs.open(..., O_NOFOLLOW)` fails.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-overwrite-toctou-'),
+      );
+      try {
+        const externalFile = path.join(escapeTarget, 'EXTERNAL.md');
+        await fsp.writeFile(externalFile, '# external', 'utf8');
+        const targetPath = path.join(tmpWs, 'QWEN.md');
+        // Real on-disk state: a symlink pointing outside the workspace.
+        await fsp.symlink(externalFile, targetPath);
+        // Stubbed lstat/readFile: pretend it's a regular file with
+        // existing content, so we land on the `overwrote` action.
+        const fakeStats = {
+          isSymbolicLink: () => false,
+          isFile: () => true,
+          isDirectory: () => false,
+          isCharacterDevice: () => false,
+          isBlockDevice: () => false,
+          isFIFO: () => false,
+          isSocket: () => false,
+        } as unknown as import('node:fs').Stats;
+        const lstatSpy = vi
+          .spyOn(fsp, 'lstat')
+          .mockResolvedValueOnce(fakeStats);
+        const readFileSpy = vi
+          .spyOn(fsp, 'readFile')
+          .mockResolvedValueOnce('# Old non-whitespace content' as never);
+        try {
+          const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+          const err = await bridge
+            .initWorkspace({ force: true }, undefined)
+            .catch((e) => e);
+          expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+          expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+          expect((err as Error).message).toMatch(
+            /could not be opened with O_NOFOLLOW/,
+          );
+          // External file untouched — the boundary held.
+          expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
+        } finally {
+          lstatSpy.mockRestore();
+          readFileSpy.mockRestore();
+        }
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
     it('honors `contextFilename` from BridgeOptions (#4282 fold-in 5 P2-1)', async () => {
       // The daemon parent never goes through `loadCliConfig`, so the
       // process-global `getCurrentGeminiMdFilename()` stays on the

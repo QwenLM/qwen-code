@@ -50,6 +50,41 @@ function formatHostForUrl(host: string): string {
 }
 
 /**
+ * #4297 fold-in 7 (deepseek S1, addresses #3262690842). Pull the
+ * `context.fileName` snapshot out of merged settings into a typed
+ * string, falling back to `undefined` when the value is missing or
+ * malformed. Exported so the daemon entrypoint can extract it from
+ * a `LoadedSettings` instance and tests can validate the four
+ * branches (string / array-with-string / array-with-non-strings /
+ * non-string non-array) without spinning up a real daemon.
+ *
+ * Validation contract:
+ *   - non-empty string after trim → returned trimmed
+ *   - array → first non-empty string element after trim, or undefined
+ *   - anything else (object, number, boolean, undefined) → undefined
+ *
+ * Returning `undefined` is the bridge's signal to use its own
+ * `getCurrentGeminiMdFilename()` default — so a malformed value
+ * keeps the daemon alive rather than producing a garbage filename.
+ */
+export function extractContextFilename(value: unknown): string | undefined {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed === '' ? undefined : trimmed;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        if (trimmed !== '') return trimmed;
+      }
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
  * #4282 fold-in 4 (qwen-latest C2). Per-workspace promise chain that
  * serializes settings read-modify-write cycles inside this process.
  *
@@ -325,21 +360,31 @@ export async function runQwenServe(
   // own `getCurrentGeminiMdFilename()` default — a sane recovery
   // posture that keeps the daemon alive instead of writing a
   // garbage filename.
-  const bootSettings = loadSettings(boundWorkspace);
-  const configuredFilename = bootSettings.merged.context?.fileName;
-  const firstStringInArray = (value: unknown): string | undefined => {
-    if (!Array.isArray(value)) return undefined;
-    for (const entry of value) {
-      if (typeof entry === 'string' && entry.trim() !== '') {
-        return entry.trim();
-      }
-    }
-    return undefined;
-  };
-  const contextFilenameForInit =
-    typeof configuredFilename === 'string' && configuredFilename.trim() !== ''
-      ? configuredFilename.trim()
-      : firstStringInArray(configuredFilename);
+  //
+  // #4297 fold-in 7 (qwen-latest critical, addresses #3262625091):
+  // wrap the boot-time `loadSettings` read in try/catch. A
+  // corrupted, malformed, or temporarily unreadable
+  // `settings.json` (partial write by a concurrent editor,
+  // permission denied, transient disk IO) used to throw
+  // synchronously and BLOCK DAEMON BOOT. Pre-PR this never
+  // happened because `loadSettings` was called lazily inside
+  // request handlers (which had their own error handling). We
+  // catch + log + fall back to the bridge's default filename so
+  // the daemon stays bootable.
+  let contextFilenameForInit: string | undefined;
+  try {
+    const bootSettings = loadSettings(boundWorkspace);
+    contextFilenameForInit = extractContextFilename(
+      bootSettings.merged.context?.fileName,
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: could not read settings for context.fileName ` +
+        `(${err instanceof Error ? err.message : String(err)}); ` +
+        `falling back to the daemon's default context filename. ` +
+        `Restart with a valid settings.json to use a custom name.`,
+    );
+  }
 
   const bridge =
     deps.bridge ??

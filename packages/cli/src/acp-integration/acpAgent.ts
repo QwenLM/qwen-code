@@ -1544,6 +1544,22 @@ class QwenAgent implements Agent {
         try {
           const fresh = loadSettings(this.config.getTargetDir());
           const mergedDisabled = fresh.merged.tools?.disabled;
+          // #4297 fold-in 7 (qwen-latest critical, addresses
+          // #3262625101): a malformed `tools.disabled` (boolean,
+          // string, object — hand-edited settings.json) DOESN'T
+          // throw, so the catch block below would never fire. The
+          // ternary used to silently substitute `[]`, clearing the
+          // entire disabled set with zero operator signal. Detect
+          // and stderr-log the malformed shape before clearing so a
+          // misconfigured settings file is loud rather than silent.
+          if (mergedDisabled !== undefined && !Array.isArray(mergedDisabled)) {
+            process.stderr.write(
+              `qwen serve: MCP restart for ${JSON.stringify(serverName)}: ` +
+                `tools.disabled has unexpected type ${typeof mergedDisabled}; ` +
+                `clearing disabled set — check settings.json. ` +
+                `Expected an array of strings.\n`,
+            );
+          }
           const disabledList = Array.isArray(mergedDisabled)
             ? mergedDisabled.filter((v): v is string => typeof v === 'string')
             : [];
