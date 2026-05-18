@@ -1636,6 +1636,12 @@ export class GeminiClient {
         ) {
           // Check if aborted before continuing
           if (signal.aborted) {
+            const activeGoalEvent = maybeEmitActiveGoalChange(
+              activeGoalAfterStopHook,
+            );
+            if (activeGoalEvent) {
+              yield activeGoalEvent;
+            }
             if (isTopLevelInteraction) endInteractionSpan('cancelled');
             return turn;
           }
