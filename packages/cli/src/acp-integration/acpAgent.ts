@@ -837,6 +837,20 @@ class QwenAgent implements Agent {
    *   - `error`   — refusals happened this pass (only possible in enforce mode)
    *   - `warning` — live count crossed 75% of budget (warn or enforce mode)
    *   - `ok`      — under threshold (or `off` mode)
+   *
+   * **`liveCount` vs `reservedSlots.size` (PR 14 review #4247 R9 #5)**:
+   * `liveCount` here is `accounting.total` — only `MCPServerStatus.CONNECTED`
+   * clients. Enforcement (`tryReserveSlot`) on the other hand uses
+   * `reservedSlots.size` — all reserved names, including in-flight
+   * connects and never-connected stale entries. The two diverge when
+   * servers hold a slot during the connect handshake or after a
+   * connect failure that didn't release (e.g. `'already_held'`
+   * reconnect timeouts). The snapshot intentionally uses the live
+   * count for **operator observability** — "how many MCP clients
+   * are actually serving requests right now" — while enforcement
+   * uses the reservation count to prevent capacity races across
+   * `Promise.all` microtask boundaries. PR 14b's typed events
+   * should consider exposing both for real-time pressure signals.
    */
   private buildBudgetCells(
     liveCount: number,

@@ -1861,6 +1861,64 @@ describe('McpClientManager — PR 14 guardrails', () => {
     );
   });
 
+  it('readResource lazy spawn disconnects on connect() failure (wenshao R9 #2 line 1534)', async () => {
+    // Mirror of the discovery-side R7 #3 / R8 #1 fixes, but for
+    // the readResource lazy-spawn path. Pre-fix: connect()
+    // partially established transport then threw → catch deleted
+    // client without disconnect() → stdio child / socket leaked.
+    let disconnectCalls = 0;
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect: vi
+            .fn()
+            .mockRejectedValue(new Error('mid-handshake failure')),
+          discover: vi.fn(),
+          disconnect: vi.fn().mockImplementation(() => {
+            disconnectCalls += 1;
+            return Promise.resolve();
+          }),
+          getStatus: vi.fn(),
+          readResource: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const config = configWithServers({ x: { command: 'node' } });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await expect(manager.readResource('x', 'file:///a')).rejects.toThrow(
+      /mid-handshake failure/,
+    );
+    expect(disconnectCalls).toBeGreaterThanOrEqual(1);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+  });
+
+  it('readBudgetFromEnv emits stderr breadcrumb on enforce-no-budget downgrade (wenshao R9 #7)', async () => {
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = 'enforce';
+    // No budget → downgrade fires
+    try {
+      const config = configWithServers({});
+      const manager = new McpClientManager(config, {} as ToolRegistry);
+      expect(manager.getMcpBudgetMode()).toBe('off');
+      const calls = writeSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        calls.some(
+          (s) =>
+            s.includes('QWEN_SERVE_MCP_BUDGET_MODE=enforce') &&
+            s.includes('downgrading to off'),
+        ),
+      ).toBe(true);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   it('discoverAllMcpTools disconnects on discover() failure (wenshao R8 #1 line 532)', async () => {
     // Bulk-path mirror of R7 #3 (per-server path). Pre-fix:
     // connect() success + discover() throw → catch deleted client

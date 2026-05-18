@@ -78,7 +78,14 @@ export const MCP_BUDGET_WARN_FRACTION = 0.75 as const;
 export type McpBudgetMode = 'enforce' | 'warn' | 'off';
 
 export interface McpBudgetConfig {
-  /** Cap on live MCP clients per workspace. `undefined` = unlimited. */
+  /**
+   * Cap on live MCP clients **per ACP session** (PR 14 v1; R4 review
+   * scope correction — see `acpAgent.newSessionConfig` constructs a
+   * fresh `Config`/`McpClientManager` per session, so each session
+   * enforces its own copy of the cap independently). Wave 5 PR 23
+   * shared MCP pool will graduate this to per-workspace.
+   * `undefined` = unlimited.
+   */
   clientBudget?: number;
   /** Behavior at and above the cap. `off` when `clientBudget` is undefined. */
   budgetMode: McpBudgetMode;
@@ -238,10 +245,25 @@ function readBudgetFromEnv(): McpBudgetConfig {
   // `emitBudgetTelemetry` (which previously claimed
   // `mode !== 'off' ⇒ clientBudget defined` — true for enforce,
   // false for warn until this fix).
+  //
+  // R9 #7: emit a stderr breadcrumb when the downgrade fires.
+  // Pre-fix the downgrade was silent — operator sets
+  // `QWEN_SERVE_MCP_BUDGET_MODE=enforce` in a Docker Compose / k8s
+  // env without the matching budget, daemon boots happy, snapshot
+  // shows `budgetMode: 'off'`, and enforcement is silently
+  // disabled. The CLI handler + `runQwenServe` path both throw on
+  // this combination; the env-var fallback path (used by the ACP
+  // child) was the laggard. Now mirrors the R7 #6 invalid-value
+  // breadcrumb pattern.
   if (
     (budgetMode === 'enforce' || budgetMode === 'warn') &&
     clientBudget === undefined
   ) {
+    process.stderr.write(
+      `qwen serve: QWEN_SERVE_MCP_BUDGET_MODE=${budgetMode} requires ` +
+        `QWEN_SERVE_MCP_CLIENT_BUDGET=N; downgrading to off. ` +
+        `Set both env vars to enable MCP guardrail enforcement.\n`,
+    );
     budgetMode = 'off';
   }
   return { clientBudget, budgetMode };
@@ -1422,6 +1444,17 @@ export class McpClientManager {
     // newly-created lazy spawns — never for a reuse of an already-
     // CONNECTED client (`client !== undefined` branch).
     let weReservedSlot = false;
+    // PR 14 fix (review #4247 wenshao R9 #6 line 1521): hoist the
+    // serverConfig lookup so the timeout-wrapped connect site
+    // (below) can pass it to `discoveryTimeoutFor` regardless of
+    // whether we're on the lazy-spawn or already-existing-client
+    // path. Existing clients get the same per-server discovery
+    // timeout as fresh ones — uniform behavior across spawn paths.
+    const servers = populateMcpServerCommand(
+      this.cliConfig.getMcpServers() || {},
+      this.cliConfig.getMcpServerCommand(),
+    );
+    const serverConfig = servers[serverName];
     if (!client) {
       // PR 14 invariant (wenshao R2 P3 line 501): the lookup→
       // disabled-check→budget-reserve→client-create sequence below
@@ -1436,11 +1469,6 @@ export class McpClientManager {
       // below through `clients.set` in `try { ... } catch {
       // this.reservedSlots.delete(serverName); throw; }` to close
       // a real race.
-      const servers = populateMcpServerCommand(
-        this.cliConfig.getMcpServers() || {},
-        this.cliConfig.getMcpServerCommand(),
-      );
-      const serverConfig = servers[serverName];
       if (!serverConfig) {
         throw new Error(`MCP server '${serverName}' is not configured.`);
       }
@@ -1529,17 +1557,65 @@ export class McpClientManager {
 
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {
       try {
-        await client.connect();
+        // PR 14 fix (review #4247 wenshao R9 #6 line 1521): wrap the
+        // lazy-spawn `client.connect()` in the same discovery
+        // timeout the bulk + incremental paths use. Pre-fix a hung
+        // MCP server during a resource-read spawn would block
+        // forever and permanently consume a budget slot under
+        // `enforce` mode, cascading into total budget exhaustion
+        // on subsequent discovery passes. Reuses
+        // `discoveryTimeoutFor` so per-server `discoveryTimeoutMs`
+        // overrides apply uniformly across spawn paths.
+        const timeoutMs = this.discoveryTimeoutFor(serverConfig);
+        let timeoutId: NodeJS.Timeout | undefined;
+        await Promise.race([
+          client.connect(),
+          new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(() => {
+              reject(
+                new Error(
+                  `MCP server '${serverName}' lazy connect timed out after ${timeoutMs}ms`,
+                ),
+              );
+            }, timeoutMs);
+          }),
+        ]).finally(() => {
+          if (timeoutId) clearTimeout(timeoutId);
+        });
+        // PR 14 fix (review #4247 wenshao R9 #8 line 1514): start
+        // the health monitor on a successful lazy spawn. Pre-fix
+        // a lazy-spawned server that later disconnected (crash,
+        // network) had no automatic reconnect path — the client
+        // sat DISCONNECTED in `this.clients` until the next
+        // readResource or incremental pass. Mirror the
+        // `discoverMcpToolsForServerInternal` finally-block
+        // pattern.
+        this.startHealthCheck(serverName);
       } catch (err) {
-        // PR 14 fix (review #4247 wenshao C3): zombie slot leak.
-        // A failed lazy spawn would otherwise permanently consume a
-        // budget slot AND leave a never-CONNECTED client entry in
-        // `this.clients` (which `getMcpClientAccounting` correctly
-        // excludes from `total`, but the slot still blocks other
-        // servers). Only release if THIS call did the reservation —
-        // a reuse path with an already-tracked client must not
-        // collateral-damage another caller's slot.
+        // PR 14 fix (review #4247 wenshao C3 + R9 #2 line 1534):
+        // zombie slot leak + transport leak.
+        //
+        // A failed lazy spawn would otherwise permanently consume
+        // a budget slot AND leave a never-CONNECTED client entry
+        // in `this.clients` (which `getMcpClientAccounting`
+        // correctly excludes from `total`, but the slot still
+        // blocks other servers). Only release if THIS call did
+        // the reservation — a reuse path with an already-tracked
+        // client must not collateral-damage another caller's
+        // slot.
+        //
+        // R9 #2: `connect()` may have established the transport
+        // (spawned the stdio child / opened the socket) before
+        // throwing on a later handshake step. Best-effort
+        // `await client.disconnect()` closes that transport
+        // before dropping the reference — mirrors the R7 #3 +
+        // R8 #1 fixes in the discovery-side catch blocks.
         if (weReservedSlot) {
+          try {
+            await client.disconnect();
+          } catch {
+            // best-effort transport cleanup
+          }
           this.reservedSlots.delete(serverName);
           this.clients.delete(serverName);
           this.eventEmitter?.emit('mcp-client-update', this.clients);
