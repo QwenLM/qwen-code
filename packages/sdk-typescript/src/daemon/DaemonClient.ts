@@ -260,14 +260,20 @@ export class DaemonClient {
     // #4282 fold-in 5 (Codex P2-3): `perCallTimeoutMs` lets a single
     // call (e.g. `restartMcpServer`, where the daemon waits up to
     // 300s for MCP rediscovery) override the client-wide default.
-    // A finite positive override wins; non-finite / non-positive
-    // values are coerced to "use the client default" so callers
-    // can pass a derived expression without defending against NaN.
+    //
+    // #4297 fold-in 2 (copilot + wenshao C1): accept finite,
+    // non-negative values — including `0`, which the
+    // `restartMcpServer` JSDoc documents as "disable the timeout
+    // entirely". Zero falls through to the no-timeout branch below
+    // via the `!effectiveTimeoutMs` truthiness check. NaN / negative
+    // inputs still coerce back to the client-wide default so callers
+    // can pass a derived expression without defending the math at
+    // every site.
     let effectiveTimeoutMs = this.fetchTimeoutMs;
     if (
       perCallTimeoutMs !== undefined &&
       Number.isFinite(perCallTimeoutMs) &&
-      perCallTimeoutMs > 0
+      perCallTimeoutMs >= 0
     ) {
       effectiveTimeoutMs = perCallTimeoutMs;
     }

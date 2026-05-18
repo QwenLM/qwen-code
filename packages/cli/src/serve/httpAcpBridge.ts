@@ -4040,6 +4040,16 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
  * unbounded data; the operator wants to know which one they hit so
  * the path-mistake is obvious.
  */
+function describeStatKind(stats: import('node:fs').Stats): string {
+  if (stats.isDirectory()) return 'directory';
+  if (stats.isSymbolicLink()) return 'symlink';
+  if (stats.isCharacterDevice()) return 'character device';
+  if (stats.isBlockDevice()) return 'block device';
+  if (stats.isFIFO()) return 'named pipe (FIFO)';
+  if (stats.isSocket()) return 'socket';
+  return 'non-regular file';
+}
+
 /**
  * #4282 fold-in 5 (Codex P2-4). Resolve `inputPath` to its real
  * filesystem path, walking up through directory components that
@@ -4072,16 +4082,6 @@ async function canonicalizeExistingAncestor(
       current = parent;
     }
   }
-}
-
-function describeStatKind(stats: import('node:fs').Stats): string {
-  if (stats.isDirectory()) return 'directory';
-  if (stats.isSymbolicLink()) return 'symlink';
-  if (stats.isCharacterDevice()) return 'character device';
-  if (stats.isBlockDevice()) return 'block device';
-  if (stats.isFIFO()) return 'named pipe (FIFO)';
-  if (stats.isSocket()) return 'socket';
-  return 'non-regular file';
 }
 
 /**

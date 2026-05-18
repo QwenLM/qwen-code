@@ -2304,9 +2304,24 @@ export class Config {
   /**
    * Returns the read-only set of tool names hidden from this Config's
    * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
-   * `ToolRegistry.registerFactory` to skip registration. Toggling at
-   * runtime requires re-spawning the ACP child (the set is frozen at
-   * construction time). See `disabledTools` in ConfigParameters.
+   * `ToolRegistry.registerFactory` to skip registration.
+   *
+   * Mutability semantics (#4282 fold-in 5 P2-2): the snapshot is
+   * mutable via `setDisabledTools()` so the daemon's
+   * `setWorkspaceToolEnabled` route can re-sync the set after a
+   * `tools.disabled` settings write — without that sync, the
+   * documented "toggle + restart" workflow would re-register the
+   * just-disabled MCP tool against the bootstrap snapshot.
+   *
+   * Already-registered tools are NOT retroactively unregistered:
+   * `ToolRegistry` consults the set at registration time only, so a
+   * mid-session disable only takes effect on the next `registerTool`
+   * call (next ACP child spawn, MCP rediscover, etc.). This matches
+   * the documented "toggling does not unregister live tools"
+   * contract.
+   *
+   * See `disabledTools` in ConfigParameters and `setDisabledTools`
+   * for the runtime sync entry point.
    */
   getDisabledTools(): ReadonlySet<string> {
     return this.disabledTools;

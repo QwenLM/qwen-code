@@ -1534,11 +1534,22 @@ class QwenAgent implements Agent {
             ? wsDisabled.filter((v): v is string => typeof v === 'string')
             : [];
           this.config.setDisabledTools(new Set(disabledList));
-        } catch {
-          // Settings load failures are non-fatal — fall through with
-          // the existing in-memory snapshot. The MCP restart still
-          // runs; only the disabledTools sync is skipped. Operators
-          // see this in the next ToolRegistry refresh log.
+        } catch (err) {
+          // #4297 fold-in 2 (wenshao S3): settings load failures are
+          // non-fatal — fall through with the existing in-memory
+          // snapshot. The MCP restart still runs; only the
+          // disabledTools sync is skipped. Surface a stderr line so a
+          // persistent failure (corrupted settings.json, permission
+          // denied) is visible to operators rather than silently
+          // breaking the documented "toggle + restart" workflow with
+          // zero diagnostic.
+          process.stderr.write(
+            `qwen serve: MCP restart for ${JSON.stringify(serverName)} ` +
+              `could not refresh disabledTools from workspace settings ` +
+              `(${err instanceof Error ? err.message : String(err)}); ` +
+              `proceeding with the bootstrap snapshot — recently toggled ` +
+              `tools may not take effect until daemon restart.\n`,
+          );
         }
         const start = Date.now();
         await manager.discoverMcpToolsForServer(serverName, this.config);

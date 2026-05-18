@@ -1456,13 +1456,26 @@ describe('DaemonClient', () => {
       // Simulate a 1.2s response with the default 1s `fetchTimeoutMs`
       // — without the override the call would timeout; with it the
       // call resolves successfully.
-      let resolveResponse:
-        | ((v: import('undici-types').Response) => void)
-        | undefined;
+      //
+      // #4297 fold-in 2 (copilot, wenshao C2): the stub must
+      // observe `init.signal` so a regression that removes the
+      // per-call override (and thus the 1s default fires) actually
+      // rejects the in-flight promise. The previous version resolved
+      // the response unconditionally and the test passed even when
+      // the abort signal had already fired — false-negative coverage.
+      let resolveResponse: ((v: Response) => void) | undefined;
+      let rejectResponse: ((reason: unknown) => void) | undefined;
       const slowFetch = vi.fn(
-        () =>
-          new Promise<Response>((resolve) => {
-            resolveResponse = resolve as unknown as (v: Response) => void;
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
+            resolveResponse = resolve;
+            rejectResponse = reject;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
           }),
       );
       const client = new DaemonClient({
@@ -1472,14 +1485,17 @@ describe('DaemonClient', () => {
       });
       const inflight = client.restartMcpServer('docs');
       // Resolve the promise after the client default would have timed
-      // out — proving the per-call override extends the budget.
+      // out — proving the per-call override extends the budget. The
+      // abort listener above guarantees that if the override is ever
+      // removed, this resolve never fires (the abort rejects first).
+      void rejectResponse;
       setTimeout(() => {
         resolveResponse?.(
           jsonResponse(200, {
             serverName: 'docs',
             restarted: true,
             durationMs: 1200,
-          }) as unknown as import('undici-types').Response,
+          }),
         );
       }, 1_200);
       await expect(inflight).resolves.toMatchObject({
@@ -1491,18 +1507,18 @@ describe('DaemonClient', () => {
     it('honors a caller-provided `timeoutMs` override (#4282 fold-in 5 P2-3)', async () => {
       // When the caller sets a tighter cap, the per-call override
       // wins over the 5-minute default. Verify by passing a 50ms
-      // budget against a slow stub — the call must abort with a
-      // TimeoutError.
+      // budget against a stub that rejects only when its
+      // `init.signal` aborts — proving the abort actually fired
+      // rather than relying on a sleep racing the timeout.
       const slowFetch = vi.fn(
-        () =>
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
           new Promise<Response>((_resolve, reject) => {
-            // Never resolve — wait for the caller's timeout to kick in.
-            // The AbortSignal coming through `init.signal` triggers
-            // this rejection so the timer doesn't leak.
-            setTimeout(
-              () => reject(new DOMException('aborted', 'AbortError')),
-              500,
-            );
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
           }),
       );
       const client = new DaemonClient({
@@ -1512,6 +1528,40 @@ describe('DaemonClient', () => {
       await expect(
         client.restartMcpServer('docs', { timeoutMs: 50 }),
       ).rejects.toThrow();
+    });
+
+    it('honors `timeoutMs: 0` as "disable the timeout" (#4297 fold-in 2 C1)', async () => {
+      // The JSDoc on `restartMcpServer` documents `0` as "disable
+      // the timeout entirely". Use a 1ms client-wide default so a
+      // regression that ignores the 0 override would abort almost
+      // immediately. The slow stub resolves after 50ms — well past
+      // the 1ms default but only because 0 disables the timer.
+      let resolveResponse: ((v: Response) => void) | undefined;
+      const slowFetch = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveResponse = resolve;
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1,
+      });
+      const inflight = client.restartMcpServer('docs', { timeoutMs: 0 });
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            serverName: 'docs',
+            restarted: true,
+            durationMs: 50,
+          }),
+        );
+      }, 50);
+      await expect(inflight).resolves.toMatchObject({
+        serverName: 'docs',
+        restarted: true,
+      });
     });
   });
 

@@ -315,17 +315,31 @@ export async function runQwenServe(
   // writes the same file the ACP child reads. Settings changes made
   // after daemon boot need a daemon restart to take effect — this
   // value rarely changes, and a snapshot avoids re-reading on every
-  // init request. `String` ↑ guard normalizes settings.json entries
-  // that aren't string-typed (hand-edited bad data); fall back to
-  // the default rather than crash the bridge.
+  // init request.
+  //
+  // #4297 fold-in 2 (copilot S2): only accept string-typed values.
+  // Hand-edited `settings.json` could land an object / number /
+  // nested array in `context.fileName`; the previous `String(...)`
+  // coerce would have produced a literal `"[object Object]"`
+  // filename. Falling back to `undefined` makes the bridge use its
+  // own `getCurrentGeminiMdFilename()` default — a sane recovery
+  // posture that keeps the daemon alive instead of writing a
+  // garbage filename.
   const bootSettings = loadSettings(boundWorkspace);
   const configuredFilename = bootSettings.merged.context?.fileName;
+  const firstStringInArray = (value: unknown): string | undefined => {
+    if (!Array.isArray(value)) return undefined;
+    for (const entry of value) {
+      if (typeof entry === 'string' && entry.trim() !== '') {
+        return entry.trim();
+      }
+    }
+    return undefined;
+  };
   const contextFilenameForInit =
     typeof configuredFilename === 'string' && configuredFilename.trim() !== ''
       ? configuredFilename.trim()
-      : Array.isArray(configuredFilename) && configuredFilename.length > 0
-        ? String(configuredFilename[0]).trim()
-        : undefined;
+      : firstStringInArray(configuredFilename);
 
   const bridge =
     deps.bridge ??
