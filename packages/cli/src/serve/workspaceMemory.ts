@@ -13,6 +13,7 @@ import {
   WorkspaceMemoryWriteTimeoutError,
   getAllGeminiMdFilenames,
   writeWorkspaceContextFile,
+  type WriteContextFileScope,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debugMode.js';
@@ -78,6 +79,12 @@ export interface WorkspaceMemoryRouteDeps {
 
 const MAX_MEMORY_CONTENT_BYTES = 1024 * 1024;
 
+const VALID_SCOPES: ReadonlySet<string> = new Set([
+  'workspace',
+  'global',
+  'auto',
+]);
+
 /** Mount the two memory routes on the supplied Express app. */
 export function mountWorkspaceMemoryRoutes(
   app: Application,
@@ -116,9 +123,9 @@ export function mountWorkspaceMemoryRoutes(
       const body = deps.safeBody(req);
 
       const scope = body['scope'];
-      if (scope !== 'workspace' && scope !== 'global' && scope !== 'auto') {
+      if (!VALID_SCOPES.has(scope as string)) {
         res.status(400).json({
-          error: '`scope` must be "workspace", "global", or "auto"',
+          error: `\`scope\` must be one of: ${[...VALID_SCOPES].map((s) => `"${s}"`).join(', ')}`,
           code: 'invalid_scope',
         });
         return;
@@ -183,7 +190,7 @@ export function mountWorkspaceMemoryRoutes(
 
       try {
         const result = await writeWorkspaceContextFile({
-          scope,
+          scope: scope as WriteContextFileScope,
           mode,
           content,
           projectRoot: deps.boundWorkspace,

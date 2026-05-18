@@ -5,7 +5,6 @@
  */
 
 import { promises as fs } from 'node:fs';
-import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import {
   E_TIMEOUT,
@@ -149,7 +148,10 @@ export async function writeWorkspaceContextFile(
       `writeWorkspaceContextFile: projectRoot must be absolute, got "${options.projectRoot}"`,
     );
   }
-  const filePath = resolveContextFilePath(options.scope, options.projectRoot);
+  const filePath = await resolveContextFilePath(
+    options.scope,
+    options.projectRoot,
+  );
 
   // Hold the per-file mutex for the entire read-compose-write sequence
   // INCLUDING the whitespace-only no-op detection. Two concurrent
@@ -225,41 +227,35 @@ async function runWrite(
   };
 }
 
-function resolveContextFilePath(
+async function resolveContextFilePath(
   scope: WriteContextFileScope,
   projectRoot: string,
-): string {
+): Promise<string> {
   // Honor `setGeminiMdFilename()` overrides so POST writes to the same
-  // file GET surfaces. With the prior `DEFAULT_CONTEXT_FILENAME` hard-
-  // code, a deployment that switched the context filename to
-  // `AGENTS.md` would have GET listing the new file while POST kept
-  // appending to a stale `QWEN.md` — clients then observed "I just
-  // wrote content but it's missing from /workspace/memory". Mirrors the
-  // discovery path's `getAllGeminiMdFilenames()` usage in
-  // `workspaceMemory.ts:collectWorkspaceMemoryStatus`.
+  // file GET surfaces.
   const filename = getCurrentGeminiMdFilename();
   if (scope === 'workspace') {
     return path.join(projectRoot, filename);
   }
 
   if (scope === 'auto') {
-    // Issue #359 / PR draft: auto-detect project-level context file.
-    // When any known context filename exists at the project root, write
-    // there; otherwise fall back to the global ~/.qwen/ directory. This
-    // prevents "memory bleed" where project-specific facts written by
-    // `save_memory` leak into unrelated sessions.
+    // Issue #359: auto-detect project-level context file. Checks known
+    // filenames at project root; falls back to global ~/.qwen/ when
+    // none exist. Note: a TOCTOU window exists between this resolution
+    // and the actual write — the per-file mutex serializes writes to
+    // the same path but doesn't protect the scope decision itself.
     const candidates = getAllGeminiMdFilenames();
     for (const candidateName of candidates) {
       const candidatePath = path.join(projectRoot, candidateName);
       try {
-        if (fsSync.statSync(candidatePath).isFile()) {
+        const stat = await fs.stat(candidatePath);
+        if (stat.isFile()) {
           return candidatePath;
         }
-      } catch {
-        // ENOENT — file doesn't exist, try the next candidate.
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
       }
     }
-    // No project-level file found — fall back to global.
     return path.join(Storage.getGlobalQwenDir(), filename);
   }
 

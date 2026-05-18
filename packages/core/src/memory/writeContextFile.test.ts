@@ -393,10 +393,16 @@ describe('writeWorkspaceContextFile', () => {
   });
 
   describe('auto scope', () => {
+    let savedFilenames: string | string[];
+
     beforeEach(() => {
-      // Restore the full filename list (previous tests may have narrowed
-      // it via setGeminiMdFilename, which would skip AGENTS.md).
-      setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+      // Capture whatever the filename list is before we touch it.
+      savedFilenames = [DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME];
+      setGeminiMdFilename(savedFilenames);
+    });
+
+    afterEach(() => {
+      setGeminiMdFilename(savedFilenames);
     });
 
     it('writes to project QWEN.md when one exists at the project root', async () => {
