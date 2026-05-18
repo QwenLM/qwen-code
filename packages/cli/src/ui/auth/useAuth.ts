@@ -10,41 +10,18 @@ import {
   getErrorMessage,
   logAuth,
   type Config,
-  type ModelProvidersConfig,
-
   buildInstallPlan,
-  getDefaultModelIds,
-  resolveBaseUrl,
-  codingPlanProvider,
-  tokenPlanProvider,
-  openRouterProvider,
-  findProviderById,
   type ProviderConfig,
-  type ProviderSetupInputs} from '@qwen-code/qwen-code-core';
+  type ProviderSetupInputs,
+} from '@qwen-code/qwen-code-core';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
 
 import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
-import {
-  createOpenRouterOAuthSession,
-  OPENROUTER_OAUTH_CALLBACK_URL,
-  runOpenRouterOAuthLogin,
-  getOpenRouterModelsWithFallback,
-  selectRecommendedOpenRouterModels,
-  getPreferredOpenRouterModelId,
-} from '../../auth/providers/oauth/openrouterOAuth.js';
-
-// Re-export types used by other modules
-export interface OpenAICredentials {
-  apiKey: string;
-  baseUrl?: string;
-  model?: string;
-}
 
 /**
  * Normalize model IDs: split by comma, trim, deduplicate, remove empty.
@@ -89,15 +66,13 @@ export type AuthController = {
   actions: {
     setAuthState: (state: AuthState) => void;
     onAuthError: (error: string | null) => void;
-    handleAuthSelect: (
-      authType: AuthType | undefined,
-      credentials?: OpenAICredentials,
-    ) => Promise<void>;
+    /** Close the /auth dialog without changing the active provider. */
+    closeAuthDialog: () => void;
+    /** Persist a provider's install plan and switch to it. */
     handleProviderSubmit: (
       providerConfig: ProviderConfig,
       inputs: ProviderSetupInputs,
     ) => Promise<void>;
-    handleOpenRouterSubmit: () => Promise<void>;
     openAuthDialog: () => void;
     cancelAuthentication: () => void;
   };
@@ -125,8 +100,6 @@ export const useAuthCommand = (
     message: string;
     detail?: string;
   } | null>(null);
-  const [openRouterAbortCtrl, setOpenRouterAbortCtrl] =
-    useState<AbortController | null>(null);
 
   const { qwenAuthState, cancelQwenAuth } = useQwenAuth(
     pendingAuthType,
@@ -170,7 +143,7 @@ export const useAuthCommand = (
     onAuthChange?.();
   }, [onAuthChange]);
 
-  // -- Unified provider submit ----------------------------------------------
+  // -- Provider connect -----------------------------------------------------
 
   const handleProviderSubmit = useCallback(
     async (providerConfig: ProviderConfig, inputs: ProviderSetupInputs) => {
@@ -203,195 +176,20 @@ export const useAuthCommand = (
     [settings, config, completeAuthentication, addItem, handleAuthFailure],
   );
 
-  // -- OpenRouter OAuth (the only genuinely different flow) ------------------
-
-  const handleOpenRouterSubmit = useCallback(async () => {
-    try {
-      setPendingAuthType(AuthType.USE_OPENAI);
-      setIsAuthenticating(true);
-      setAuthError(null);
-      setIsAuthDialogOpen(false);
-
-      const oauthSession = createOpenRouterOAuthSession(
-        OPENROUTER_OAUTH_CALLBACK_URL,
-      );
-      setExternalAuthState({
-        title: t('OpenRouter Authentication'),
-        message: t(
-          'Open the authorization page if your browser does not launch automatically.',
-        ),
-        detail: oauthSession.authorizationUrl,
-      });
-
-      const abortController = new AbortController();
-      setOpenRouterAbortCtrl(abortController);
-      const oauthResult = await runOpenRouterOAuthLogin(
-        OPENROUTER_OAUTH_CALLBACK_URL,
-        { abortSignal: abortController.signal, session: oauthSession },
-      );
-      setOpenRouterAbortCtrl(null);
-
-      const selectedKey = oauthResult.apiKey;
-      if (!selectedKey) {
-        throw new Error(
-          t('OpenRouter authentication completed without an API key.'),
-        );
-      }
-
-      setExternalAuthState({
-        title: t('OpenRouter Authentication'),
-        message: t('Finalizing OpenRouter setup...'),
-      });
-
-      // Fetch models and build install plan using unified path
-      const allModels = await getOpenRouterModelsWithFallback();
-      const recommendedModels = selectRecommendedOpenRouterModels(allModels);
-      const preferredModelId = getPreferredOpenRouterModelId(recommendedModels);
-
-      const plan = buildInstallPlan(openRouterProvider, {
-        baseUrl: resolveBaseUrl(openRouterProvider),
-        apiKey: selectedKey,
-        modelIds: preferredModelId ? [preferredModelId] : [],
-        prebuiltModels: recommendedModels,
-      });
-
-      await applyProviderInstallPlan(plan, {
-        settings,
-        config,
-        refreshAuth: false,
-      });
-
-      setExternalAuthState(null);
-      completeAuthentication();
-
-      addItem(
-        {
-          type: MessageType.INFO,
-          text: t(
-            'Successfully configured OpenRouter. Use /model to switch models.',
-          ),
-        },
-        Date.now(),
-      );
-
-      logAuth(config, new AuthEvent(AuthType.USE_OPENAI, 'manual', 'success'));
-    } catch (error) {
-      setOpenRouterAbortCtrl(null);
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        setExternalAuthState(null);
-        setPendingAuthType(undefined);
-        setIsAuthenticating(false);
-        setIsAuthDialogOpen(true);
-        return;
-      }
-      handleAuthFailure(error);
-    }
-  }, [settings, config, completeAuthentication, addItem, handleAuthFailure]);
-
-  // -- Legacy auth select (Qwen OAuth / direct) ----------------------------
-
-  const isProviderManagedModel = useCallback(
-    (authType: AuthType, modelId: string | undefined) => {
-      if (!modelId) return false;
-      const modelProviders = settings.merged.modelProviders as
-        | ModelProvidersConfig
-        | undefined;
-      if (!modelProviders) return false;
-      const providerModels = modelProviders[authType];
-      return (
-        Array.isArray(providerModels) &&
-        providerModels.some((m) => m.id === modelId)
-      );
-    },
-    [settings],
-  );
-
-  const handleAuthSelect = useCallback(
-    async (authType: AuthType | undefined, credentials?: OpenAICredentials) => {
-      if (!authType) {
-        setIsAuthDialogOpen(false);
-        setAuthError(null);
-        return;
-      }
-
-      if (
-        authType === AuthType.USE_OPENAI &&
-        credentials?.model &&
-        isProviderManagedModel(authType, credentials.model)
-      ) {
-        onAuthError(
-          t(
-            'Model "{{modelName}}" is managed via settings.modelProviders. Please complete the fields in settings, or use another model id.',
-            { modelName: credentials.model },
-          ),
-        );
-        return;
-      }
-
-      setPendingAuthType(authType);
-      setAuthError(null);
-      setIsAuthDialogOpen(false);
-      setIsAuthenticating(true);
-
-      if (authType === AuthType.USE_OPENAI) {
-        onAuthError(
-          t(
-            'Manual OpenAI-compatible setup has moved to provider setup. Choose a provider or use Custom API Key.',
-          ),
-        );
-        setIsAuthenticating(false);
-        setPendingAuthType(undefined);
-        setIsAuthDialogOpen(true);
-        return;
-      }
-
-      // Qwen OAuth or other direct auth
-      try {
-        await config.refreshAuth(authType);
-
-        if (authType === AuthType.QWEN_OAUTH) {
-          const scope = getPersistScopeForModelSelection(settings);
-          settings.setValue(scope, 'security.auth.selectedType', authType);
-        }
-        completeAuthentication();
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: t('Authenticated successfully with {{authType}}.', {
-              authType,
-            }),
-          },
-          Date.now(),
-        );
-        logAuth(config, new AuthEvent(authType, 'manual', 'success'));
-      } catch (e) {
-        handleAuthFailure(e);
-      }
-    },
-    [
-      config,
-      settings,
-      completeAuthentication,
-      addItem,
-      handleAuthFailure,
-      isProviderManagedModel,
-      onAuthError,
-    ],
-  );
-
   // -- Dialog open / close / cancel ----------------------------------------
 
   const openAuthDialog = useCallback(() => {
     setIsAuthDialogOpen(true);
   }, []);
 
+  const closeAuthDialog = useCallback(() => {
+    setIsAuthDialogOpen(false);
+    setAuthError(null);
+  }, []);
+
   const cancelAuthentication = useCallback(() => {
     if (isAuthenticating && pendingAuthType === AuthType.QWEN_OAUTH) {
       cancelQwenAuth();
-    }
-    if (isAuthenticating && pendingAuthType === AuthType.USE_OPENAI) {
-      openRouterAbortCtrl?.abort();
-      setOpenRouterAbortCtrl(null);
     }
     if (isAuthenticating && pendingAuthType) {
       logAuth(config, new AuthEvent(pendingAuthType, 'manual', 'cancelled'));
@@ -400,79 +198,7 @@ export const useAuthCommand = (
     setExternalAuthState(null);
     setIsAuthDialogOpen(true);
     setAuthError(null);
-  }, [
-    isAuthenticating,
-    pendingAuthType,
-    cancelQwenAuth,
-    config,
-    openRouterAbortCtrl,
-  ]);
-
-  // -- Legacy wrappers (delegate to handleProviderSubmit) -------------------
-
-  const handleSubscriptionPlanSubmit = useCallback(
-    async (planId: 'coding' | 'token', apiKey: string, baseUrl?: string) => {
-      const providerConfig =
-        planId === 'token' ? tokenPlanProvider : codingPlanProvider;
-      const resolvedBaseUrl = resolveBaseUrl(providerConfig, baseUrl);
-      await handleProviderSubmit(providerConfig, {
-        baseUrl: resolvedBaseUrl,
-        apiKey,
-        modelIds: getDefaultModelIds(providerConfig),
-      });
-    },
-    [handleProviderSubmit],
-  );
-
-  const handleApiKeyProviderSubmit = useCallback(
-    async (
-      providerId: string,
-      apiKey: string,
-      modelIdsInput: string,
-      endpointOption?: string,
-    ) => {
-      const providerConfig = findProviderById(providerId);
-      if (!providerConfig) {
-        onAuthError(t('Unknown provider: {{id}}', { id: providerId }));
-        return;
-      }
-      const resolvedBaseUrl = resolveBaseUrl(
-        providerConfig,
-        endpointOption
-          ? Array.isArray(providerConfig.baseUrl)
-            ? providerConfig.baseUrl.find((o) => o.id === endpointOption)?.url
-            : undefined
-          : undefined,
-      );
-      await handleProviderSubmit(providerConfig, {
-        baseUrl: resolvedBaseUrl,
-        apiKey: apiKey.trim(),
-        modelIds: normalizeModelIds(modelIdsInput),
-      });
-    },
-    [handleProviderSubmit, onAuthError],
-  );
-
-  const handleCustomApiKeySubmit = useCallback(
-    async (
-      protocol: AuthType,
-      baseUrl: string,
-      apiKey: string,
-      modelIdsInput: string,
-      generationConfig?: ProviderSetupInputs['advancedConfig'],
-    ) => {
-      const providerConfig = findProviderById('custom-openai-compatible');
-      if (!providerConfig) return;
-      await handleProviderSubmit(providerConfig, {
-        protocol,
-        baseUrl: baseUrl.trim(),
-        apiKey: apiKey.trim(),
-        modelIds: normalizeModelIds(modelIdsInput),
-        advancedConfig: generationConfig,
-      });
-    },
-    [handleProviderSubmit],
-  );
+  }, [isAuthenticating, pendingAuthType, cancelQwenAuth, config]);
 
   // -- Validate QWEN_DEFAULT_AUTH_TYPE env var on mount --------------------
 
@@ -520,18 +246,16 @@ export const useAuthCommand = (
     () => ({
       setAuthState,
       onAuthError,
-      handleAuthSelect,
+      closeAuthDialog,
       handleProviderSubmit,
-      handleOpenRouterSubmit,
       openAuthDialog,
       cancelAuthentication,
     }),
     [
       setAuthState,
       onAuthError,
-      handleAuthSelect,
+      closeAuthDialog,
       handleProviderSubmit,
-      handleOpenRouterSubmit,
       openAuthDialog,
       cancelAuthentication,
     ],
@@ -547,21 +271,8 @@ export const useAuthCommand = (
     pendingAuthType,
     externalAuthState,
     qwenAuthState,
-    handleAuthSelect,
+    closeAuthDialog,
     handleProviderSubmit,
-    handleOpenRouterSubmit,
-    handleSubscriptionPlanSubmit,
-    handleCodingPlanSubmit: useCallback(
-      (apiKey: string, baseUrl?: string) =>
-        handleSubscriptionPlanSubmit('coding', apiKey, baseUrl),
-      [handleSubscriptionPlanSubmit],
-    ),
-    handleTokenPlanSubmit: useCallback(
-      (apiKey: string) => handleSubscriptionPlanSubmit('token', apiKey),
-      [handleSubscriptionPlanSubmit],
-    ),
-    handleApiKeyProviderSubmit,
-    handleCustomApiKeySubmit,
     openAuthDialog,
     cancelAuthentication,
     state,

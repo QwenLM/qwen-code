@@ -47,7 +47,6 @@ export {
   getAllProviderBaseUrls,
   idealabProvider,
   minimaxProvider,
-  OAUTH_PROVIDERS,
   openRouterProvider,
   THIRD_PARTY_PROVIDERS,
   tokenPlanProvider,

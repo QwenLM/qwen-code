@@ -8,12 +8,6 @@ import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
 import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { ArenaDialogType } from './useArenaCommand.js';
-// OpenAICredentials type (previously imported from OpenAIKeyPrompt)
-interface OpenAICredentials {
-  apiKey: string;
-  baseUrl?: string;
-  model?: string;
-}
 
 export interface DialogCloseOptions {
   // Theme dialog
@@ -29,10 +23,7 @@ export interface DialogCloseOptions {
 
   // Auth dialog
   isAuthDialogOpen: boolean;
-  handleAuthSelect: (
-    authType: AuthType | undefined,
-    credentials?: OpenAICredentials,
-  ) => Promise<void>;
+  closeAuthDialog: () => void;
   pendingAuthType: AuthType | undefined;
 
   // Editor dialog

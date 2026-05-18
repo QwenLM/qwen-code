@@ -45,11 +45,11 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
   codingPlanProvider,
   tokenPlanProvider,
   alibabaStandardProvider,
-  openRouterProvider,
   deepseekProvider,
   minimaxProvider,
   zaiProvider,
   idealabProvider,
+  openRouterProvider,
   customProvider,
 ];
 
@@ -59,9 +59,6 @@ export const ALIBABA_PROVIDERS = ALL_PROVIDERS.filter(
 );
 export const THIRD_PARTY_PROVIDERS = ALL_PROVIDERS.filter(
   (p) => p.uiGroup === 'third-party',
-);
-export const OAUTH_PROVIDERS = ALL_PROVIDERS.filter(
-  (p) => p.uiGroup === 'oauth',
 );
 
 export function findProviderById(id: string): ProviderConfig | undefined {

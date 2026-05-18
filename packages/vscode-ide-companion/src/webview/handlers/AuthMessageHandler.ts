@@ -11,7 +11,6 @@ import {
   ALL_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
-  OAUTH_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
   getDefaultModelIds,
@@ -185,7 +184,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
       };
 
       addGroup('Alibaba Cloud', ALIBABA_PROVIDERS);
-      addGroup('OAuth', OAUTH_PROVIDERS);
       addGroup('Third Party', THIRD_PARTY_PROVIDERS);
 
       // Custom provider is always last
