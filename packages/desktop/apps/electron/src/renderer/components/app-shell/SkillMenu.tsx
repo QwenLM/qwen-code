@@ -11,7 +11,7 @@
  * Provides consistent skill actions:
  * - Open in New Window
  * - Show in file manager
- * - Delete
+ * - Delete (workspace skills only)
  */
 
 import * as React from 'react'
@@ -83,13 +83,17 @@ export function SkillMenu({
         </MenuItem>
       )}
 
-      <Separator />
+      {canDelete && onDelete && (
+        <>
+          <Separator />
 
-      {/* Delete */}
-      <MenuItem onClick={canDelete ? onDelete : undefined} variant="destructive" disabled={!canDelete}>
-        <Trash2 className="h-3.5 w-3.5" />
-        <span className="flex-1">{deleteLabel || t("sidebarMenu.deleteSkill")}</span>
-      </MenuItem>
+          {/* Delete */}
+          <MenuItem onClick={onDelete} variant="destructive">
+            <Trash2 className="h-3.5 w-3.5" />
+            <span className="flex-1">{deleteLabel || t("sidebarMenu.deleteSkill")}</span>
+          </MenuItem>
+        </>
+      )}
     </>
   )
 }

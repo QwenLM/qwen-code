@@ -154,7 +154,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
             canShowInFinder={canRevealLocally && Boolean(skill?.path)}
             onDelete={canDeleteSkill ? handleDelete : undefined}
             canDelete={canDeleteSkill}
-            deleteLabel={canDeleteSkill ? t('skillInfo.deleteSkill') : skill?.source === 'provider' ? 'Managed by Qwen Code' : t('skillInfo.managedByProject')}
+            deleteLabel={t('skillInfo.deleteSkill')}
           />
         }
       />

@@ -3312,19 +3312,6 @@ function AppShellContent({
                       )}
                     />
                   )}
-                  {/* Add Skill button (only for skills mode) */}
-                  {isSkillsNavigation(navState) && activeWorkspace && (
-                    <EditPopover
-                      trigger={
-                        <HeaderIconButton
-                          icon={<Plus className="h-4 w-4" />}
-                          tooltip={t("sidebarMenu.addSkill")}
-                          data-tutorial="add-skill-button"
-                        />
-                      }
-                      {...getEditConfig('add-skill', activeWorkspace.rootPath)}
-                    />
-                  )}
                   {/* Add Automation button (only for automations mode) */}
                   {isAutomationsNavigation(navState) && activeWorkspace && (
                     <EditPopover

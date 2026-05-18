@@ -96,7 +96,7 @@ export function SkillsListPanel({
             canShowInFinder={canRevealLocally && Boolean(skill.path)}
             onDelete={skill.source === 'workspace' ? () => onDeleteSkill(skill.slug) : undefined}
             canDelete={skill.source === 'workspace'}
-            deleteLabel={skill.source === 'workspace' ? t('skillsList.deleteSkill') : skill.source === 'provider' ? 'Managed by Qwen Code' : t('skillsList.managedByProject')}
+            deleteLabel={t('skillsList.deleteSkill')}
             onSendToWorkspace={hasOtherWorkspaces && skill.source === 'workspace' ? () => {
               setSendResourceSlug(skill.slug)
               setSendResourceLabel(skill.metadata.name)
