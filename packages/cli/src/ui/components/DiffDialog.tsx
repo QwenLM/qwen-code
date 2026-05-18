@@ -14,10 +14,7 @@ import type {
   TurnDiff,
   TurnFileDiff,
 } from '@qwen-code/qwen-code-core';
-import {
-  MAX_FILES_FOR_DETAILS,
-  MAX_LINES_PER_FILE,
-} from '@qwen-code/qwen-code-core';
+import { MAX_LINES_PER_FILE } from '@qwen-code/qwen-code-core';
 import type { HistoryItem } from '../types.js';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
@@ -245,7 +242,11 @@ export function DiffDialog({
             )}
           </Text>
         ) : viewMode === 'list' ? (
-          <FileList files={files} selectedIndex={fileIndex} />
+          <FileList
+            files={files}
+            selectedIndex={fileIndex}
+            contentWidth={dialogWidth - 4}
+          />
         ) : selectedFile ? (
           <FileDetail
             file={selectedFile}
@@ -308,9 +309,11 @@ function SourceSwitcher({
 function FileList({
   files,
   selectedIndex,
+  contentWidth,
 }: {
   files: UnifiedFile[];
   selectedIndex: number;
+  contentWidth: number;
 }): React.JSX.Element {
   const { startIndex, endIndex } = useVisibleWindow(
     files.length,
@@ -320,7 +323,11 @@ function FileList({
   const visible = files.slice(startIndex, endIndex);
   const aboveCount = startIndex;
   const belowCount = files.length - endIndex;
-  const maxPathLen = visible.reduce((m, f) => Math.max(m, f.path.length), 1);
+  // Reserve room for the pointer (2), the tag column (≤16 chars), and the
+  // stats column (≤16 chars). Anything past that gets head-truncated so
+  // overflowing paths can't wrap and break the row layout.
+  const TAG_AND_STATS_BUDGET = 32;
+  const maxPathChars = Math.max(8, contentWidth - 2 - TAG_AND_STATS_BUDGET);
   return (
     <Box flexDirection="column">
       {aboveCount > 0 ? (
@@ -334,7 +341,7 @@ function FileList({
           key={f.path}
           file={f}
           selected={startIndex + idx === selectedIndex}
-          pathColumn={maxPathLen}
+          maxPathChars={maxPathChars}
         />
       ))}
       {belowCount > 0 ? (
@@ -350,11 +357,11 @@ function FileList({
 function FileRow({
   file,
   selected,
-  pathColumn,
+  maxPathChars,
 }: {
   file: UnifiedFile;
   selected: boolean;
-  pathColumn: number;
+  maxPathChars: number;
 }): React.JSX.Element {
   const pointer = selected ? '› ' : '  ';
   const tag = file.isNewFile
@@ -366,7 +373,8 @@ function FileRow({
         : file.truncated
           ? t(' (truncated)')
           : '';
-  const path = file.path.padEnd(pathColumn);
+  // Head-truncate so the basename (the part users actually read) is kept.
+  const path = truncatePathStart(file.path, maxPathChars);
   return (
     <Box flexDirection="row">
       <Text
@@ -439,7 +447,7 @@ function FileDetail({
   return (
     <Box flexDirection="column">
       <Text bold color={theme.text.primary}>
-        {file.path}
+        {truncatePathStart(file.path, contentWidth)}
       </Text>
       <Box marginTop={1}>
         <DiffRenderer
@@ -451,6 +459,18 @@ function FileDetail({
       </Box>
     </Box>
   );
+}
+
+/**
+ * Truncate from the **start** so the basename — the most identifying part
+ * of a path — survives. Mirrors claude-code's `truncateStartToWidth` and
+ * keeps long absolute paths from wrapping and shattering the row layout.
+ */
+function truncatePathStart(path: string, maxChars: number): string {
+  if (maxChars <= 0) return '';
+  if (path.length <= maxChars) return path;
+  if (maxChars <= 1) return path.slice(-maxChars);
+  return '…' + path.slice(-(maxChars - 1));
 }
 
 function useVisibleWindow(
@@ -470,10 +490,11 @@ function useVisibleWindow(
 
 function currentToFiles(result: GitDiffResult | null): UnifiedFile[] {
   if (!result) return [];
+  // `result.perFileStats` is already bounded by `fetchGitDiff` (MAX_FILES=50)
+  // and the whole map is empty when the diff exceeds MAX_FILES_FOR_DETAILS
+  // upstream, so no additional cap is necessary here.
   const out: UnifiedFile[] = [];
-  let count = 0;
   for (const [path, s] of result.perFileStats) {
-    if (++count > MAX_FILES_FOR_DETAILS) break;
     out.push(perFileToUnified(path, s));
   }
   out.sort((a, b) => a.path.localeCompare(b.path));
