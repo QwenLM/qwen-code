@@ -1515,23 +1515,37 @@ class QwenAgent implements Agent {
             reason: 'budget_would_exceed' as const,
           };
         }
-        // #4282 fold-in 5 (Codex P2-2). Re-read workspace settings to
-        // pick up any `tools.disabled` toggles applied since this ACP
-        // child booted. The original snapshot was frozen by Config's
+        // #4282 fold-in 5 (Codex P2-2). Re-read settings to pick up
+        // any `tools.disabled` toggles applied since this ACP child
+        // booted. The original snapshot was frozen by Config's
         // constructor; without this refresh, a `setWorkspaceToolEnabled`
         // call followed by the documented `mcp restart` would
         // re-register a just-disabled MCP tool because
         // `discoverMcpToolsForServer` walks `ToolRegistry.registerTool`,
-        // which consults `Config.getDisabledTools()`. Reading from the
-        // workspace scope (not merged) matches the persist-write path
-        // in `runQwenServe.persistDisabledTools` so the read/write
-        // sources of truth agree.
+        // which consults `Config.getDisabledTools()`.
+        //
+        // #4297 fold-in 3 (wenshao critical, addresses #3260725526):
+        // read the MERGED settings (User + System + Workspace union)
+        // rather than the workspace scope alone. The bootstrap Config
+        // received `merged.tools?.disabled`, so user/system policy is
+        // already enforced by `ToolRegistry.registerTool`. Replacing
+        // the in-memory set with the workspace scope alone would
+        // silently drop higher-scope entries — a user-level disable
+        // would survive boot but vanish after the first MCP restart,
+        // letting `discoverMcpToolsForServer` re-register the
+        // user-disabled tool.
+        //
+        // The asymmetry vs. the persist-write path is deliberate:
+        // `runQwenServe.persistDisabledTools` writes to
+        // `SettingScope.Workspace` only so the workspace file doesn't
+        // bake in user/system entries (the fold-in 1 H2 fix). Reads
+        // need the union; writes need the scope. The two paths look
+        // alike but answer different questions.
         try {
           const fresh = loadSettings(this.config.getTargetDir());
-          const wsScope = fresh.forScope(SettingScope.Workspace).settings;
-          const wsDisabled = wsScope.tools?.disabled;
-          const disabledList = Array.isArray(wsDisabled)
-            ? wsDisabled.filter((v): v is string => typeof v === 'string')
+          const mergedDisabled = fresh.merged.tools?.disabled;
+          const disabledList = Array.isArray(mergedDisabled)
+            ? mergedDisabled.filter((v): v is string => typeof v === 'string')
             : [];
           this.config.setDisabledTools(new Set(disabledList));
         } catch (err) {
@@ -1545,7 +1559,7 @@ class QwenAgent implements Agent {
           // zero diagnostic.
           process.stderr.write(
             `qwen serve: MCP restart for ${JSON.stringify(serverName)} ` +
-              `could not refresh disabledTools from workspace settings ` +
+              `could not refresh disabledTools from merged settings ` +
               `(${err instanceof Error ? err.message : String(err)}); ` +
               `proceeding with the bootstrap snapshot — recently toggled ` +
               `tools may not take effect until daemon restart.\n`,
