@@ -648,10 +648,13 @@ if !ERRORLEVEL! NEQ 0 (
 )
 
 set "VERSION_POINTER_VALUE="
-for /f "usebackq delims=" %%V in ("!TEMP_VERSION_FILE!") do if not defined VERSION_POINTER_VALUE set "VERSION_POINTER_VALUE=%%V"
-set "QWEN_VERSION_VALUE=!VERSION_POINTER_VALUE!"
-for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VERSION_VALUE; if ([string]::IsNullOrWhiteSpace($value)) { exit 1 }; $value = $value.Trim(); if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { if ($value.StartsWith('v')) { Write-Output $value } else { Write-Output ('v' + $value) }; exit 0 }; exit 1"') do if not defined RESOLVED_VERSION_PATH set "RESOLVED_VERSION_PATH=%%V"
-set "QWEN_VERSION_VALUE="
+for /f "usebackq tokens=* delims= " %%V in ("!TEMP_VERSION_FILE!") do if not defined VERSION_POINTER_VALUE set "VERSION_POINTER_VALUE=%%V"
+set "VERSION_POINTER_VALUE=!VERSION_POINTER_VALUE: =!"
+if /i "!VERSION_POINTER_VALUE:~0,1!"=="v" set "VERSION_POINTER_VALUE=!VERSION_POINTER_VALUE:~1!"
+if not "!VERSION_POINTER_VALUE!"=="" (
+    echo(!VERSION_POINTER_VALUE!| findstr /R /C:"^[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$" >nul
+    if !ERRORLEVEL! EQU 0 set "RESOLVED_VERSION_PATH=v!VERSION_POINTER_VALUE!"
+)
 set "VERSION_POINTER_VALUE="
 if exist "!TEMP_VERSION_FILE!" del /F /Q "!TEMP_VERSION_FILE!" >nul 2>&1
 set "TEMP_VERSION_FILE="
