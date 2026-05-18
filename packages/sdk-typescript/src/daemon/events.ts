@@ -1204,12 +1204,25 @@ function isStreamErrorData(value: unknown): value is DaemonStreamErrorData {
 function isMcpBudgetWarningData(
   value: unknown,
 ): value is DaemonMcpBudgetWarningData {
+  // PR 14b fix (codex round 6): `thresholdRatio` is validated as a
+  // finite number, NOT pinned to the literal `0.75`. The SDK's
+  // role here is wire-shape validation; threshold semantics are
+  // owned by the daemon's `MCP_BUDGET_WARN_FRACTION` constant
+  // (`packages/core/src/tools/mcp-client-manager.ts`) and documented
+  // in `qwen-serve-protocol.md`. Pinning the literal in the SDK
+  // would mean a daemon-side change to e.g. 0.80 silently routes
+  // every warning through `unrecognizedKnownEventCount` — a
+  // cross-package coordination hazard with no operator-visible
+  // failure mode. The `DaemonMcpBudgetWarningData.thresholdRatio`
+  // type still narrows to `0.75` for current daemons; future
+  // multi-threshold support (e.g. 0.5 critical) would extend the
+  // type AND the wire shape via a `severity` discriminator field.
   return (
     isRecord(value) &&
     isFiniteNumber(value['liveCount']) &&
     isFiniteNumber(value['reservedCount']) &&
     isFiniteNumber(value['budget']) &&
-    value['thresholdRatio'] === 0.75 &&
+    isFiniteNumber(value['thresholdRatio']) &&
     (value['mode'] === 'warn' || value['mode'] === 'enforce')
   );
 }

@@ -825,6 +825,20 @@ export class McpClientManager {
       // some upstream path mis-reserved. Drain the queue so it
       // doesn't loop into the next pass; skip the emit (we can't
       // build a truthful payload without a real budget value).
+      //
+      // PR 14b fix (codex round 6): pre-fix this branch was silent.
+      // The two writers of `pendingRefusalNames` (`refuseAndLog`)
+      // are gated on `enforce` mode, so reaching this point means
+      // an invariant violation. Surface the regression at debug
+      // level so a future bug can be diagnosed by flipping debug
+      // on, not by reverse-engineering missing telemetry.
+      debugLogger.warn(
+        `MCP guardrail: dropped ${this.pendingRefusalNames.size} ` +
+          `pending refusal(s) — invariant violation ` +
+          `(budget=${this.clientBudget}, mode=${this.budgetMode}). ` +
+          `This branch should be unreachable; investigate the ` +
+          `refuseAndLog call sites.`,
+      );
       this.pendingRefusalNames.clear();
       return;
     }
@@ -840,6 +854,16 @@ export class McpClientManager {
       // The pending set is non-empty but none of the names appear in
       // `lastRefusedServerNames` — shouldn't happen given `refuseAndLog`
       // adds to both. Drain defensively to avoid a stuck queue.
+      //
+      // PR 14b fix (codex round 6): same rationale as the
+      // budget/mode invariant branch above — surface unreachable
+      // states so future regressions are diagnosable.
+      debugLogger.warn(
+        `MCP guardrail: dropped ${this.pendingRefusalNames.size} ` +
+          `pending refusal(s) — names absent from ` +
+          `lastRefusedServerNames (the two writers in refuseAndLog ` +
+          `are paired; reaching this branch indicates a sync gap).`,
+      );
       this.pendingRefusalNames.clear();
       return;
     }

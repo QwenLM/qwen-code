@@ -3657,6 +3657,20 @@ export class Config {
       if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
         mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
       }
+      // PR 14b fix (codex round 6): clear after consumption so a
+      // subsequent `createToolRegistry` call (e.g. subagent override
+      // via `createApprovalModeOverride` /
+      // `buildSubagentContextOverride`) doesn't re-apply the parent
+      // session's callback to a fresh manager. Subagent contexts run
+      // their own MCP clients but should NOT push budget events
+      // through the parent's ACP session — that would route subagent
+      // telemetry to the wrong subscriber.
+      //
+      // Late-call setter (`setMcpBudgetEventCallback` after
+      // `initialize()`) is unaffected: it dispatches directly to the
+      // existing manager via the `if (this.toolRegistry)` branch,
+      // not through `pendingMcpBudgetCallback`.
+      this.pendingMcpBudgetCallback = undefined;
     }
 
     if (!options?.skipDiscovery) {

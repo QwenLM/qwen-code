@@ -792,6 +792,14 @@ describe('daemon event schema', () => {
         },
       }),
     ).toBeUndefined();
+    // PR 14b fix (codex round 6): `thresholdRatio` is validated as a
+    // finite number rather than the literal 0.75 — the SDK's role is
+    // wire-shape validation, not threshold-value enforcement. Pinning
+    // the literal would mean a daemon-side bump to e.g. 0.80 silently
+    // routes every warning through `unrecognizedKnownEventCount` (a
+    // cross-package coordination hazard). Forward-compat for a future
+    // 0.5 critical threshold falls out for free; the daemon constant
+    // and protocol docs are the source of truth for threshold values.
     expect(
       asKnownDaemonEvent({
         v: 1,
@@ -800,10 +808,22 @@ describe('daemon event schema', () => {
           liveCount: 4,
           reservedCount: 4,
           budget: 4,
-          // `thresholdRatio` must be the literal 0.75 (the only ratio
-          // PR 14b emits). A future PR adding 0.50 / 0.95 thresholds
-          // would extend both the daemon emit + this predicate.
-          thresholdRatio: 0.5,
+          thresholdRatio: 0.5, // forward-compat threshold value
+          mode: 'warn',
+        },
+      }),
+    ).toBeDefined();
+    // Non-finite values (NaN / Infinity) are still rejected — the
+    // predicate uses `isFiniteNumber`, not bare `typeof === 'number'`.
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'mcp_budget_warning',
+        data: {
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: Number.NaN,
           mode: 'warn',
         },
       }),
