@@ -1442,8 +1442,9 @@ class QwenAgent implements Agent {
         // pre-check from PR 14 v1's accounting snapshot. Soft skips
         // (in_flight, disabled, budget_would_exceed) come back as
         // structured 200 responses; hard errors (server not in
-        // config, manager unavailable) propagate as JSON-RPC errors
-        // that the bridge translates to HTTP 4xx/5xx.
+        // config, manager unavailable, post-discover not connected)
+        // propagate as JSON-RPC errors with structured `data` that
+        // the bridge translates to typed HTTP responses.
         const serverName = params['serverName'];
         if (typeof serverName !== 'string' || serverName.length === 0) {
           throw RequestError.invalidParams(
@@ -1453,7 +1454,17 @@ class QwenAgent implements Agent {
         }
         const servers = this.config.getMcpServers() ?? {};
         if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
-          throw RequestError.resourceNotFound(`mcpServer:${serverName}`);
+          // #4282 gpt-5.5 C5 fold-in: the bridge looks for
+          // `data.errorKind: 'mcp_server_not_found'` to map this back
+          // to a typed `McpServerNotFoundError` and a stable HTTP 404
+          // — without the structured payload the bridge can't
+          // distinguish this from a generic JSON-RPC error and the
+          // route falls through to 500.
+          throw new RequestError(
+            -32004,
+            `MCP server not configured: ${JSON.stringify(serverName)}`,
+            { errorKind: 'mcp_server_not_found', serverName },
+          );
         }
         if (this.config.isMcpServerDisabled(serverName)) {
           return {
@@ -1481,11 +1492,21 @@ class QwenAgent implements Agent {
         const accounting = manager.getMcpClientAccounting();
         const budget = manager.getMcpClientBudget();
         const mode = manager.getMcpBudgetMode();
+        // #4282 gpt-5.5 C3 fold-in: enforce-mode capacity is reserved
+        // by `tryReserveSlot` via `reservedSlots` (which counts
+        // configured + in-flight + disconnected slot holders), not by
+        // `total` (which only counts CONNECTED clients). Comparing
+        // `total` to budget under-counted reservations and let a
+        // restart proceed past capacity; the manager would then
+        // refuse internally and return void, while this handler
+        // reported `restarted: true`. Mirror the manager's policy
+        // by checking `reservedSlots.length` for servers that don't
+        // already hold a reservation.
         if (
           mode === 'enforce' &&
           budget !== undefined &&
           !accounting.reservedSlots.includes(serverName) &&
-          accounting.total >= budget
+          accounting.reservedSlots.length >= budget
         ) {
           return {
             serverName,
@@ -1496,6 +1517,25 @@ class QwenAgent implements Agent {
         }
         const start = Date.now();
         await manager.discoverMcpToolsForServer(serverName, this.config);
+        // #4282 gpt-5.5 C4 fold-in: `discoverMcpToolsForServer`
+        // catches reconnect/discovery errors internally (logs and
+        // resolves void) so a broken MCP server would otherwise
+        // surface as `restarted: true`. Verify the live status from
+        // the per-server status map; anything other than CONNECTED
+        // means the restart didn't take effect.
+        const postStatus = getMCPServerStatus(serverName);
+        if (postStatus !== MCPServerStatus.CONNECTED) {
+          throw new RequestError(
+            -32099,
+            `MCP server ${JSON.stringify(serverName)} did not reach a ` +
+              `connected state after restart (status: ${postStatus}).`,
+            {
+              errorKind: 'mcp_restart_failed',
+              serverName,
+              mcpStatus: postStatus,
+            },
+          );
+        }
         return {
           serverName,
           restarted: true,

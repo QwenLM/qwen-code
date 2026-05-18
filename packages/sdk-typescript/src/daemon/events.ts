@@ -283,15 +283,23 @@ export interface DaemonToolToggledData {
 
 /**
  * #4175 Wave 4 PR 17. Workspace-scoped: fan-outs to every active
- * session SSE bus when `POST /workspace/init` scaffolds the daemon's
- * `QWEN.md`. `action: 'created'` for fresh creates (or whitespace-
- * only files); `'overwrote'` when `force: true` replaced non-empty
- * content. The `path` is absolute on the daemon host filesystem (see
+ * session SSE bus when `POST /workspace/init` is invoked. The
+ * `action` field discriminates between three outcomes:
+ *
+ * - `'created'`: daemon wrote an empty file at the resolved path
+ *   (target did not exist).
+ * - `'overwrote'`: daemon truncated an existing non-whitespace file
+ *   under `force: true`.
+ * - `'noop'`: daemon left an existing whitespace-only file alone
+ *   (no on-disk change). Still fan-outs the event so cross-client
+ *   UIs can render an "init was attempted" hint without polling.
+ *
+ * The `path` is absolute on the daemon host filesystem (see
  * runtime-locality contract).
  */
 export interface DaemonWorkspaceInitializedData {
   path: string;
-  action: 'created' | 'overwrote';
+  action: 'created' | 'overwrote' | 'noop';
   originatorClientId?: string;
   [key: string]: unknown;
 }
@@ -1400,7 +1408,7 @@ function isWorkspaceInitializedData(
   if (!isRecord(value)) return false;
   if (!isNonEmptyString(value['path'])) return false;
   const action = value['action'];
-  return action === 'created' || action === 'overwrote';
+  return action === 'created' || action === 'overwrote' || action === 'noop';
 }
 
 function isMcpServerRestartedData(

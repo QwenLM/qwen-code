@@ -861,14 +861,16 @@ export class DaemonClient {
   async setSessionApprovalMode(
     sessionId: string,
     mode: DaemonApprovalMode,
-    opts?: { persist?: boolean },
-    clientId?: string,
+    opts?: { persist?: boolean; clientId?: string },
   ): Promise<DaemonApprovalModeResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/approval-mode`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
         body: JSON.stringify({
           mode,
           ...(opts?.persist === true ? { persist: true } : {}),
@@ -901,13 +903,16 @@ export class DaemonClient {
   async setWorkspaceToolEnabled(
     toolName: string,
     enabled: boolean,
-    clientId?: string,
+    opts?: { clientId?: string },
   ): Promise<DaemonToolToggleResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/tools/${encodeURIComponent(toolName)}/enable`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
         body: JSON.stringify({ enabled }),
       },
       async (res) => {
@@ -935,13 +940,16 @@ export class DaemonClient {
    */
   async restartMcpServer(
     serverName: string,
-    clientId?: string,
+    opts?: { clientId?: string },
   ): Promise<DaemonMcpRestartResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
         body: '{}',
       },
       async (res) => {
@@ -969,15 +977,18 @@ export class DaemonClient {
    *
    * Pre-flight `caps.features.workspace_init` before calling.
    */
-  async initWorkspace(
-    opts?: { force?: boolean },
-    clientId?: string,
-  ): Promise<DaemonInitWorkspaceResult> {
+  async initWorkspace(opts?: {
+    force?: boolean;
+    clientId?: string;
+  }): Promise<DaemonInitWorkspaceResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/init`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
         body: JSON.stringify(opts?.force === true ? { force: true } : {}),
       },
       async (res) => {

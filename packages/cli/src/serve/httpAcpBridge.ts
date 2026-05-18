@@ -506,7 +506,7 @@ export interface HttpAcpBridge {
     originatorClientId: string | undefined,
   ): Promise<{
     path: string;
-    action: 'created' | 'overwrote';
+    action: 'created' | 'overwrote' | 'noop';
   }>;
 
   /**
@@ -1242,6 +1242,45 @@ export class WorkspaceInitConflictError extends Error {
     this.name = 'WorkspaceInitConflictError';
     this.path = path;
     this.existingSize = existingSize;
+  }
+}
+
+/**
+ * #4282 fold-in 1 (gpt-5.5 C5). Thrown by `restartMcpServer` when the
+ * caller asks for a server name that isn't in the daemon's
+ * `McpServers` config. Translated to HTTP 404 + structured body by
+ * the route — distinguishable from a generic 500 so a bad server
+ * name doesn't look like an internal daemon failure.
+ */
+export class McpServerNotFoundError extends Error {
+  readonly serverName: string;
+  constructor(serverName: string) {
+    super(`MCP server not configured: ${JSON.stringify(serverName)}`);
+    this.name = 'McpServerNotFoundError';
+    this.serverName = serverName;
+  }
+}
+
+/**
+ * #4282 fold-in 1 (gpt-5.5 C4). Thrown by `restartMcpServer` when
+ * `discoverMcpToolsForServer` resolves but the MCP client fails to
+ * end up `CONNECTED` post-discover. The manager catches reconnect
+ * errors and returns void, so without an explicit post-check the
+ * route would report `restarted: true` while the server stays
+ * disconnected. Translated to HTTP 502 + `errorKind:
+ * 'protocol_error'` by the route.
+ */
+export class McpServerRestartFailedError extends Error {
+  readonly serverName: string;
+  readonly mcpStatus: string;
+  constructor(serverName: string, mcpStatus: string) {
+    super(
+      `MCP server ${JSON.stringify(serverName)} did not reach a connected ` +
+        `state after restart (status: ${mcpStatus}).`,
+    );
+    this.name = 'McpServerRestartFailedError';
+    this.serverName = serverName;
+    this.mcpStatus = mcpStatus;
   }
 }
 
@@ -3769,14 +3808,29 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           'errorKind' in data &&
           (data as { errorKind?: unknown }).errorKind === 'trust_gate'
         ) {
+          const rawMessage = (err as { message?: unknown })?.message;
           const message =
-            (err as { message?: unknown })?.message instanceof String ||
-            typeof (err as { message?: unknown })?.message === 'string'
-              ? String((err as { message: string }).message)
+            typeof rawMessage === 'string'
+              ? rawMessage
               : 'Trust-gate rejection from ACP child';
           throw new TrustGateError(message);
         }
         throw err;
+      }
+      // #4282 wenshao H3 fold-in: throw clearly when the caller asked
+      // for `persist: true` but the bridge wasn't wired with a
+      // `persistApprovalMode` callback. The previous silent
+      // `persisted: false` was indistinguishable from "hook ran but
+      // failed" or genuine `persisted: true` from the caller's point
+      // of view, leaving a contract gap. Mirrors the throw in
+      // `setWorkspaceToolEnabled` for the same situation.
+      if (opts.persist && !persistApprovalMode) {
+        throw new Error(
+          'setSessionApprovalMode called with `persist: true` but no ' +
+            '`persistApprovalMode` callback wired in BridgeOptions. ' +
+            'runQwenServe wires the production callback; direct embeds ' +
+            'and tests must opt in or omit `persist`.',
+        );
       }
       let persisted = false;
       if (opts.persist) {
@@ -3846,23 +3900,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // the structured response back into the typed result, (c) fan
       // out the appropriate event to every session bus. Soft refusals
       // (skipped:true) come back as a normal response; hard errors
-      // (server not configured, manager unavailable) are propagated
-      // as JSON-RPC errors that the route maps via sendBridgeError.
+      // (server not configured, manager unavailable, post-discover
+      // not connected) are translated via `data.errorKind` into typed
+      // bridge errors that `sendBridgeError` maps to stable HTTP
+      // responses (#4282 gpt-5.5 C4/C5 fold-in).
       const info = liveChannelInfo();
       if (!info) {
         throw new SessionNotFoundError(`mcp:${serverName}`);
       }
-      const response = (await Promise.race([
-        withTimeout(
-          info.connection.extMethod(
-            SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
-            { serverName },
-          ),
-          initTimeoutMs,
-          SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
-        ),
-        getChannelClosedReject(info),
-      ])) as
+      let response:
         | { serverName: string; restarted: true; durationMs: number }
         | {
             serverName: string;
@@ -3870,6 +3916,47 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             skipped: true;
             reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
           };
+      try {
+        response = (await Promise.race([
+          withTimeout(
+            info.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+              { serverName },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+          ),
+          getChannelClosedReject(info),
+        ])) as
+          | { serverName: string; restarted: true; durationMs: number }
+          | {
+              serverName: string;
+              restarted: false;
+              skipped: true;
+              reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+            };
+      } catch (err) {
+        // Detect structured ACP error payloads and re-instantiate as
+        // typed bridge errors. JSON-RPC strips class names across the
+        // wire; the agent attaches `data.errorKind` as the
+        // reconstruction signal.
+        const data = (err as { data?: unknown })?.data;
+        if (data && typeof data === 'object') {
+          const kind = (data as { errorKind?: unknown }).errorKind;
+          const sn = (data as { serverName?: unknown }).serverName;
+          if (kind === 'mcp_server_not_found' && typeof sn === 'string') {
+            throw new McpServerNotFoundError(sn);
+          }
+          if (kind === 'mcp_restart_failed' && typeof sn === 'string') {
+            const status = (data as { mcpStatus?: unknown }).mcpStatus;
+            throw new McpServerRestartFailedError(
+              sn,
+              typeof status === 'string' ? status : 'unknown',
+            );
+          }
+        }
+        throw err;
+      }
       if (response.restarted === true) {
         broadcastWorkspaceEvent({
           type: 'mcp_server_restarted',
@@ -3899,21 +3986,45 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // call — clients that want AI-fill follow up with
       // `POST /session/:id/prompt`.
       const filename = getCurrentGeminiMdFilename();
-      const target = path.join(boundWorkspace, filename);
+      // #4282 gpt-5.5 C1 fold-in: `getCurrentGeminiMdFilename()` is
+      // settings-controlled. A daemon configured with
+      // `context.fileName: "../outside.md"` would otherwise resolve
+      // outside `boundWorkspace` and let this strict-gated mutation
+      // create or truncate a file outside the workspace boundary.
+      // Resolve the joined path and reject anything that escapes.
+      const target = path.resolve(boundWorkspace, filename);
+      const withinWorkspace =
+        target === boundWorkspace ||
+        target.startsWith(boundWorkspace + path.sep);
+      if (!withinWorkspace) {
+        throw new Error(
+          `Configured workspace context filename ${JSON.stringify(filename)} ` +
+            `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
+            `Refusing to write.`,
+        );
+      }
       let existingSize: number | undefined;
-      let action: 'created' | 'overwrote' = 'created';
+      let action: 'created' | 'overwrote' | 'noop' = 'created';
       try {
         const existing = await fs.readFile(target, 'utf8');
-        // Whitespace-only is treated as absent — matches the behavior
-        // of the local `/init` slash command (initCommand.ts) so a
-        // half-broken init left an empty file behind doesn't trigger
-        // a confusing 409.
         if (existing.trim().length > 0) {
           existingSize = Buffer.byteLength(existing, 'utf8');
           if (initOpts.force !== true) {
             throw new WorkspaceInitConflictError(target, existingSize);
           }
           action = 'overwrote';
+        } else {
+          // #4282 wenshao H4 fold-in: an existing whitespace-only file
+          // is treated as a no-op rather than silently overwritten.
+          // Previously the code would label the response `'created'`
+          // and unconditionally `writeFile(target, '')`, destroying
+          // the user's whitespace content (stray template, half-
+          // written init, intentional newline) without `force: true`.
+          // The HTTP intent of "init only if absent" is honored by
+          // skipping the write and surfacing `'noop'` so the SSE
+          // event accurately reflects that no on-disk change
+          // occurred.
+          action = 'noop';
         }
       } catch (err) {
         if (err instanceof WorkspaceInitConflictError) throw err;
@@ -3921,7 +4032,9 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         if (code !== 'ENOENT') throw err;
         // ENOENT — fall through to create.
       }
-      await fs.writeFile(target, '', 'utf8');
+      if (action !== 'noop') {
+        await fs.writeFile(target, '', 'utf8');
+      }
       broadcastWorkspaceEvent({
         type: 'workspace_initialized',
         data: { path: target, action },

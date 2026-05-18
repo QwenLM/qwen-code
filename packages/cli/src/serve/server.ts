@@ -37,6 +37,8 @@ import {
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
@@ -1375,7 +1377,11 @@ export function createServeApp(
         });
         return;
       }
-      const clientId = parseClientIdHeader(req, res);
+      // #4282 fold-in 1 (gpt-5.5 C2): validate `X-Qwen-Client-Id`
+      // against `bridge.knownClientIds()` so the originator stamped
+      // onto `mcp_server_restart*` events is grounded in a known
+      // identity rather than a forged header.
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
       try {
         const result = await bridge.restartMcpServer(serverName, clientId);
@@ -1401,7 +1407,8 @@ export function createServeApp(
       });
       return;
     }
-    const clientId = parseClientIdHeader(req, res);
+    // #4282 fold-in 1 (gpt-5.5 C2): validate against known client ids.
+    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
     if (clientId === null) return;
     try {
       const result = await bridge.initWorkspace(
@@ -1442,7 +1449,8 @@ export function createServeApp(
         });
         return;
       }
-      const clientId = parseClientIdHeader(req, res);
+      // #4282 fold-in 1 (gpt-5.5 C2): validate against known client ids.
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
       if (clientId === null) return;
       try {
         const result = await bridge.setWorkspaceToolEnabled(
@@ -1960,6 +1968,37 @@ function parseClientIdHeader(
   return raw;
 }
 
+/**
+ * #4282 fold-in 1 (gpt-5.5 C2). Workspace-level mutation routes validate
+ * the parsed `X-Qwen-Client-Id` against `bridge.knownClientIds()` so the
+ * `originatorClientId` stamped onto fan-out events is grounded in a
+ * client identity the daemon previously issued. Without this check, any
+ * authenticated caller could forge the originator on `tool_toggled`,
+ * `workspace_initialized`, and `mcp_server_restart*` events.
+ *
+ * Mirrors the inline check pattern in `workspaceMemory.ts` /
+ * `workspaceAgents.ts` from PR 16. Returns the validated client id
+ * (or `undefined` when no header was supplied), `null` when a 400 has
+ * already been emitted by `parseClientIdHeader` or this validator.
+ */
+function parseAndValidateWorkspaceClientId(
+  req: import('express').Request,
+  res: import('express').Response,
+  bridge: HttpAcpBridge,
+): string | undefined | null {
+  const raw = parseClientIdHeader(req, res);
+  if (raw === null || raw === undefined) return raw;
+  if (!bridge.knownClientIds().has(raw)) {
+    res.status(400).json({
+      error: `Client id "${raw}" is not registered for this workspace`,
+      code: 'invalid_client_id',
+      clientId: raw,
+    });
+    return null;
+  }
+  return raw;
+}
+
 function parsePermissionVoteBody(
   req: import('express').Request,
   res: import('express').Response,
@@ -2172,6 +2211,31 @@ function sendBridgeError(
       code: 'workspace_init_conflict',
       path: err.path,
       existingSize: err.existingSize,
+    });
+    return;
+  }
+  if (err instanceof McpServerNotFoundError) {
+    // #4282 fold-in 1 (gpt-5.5 C5). Stable 404 for "MCP server name
+    // not in `mcpServers` config" so callers can distinguish a typo
+    // from an internal daemon failure.
+    res.status(404).json({
+      error: err.message,
+      code: 'mcp_server_not_found',
+      serverName: err.serverName,
+    });
+    return;
+  }
+  if (err instanceof McpServerRestartFailedError) {
+    // #4282 fold-in 1 (gpt-5.5 C4). 502 because the daemon understood
+    // the request and the upstream (the MCP server / its child
+    // process) failed to come back online. `errorKind: 'protocol_error'`
+    // shares the closed PR-13 taxonomy.
+    res.status(502).json({
+      error: err.message,
+      code: 'mcp_server_restart_failed',
+      errorKind: 'protocol_error',
+      serverName: err.serverName,
+      mcpStatus: err.mcpStatus,
     });
     return;
   }

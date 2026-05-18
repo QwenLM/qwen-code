@@ -1249,7 +1249,9 @@ describe('DaemonClient', () => {
         }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      await client.setSessionApprovalMode('s-1', 'plan', undefined, 'client-1');
+      await client.setSessionApprovalMode('s-1', 'plan', {
+        clientId: 'client-1',
+      });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
@@ -1303,7 +1305,9 @@ describe('DaemonClient', () => {
         jsonResponse(200, { toolName: 'Bash', enabled: false }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      await client.setWorkspaceToolEnabled('Bash', false, 'client-1');
+      await client.setWorkspaceToolEnabled('Bash', false, {
+        clientId: 'client-1',
+      });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
@@ -1430,7 +1434,7 @@ describe('DaemonClient', () => {
         }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-      await client.restartMcpServer('docs', 'client-1');
+      await client.restartMcpServer('docs', { clientId: 'client-1' });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 

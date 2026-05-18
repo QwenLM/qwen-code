@@ -741,9 +741,15 @@ export interface DaemonToolToggleResult {
 
 /**
  * #4175 Wave 4 PR 17. Result body of `POST /workspace/init`.
- * `action: 'created'` means the file did not exist (or contained only
- * whitespace) and was scaffolded fresh; `'overwrote'` means it had
- * non-empty content and the caller passed `force: true`.
+ *
+ * - `'created'`: the target file did not exist; daemon scaffolded an
+ *   empty file fresh.
+ * - `'overwrote'`: the target file had non-whitespace content and the
+ *   caller passed `force: true`; daemon truncated to empty.
+ * - `'noop'`: the target file already existed but contained only
+ *   whitespace, so the daemon left it alone (no write, no on-disk
+ *   change). Honors the "init only if absent" intent without
+ *   requiring `force: true` (#4282 fold-in 1, wenshao H4).
  *
  * Note: `path` is the absolute path on the daemon host filesystem —
  * not the client's. Per the runtime-locality contract, file ops
@@ -751,7 +757,7 @@ export interface DaemonToolToggleResult {
  */
 export interface DaemonInitWorkspaceResult {
   path: string;
-  action: 'created' | 'overwrote';
+  action: 'created' | 'overwrote' | 'noop';
 }
 
 /**

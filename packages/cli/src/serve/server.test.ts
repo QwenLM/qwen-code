@@ -143,6 +143,13 @@ const EXPECTED_REGISTERED_FEATURES = [
 ] as const;
 
 interface FakeBridgeOpts {
+  /**
+   * #4282 fold-in 1 (gpt-5.5 C2): tests that exercise workspace
+   * mutation routes with `X-Qwen-Client-Id` set need the fakeBridge
+   * to advertise those ids as "known", or the new client-id
+   * validator returns 400. Defaults to an empty set.
+   */
+  knownClientIds?: Iterable<string>;
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
@@ -699,9 +706,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       // exercised against a live bridge.
     },
     knownClientIds() {
-      // Default empty set — workspace mutation tests opt in by
-      // overriding the bridge in their suite.
-      return new Set<string>();
+      // Default empty set; tests pass `{knownClientIds: ['client-1']}`
+      // to opt into validation success on workspace mutation routes.
+      return new Set<string>(opts.knownClientIds ?? []);
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
@@ -2363,12 +2370,33 @@ describe('createServeApp', () => {
     });
 
     it('passes client identity into the bridge', async () => {
-      const bridge = fakeBridge();
+      // #4282 fold-in 1 (gpt-5.5 C2): the workspace mutation route
+      // validates `X-Qwen-Client-Id` against `bridge.knownClientIds()`.
+      // Register `client-1` so the validation succeeds and the
+      // originator stamp lands on the bridge call.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(tokenOpts, undefined, { bridge });
       await auth(request(app).post('/workspace/init'))
         .set('X-Qwen-Client-Id', 'client-1')
         .send({});
       expect(bridge.initWorkspaceCalls[0]?.originatorClientId).toBe('client-1');
+    });
+
+    it('400 invalid_client_id when X-Qwen-Client-Id is not in knownClientIds', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): the validator rejects forged
+      // headers with a structured 400 instead of stamping the
+      // originator on the SSE event.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
     });
 
     it('400 when force is non-boolean', async () => {
@@ -2456,7 +2484,8 @@ describe('createServeApp', () => {
     });
 
     it('passes client identity into the bridge', async () => {
-      const bridge = fakeBridge();
+      // #4282 fold-in 1 (gpt-5.5 C2): see /workspace/init test above.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(tokenOpts, undefined, { bridge });
       await auth(request(app).post('/workspace/mcp/docs/restart'))
         .set('X-Qwen-Client-Id', 'client-1')
@@ -2464,6 +2493,20 @@ describe('createServeApp', () => {
       expect(bridge.restartMcpServerCalls[0]?.originatorClientId).toBe(
         'client-1',
       );
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/docs/restart'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
     });
 
     it('decodes URL-encoded server names', async () => {
@@ -2539,7 +2582,8 @@ describe('createServeApp', () => {
     });
 
     it('passes client identity into the bridge', async () => {
-      const bridge = fakeBridge();
+      // #4282 fold-in 1 (gpt-5.5 C2): see /workspace/init test above.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(tokenOpts, undefined, { bridge });
       await auth(request(app).post('/workspace/tools/Bash/enable'))
         .set('X-Qwen-Client-Id', 'client-1')
@@ -2547,6 +2591,20 @@ describe('createServeApp', () => {
       expect(bridge.setToolEnabledCalls[0]?.originatorClientId).toBe(
         'client-1',
       );
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/tools/Bash/enable'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
     });
 
     it('400 when enabled is missing or non-boolean', async () => {

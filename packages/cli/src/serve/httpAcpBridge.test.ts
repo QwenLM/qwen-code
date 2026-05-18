@@ -4424,14 +4424,19 @@ describe('createHttpAcpBridge', () => {
       expect(written).toBe('');
     });
 
-    it('treats whitespace-only file as absent (no 409)', async () => {
+    it('treats whitespace-only file as a noop without force (no 409, no write)', async () => {
+      // #4282 fold-in 1 (wenshao H4): whitespace-only existing file is
+      // a no-op rather than a silent overwrite. Original whitespace
+      // content is preserved; the response surface signals `'noop'`
+      // so the SSE event accurately reflects "no on-disk change."
       const target = path.join(tmpWs, 'QWEN.md');
-      await fsp.writeFile(target, '   \n\t\n', 'utf8');
+      const original = '   \n\t\n';
+      await fsp.writeFile(target, original, 'utf8');
       const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
       const res = await bridge.initWorkspace({}, undefined);
-      expect(res.action).toBe('created');
-      const written = await fsp.readFile(target, 'utf8');
-      expect(written).toBe('');
+      expect(res.action).toBe('noop');
+      const onDisk = await fsp.readFile(target, 'utf8');
+      expect(onDisk).toBe(original);
     });
 
     it('throws WorkspaceInitConflictError when content exists and force is omitted', async () => {

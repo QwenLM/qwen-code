@@ -294,11 +294,21 @@ export async function runQwenServe(
       // freshness rationale as `persistApprovalMode`) and merges into
       // the existing `tools.disabled` array — concurrent toggles from
       // other writers stay safe across the read/modify/write window.
+      //
+      // #4282 wenshao H2 fold-in: read from the WORKSPACE scope only.
+      // Reading `fresh.merged.tools?.disabled` (the UNION across
+      // System / SystemDefaults / User / Workspace) and writing the
+      // result back into `SettingScope.Workspace` would copy entries
+      // from higher scopes into the workspace file on the first
+      // toggle. Subsequent removals at the originating scope (e.g.
+      // User) would no longer take effect because the names have been
+      // baked into the workspace file with no obvious source.
       persistDisabledTools: async (workspace, toolName, enabled) => {
         const fresh = loadSettings(workspace);
-        const merged = fresh.merged.tools?.disabled;
-        const current = Array.isArray(merged)
-          ? merged.filter((v): v is string => typeof v === 'string')
+        const wsScope = fresh.forScope(SettingScope.Workspace).settings;
+        const wsDisabled = wsScope.tools?.disabled;
+        const current = Array.isArray(wsDisabled)
+          ? wsDisabled.filter((v): v is string => typeof v === 'string')
           : [];
         const next = new Set(current);
         if (enabled) next.delete(toolName);
