@@ -176,6 +176,23 @@ export enum ApprovalMode {
 export const APPROVAL_MODES = Object.values(ApprovalMode);
 
 /**
+ * Thrown by `Config.setApprovalMode` when the requested mode would grant
+ * privileged tool autonomy in a folder the user has not marked as trusted.
+ *
+ * Why: the daemon mutation route at `POST /session/:id/approval-mode` needs
+ * to recognize this specific class of rejection and translate it into a
+ * structured `errorKind: 'auth_env_error'` rather than a generic 500.
+ * Using a named subclass lets the bridge match by `err.name` without
+ * depending on the message text (which would drift across i18n).
+ */
+export class TrustGateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TrustGateError';
+  }
+}
+
+/**
  * Information about an approval mode including display name and description.
  */
 export interface ApprovalModeInfo {
@@ -2474,7 +2491,7 @@ export class Config {
       mode !== ApprovalMode.DEFAULT &&
       mode !== ApprovalMode.PLAN
     ) {
-      throw new Error(
+      throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }

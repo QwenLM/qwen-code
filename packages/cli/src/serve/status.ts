@@ -563,6 +563,10 @@ export function mapDomainErrorToErrorKind(
   }
   if (err instanceof SyntaxError) return 'parse_error';
   if (!(err instanceof Error)) return undefined;
+  // `TrustGateError` is defined in `@qwen-code/qwen-code-core/config`; we
+  // match by `.name` rather than `instanceof` because cross-package bundling
+  // can produce duplicate class instances where `instanceof` returns false.
+  if (err.name === 'TrustGateError') return 'auth_env_error';
   if (MODEL_CONFIG_ERROR_NAMES.has(err.name)) return 'auth_env_error';
   const code = (err as { code?: unknown }).code;
   if (typeof code === 'string' && FS_MISSING_CODES.has(code)) {
