@@ -1536,11 +1536,26 @@ describe('DaemonClient', () => {
       // regression that ignores the 0 override would abort almost
       // immediately. The slow stub resolves after 50ms — well past
       // the 1ms default but only because 0 disables the timer.
+      //
+      // #4297 fold-in 4 (wenshao critical, addresses #3260810242):
+      // the stub must observe `init.signal` and reject on abort.
+      // Without the listener, a regression where the override is
+      // ignored fires the AbortController at 1ms but the stub never
+      // sees it — the promise stays pending until the 50ms
+      // `resolveResponse` wins, leaving the test green and the
+      // "0 disables timeout" contract unprotected. Mirrors the
+      // listener pattern in the two sibling tests above.
       let resolveResponse: ((v: Response) => void) | undefined;
       const slowFetch = vi.fn(
-        () =>
-          new Promise<Response>((resolve) => {
+        (_input: RequestInfo | URL, init?: { signal?: AbortSignal | null }) =>
+          new Promise<Response>((resolve, reject) => {
             resolveResponse = resolve;
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
           }),
       );
       const client = new DaemonClient({
