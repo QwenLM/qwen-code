@@ -4762,6 +4762,78 @@ describe('createHttpAcpBridge', () => {
       expect(await fsp.readFile(target, 'utf8')).toBe('');
     });
 
+    it('honors `contextFilename` from BridgeOptions (#4282 fold-in 5 P2-1)', async () => {
+      // The daemon parent never goes through `loadCliConfig`, so the
+      // process-global `getCurrentGeminiMdFilename()` stays on the
+      // default `QWEN.md`. `runQwenServe` snapshots the workspace's
+      // `context.fileName` setting at boot and forwards it via the
+      // `contextFilename` option so init writes the same file the
+      // ACP child reads.
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        contextFilename: 'AGENTS.md',
+      });
+      const res = await bridge.initWorkspace({}, undefined);
+      expect(res.action).toBe('created');
+      expect(res.path).toBe(path.join(tmpWs, 'AGENTS.md'));
+      // Default name must NOT have been written; otherwise observers
+      // would see two files appear and clients would race over which
+      // is canonical.
+      expect(
+        await fsp
+          .stat(path.join(tmpWs, 'QWEN.md'))
+          .then(() => true)
+          .catch(() => false),
+      ).toBe(false);
+    });
+
+    it('rejects writes when a parent directory symlinks outside the workspace (#4282 fold-in 5 P2-4)', async () => {
+      // `lstat(target)` only checks the final component. A symlink at
+      // any parent level — e.g. `docs -> /tmp` with `context.fileName:
+      // 'docs/AGENTS.md'` — would let `writeFile` follow the parent
+      // link and create or truncate outside `boundWorkspace`. The
+      // canonical-parent check resolves the chain via `realpath`
+      // before any read or write.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-escape-'),
+      );
+      try {
+        await fsp.symlink(escapeTarget, path.join(tmpWs, 'docs'));
+        const bridge = createHttpAcpBridge({
+          boundWorkspace: tmpWs,
+          contextFilename: 'docs/AGENTS.md',
+        });
+        const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+        expect(err).toBeInstanceOf(Error);
+        expect((err as Error).message).toMatch(
+          /parent path that resolves outside the bound workspace/,
+        );
+        // Confirm nothing was written outside the workspace.
+        expect(
+          await fsp
+            .stat(path.join(escapeTarget, 'AGENTS.md'))
+            .then(() => true)
+            .catch(() => false),
+        ).toBe(false);
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('accepts writes when a parent directory is a real subdir (#4282 fold-in 5 P2-4)', async () => {
+      // Symmetric coverage for the parent-realpath check: when `docs`
+      // is a real directory (not a symlink), the write must succeed
+      // and land at the nested target.
+      await fsp.mkdir(path.join(tmpWs, 'docs'));
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        contextFilename: 'docs/AGENTS.md',
+      });
+      const res = await bridge.initWorkspace({}, undefined);
+      expect(res.action).toBe('created');
+      expect(res.path).toBe(path.join(tmpWs, 'docs', 'AGENTS.md'));
+    });
+
     it('does NOT spawn an ACP child', async () => {
       let factoryCalls = 0;
       const bridge = createHttpAcpBridge({

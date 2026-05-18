@@ -305,6 +305,28 @@ export async function runQwenServe(
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
   };
 
+  // #4282 fold-in 5 (Codex P2-1). Snapshot the workspace's preferred
+  // context filename at boot. The daemon parent doesn't go through
+  // `loadCliConfig` (it spawns an ACP child that does), so the
+  // process-global `getCurrentGeminiMdFilename()` stays on the
+  // default `QWEN.md` even when the workspace has
+  // `context.fileName: 'AGENTS.md'`. Reading merged settings here
+  // and forwarding to the bridge ensures `POST /workspace/init`
+  // writes the same file the ACP child reads. Settings changes made
+  // after daemon boot need a daemon restart to take effect — this
+  // value rarely changes, and a snapshot avoids re-reading on every
+  // init request. `String` ↑ guard normalizes settings.json entries
+  // that aren't string-typed (hand-edited bad data); fall back to
+  // the default rather than crash the bridge.
+  const bootSettings = loadSettings(boundWorkspace);
+  const configuredFilename = bootSettings.merged.context?.fileName;
+  const contextFilenameForInit =
+    typeof configuredFilename === 'string' && configuredFilename.trim() !== ''
+      ? configuredFilename.trim()
+      : Array.isArray(configuredFilename) && configuredFilename.length > 0
+        ? String(configuredFilename[0]).trim()
+        : undefined;
+
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -320,6 +342,9 @@ export async function runQwenServe(
       // implementation wraps `buildEnvStatusFromProcess` and the
       // (lifted) `buildDaemonPreflightCells` body.
       statusProvider: createDaemonStatusProvider(),
+      ...(contextFilenameForInit !== undefined
+        ? { contextFilename: contextFilenameForInit }
+        : {}),
       // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
       // an opt-in `persist: true` flag. We re-load settings on each
       // persist call rather than caching a `LoadedSettings` handle —

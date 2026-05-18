@@ -766,7 +766,15 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
-  private readonly disabledTools: ReadonlySet<string>;
+  // #4282 fold-in 5 (Codex P2-2). `disabledTools` is set at construction
+  // time but can be re-synced by the daemon mutation surface
+  // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
+  // `discoverMcpToolsForServer` sees the latest disabled set instead
+  // of the bootstrap snapshot. Stays `ReadonlySet` for callers; the
+  // setter swaps the reference rather than mutating in place so any
+  // captured reference (e.g. by ToolRegistry mid-iteration) remains
+  // self-consistent.
+  private disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -2302,6 +2310,24 @@ export class Config {
    */
   getDisabledTools(): ReadonlySet<string> {
     return this.disabledTools;
+  }
+
+  /**
+   * #4282 fold-in 5 (Codex P2-2). Replace the in-process `disabledTools`
+   * snapshot with a fresh set sourced from the workspace settings.
+   * Intended for the `qwen serve` mutation surface
+   * (`setWorkspaceToolEnabled` → ACP `qwen/control/...` → here): the
+   * settings file is the source of truth, and this setter keeps the
+   * in-memory Config in sync so a subsequent MCP rediscovery / next
+   * tool registration honors the just-toggled value.
+   *
+   * Already-registered tools are NOT retroactively unregistered —
+   * `ToolRegistry` consults the set at registration time only, which
+   * matches the documented "toggling does not unregister live tools"
+   * contract.
+   */
+  setDisabledTools(disabled: ReadonlySet<string>): void {
+    this.disabledTools = new Set(disabled);
   }
 
   getToolCallCommand(): string | undefined {

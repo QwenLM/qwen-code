@@ -1515,6 +1515,31 @@ class QwenAgent implements Agent {
             reason: 'budget_would_exceed' as const,
           };
         }
+        // #4282 fold-in 5 (Codex P2-2). Re-read workspace settings to
+        // pick up any `tools.disabled` toggles applied since this ACP
+        // child booted. The original snapshot was frozen by Config's
+        // constructor; without this refresh, a `setWorkspaceToolEnabled`
+        // call followed by the documented `mcp restart` would
+        // re-register a just-disabled MCP tool because
+        // `discoverMcpToolsForServer` walks `ToolRegistry.registerTool`,
+        // which consults `Config.getDisabledTools()`. Reading from the
+        // workspace scope (not merged) matches the persist-write path
+        // in `runQwenServe.persistDisabledTools` so the read/write
+        // sources of truth agree.
+        try {
+          const fresh = loadSettings(this.config.getTargetDir());
+          const wsScope = fresh.forScope(SettingScope.Workspace).settings;
+          const wsDisabled = wsScope.tools?.disabled;
+          const disabledList = Array.isArray(wsDisabled)
+            ? wsDisabled.filter((v): v is string => typeof v === 'string')
+            : [];
+          this.config.setDisabledTools(new Set(disabledList));
+        } catch {
+          // Settings load failures are non-fatal — fall through with
+          // the existing in-memory snapshot. The MCP restart still
+          // runs; only the disabledTools sync is skipped. Operators
+          // see this in the next ToolRegistry refresh log.
+        }
         const start = Date.now();
         await manager.discoverMcpToolsForServer(serverName, this.config);
         // #4282 gpt-5.5 C4 fold-in: `discoverMcpToolsForServer`

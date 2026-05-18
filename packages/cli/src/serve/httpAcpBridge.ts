@@ -193,7 +193,10 @@ export type { AcpChannel, AcpChannelExitInfo, ChannelFactory };
 // `createDaemonStatusProvider()` (production impl in
 // `cli/src/serve/daemonStatusProvider.ts`) when the bridge is built;
 // embedded callers that don't need daemon-host cells may omit it,
-// in which case the factory returns idle placeholders.
+// in which case the factory returns idle placeholders. The
+// `contextFilename` option (added by #4282 fold-in 5) was lifted
+// alongside the rest of the surface — see the lifted definition in
+// `packages/acp-bridge/src/bridgeOptions.ts`.
 import type {
   BridgeOptions,
   DaemonStatusProvider,
@@ -1297,6 +1300,13 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const boundWorkspace = opts.boundWorkspace;
+  // #4282 fold-in 5 (Codex P2-1). Snapshot the configured context
+  // filename at construction time. The daemon parent never updates
+  // the process-global through `loadCliConfig`, so `runQwenServe`
+  // reads the workspace's merged settings and forwards the value
+  // here. Falling back to `getCurrentGeminiMdFilename()` keeps
+  // bridge tests + embedded callers working without explicit setup.
+  const contextFilename = opts.contextFilename ?? getCurrentGeminiMdFilename();
   const persistApprovalMode = opts.persistApprovalMode;
   const persistDisabledTools = opts.persistDisabledTools;
 
@@ -3608,13 +3618,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // operator chose and the trust dialog flow doesn't yet exist
       // for the daemon. The CV1 symlink reject below covers the
       // immediate boundary-escape concern.
-      const filename = getCurrentGeminiMdFilename();
-      // #4282 gpt-5.5 C1 fold-in: `getCurrentGeminiMdFilename()` is
-      // settings-controlled. A daemon configured with
-      // `context.fileName: "../outside.md"` would otherwise resolve
-      // outside `boundWorkspace` and let this strict-gated mutation
-      // create or truncate a file outside the workspace boundary.
-      // Resolve the joined path and reject anything that escapes.
+      // #4282 fold-in 5 (Codex P2-1). Use the snapshot from
+      // `BridgeOptions.contextFilename` (sourced from the workspace's
+      // merged settings at daemon boot) instead of the process-global
+      // `getCurrentGeminiMdFilename()` — the daemon parent never goes
+      // through `loadCliConfig`, so a workspace configured with
+      // `context.fileName: 'AGENTS.md'` would otherwise see init
+      // create `QWEN.md` while the rest of the workspace reads a
+      // different file.
+      const filename = contextFilename;
+      // #4282 gpt-5.5 C1 fold-in: `context.fileName` is settings-
+      // controlled. A daemon configured with `context.fileName:
+      // "../outside.md"` would otherwise resolve outside
+      // `boundWorkspace` and let this strict-gated mutation create
+      // or truncate a file outside the workspace boundary. Resolve
+      // the joined path and reject anything that escapes.
       const target = path.resolve(boundWorkspace, filename);
       const withinWorkspace =
         target === boundWorkspace ||
@@ -3624,6 +3642,32 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
           `Configured workspace context filename ${JSON.stringify(filename)} ` +
             `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
             `Refusing to write.`,
+        );
+      }
+      // #4282 fold-in 5 (Codex P2-4). The textual `withinWorkspace`
+      // and final-component `lstat` checks miss intermediate symlinks
+      // — e.g. `context.fileName: "docs/QWEN.md"` with `docs` a
+      // symlink to `/tmp` would let the later `writeFile(target)`
+      // follow the parent symlink and create or truncate outside
+      // `boundWorkspace`. Resolve the parent chain via
+      // `realpath`, walking up through any not-yet-existing ancestors,
+      // and verify the canonical parent stays within the canonical
+      // workspace.
+      const wsCanonical = await fs.realpath(boundWorkspace);
+      const parentCanonical = await canonicalizeExistingAncestor(
+        path.dirname(target),
+      );
+      const parentWithinWorkspace =
+        parentCanonical === wsCanonical ||
+        parentCanonical.startsWith(wsCanonical + path.sep);
+      if (!parentWithinWorkspace) {
+        throw new Error(
+          `Configured workspace context filename ${JSON.stringify(filename)} ` +
+            `has a parent path that resolves outside the bound workspace ` +
+            `(parent canonicalizes to ${JSON.stringify(parentCanonical)}, ` +
+            `workspace canonicalizes to ${JSON.stringify(wsCanonical)}). ` +
+            `Refusing to write — replace any symlinked parent directory ` +
+            `with a real directory before re-running init.`,
         );
       }
       // #4282 fold-in 2 (gpt-5.5 CV1): the textual `withinWorkspace`
@@ -3936,6 +3980,40 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
  * unbounded data; the operator wants to know which one they hit so
  * the path-mistake is obvious.
  */
+/**
+ * #4282 fold-in 5 (Codex P2-4). Resolve `inputPath` to its real
+ * filesystem path, walking up through directory components that
+ * don't yet exist on disk. Used by `initWorkspace` to make sure
+ * every parent directory of the target file canonicalizes inside
+ * the bound workspace — a symlink at any level (e.g. `docs/QWEN.md`
+ * with `docs -> /tmp`) would otherwise let `writeFile` escape the
+ * workspace boundary.
+ *
+ * The walk-up mirrors what `realpath` would do if it accepted
+ * non-existent terminal segments: the deepest extant ancestor
+ * dictates the canonical prefix, and any not-yet-created components
+ * inherit it. Hitting the filesystem root (`path.dirname(p) === p`)
+ * without finding anything that exists rethrows the underlying
+ * ENOENT — by that point the input was unrooted in a way the
+ * caller's contract can't honor.
+ */
+async function canonicalizeExistingAncestor(
+  inputPath: string,
+): Promise<string> {
+  let current = inputPath;
+  while (true) {
+    try {
+      return await fs.realpath(current);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null | undefined)?.code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      const parent = path.dirname(current);
+      if (parent === current) throw err;
+      current = parent;
+    }
+  }
+}
+
 function describeStatKind(stats: import('node:fs').Stats): string {
   if (stats.isDirectory()) return 'directory';
   if (stats.isSymbolicLink()) return 'symlink';

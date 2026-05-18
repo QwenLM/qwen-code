@@ -91,6 +91,15 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+/**
+ * #4282 fold-in 5 (Codex P2-3). The daemon's `MCP_RESTART_TIMEOUT_MS`
+ * (5 minutes — see `httpAcpBridge.ts`) is the upper bound on a single
+ * MCP rediscovery; the SDK matches that ceiling so a slow but valid
+ * stdio restart isn't aborted client-side while the daemon is still
+ * working. Callers needing a tighter or looser cap pass their own
+ * `timeoutMs` to `restartMcpServer`.
+ */
+const MCP_RESTART_DEFAULT_TIMEOUT_MS = 300_000;
 const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 
 /**
@@ -235,6 +244,7 @@ export class DaemonClient {
     url: string,
     init: RequestInit = {},
     consume?: (res: Response) => Promise<T>,
+    perCallTimeoutMs?: number,
   ): Promise<T> {
     // BRN1o: when `consume` is provided, the timer must remain
     // armed through the entire callback (body read + parse). The
@@ -246,7 +256,22 @@ export class DaemonClient {
     // composed abort signal still flows through to fetch's body
     // stream, so an in-progress `res.json()` rejects cleanly when
     // the timer fires.
-    if (!this.fetchTimeoutMs || !Number.isFinite(this.fetchTimeoutMs)) {
+    //
+    // #4282 fold-in 5 (Codex P2-3): `perCallTimeoutMs` lets a single
+    // call (e.g. `restartMcpServer`, where the daemon waits up to
+    // 300s for MCP rediscovery) override the client-wide default.
+    // A finite positive override wins; non-finite / non-positive
+    // values are coerced to "use the client default" so callers
+    // can pass a derived expression without defending against NaN.
+    let effectiveTimeoutMs = this.fetchTimeoutMs;
+    if (
+      perCallTimeoutMs !== undefined &&
+      Number.isFinite(perCallTimeoutMs) &&
+      perCallTimeoutMs > 0
+    ) {
+      effectiveTimeoutMs = perCallTimeoutMs;
+    }
+    if (!effectiveTimeoutMs || !Number.isFinite(effectiveTimeoutMs)) {
       const res = await this._fetch(url, init);
       if (consume) return consume(res);
       return res as unknown as T;
@@ -263,7 +288,7 @@ export class DaemonClient {
     const ctrl = new AbortController();
     const timer = setTimeout(() => {
       ctrl.abort(new DOMException('The operation timed out', 'TimeoutError'));
-    }, this.fetchTimeoutMs);
+    }, effectiveTimeoutMs);
     if (typeof timer === 'object' && timer && 'unref' in timer) {
       (timer as { unref: () => void }).unref();
     }
@@ -936,11 +961,18 @@ export class DaemonClient {
    * Only hard errors (unknown server name, no live ACP channel)
    * surface as non-2xx.
    *
+   * #4282 fold-in 5 (Codex P2-3): the daemon-side restart waits up to
+   * 5 minutes for stdio MCP discovery; the SDK matches that budget by
+   * default so a slow but valid restart isn't aborted client-side
+   * while the daemon continues working. Callers can pass a custom
+   * `timeoutMs` when their threat model needs a tighter cap, or `0`
+   * to disable the timeout entirely.
+   *
    * Pre-flight `caps.features.workspace_mcp_restart` before calling.
    */
   async restartMcpServer(
     serverName: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; timeoutMs?: number },
   ): Promise<DaemonMcpRestartResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
@@ -961,6 +993,7 @@ export class DaemonClient {
         }
         return (await res.json()) as DaemonMcpRestartResult;
       },
+      opts?.timeoutMs ?? MCP_RESTART_DEFAULT_TIMEOUT_MS,
     );
   }
 

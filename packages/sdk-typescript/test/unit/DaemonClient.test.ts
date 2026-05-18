@@ -1447,6 +1447,72 @@ describe('DaemonClient', () => {
         status: 404,
       });
     });
+
+    it('survives a slow daemon response longer than the client default timeout (#4282 fold-in 5 P2-3)', async () => {
+      // The daemon-side restart waits up to 300s for stdio MCP
+      // discovery. The client-wide `fetchTimeoutMs` defaults to 30s,
+      // so without the per-call override, a valid 60s+ restart would
+      // be aborted client-side while the daemon kept working.
+      // Simulate a 1.2s response with the default 1s `fetchTimeoutMs`
+      // — without the override the call would timeout; with it the
+      // call resolves successfully.
+      let resolveResponse:
+        | ((v: import('undici-types').Response) => void)
+        | undefined;
+      const slowFetch = vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveResponse = resolve as unknown as (v: Response) => void;
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+        fetchTimeoutMs: 1_000,
+      });
+      const inflight = client.restartMcpServer('docs');
+      // Resolve the promise after the client default would have timed
+      // out — proving the per-call override extends the budget.
+      setTimeout(() => {
+        resolveResponse?.(
+          jsonResponse(200, {
+            serverName: 'docs',
+            restarted: true,
+            durationMs: 1200,
+          }) as unknown as import('undici-types').Response,
+        );
+      }, 1_200);
+      await expect(inflight).resolves.toMatchObject({
+        serverName: 'docs',
+        restarted: true,
+      });
+    });
+
+    it('honors a caller-provided `timeoutMs` override (#4282 fold-in 5 P2-3)', async () => {
+      // When the caller sets a tighter cap, the per-call override
+      // wins over the 5-minute default. Verify by passing a 50ms
+      // budget against a slow stub — the call must abort with a
+      // TimeoutError.
+      const slowFetch = vi.fn(
+        () =>
+          new Promise<Response>((_resolve, reject) => {
+            // Never resolve — wait for the caller's timeout to kick in.
+            // The AbortSignal coming through `init.signal` triggers
+            // this rejection so the timer doesn't leak.
+            setTimeout(
+              () => reject(new DOMException('aborted', 'AbortError')),
+              500,
+            );
+          }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: slowFetch as unknown as typeof globalThis.fetch,
+      });
+      await expect(
+        client.restartMcpServer('docs', { timeoutMs: 50 }),
+      ).rejects.toThrow();
+    });
   });
 
   describe('error coercion', () => {
