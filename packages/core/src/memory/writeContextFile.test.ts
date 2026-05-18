@@ -391,4 +391,88 @@ describe('writeWorkspaceContextFile', () => {
       setGeminiMdFilename(DEFAULT_CONTEXT_FILENAME);
     }
   });
+
+  describe('auto scope', () => {
+    beforeEach(() => {
+      // Restore the full filename list (previous tests may have narrowed
+      // it via setGeminiMdFilename, which would skip AGENTS.md).
+      setGeminiMdFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+    });
+
+    it('writes to project QWEN.md when one exists at the project root', async () => {
+      const projectQwenPath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+      await fs.writeFile(projectQwenPath, '# project\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- memory entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.filePath).toBe(projectQwenPath);
+      const written = await fs.readFile(projectQwenPath, 'utf8');
+      expect(written).toContain('- memory entry');
+      // Global dir must not have been touched.
+      const globalPath = path.join(globalDir, DEFAULT_CONTEXT_FILENAME);
+      await expect(fs.access(globalPath)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('writes to project AGENTS.md when that exists instead of QWEN.md', async () => {
+      const agentsPath = path.join(workspace, AGENT_CONTEXT_FILENAME);
+      await fs.writeFile(agentsPath, '# agents\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- agents memory',
+        projectRoot: workspace,
+      });
+
+      expect(result.filePath).toBe(agentsPath);
+      const written = await fs.readFile(agentsPath, 'utf8');
+      expect(written).toContain('- agents memory');
+      // QWEN.md must not be created.
+      await expect(
+        fs.access(path.join(workspace, DEFAULT_CONTEXT_FILENAME)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+
+    it('falls back to global when no project context file exists', async () => {
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- fallback entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.filePath).toBe(
+        path.join(globalDir, DEFAULT_CONTEXT_FILENAME),
+      );
+      expect(getGlobalQwenDirSpy).toHaveBeenCalled();
+      const written = await fs.readFile(result.filePath, 'utf8');
+      expect(written).toBe(MEMORY_SECTION_HEADER + '\n- fallback entry\n');
+    });
+
+    it('prefers QWEN.md over AGENTS.md when both exist (QWEN.md first in filenames list)', async () => {
+      const qwenPath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+      const agentsPath = path.join(workspace, AGENT_CONTEXT_FILENAME);
+      await fs.writeFile(qwenPath, '# qwen\n', 'utf8');
+      await fs.writeFile(agentsPath, '# agents\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- which one?',
+        projectRoot: workspace,
+      });
+
+      // Should prefer QWEN.md since getAllGeminiMdFilenames returns it first.
+      expect(result.filePath).toBe(qwenPath);
+      const qwenContent = await fs.readFile(qwenPath, 'utf8');
+      expect(qwenContent).toContain('- which one?');
+    });
+  });
 });

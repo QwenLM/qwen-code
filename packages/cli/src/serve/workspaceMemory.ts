@@ -116,9 +116,9 @@ export function mountWorkspaceMemoryRoutes(
       const body = deps.safeBody(req);
 
       const scope = body['scope'];
-      if (scope !== 'workspace' && scope !== 'global') {
+      if (scope !== 'workspace' && scope !== 'global' && scope !== 'auto') {
         res.status(400).json({
-          error: '`scope` must be "workspace" or "global"',
+          error: '`scope` must be "workspace", "global", or "auto"',
           code: 'invalid_scope',
         });
         return;

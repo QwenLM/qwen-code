@@ -5,6 +5,7 @@
  */
 
 import { promises as fs } from 'node:fs';
+import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import {
   E_TIMEOUT,
@@ -13,7 +14,11 @@ import {
   type MutexInterface,
 } from 'async-mutex';
 import { Storage } from '../config/storage.js';
-import { getCurrentGeminiMdFilename, MEMORY_SECTION_HEADER } from './const.js';
+import {
+  getCurrentGeminiMdFilename,
+  getAllGeminiMdFilenames,
+  MEMORY_SECTION_HEADER,
+} from './const.js';
 
 /**
  * Per-resolved-file mutex map. Two simultaneous `writeWorkspaceContextFile`
@@ -77,7 +82,7 @@ export class WorkspaceMemoryWriteTimeoutError extends Error {
   }
 }
 
-export type WriteContextFileScope = 'workspace' | 'global';
+export type WriteContextFileScope = 'workspace' | 'global' | 'auto';
 export type WriteContextFileMode = 'append' | 'replace';
 
 export interface WriteContextFileOptions {
@@ -90,8 +95,8 @@ export interface WriteContextFileOptions {
    */
   content: string;
   /**
-   * Absolute path to the workspace root (used when `scope === 'workspace'`).
-   * Ignored for `global` writes.
+   * Absolute path to the workspace root. Required for `'workspace'`
+   * and `'auto'` scopes. Ignored for `'global'` writes.
    */
   projectRoot: string;
 }
@@ -236,6 +241,28 @@ function resolveContextFilePath(
   if (scope === 'workspace') {
     return path.join(projectRoot, filename);
   }
+
+  if (scope === 'auto') {
+    // Issue #359 / PR draft: auto-detect project-level context file.
+    // When any known context filename exists at the project root, write
+    // there; otherwise fall back to the global ~/.qwen/ directory. This
+    // prevents "memory bleed" where project-specific facts written by
+    // `save_memory` leak into unrelated sessions.
+    const candidates = getAllGeminiMdFilenames();
+    for (const candidateName of candidates) {
+      const candidatePath = path.join(projectRoot, candidateName);
+      try {
+        if (fsSync.statSync(candidatePath).isFile()) {
+          return candidatePath;
+        }
+      } catch {
+        // ENOENT — file doesn't exist, try the next candidate.
+      }
+    }
+    // No project-level file found — fall back to global.
+    return path.join(Storage.getGlobalQwenDir(), filename);
+  }
+
   return path.join(Storage.getGlobalQwenDir(), filename);
 }
 
