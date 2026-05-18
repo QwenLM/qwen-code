@@ -4415,10 +4415,10 @@ describe('auth device-flow routes', () => {
   it('GET /workspace/auth/device-flow/:id is strict-gated; GET /workspace/auth/status is read-only', async () => {
     // The two GETs have ASYMMETRIC auth posture by design:
     // - `GET /workspace/auth/device-flow/:id` returns `userCode` for
-    //   pending entries, which is shoulder-surf-able if a peer process
-    //   on the same host can read it. fold-in (round-4 #1) added
-    //   `mutate({strict:true})` to close the info-disclosure
-    //   asymmetry vs. the strict POST/DELETE.
+    //   pending entries (only when caller's clientId matches the
+    //   initiator — see follow-up review thread test below). fold-in
+    //   (round-4 #1) added `mutate({strict:true})` to close the
+    //   info-disclosure asymmetry vs. the strict POST/DELETE.
     // - `GET /workspace/auth/status` intentionally redacts userCode
     //   (lists only deviceFlowId/providerId/expiresAt) so it stays
     //   bearer-only (passthrough on loopback no-token default).
@@ -4433,5 +4433,58 @@ describe('auth device-flow routes', () => {
       .get('/workspace/auth/status')
       .set('Host', `127.0.0.1:${baseOpts.port}`);
     expect(status.status).toBe(200);
+  });
+
+  it('GET /workspace/auth/device-flow/:id only echoes userCode/verificationUri/initiatorClientId to caller matching the initiator', async () => {
+    // PR #4255 follow-up review thread (deepseek-v4-pro): the GET
+    // response shape is symmetrized with the POST take-over response.
+    // An anonymous caller, or a caller identifying as a different
+    // client, only sees the public envelope (status/timestamps/error
+    // fields) — never the verification code or the initiator id.
+    const { app } = buildApp({ token: 'tkn' });
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A')
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    expect(typeof id).toBe('string');
+
+    const matchingCaller = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-A');
+    expect(matchingCaller.status).toBe(200);
+    expect(matchingCaller.body.deviceFlowId).toBe(id);
+    expect(matchingCaller.body.userCode).toBe('USER-1');
+    expect(matchingCaller.body.verificationUri).toBe(
+      'https://idp.example/verify',
+    );
+    expect(matchingCaller.body.initiatorClientId).toBe('sdk-A');
+
+    const anonymousCaller = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(anonymousCaller.status).toBe(200);
+    expect(anonymousCaller.body.deviceFlowId).toBe(id);
+    expect(anonymousCaller.body).not.toHaveProperty('userCode');
+    expect(anonymousCaller.body).not.toHaveProperty('verificationUri');
+    expect(anonymousCaller.body).not.toHaveProperty('verificationUriComplete');
+    expect(anonymousCaller.body).not.toHaveProperty('initiatorClientId');
+
+    const differentCaller = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-B');
+    expect(differentCaller.status).toBe(200);
+    expect(differentCaller.body.deviceFlowId).toBe(id);
+    expect(differentCaller.body).not.toHaveProperty('userCode');
+    expect(differentCaller.body).not.toHaveProperty('verificationUri');
+    expect(differentCaller.body).not.toHaveProperty('verificationUriComplete');
+    expect(differentCaller.body).not.toHaveProperty('initiatorClientId');
   });
 });

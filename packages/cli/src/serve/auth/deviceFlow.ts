@@ -51,6 +51,21 @@ export const DEVICE_FLOW_PERSIST_TIMEOUT_MS = 30_000;
  */
 export const DEVICE_FLOW_START_TIMEOUT_MS = 30_000;
 /**
+ * Hard ceiling on a single `provider.poll()` tick. Symmetric with
+ * `DEVICE_FLOW_START_TIMEOUT_MS` and `DEVICE_FLOW_PERSIST_TIMEOUT_MS`,
+ * which already bound their respective phases. PR #4255 follow-up
+ * review thread (deepseek-v4-pro): a hung IdP token endpoint (TCP
+ * established, no response) without this would block the registry's
+ * poll-tick promise indefinitely. The entry's `cancelController.signal`
+ * is the cooperative path; this race makes the timeout authoritative
+ * regardless of provider cooperation. The sweeper would still evict
+ * the entry once `expiresAt` is past, but until then the per-provider
+ * singleton stays occupied with no other recovery short of daemon
+ * restart. 30s is the same generosity the start/persist phases use
+ * and is well over a healthy IdP's polling round-trip.
+ */
+export const DEVICE_FLOW_POLL_TIMEOUT_MS = 30_000;
+/**
  * Operator-safe upper bound on the IdP-provided `expires_in`. RFC
  * 8628 §6.1 calls 5–30 minutes "reasonable"; 1 hour is the practical
  * ceiling for any well-behaved IdP. PR #4255 fold-in 7 review thread
@@ -916,7 +931,15 @@ export class DeviceFlowRegistry {
       // `originatorClientId` was always `entry.initiatorClientId`,
       // which broke any SSE consumer that suppresses self-emitted
       // events to avoid double-handling.
-      if (cancellerClientId) {
+      // PR #4255 follow-up review thread (deepseek-v4-pro): first-writer-
+      // wins. Two SDK clients racing `cancel()` on the same persist-in-
+      // flight entry must NOT silently overwrite attribution — the second
+      // caller's `cancel()` is functionally a no-op (the entry is already
+      // marked `cancelRequestedDuringPersist`), so the persist-resolution
+      // event should be attributed to whoever actually drove the
+      // transition first. Subsequent callers stay in the audit trail
+      // through their own `audit.record(...)` line below.
+      if (cancellerClientId && entry.cancellerClientId === undefined) {
         entry.cancellerClientId = cancellerClientId;
       }
       try {
@@ -1011,14 +1034,36 @@ export class DeviceFlowRegistry {
     entry.lastPolledAt = now;
     let result: DeviceFlowPollResult;
     let rawProviderError: string | undefined;
+    // PR #4255 follow-up review thread (deepseek-v4-pro): bound
+    // `provider.poll()` with the same `Promise.race` shape used by
+    // `doStart` / persist. The cooperative `entry.cancelController.signal`
+    // path covers well-behaved providers; this race makes the timeout
+    // authoritative even when a provider ignores `signal`. A hung IdP
+    // token endpoint without this would otherwise block the poll-tick
+    // promise indefinitely (occupying the per-provider singleton until
+    // sweeper / daemon restart). The rejecting timer aborts the signal
+    // first so cooperative providers can still tear down cleanly.
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
     try {
-      result = await provider.poll(
-        {
-          deviceCode: entry.deviceCode,
-          pkceVerifier: entry.pkceVerifier,
-        },
-        { signal: entry.cancelController.signal },
-      );
+      result = await new Promise<DeviceFlowPollResult>((resolve, reject) => {
+        pollTimer = this.schedule(DEVICE_FLOW_POLL_TIMEOUT_MS, () => {
+          try {
+            entry.cancelController.abort(new Error('device-flow poll timeout'));
+          } catch {
+            // best-effort
+          }
+          reject(new Error('device-flow poll timeout'));
+        });
+        provider
+          .poll(
+            {
+              deviceCode: entry.deviceCode!,
+              pkceVerifier: entry.pkceVerifier,
+            },
+            { signal: entry.cancelController.signal },
+          )
+          .then(resolve, reject);
+      });
     } catch (err: unknown) {
       // PR #4255 fold-in 9 review thread #1 (refines fold-in 8 #1):
       // a non-conforming provider that violates the `@remarks`
@@ -1037,6 +1082,8 @@ export class DeviceFlowRegistry {
         errorKind: 'upstream_error',
         hint: 'provider.poll() failed; see daemon audit log for details',
       };
+    } finally {
+      if (pollTimer !== undefined) this.clearScheduled(pollTimer);
     }
     // PR #4255 round-12 #1 (gpt-5.5 review CzSpN): also re-check
     // `this.disposed` after the await. `dispose()` clears

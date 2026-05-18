@@ -736,7 +736,9 @@ export function createServeApp(
         });
         return;
       }
-      res.status(200).json(toDeviceFlowStateBody(view));
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      res.status(200).json(toDeviceFlowStateBody(view, clientId));
     },
   );
 
@@ -1763,6 +1765,7 @@ function toDeviceFlowStartResponseBody(
 
 function toDeviceFlowStateBody(
   view: DeviceFlowPublicView,
+  callerClientId?: string,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     deviceFlowId: view.deviceFlowId,
@@ -1772,15 +1775,29 @@ function toDeviceFlowStateBody(
   };
   if (view.errorKind) body['errorKind'] = view.errorKind;
   if (view.hint) body['hint'] = view.hint;
-  if (view.userCode) body['userCode'] = view.userCode;
-  if (view.verificationUri) body['verificationUri'] = view.verificationUri;
-  if (view.verificationUriComplete) {
-    body['verificationUriComplete'] = view.verificationUriComplete;
-  }
   if (view.expiresAt !== undefined) body['expiresAt'] = view.expiresAt;
   if (view.intervalMs !== undefined) body['intervalMs'] = view.intervalMs;
   if (view.lastPolledAt !== undefined) body['lastPolledAt'] = view.lastPolledAt;
-  if (view.initiatorClientId) {
+  // PR #4255 follow-up review thread (deepseek-v4-pro): symmetrize with
+  // the POST take-over response shape — only echo `userCode` /
+  // `verificationUri` / `verificationUriComplete` / `initiatorClientId`
+  // back to the original starter (matched by `X-Qwen-Client-Id`). An
+  // anonymous GET caller, or a caller identifying as a different client,
+  // sees only the public envelope (`status` / `errorKind` / `hint` /
+  // timestamps). Bearer-token gated already (the route uses
+  // `mutate({ strict: true })`), so the blast radius was small, but
+  // multi-client setups sharing a single daemon token could otherwise
+  // enumerate other clients' verification codes.
+  const callerIsInitiator =
+    view.initiatorClientId !== undefined &&
+    callerClientId !== undefined &&
+    callerClientId === view.initiatorClientId;
+  if (callerIsInitiator) {
+    if (view.userCode) body['userCode'] = view.userCode;
+    if (view.verificationUri) body['verificationUri'] = view.verificationUri;
+    if (view.verificationUriComplete) {
+      body['verificationUriComplete'] = view.verificationUriComplete;
+    }
     body['initiatorClientId'] = view.initiatorClientId;
   }
   return body;

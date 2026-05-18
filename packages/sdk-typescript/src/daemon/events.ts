@@ -199,6 +199,16 @@ export type DaemonAuthDeviceFlowErrorKind =
    *  exchange succeeded but the daemon couldn't durably store credentials
    *  (EACCES, EROFS, ENOSPC, etc.). Distinct from `upstream_error`. */
   | 'persist_failed'
+  /** SDK-synthesized when the daemon's GET returns 404 inside
+   *  `DaemonAuthFlow.awaitCompletion`. Surfaced from `getDeviceFlowOrSynthetic404`
+   *  rather than the daemon — three reachable causes: (a) the flow expired
+   *  past the 5-min terminal grace window and the sweeper reaped it, (b) the
+   *  daemon was restarted and lost the in-memory registry, (c) the
+   *  `deviceFlowId` was wrong / spoofed. PR #4255 follow-up review thread
+   *  (deepseek-v4-pro): added to the typed union so SDK consumers' exhaustive
+   *  switches narrow it as a known literal instead of falling into the
+   *  `(string & {})` fallback arm. */
+  | 'not_found_or_evicted'
   | (string & {});
 
 export interface DaemonAuthDeviceFlowStartedData {

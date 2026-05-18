@@ -16,6 +16,7 @@ import {
   DEVICE_FLOW_MAX_EXPIRES_IN_SEC,
   DEVICE_FLOW_MAX_INTERVAL_MS,
   DEVICE_FLOW_PERSIST_TIMEOUT_MS,
+  DEVICE_FLOW_POLL_TIMEOUT_MS,
   DEVICE_FLOW_SLOW_DOWN_BUMP_MS,
   DEVICE_FLOW_START_TIMEOUT_MS,
   DEVICE_FLOW_TERMINAL_GRACE_MS,
@@ -122,6 +123,13 @@ class FakeProvider implements DeviceFlowProvider {
    *  `DeviceFlowProvider.poll()` `@remarks` sanitization contract by
    *  throwing raw IdP detail. PR #4255 fold-in 8 #1. */
   pollThrowsWith: Error | undefined;
+  /** Test hook: when `true`, `poll()` returns a Promise that NEVER
+   *  resolves and ignores the supplied `signal`. Models a misbehaving
+   *  provider whose underlying I/O isn't abortable — registry's
+   *  authoritative `Promise.race` against `DEVICE_FLOW_POLL_TIMEOUT_MS`
+   *  is the only thing that can rescue the await. PR #4255 follow-up
+   *  review thread (deepseek-v4-pro). */
+  pollHangs = false;
   /** Most recent `opts.signal` observed by `poll`. Test hook for the
    *  abort-mid-poll assertion: after `registry.cancel(...)`, this
    *  signal MUST report `.aborted === true` so the upstream HTTP
@@ -167,6 +175,12 @@ class FakeProvider implements DeviceFlowProvider {
       const err = this.pollThrowsWith;
       this.pollThrowsWith = undefined;
       throw err;
+    }
+    if (this.pollHangs) {
+      // Never resolves, ignores `signal`. Registry's Promise.race
+      // timeout is the only path out.
+      await new Promise<never>(() => {});
+      throw new Error('unreachable');
     }
     if (opts.signal.aborted) return { kind: 'pending' };
     if (this.pollScript.length === 0) {
@@ -667,6 +681,59 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
     }
   });
 
+  it('poll() that hangs past POLL_TIMEOUT_MS surfaces as upstream_error and aborts the entry signal (follow-up review)', async () => {
+    // PR #4255 follow-up review thread (deepseek-v4-pro): runPollTick
+    // now races provider.poll() against DEVICE_FLOW_POLL_TIMEOUT_MS so
+    // a non-abortable provider can no longer pin the per-providerId
+    // singleton waiting for sweeper-level expiry. Aborts the signal
+    // first so cooperative providers tear down cleanly; reject
+    // surfaces in the catch as the bounded `upstream_error` hint.
+    const provider = new FakeProvider();
+    provider.pollHangs = true;
+    const built = buildRegistry(provider);
+    const { registry, env, events, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      // Trigger the first poll tick.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      // Let runPollTick reach the await.
+      await flushAsync();
+      expect(provider.pollCount).toBe(1);
+      // Race timer hasn't fired yet — entry is still pending.
+      expect(registry.get(view.deviceFlowId)?.status).toBe('pending');
+      // Advance clock past POLL_TIMEOUT_MS; race timer fires, aborts
+      // the entry signal, and rejects the wrapper promise.
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Signal must be aborted so cooperative providers can abandon
+      // their in-flight fetch.
+      expect(provider.lastPollSignal?.aborted).toBe(true);
+      // The catch block surfaces a bounded upstream_error to SSE.
+      const failed = events.find(
+        (e) =>
+          e.emission.type === 'failed' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(failed).toBeDefined();
+      if (failed && failed.emission.type === 'failed') {
+        expect(failed.emission.data.errorKind).toBe('upstream_error');
+        expect(failed.emission.data.hint).toContain(
+          'see daemon audit log for details',
+        );
+      }
+      // Audit captures the raw timeout error for the operator.
+      const auditFailure = auditLines.find(
+        (line) =>
+          line['status'] === 'failed' && line['errorKind'] === 'upstream_error',
+      );
+      expect(auditFailure).toBeDefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('persist() that hangs past PERSIST_TIMEOUT_MS maps to persist_failed (#2)', async () => {
     const provider = new FakeProvider();
     // Single poll tick returns success whose persist() never resolves.
@@ -935,6 +1002,63 @@ describe('DeviceFlowRegistry — persist failure paths (fold-in 10 #1)', () => {
             e.emission.data.errorKind === 'persist_failed',
         ),
       ).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('cancellerClientId is first-writer-wins across concurrent cancel() calls during persist', async () => {
+    // PR #4255 follow-up review thread (deepseek-v4-pro): two SDK
+    // clients racing `cancel()` on the same persist-in-flight entry
+    // must NOT silently overwrite attribution. The first cancel that
+    // observes `persistInFlight` is the one that drove the transition;
+    // the persist-resolution event should be attributed to it. The
+    // second cancel is functionally a no-op on the entry (it's already
+    // marked `cancelRequestedDuringPersist`); its caller still appears
+    // in the audit trail through the `audit.record(...)` path but
+    // does not overwrite the SSE event's `originatorClientId`.
+    const provider = new FakeProvider();
+    let rejectPersist!: (err: Error) => void;
+    const persistPromise = new Promise<{ expiresAt?: number }>(
+      (_resolve, reject) => {
+        rejectPersist = reject;
+      },
+    );
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: () => persistPromise,
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // First canceller wins.
+      const first = registry.cancel(view.deviceFlowId, 'sdk-A');
+      expect(first).toEqual({ alreadyTerminal: false });
+      // Second canceller observes `persistInFlight` already set; the
+      // entry is still marked `cancelRequestedDuringPersist`. Its id
+      // MUST NOT overwrite the first-writer's attribution.
+      const second = registry.cancel(view.deviceFlowId, 'sdk-B');
+      expect(second).toEqual({ alreadyTerminal: false });
+      // Persist now fails — the registry emits `cancelled` with
+      // `originatorClientId = entry.cancellerClientId` (sdk-A).
+      rejectPersist(new Error('aborted: cancel during persist'));
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('cancelled');
+      const cancelledEvent = events.find(
+        (e) =>
+          e.emission.type === 'cancelled' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(cancelledEvent).toBeDefined();
+      // First-writer-wins: sdk-A drove the transition.
+      expect(cancelledEvent?.clientId).toBe('sdk-A');
     } finally {
       registry.dispose();
     }

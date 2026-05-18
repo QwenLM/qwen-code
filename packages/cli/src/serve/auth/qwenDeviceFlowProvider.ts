@@ -199,6 +199,19 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
         err instanceof QwenOAuthPollError
           ? mapRfc8628OAuthCode(err.oauthError)
           : 'upstream_error';
+      // PR #4255 follow-up review thread (deepseek-v4-pro): mirror the
+      // `start()` path's stderr audit — `poll()` failures (non-RFC-8628,
+      // non-`authorization_pending` / `slow_down` throws like JSON
+      // parse errors, WAF HTML, proxy 503) previously had no operator
+      // breadcrumb; SSE/HTTP only carried the static `upstream_error`
+      // hint. Without raw detail in stderr the on-call has no way to
+      // distinguish WAF block from network reset from malformed JSON
+      // at 3 AM. The truncator caps the kept prefix below container
+      // log-aggregator per-line limits.
+      const detail = err instanceof Error ? err.message : String(err);
+      writeStderrLine(
+        `[serve] qwen device-flow poll failed (raw, errorKind=${errorKind}): ${truncateForStderr(detail)}`,
+      );
       return {
         kind: 'error',
         errorKind,
