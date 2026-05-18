@@ -2914,11 +2914,9 @@ describe('Windows installer end-to-end', () => {
         const curlUrls = readScript(curlLog);
         expect(curlUrls).toContain('/releases/qwen-code/latest/VERSION');
         expect(curlUrls).toContain(
-          '/releases/qwen-code/v0.0.0-smoke/qwen-code-win-x64.zip',
+          '/releases/qwen-code/v0.0.0/qwen-code-win-x64.zip',
         );
-        expect(curlUrls).toContain(
-          '/releases/qwen-code/v0.0.0-smoke/SHA256SUMS',
-        );
+        expect(curlUrls).toContain('/releases/qwen-code/v0.0.0/SHA256SUMS');
         expect(curlUrls).not.toContain(
           '/releases/qwen-code/latest/qwen-code-win-x64.zip',
         );
@@ -3339,14 +3337,14 @@ function createFakeWindowsCurlCommand(fakeBin) {
       'if "!url!"=="" echo missing url or destination 1>&2 & exit /b 2',
       'if "!destination!"=="" echo missing url or destination 1>&2 & exit /b 2',
       'echo(!url! | findstr /I /C:"/releases/qwen-code/latest/VERSION" >nul && (',
-      '  > "!destination!" echo 0.0.0-smoke',
+      '  > "!destination!" echo 0.0.0',
       '  exit /b 0',
       ')',
-      'echo(!url! | findstr /I /C:"/releases/qwen-code/v0.0.0-smoke/qwen-code-win-x64.zip" >nul && (',
+      'echo(!url! | findstr /I /C:"/releases/qwen-code/v0.0.0/qwen-code-win-x64.zip" >nul && (',
       '  copy /Y "%QWEN_FAKE_ARCHIVE%" "!destination!" >nul',
       '  exit /b 0',
       ')',
-      'echo(!url! | findstr /I /C:"/releases/qwen-code/v0.0.0-smoke/SHA256SUMS" >nul && (',
+      'echo(!url! | findstr /I /C:"/releases/qwen-code/v0.0.0/SHA256SUMS" >nul && (',
       '  copy /Y "%QWEN_FAKE_SHA256SUMS%" "!destination!" >nul',
       '  exit /b 0',
       ')',
