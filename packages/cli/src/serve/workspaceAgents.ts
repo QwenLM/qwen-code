@@ -228,7 +228,7 @@ export function mountWorkspaceAgentsRoutes(
         // a proper rollback policy on top once mutation auditing
         // arrives.
         writeStderrLine(
-          `qwen serve: agent_create_reload_failed (name="${config.name}" ` +
+          `qwen serve: agent_create_reload_failed (name=${safeLogValue(config.name)} ` +
             `level=${level}) — file likely persisted on disk; check ` +
             `\`GET /workspace/agents\` for a phantom entry`,
         );
@@ -265,7 +265,7 @@ export function mountWorkspaceAgentsRoutes(
       res.status(200).json(toDetail(config));
     } catch (err) {
       writeStderrLine(
-        `qwen serve: GET /workspace/agents/${agentType} failed: ${
+        `qwen serve: GET /workspace/agents/${safeLogValue(agentType)} failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
         }`,
       );
@@ -374,7 +374,7 @@ export function mountWorkspaceAgentsRoutes(
           }
         }
         writeStderrLine(
-          `qwen serve: POST /workspace/agents/${agentType} failed: ${
+          `qwen serve: POST /workspace/agents/${safeLogValue(agentType)} failed: ${
             err instanceof Error ? (err.stack ?? err.message) : String(err)
           }`,
         );
@@ -393,9 +393,9 @@ export function mountWorkspaceAgentsRoutes(
         // change with the failed POST. The file is in its updated
         // state on disk; subsequent reads will pick it up.
         writeStderrLine(
-          `qwen serve: agent_update_reload_failed (name="${agentType}" ` +
+          `qwen serve: agent_update_reload_failed (name=${safeLogValue(agentType)} ` +
             `level=${existing.level}) — disk write completed; check ` +
-            `\`GET /workspace/agents/${agentType}\` for the new state`,
+            `\`GET /workspace/agents/${safeLogValue(agentType)}\` for the new state`,
         );
         res.status(500).json({
           error: 'Agent update succeeded but reload failed',
@@ -471,7 +471,7 @@ export function mountWorkspaceAgentsRoutes(
           }
         }
         writeStderrLine(
-          `qwen serve: DELETE /workspace/agents/${agentType} failed: ${
+          `qwen serve: DELETE /workspace/agents/${safeLogValue(agentType)} failed: ${
             err instanceof Error ? (err.stack ?? err.message) : String(err)
           }`,
         );
@@ -516,7 +516,7 @@ export function mountWorkspaceAgentsRoutes(
 
       if (remaining.length > 0) {
         writeStderrLine(
-          `qwen serve: DELETE /workspace/agents/${agentType} partial — ` +
+          `qwen serve: DELETE /workspace/agents/${safeLogValue(agentType)} partial — ` +
             `removed=${removed.map((r) => r.level).join(',') || 'none'} ` +
             `remaining=${remaining
               .map((r) => `${r.level}:${r.filePath}`)
@@ -590,6 +590,23 @@ export function mountWorkspaceAgentsRoutes(
       res.status(204).end();
     },
   );
+}
+
+/**
+ * Wrap a string value for safe interpolation into stderr log lines.
+ * `JSON.stringify` escapes control characters (`\n`, `\r`, etc.) and
+ * wraps the result in quotes so any injection attempt surfaces as
+ * visible-as-quoted-noise rather than a forged log line. Mirrors
+ * `safeLogValue` in `server.ts` (kept private there); we copy the
+ * 82-byte truncation budget so attacker-controlled long names can't
+ * blow up the operator's log shipper. Defense-in-depth — the
+ * route's `validateAgentType` regex already rejects names with
+ * control chars, but escaping also covers `agentType` derived from
+ * sources we don't fully control (legacy on-disk shadows, future
+ * routes adding new fields).
+ */
+function safeLogValue(raw: unknown): string {
+  return JSON.stringify(String(raw)).slice(0, 82);
 }
 
 /**

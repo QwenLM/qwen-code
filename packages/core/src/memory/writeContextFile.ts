@@ -231,13 +231,17 @@ async function composeAppendedContent(
   // necessarily at the end of the file. Without this guard, a file
   // whose `## Qwen Added Memories` block is followed by another
   // `## ...` heading would land each new entry past the next heading
-  // — silently moving entries into the wrong section. Find the next
-  // top-level (`\n## `) heading after the memory header; if present,
-  // insert just before it. If absent (memory section is last in the
-  // file), keep the previous behavior of appending to EOF.
+  // — silently moving entries into the wrong section.
+  //
+  // The naive `indexOf('\n## ')` scan, however, can match `## ` lines
+  // INSIDE fenced code blocks (` ``` `) — common in user-authored
+  // QWEN.md memory entries that quote API documentation containing
+  // markdown headings. Track fence state while scanning and only
+  // accept matches outside fences. If no real heading is found
+  // (memory section is the last block), keep the previous behavior
+  // of appending to EOF.
   const afterHeaderIdx = sectionIdx + MEMORY_SECTION_HEADER.length;
-  const tail = existing.slice(afterHeaderIdx);
-  const nextHeaderRel = tail.indexOf('\n## ');
+  const nextHeaderRel = findNextTopLevelHeading(existing, afterHeaderIdx);
   if (nextHeaderRel === -1) {
     const sep = existing.endsWith('\n') ? '' : '\n';
     return `${existing}${sep}${trimmed}\n`;
@@ -247,6 +251,43 @@ async function composeAppendedContent(
   const after = existing.slice(insertAt);
   const sep = before.endsWith('\n') ? '' : '\n';
   return `${before}${sep}${trimmed}\n${after}`;
+}
+
+/**
+ * Find the byte offset of the next `\n## ` heading in `text` starting
+ * at position `start`, skipping any matches that fall inside a fenced
+ * code block (lines opening with ``` ``` `` `). Returns the offset
+ * RELATIVE TO `start` (so callers can do `start + result`), or `-1`
+ * when no real heading is found.
+ *
+ * The fence detector is line-based: a line whose first three
+ * characters are ``` ``` `` ` toggles fence state. Doesn't model
+ * indented code blocks (4+ leading spaces) — `## ` inside an
+ * indented code block is rare enough not to justify the parser
+ * complexity, and a misclassification only causes us to fall back
+ * to EOF-append, which is the legacy behavior.
+ */
+function findNextTopLevelHeading(text: string, start: number): number {
+  let inFence = false;
+  let lineStart = start;
+  for (let i = start; i < text.length; i++) {
+    if (text.charCodeAt(i) !== 0x0a /* \n */) continue;
+    const nextLineStart = i + 1;
+    // Toggle fence state if the JUST-FINISHED line opens/closes a
+    // fence. Strict prefix check — leading whitespace is intentional
+    // because a 4-space-indented "```" is markdown code-block content,
+    // not a fence marker.
+    if (text.startsWith('```', lineStart)) {
+      inFence = !inFence;
+    }
+    // Heading match runs against the boundary `\n## ` (the four chars
+    // starting at the newline we just observed). Skip when in fence.
+    if (!inFence && text.startsWith('## ', nextLineStart)) {
+      return i - start; // relative offset of the `\n` separator
+    }
+    lineStart = nextLineStart;
+  }
+  return -1;
 }
 
 function isEnoent(err: unknown): boolean {

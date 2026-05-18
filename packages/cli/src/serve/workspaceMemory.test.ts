@@ -355,6 +355,51 @@ describe('workspace memory routes', () => {
       expect(events).toHaveLength(0);
     });
 
+    it('omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on', async () => {
+      // Default: production response carries no `errorMessage` or
+      // `filePath` fields — operators read the daemon stderr log
+      // for the path. Setting QWEN_SERVE_DEBUG=1 enables both.
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+
+      // Force a 500 by making the workspace QWEN.md unwritable. We
+      // chmod the WORKSPACE directory (not the file) so `mkdir` and
+      // `writeFile` will fail with EACCES.
+      const before = await fs.stat(workspace);
+      await fs.chmod(workspace, 0o555);
+      const prevDebug = process.env['QWEN_SERVE_DEBUG'];
+      try {
+        delete process.env['QWEN_SERVE_DEBUG'];
+        const res = await request(app).post('/workspace/memory').send({
+          scope: 'workspace',
+          mode: 'append',
+          content: '- entry',
+        });
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('file_error');
+        expect(res.body.scope).toBe('workspace');
+        expect(res.body.mode).toBe('append');
+        // Default response: no errorMessage, no filePath.
+        expect(res.body.errorMessage).toBeUndefined();
+        expect(res.body.filePath).toBeUndefined();
+
+        // Toggle debug back on; the same payload now carries the
+        // detail.
+        process.env['QWEN_SERVE_DEBUG'] = '1';
+        const debugRes = await request(app).post('/workspace/memory').send({
+          scope: 'workspace',
+          mode: 'append',
+          content: '- entry',
+        });
+        expect(debugRes.status).toBe(500);
+        expect(typeof debugRes.body.errorMessage).toBe('string');
+      } finally {
+        if (prevDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
+        else process.env['QWEN_SERVE_DEBUG'] = prevDebug;
+        await fs.chmod(workspace, before.mode);
+      }
+    });
+
     it('returns 500 memory_discovery_failed when GET helper throws unexpectedly', async () => {
       const bridge = buildBridgeStub();
       const app = buildApp({ bridge, boundWorkspace: workspace });

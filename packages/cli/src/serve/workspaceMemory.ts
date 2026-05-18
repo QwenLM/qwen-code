@@ -76,6 +76,22 @@ export interface WorkspaceMemoryRouteDeps {
 
 const MAX_MEMORY_CONTENT_BYTES = 1024 * 1024;
 
+/**
+ * Mirrors `isServeDebugLoggingEnabled` in `httpAcpBridge.ts`. When the
+ * env var is set (and not a falsy literal), error responses include
+ * `errorMessage` + `filePath` for triage; without it those fields
+ * are omitted to avoid leaking absolute filesystem paths in the
+ * response body. Inlined rather than exported across files because
+ * the helper is two lines and the bridge module is the local owner
+ * of the env-var contract — copying the predicate keeps the route
+ * self-contained at trivial duplication cost.
+ */
+function debugMode(): boolean {
+  const value = process.env['QWEN_SERVE_DEBUG'];
+  if (!value) return false;
+  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
+}
+
 /** Mount the two memory routes on the supplied Express app. */
 export function mountWorkspaceMemoryRoutes(
   app: Application,
@@ -222,12 +238,18 @@ export function mountWorkspaceMemoryRoutes(
             `qwen serve: POST /workspace/memory refused — existing file ` +
               `${err.filePath} is ${err.bytes} bytes (cap ${err.limit})`,
           );
+          // Path disclosure: `filePath` is gated behind QWEN_SERVE_DEBUG
+          // so production responses don't include `/Users/<x>/.qwen/...`
+          // in the body. Operators triaging an issue locally enable the
+          // debug toggle to get the path back; in default mode SDK
+          // callers branch on `code` + `bytes` / `limit` instead.
+          const debug = debugMode();
           res.status(413).json({
             error: err.message,
             code: 'memory_file_too_large',
             scope,
             mode,
-            filePath: err.filePath,
+            ...(debug ? { filePath: err.filePath } : {}),
             bytes: err.bytes,
             limit: err.limit,
           });
@@ -238,25 +260,31 @@ export function mountWorkspaceMemoryRoutes(
             err instanceof Error ? (err.stack ?? err.message) : String(err)
           }`,
         );
-        // Surface enough context for callers to debug without
-        // leaking the stack trace. Operating-system error codes
-        // (`EACCES`, `EROFS`, `EDQUOT`, `ENOSPC`, …) are propagated
-        // as `osCode` so SDK clients can branch — e.g. distinguish
-        // "permissions" from "disk full" without parsing a free-form
-        // message. The `errorMessage` is the bridge's `err.message`
-        // (no stack), matching the redaction posture of
-        // `errorPayload` in server.ts.
+        // Surface enough context for callers to debug without leaking
+        // absolute paths in the response body. `osCode` (`EACCES` /
+        // `EROFS` / `EDQUOT` / `ENOSPC` / ...) stays unconditional so
+        // SDK clients can branch on the failure class. The full
+        // `errorMessage` (which often embeds the file path on Node's
+        // ENOENT/EACCES messages) is gated behind `QWEN_SERVE_DEBUG`.
+        // Without the debug toggle, callers see only the generic
+        // `error` + `code` + `osCode` envelope; the daemon's stderr
+        // log has the full message for the operator.
         const osCode =
           err && typeof err === 'object' && 'code' in err
             ? (err as { code?: unknown }).code
             : undefined;
+        const debug = debugMode();
         res.status(500).json({
           error: 'Failed to write workspace memory',
           code: 'file_error',
           scope,
           mode,
           ...(typeof osCode === 'string' ? { osCode } : {}),
-          errorMessage: err instanceof Error ? err.message : String(err),
+          ...(debug
+            ? {
+                errorMessage: err instanceof Error ? err.message : String(err),
+              }
+            : {}),
         });
       }
     },
@@ -347,62 +375,46 @@ async function collectWorkspaceMemoryStatus(
   return result;
 }
 
+/**
+ * Stat each known memory filename (`QWEN.md`, `AGENTS.md`) at the
+ * bound workspace root and return the matches. v1 does not walk
+ * parent directories — that's reserved for PR 16.5's hierarchical
+ * mode, which will replace this helper with a real upward walk
+ * (originally drafted in this file but removed at glm-5.1's review
+ * because the loop body was reachable only on its first iteration
+ * via `if (cursor === start) break`, making the cap and `seen` set
+ * dead code that confused reviewers). When PR 16.5 lifts the cap,
+ * the new implementation lands as a fresh upward walk rather than
+ * "uncomment lines".
+ */
 async function walkWorkspaceForMemory(
   start: string,
   filenames: ReadonlySet<string>,
   errors: NonNullable<ServeWorkspaceMemoryStatus['errors']>,
 ): Promise<DiscoveredFile[]> {
   const out: DiscoveredFile[] = [];
-  const seen = new Set<string>();
-  let cursor = start;
-  // Cap at 12 levels. Realistic project depth (mono-repo nesting +
-  // worktree + .qwen) sits well below 8; 12 leaves headroom without
-  // amplifying blast radius from symlink cycles or pathological
-  // mounts. Today the loop exits after the first iteration anyway
-  // (single-cursor workspace-root discovery — see the
-  // `if (cursor === start) break` below); the cap is the safety
-  // ceiling for the future hierarchical mode reserved at #4175 PR
-  // 16.5.
-  for (let i = 0; i < 12; i++) {
-    if (seen.has(cursor)) break;
-    seen.add(cursor);
-
-    for (const filename of filenames) {
-      const candidate = path.join(cursor, filename);
-      try {
-        const stat = await fs.stat(candidate);
-        if (stat.isFile()) {
-          out.push({
-            absolutePath: candidate,
-            scope: 'workspace',
-            bytes: stat.size,
-          });
-        }
-      } catch (err) {
-        if (!isEnoent(err)) {
-          errors.push({
-            kind: 'memory_file',
-            status: 'error',
-            error: err instanceof Error ? err.message : String(err),
-            errorKind: 'stat_failed',
-            hint: candidate,
-          });
-        }
+  for (const filename of filenames) {
+    const candidate = path.join(start, filename);
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isFile()) {
+        out.push({
+          absolutePath: candidate,
+          scope: 'workspace',
+          bytes: stat.size,
+        });
+      }
+    } catch (err) {
+      if (!isEnoent(err)) {
+        errors.push({
+          kind: 'memory_file',
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+          errorKind: 'stat_failed',
+          hint: candidate,
+        });
       }
     }
-
-    // Stop at the workspace root (we don't escape the bound workspace
-    // for v1) or at the filesystem root.
-    const parent = path.dirname(cursor);
-    if (parent === cursor) break;
-    if (cursor === start) {
-      // For workspace-only discovery, stop after the bound workspace
-      // itself. Hierarchical parent-walk is intentionally deferred —
-      // it complicates "scope=workspace" semantics without obvious
-      // payoff for the daemon's bounded-workspace contract.
-      break;
-    }
-    cursor = parent;
   }
   return out;
 }

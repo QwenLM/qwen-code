@@ -249,6 +249,75 @@ describe('writeWorkspaceContextFile', () => {
     expect(secondIdx).toBeLessThan(postSection);
   });
 
+  it('does not split a memory entry that contains `## ` inside a fenced code block', async () => {
+    // Round-7 [Critical] glm-5.1: the `\n## ` boundary heuristic was
+    // matching `## ` lines INSIDE user-authored fenced code blocks
+    // (common in QWEN.md memory entries that quote API docs with
+    // markdown headings). The old impl would insert the new entry
+    // mid-fence, splitting the existing entry. Code-fence-aware
+    // detection skips matches inside ``` ``` `` ` blocks.
+    const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+    const fencedEntry = [
+      `${MEMORY_SECTION_HEADER}`,
+      '- API example:',
+      '```markdown',
+      '## Request Body',
+      'POST /api/thing',
+      '```',
+      '',
+    ].join('\n');
+    await fs.writeFile(filePath, fencedEntry, 'utf8');
+
+    await writeWorkspaceContextFile({
+      scope: 'workspace',
+      mode: 'append',
+      content: '- next entry',
+      projectRoot: workspace,
+    });
+
+    const written = await fs.readFile(filePath, 'utf8');
+    // The new entry must land AFTER the fence, not inside it.
+    const fenceClose = written.lastIndexOf('```');
+    const newEntry = written.indexOf('- next entry');
+    expect(newEntry).toBeGreaterThan(fenceClose);
+    // The fenced `## Request Body` must still be intact (no insert
+    // before / inside the code block).
+    expect(written).toContain(
+      '```markdown\n## Request Body\nPOST /api/thing\n```',
+    );
+  });
+
+  it('still respects real `## ` headings outside code fences', async () => {
+    const filePath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+    // Memory section, then a fenced `## ` (must be skipped), then a
+    // real `## post` heading (must be honored as the boundary).
+    const initial = [
+      `${MEMORY_SECTION_HEADER}`,
+      '- existing',
+      '```',
+      '## fake heading inside fence',
+      '```',
+      '',
+      '## post',
+      'tail',
+      '',
+    ].join('\n');
+    await fs.writeFile(filePath, initial, 'utf8');
+
+    await writeWorkspaceContextFile({
+      scope: 'workspace',
+      mode: 'append',
+      content: '- new',
+      projectRoot: workspace,
+    });
+
+    const written = await fs.readFile(filePath, 'utf8');
+    const realPost = written.indexOf('## post');
+    const newEntry = written.indexOf('- new');
+    expect(newEntry).toBeLessThan(realPost);
+    expect(newEntry).toBeGreaterThan(written.indexOf('- existing'));
+  });
+
   it('appends to EOF when the MEMORY section is the last block', async () => {
     // Sanity: when no later heading follows, behavior is the
     // pre-fix append-to-end path (still inside the section because

@@ -3203,21 +3203,28 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // proper workspace event bus on top if adapters need stricter
       // delivery semantics.
       //
-      // Per-entry exceptions go to the debug log so a wholesale fan-out
-      // regression isn't invisible — `EventBus.publish` is documented
-      // never to throw (BX9_p contract at eventBus.ts:186), so anything
-      // landing here is by definition unexpected. Gated behind
-      // `QWEN_SERVE_DEBUG` to keep production stderr quiet during the
-      // common shutdown-race case.
+      // Per-entry exceptions go to stderr in normal operation, but
+      // are downgraded to the debug channel when `shuttingDown` is
+      // true. `EventBus.publish` is documented never to throw (BX9_p
+      // contract at eventBus.ts:186), so anything landing here in
+      // normal ops is by definition unexpected — silencing it via
+      // QWEN_SERVE_DEBUG would let a true regression succeed at the
+      // route layer (200 OK) while SSE subscribers stop seeing
+      // events. The shutdown gate keeps the common race noise out of
+      // the production log without hiding actual bugs.
       for (const entry of byId.values()) {
         try {
           entry.events.publish(event);
         } catch (err) {
-          writeServeDebugLine(
+          const detail =
             `publishWorkspaceEvent: bus publish failed for session ` +
-              `${JSON.stringify(entry.sessionId)} (type=${event.type}): ` +
-              `${err instanceof Error ? err.message : String(err)}`,
-          );
+            `${JSON.stringify(entry.sessionId)} (type=${event.type}): ` +
+            `${err instanceof Error ? err.message : String(err)}`;
+          if (shuttingDown) {
+            writeServeDebugLine(detail);
+          } else {
+            writeStderrLine(`qwen serve: ${detail}`);
+          }
         }
       }
     },
