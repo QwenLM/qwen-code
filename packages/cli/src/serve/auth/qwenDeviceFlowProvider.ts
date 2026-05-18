@@ -11,6 +11,7 @@ import {
   isDeviceTokenPending,
   isDeviceTokenSuccess,
   QwenOAuth2Client,
+  QwenOAuthPollError,
   type DeviceTokenPendingData,
   type IQwenOAuth2Client,
   type QwenCredentials,
@@ -18,7 +19,7 @@ import {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   brandSecret,
-  revealSecret,
+  unsafeRevealSecret,
   UpstreamDeviceFlowError,
   type BrandedSecret,
   type DeviceFlowErrorKind,
@@ -144,8 +145,8 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       // throws synchronously into our catch block below.
       response = await this.client.pollDeviceToken(
         {
-          device_code: revealSecret(state.deviceCode),
-          code_verifier: revealSecret(state.pkceVerifier),
+          device_code: unsafeRevealSecret(state.deviceCode),
+          code_verifier: unsafeRevealSecret(state.pkceVerifier),
         },
         { signal: opts.signal },
       );
@@ -161,8 +162,18 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       // would flow through `broadcastWorkspaceEvent` to every SSE
       // subscriber. Use a stable bounded summary; full detail goes
       // through the registry's stderr audit only.
-      const message = err instanceof Error ? err.message : String(err);
-      const errorKind = mapRfc8628ErrorMessage(message);
+      //
+      // PR #4255 fold-in 5 (#4): branch on `instanceof
+      // QwenOAuthPollError` and read the structured `oauthError`
+      // field instead of substring-matching the message text. The
+      // earlier regex was a fragile cross-file string contract that
+      // would silently degrade to `upstream_error` if `qwenOAuth2.ts`
+      // ever changed its message format. The typed class makes the
+      // contract explicit + tsc-checkable.
+      const errorKind: DeviceFlowErrorKind =
+        err instanceof QwenOAuthPollError
+          ? mapRfc8628OAuthCode(err.oauthError)
+          : 'upstream_error';
       return {
         kind: 'error',
         errorKind,
@@ -246,19 +257,23 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
 }
 
 /**
- * Anchored regex matcher for the thrown-error path of `pollDeviceToken`.
- * Format (`qwenOAuth2.ts:391`): `"Device token poll failed: ${error} - ${description}"`.
- * The earlier `message.includes(code)` shape was substring-matching the
- * description too, so an `error_description` containing the literal
- * `"expired_token"` (e.g. "your expired_token has been replaced")
- * mis-classified an unrelated upstream error. The anchored regex
- * captures group 1 = the OAuth error code, never the description.
+ * Map a structured RFC 8628 OAuth error code (from
+ * `QwenOAuthPollError.oauthError`) to the registry's
+ * `DeviceFlowErrorKind` taxonomy. Unknown / missing codes fall
+ * through to `upstream_error`. PR #4255 fold-in 5 (#4) replaced the
+ * earlier substring-regex match against the message text, which was
+ * an implicit string contract with `qwenOAuth2.ts` that would
+ * silently degrade if the message format changed.
  */
-const RFC_8628_ERROR_RE =
-  /^Device token poll failed: (expired_token|access_denied|invalid_grant)(?: |$)/;
-
-function mapRfc8628ErrorMessage(message: string): DeviceFlowErrorKind {
-  const match = RFC_8628_ERROR_RE.exec(message);
-  if (!match) return 'upstream_error';
-  return match[1] as DeviceFlowErrorKind;
+function mapRfc8628OAuthCode(code: string | undefined): DeviceFlowErrorKind {
+  switch (code) {
+    case 'expired_token':
+      return 'expired_token';
+    case 'access_denied':
+      return 'access_denied';
+    case 'invalid_grant':
+      return 'invalid_grant';
+    default:
+      return 'upstream_error';
+  }
 }

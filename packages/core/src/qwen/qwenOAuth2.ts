@@ -110,6 +110,44 @@ export class CredentialsClearRequiredError extends Error {
 }
 
 /**
+ * Typed error thrown by `QwenOAuth2Client.pollDeviceToken` for upstream
+ * RFC 8628 errors that aren't `authorization_pending` / `slow_down`.
+ *
+ * Earlier the class threw a plain `Error` with the OAuth code embedded
+ * in the message text; downstream callers (notably PR #4255's
+ * device-flow registry provider) had to substring-match the message
+ * to extract the error code, an implicit cross-file contract that
+ * silently degrades to `upstream_error` if the message format ever
+ * changes. The structured `oauthError` / `description` / `status`
+ * fields make the contract explicit + type-checked.
+ *
+ * The thrown `message` keeps the same `"Device token poll failed:
+ * ${error} - ${description}"` shape so existing log-parsing /
+ * substring-matching code continues to work; new code should branch
+ * on `instanceof QwenOAuthPollError` + read fields directly.
+ */
+export class QwenOAuthPollError extends Error {
+  readonly status?: number;
+  readonly oauthError?: string;
+  readonly description?: string;
+  constructor(opts: {
+    oauthError?: string;
+    description?: string;
+    status?: number;
+  }) {
+    super(
+      `Device token poll failed: ${opts.oauthError ?? 'Unknown error'} - ${
+        opts.description ?? '(no description)'
+      }`,
+    );
+    this.name = 'QwenOAuthPollError';
+    this.oauthError = opts.oauthError;
+    this.description = opts.description;
+    this.status = opts.status;
+  }
+}
+
+/**
  * Qwen OAuth2 credentials interface
  */
 export interface QwenCredentials {
@@ -409,12 +447,16 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
 
       // Handle other 400 errors (access_denied, expired_token, etc.) as real errors
 
-      // For other errors, throw with proper error information
-      const error = new Error(
-        `Device token poll failed: ${errorData.error || 'Unknown error'} - ${errorData.error_description}`,
-      );
-      (error as Error & { status?: number }).status = response.status;
-      throw error;
+      // For other errors, throw a typed `QwenOAuthPollError` so
+      // downstream callers (PR #4255 device-flow registry) can branch
+      // on `instanceof` + structured fields instead of substring-
+      // matching the message text. The message format is preserved
+      // for log-readers + any pre-existing substring matchers.
+      throw new QwenOAuthPollError({
+        oauthError: errorData.error,
+        description: errorData.error_description,
+        status: response.status,
+      });
     }
 
     return (await response.json()) as DeviceTokenResponse;

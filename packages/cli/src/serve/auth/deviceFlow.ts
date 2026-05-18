@@ -116,7 +116,7 @@ export type DeviceFlowErrorKind =
  * The current shape is a frozen plain object whose only string-coercion
  * paths (`toString`, `toJSON`, `Symbol.toPrimitive`) all return
  * `'[redacted]'`. The actual primitive is held in a module-level
- * `WeakMap`, retrievable only via `revealSecret`. Brand uses a `unique
+ * `WeakMap`, retrievable only via `unsafeRevealSecret`. Brand uses a `unique
  * symbol` so other modules can't structurally satisfy it.
  *
  * Misuse paths and what they produce:
@@ -126,7 +126,7 @@ export type DeviceFlowErrorKind =
  *   `` `s=${secret}` ``           → `'s=[redacted]'`
  *   `secret.length`               → undefined (no String prototype)
  *   `+secret`                     → NaN
- *   `revealSecret(secret)`        → the original primitive (only path)
+ *   `unsafeRevealSecret(secret)`        → the original primitive (only path)
  */
 const SECRET_BRAND: unique symbol = Symbol('DeviceFlowSecret');
 
@@ -159,10 +159,16 @@ export function brandSecret<T extends string>(value: T): BrandedSecret<T> {
 /**
  * Reveal a branded secret. Callers must NOT pass the result back to event
  * emitters, response bodies, or stderr without explicit redaction. The
- * `unsafeReveal_` naming is intentional: greppable in code review, easy
- * to allowlist in lint rules, hard to invoke by accident.
+ * `unsafe`-prefixed name is intentional: greppable in code review, easy
+ * to allowlist in lint rules (`no-restricted-imports` /
+ * `no-restricted-syntax` keying off the identifier), and hard to
+ * invoke by accident or muscle memory. PR #4255 fold-in 5 review
+ * thread #2: renamed from `revealSecret` so the JSDoc-promised
+ * "greppable" property is actually the case in the codebase.
  */
-export function revealSecret<T extends string>(secret: BrandedSecret<T>): T {
+export function unsafeRevealSecret<T extends string>(
+  secret: BrandedSecret<T>,
+): T {
   const value = SECRETS.get(secret);
   if (value === undefined) {
     // The earlier message claimed "secret has been GC-evicted", but a
@@ -173,7 +179,7 @@ export function revealSecret<T extends string>(secret: BrandedSecret<T>): T {
     // shape, mistakenly serialized + reparsed object that retained
     // the public surface but lost the WeakMap binding).
     throw new Error(
-      'revealSecret: argument is not a BrandedSecret (was never registered, or its WeakMap binding was lost via serialization)',
+      'unsafeRevealSecret: argument is not a BrandedSecret (was never registered, or its WeakMap binding was lost via serialization)',
     );
   }
   return value as T;
@@ -332,6 +338,29 @@ interface DeviceFlowEntry {
   terminalAt?: number;
   pollHandle?: ReturnType<typeof setTimeout>;
   cancelController: AbortController;
+  /**
+   * `true` while `provider.persist()` is awaiting on disk I/O. While
+   * set, `cancel()` and the sweeper SKIP transitioning + emitting —
+   * only the persist resolution finalizes the terminal state. This
+   * prevents the SDK-event-stream UX trap where direct subscribers
+   * would see `auth_device_flow_cancelled` followed by
+   * `auth_device_flow_authorized` for the same flow (reducer-state
+   * converges correctly via last-write-wins, but imperative event
+   * handlers — close-dialog / release-resource / log-telemetry —
+   * race onto an unmounted UI). PR #4255 fold-in 5 review thread #1.
+   */
+  persistInFlight?: boolean;
+  /**
+   * Set by `cancel()` if it ran while `persistInFlight === true`. The
+   * persist resolution branch reads this to decide which terminal
+   * event to emit:
+   *   - persist succeeded → `authorized` (IdP approval wins; the
+   *     cancel-during-persist race resolves toward the user's
+   *     completed browser approval per fold-in 3's C4 reversal).
+   *   - persist failed (incl. abort fired by `cancel()`) → `cancelled`
+   *     (the cancel got its way; no credentials on disk).
+   */
+  cancelRequestedDuringPersist?: boolean;
 }
 
 export interface DeviceFlowRegistryDeps {
@@ -673,6 +702,33 @@ export class DeviceFlowRegistry {
   ): { alreadyTerminal: boolean } | undefined {
     const entry = this.byId.get(deviceFlowId);
     if (!entry) return undefined;
+    // PR #4255 fold-in 5 review thread #1: if `provider.persist()` is
+    // currently in flight, DEFER the transition + event emission to
+    // the persist resolution branch. Aborting the signal still gives
+    // `fs.writeFile` a chance to short-circuit; the persist resolution
+    // looks at `cancelRequestedDuringPersist` to decide whether to
+    // emit `cancelled` (persist aborted in time) or `authorized`
+    // (persist committed before the abort fired — IdP wins per
+    // fold-in 3 C4). This eliminates the cancelled→authorized event
+    // sequence that would have raced onto a listener that already
+    // closed its dialog.
+    if (entry.persistInFlight) {
+      entry.cancelRequestedDuringPersist = true;
+      try {
+        entry.cancelController.abort(new Error('cancel during persist'));
+      } catch {
+        // best-effort
+      }
+      // Audit the deferred cancel so operators can correlate.
+      this.deps.audit?.record({
+        deviceFlowId: entry.deviceFlowId,
+        providerId: entry.providerId,
+        clientId: cancellerClientId,
+        status: 'cancelled',
+        hint: 'deferred (persist in flight; final state decided by persist resolution)',
+      });
+      return { alreadyTerminal: false };
+    }
     if (!this.transitionTerminal(entry, 'cancelled')) {
       return { alreadyTerminal: true };
     }
@@ -785,14 +841,15 @@ export class DeviceFlowRegistry {
         this.schedulePoll(entry, provider);
         return;
       case 'success': {
-        // PR #4255 review C3: bound persist() with both the entry's
-        // cancelController signal AND a hard timeout, so a hung
-        // filesystem (NFS stall, encrypted-volume request) can't pin
-        // the entry in `pending` indefinitely. Hitting the timeout
-        // surfaces as `persist_failed` rather than waiting for the
-        // sweeper to catch the expiry — operators see the disk
-        // problem immediately.
+        // PR #4255 review C3 + fold-in 5 (#1): bound persist() with
+        // both the entry's cancelController signal AND a hard timeout
+        // so a hung filesystem can't pin the entry in `pending`
+        // indefinitely. Set `entry.persistInFlight` for the duration
+        // so `cancel()` and the sweeper SKIP transition+emit during
+        // this window — they just register intent (or no-op) and let
+        // the persist resolution decide the terminal state.
         let metadata: { expiresAt?: number; accountAlias?: string } = {};
+        let persistError: unknown;
         const persistTimeout = this.schedule(
           DEVICE_FLOW_PERSIST_TIMEOUT_MS,
           () => {
@@ -803,18 +860,69 @@ export class DeviceFlowRegistry {
             }
           },
         );
+        entry.persistInFlight = true;
         try {
           metadata = await result.persist({
             signal: entry.cancelController.signal,
           });
-        } catch (_err: unknown) {
-          if (this.transitionTerminal(entry, 'error', 'persist_failed')) {
-            // S1 sanitize: `_err.message` from `cacheQwenCredentials`
-            // includes the full credential file path (`~/.qwen/...`)
-            // that flows verbatim through `broadcastWorkspaceEvent`
-            // to every SSE subscriber. Replace the user-facing hint
-            // with a generic sentence; full err detail goes to stderr
-            // audit only (`debugLogger` inside `cacheQwenCredentials`).
+        } catch (err: unknown) {
+          persistError = err;
+        } finally {
+          this.clearScheduled(persistTimeout);
+          entry.persistInFlight = false;
+        }
+        if (this.disposed) return;
+        const cancelDuringPersist = entry.cancelRequestedDuringPersist === true;
+        if (persistError) {
+          // Persist failed (abort triggered by cancel/timeout, or a
+          // genuine fs error). Three possible terminal mappings:
+          //   1. cancelDuringPersist  → `cancelled` (user cancel won)
+          //   2. expiresAt exceeded    → `expired`/`expired_token`
+          //                              (sweeper would have)
+          //   3. otherwise             → `error`/`persist_failed`
+          //                              (genuine disk fault)
+          // Only branch 1 needs a fresh audit emission — the deferred
+          // `cancelled` audit was recorded by `cancel()` already, but
+          // we still need to publish the SSE event since cancel()
+          // deferred it.
+          const now = this.now();
+          if (cancelDuringPersist) {
+            if (this.transitionTerminal(entry, 'cancelled')) {
+              this.deps.events.publish(
+                {
+                  type: 'cancelled',
+                  data: { deviceFlowId: entry.deviceFlowId },
+                },
+                entry.initiatorClientId,
+              );
+            }
+          } else if (now >= entry.expiresAt) {
+            if (this.transitionTerminal(entry, 'expired', 'expired_token')) {
+              this.deps.events.publish(
+                {
+                  type: 'failed',
+                  data: {
+                    deviceFlowId: entry.deviceFlowId,
+                    errorKind: 'expired_token',
+                    hint: 'device-flow expired without authorization',
+                  },
+                },
+                entry.initiatorClientId,
+              );
+              this.deps.audit?.record({
+                deviceFlowId: entry.deviceFlowId,
+                providerId: entry.providerId,
+                clientId: entry.initiatorClientId,
+                status: 'expired',
+                errorKind: 'expired_token',
+              });
+            }
+          } else if (
+            this.transitionTerminal(entry, 'error', 'persist_failed')
+          ) {
+            // S1 sanitize: full err detail goes through stderr audit
+            // (debugLogger inside cacheQwenCredentials); only a
+            // bounded sentence flows to SSE subscribers.
             this.deps.events.publish(
               {
                 type: 'failed',
@@ -835,61 +943,36 @@ export class DeviceFlowRegistry {
             });
           }
           return;
-        } finally {
-          this.clearScheduled(persistTimeout);
         }
-        // PR #4255 fold-in 3 — C4 reversed (was: unpersist on race).
-        //
-        // The user already approved on the IdP page. The
-        // `device_code` is RFC 8628 single-use, so a microsecond
-        // cancel/dispose racing with `persist()` shouldn't waste their
-        // approval — re-running the flow would force them through the
-        // browser-prompt + paste-code dance again for a click whose
-        // intent was likely "stop the wait" rather than "undo my
-        // already-completed approval". Match gh CLI / Auth0 SDK /
-        // git-credential-manager: IdP approval wins the race.
-        //
-        // `transitionTerminal(authorized)` may return false because
-        // `cancel()` / `dispose()` got there first; in that case it
-        // already cleared `pollHandle` + secrets + `byProvider`.
-        // Override `entry.status` to `authorized` so the GET endpoint
-        // and reducer state converge on the actual outcome (disk has
-        // credentials, IdP says authorized). Either way we publish
-        // `authorized` + audit. The race is captured via `hint` for
-        // incident-response correlation.
-        const wonRace = this.transitionTerminal(entry, 'authorized');
-        if (!wonRace) {
-          // Force-authorize: the prior terminal call (cancel /
-          // dispose / sweeper-expired) already did the cleanup
-          // side-effects — we only need to overwrite the status +
-          // clear any errorKind it stamped.
-          entry.status = 'authorized';
-          entry.errorKind = undefined;
-          entry.hint = undefined;
-        }
-        this.deps.events.publish(
-          {
-            type: 'authorized',
-            data: {
-              deviceFlowId: entry.deviceFlowId,
-              providerId: entry.providerId,
-              expiresAt: metadata.expiresAt,
-              accountAlias: metadata.accountAlias,
+        // Persist succeeded. Per fold-in 3 C4 (and fold-in 5 #1
+        // refinement): IdP approval wins. Whether or not cancel was
+        // requested during persist, the disk write committed —
+        // honor it.
+        if (this.transitionTerminal(entry, 'authorized')) {
+          this.deps.events.publish(
+            {
+              type: 'authorized',
+              data: {
+                deviceFlowId: entry.deviceFlowId,
+                providerId: entry.providerId,
+                expiresAt: metadata.expiresAt,
+                accountAlias: metadata.accountAlias,
+              },
             },
-          },
-          entry.initiatorClientId,
-        );
-        this.deps.audit?.record({
-          deviceFlowId: entry.deviceFlowId,
-          providerId: entry.providerId,
-          clientId: entry.initiatorClientId,
-          status: 'authorized',
-          ...(wonRace
-            ? {}
-            : {
-                hint: 'lost_success_kept (cancel/dispose lost race against persist; credentials kept per IdP approval)',
-              }),
-        });
+            entry.initiatorClientId,
+          );
+          this.deps.audit?.record({
+            deviceFlowId: entry.deviceFlowId,
+            providerId: entry.providerId,
+            clientId: entry.initiatorClientId,
+            status: 'authorized',
+            ...(cancelDuringPersist
+              ? {
+                  hint: 'lost_success_kept (cancel during persist; credentials kept per IdP approval)',
+                }
+              : {}),
+          });
+        }
         return;
       }
       case 'error':
@@ -980,6 +1063,13 @@ export class DeviceFlowRegistry {
     if (this.disposed) return;
     const now = this.now();
     for (const entry of [...this.byId.values()]) {
+      // PR #4255 fold-in 5 review thread #1: skip entries with persist
+      // in flight — the persist resolution branch will handle the
+      // terminal transition + audit (and emit `expired` if the entry
+      // was past `expiresAt` when persist failed). Sweeping here would
+      // create the same `expired` → `authorized` event-stream UX trap
+      // that the cancel-during-persist case avoids.
+      if (entry.persistInFlight) continue;
       if (entry.status === 'pending' && now >= entry.expiresAt) {
         if (this.transitionTerminal(entry, 'expired', 'expired_token')) {
           this.deps.events.publish(

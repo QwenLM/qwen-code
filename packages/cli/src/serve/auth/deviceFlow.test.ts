@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   brandSecret,
-  revealSecret,
+  unsafeRevealSecret,
   DEVICE_FLOW_DEFAULT_INTERVAL_MS,
   DEVICE_FLOW_MAX_CONCURRENT,
   DEVICE_FLOW_SLOW_DOWN_BUMP_MS,
@@ -235,23 +235,23 @@ describe('BrandedSecret', () => {
     expect(Number.isNaN(+secret)).toBe(true);
   });
 
-  it('revealSecret returns the original primitive', () => {
+  it('unsafeRevealSecret returns the original primitive', () => {
     const secret = brandSecret('THE-REAL-VALUE');
-    expect(revealSecret(secret)).toBe('THE-REAL-VALUE');
+    expect(unsafeRevealSecret(secret)).toBe('THE-REAL-VALUE');
   });
 
-  it('revealSecret throws when called on a non-secret object', () => {
+  it('unsafeRevealSecret throws when called on a non-secret object', () => {
     const fake = { toString: () => '[redacted]' } as unknown as ReturnType<
       typeof brandSecret
     >;
-    expect(() => revealSecret(fake)).toThrowError(/not a BrandedSecret/);
+    expect(() => unsafeRevealSecret(fake)).toThrowError(/not a BrandedSecret/);
   });
 
   it('two distinct brands compare unequal even when contents match', () => {
     const a = brandSecret('SAME');
     const b = brandSecret('SAME');
     expect(a).not.toBe(b);
-    expect(revealSecret(a)).toBe(revealSecret(b));
+    expect(unsafeRevealSecret(a)).toBe(unsafeRevealSecret(b));
   });
 });
 
