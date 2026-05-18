@@ -233,12 +233,8 @@ jobs:
           head_repo="$(jq -r '.headRepository.name // ""' <<< "$pr_json")"
           changed_lines=$((additions + deletions))
 
-          # Reject empty head_sha / base_sha early. Both are needed to scope
-          # the review-cache key correctly. Without base_sha, an "Update branch"
-          # merge or a base retarget would still match a stale cache via the
-          # restore-keys prefix, which would let the bundled /review skill
-          # compute git diff <oldHead>..<newHead> across upstream commits the
-          # PR did not author. An empty value almost always means gh pr view
+          # Reject empty head_sha / base_sha early. Both are queried via
+          # gh pr view; an empty value almost always means gh pr view
           # partially failed.
           if [ -z "$head_sha" ]; then
             echo "::error::Could not resolve PR head SHA via gh pr view --json headRefOid."
@@ -249,13 +245,38 @@ jobs:
             exit 1
           fi
 
+          # Compute the merge-base SHA, i.e., the commit where the PR's
+          # history forks from the base branch. The merge base is what the
+          # cache key must be scoped to, NOT baseRefOid.
+          #
+          # baseRefOid is the current tip of the base ref (e.g., main HEAD).
+          # That value can stay fixed across reviews even when the PR
+          # merges base into itself: if the author clicks "Update branch"
+          # while base hasn't moved, baseRefOid is unchanged but the PR's
+          # history now incorporates base's commits. A cache restored under
+          # baseRefOid would then let the bundled /review skill compute
+          # `git diff <oldHead>..<newHead>` across upstream commits the PR
+          # did not author. The merge base, in contrast, advances whenever
+          # base content enters the PR (Update branch, rebase onto newer
+          # base, or base retarget), which is exactly the boundary we
+          # want to invalidate the cache on.
+          merge_base_sha="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/compare/${base_sha}...${head_sha}" \
+            --jq '.merge_base_commit.sha // ""')"
+          if [ -z "$merge_base_sha" ]; then
+            echo "::error::Could not resolve PR merge base via gh api compare."
+            exit 1
+          fi
+
           echo "changed_lines=$changed_lines" >> "$GITHUB_OUTPUT"
           echo "changed_files=$changed_files" >> "$GITHUB_OUTPUT"
           echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "merge_base_sha=$merge_base_sha" >> "$GITHUB_OUTPUT"
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
           echo "Review branch: $base_ref ($base_sha) <- $head_owner/$head_repo:$head_ref ($head_sha)"
+          echo "Review merge base: $merge_base_sha"
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
 
           if [ "$is_cross_repository" = "true" ]; then
@@ -310,14 +331,13 @@ jobs:
       # short-circuit on "No new changes since last review"). See
       # docs/design/code-review/code-review-design.md §增量评审与缓存.
       #
-      # Cache key includes BOTH base_sha and head_sha. Without base_sha,
-      # an "Update branch" merge or a base retarget would still match an
-      # older cache via the restore-keys prefix, and the bundled skill's
-      # `git diff <lastCommitSha>..HEAD` would then incorrectly include
-      # upstream commits that the PR did not author. With base_sha in
-      # both the exact key and the restore-keys prefix, a base change
-      # invalidates prior cache entries for the same PR and forces a
-      # full review on the next run.
+      # Cache key uses merge_base_sha + head_sha (not baseRefOid). The
+      # merge base advances whenever base content enters the PR — Update
+      # branch, rebase onto newer base, or base retarget — which are
+      # exactly the boundaries that should invalidate the cache. Pure
+      # author pushes leave the merge base alone, so the restore-keys
+      # prefix `qwen-review-<pr#>-<merge_base_sha>-` keeps matching and
+      # bundled /review can still scope to the incremental diff.
       - name: 'Restore review cache'
         id: 'restore-cache'
         if: |-
@@ -327,9 +347,9 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '.qwen/review-cache'
-          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.base_sha }}-${{ steps.size.outputs.head_sha }}'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
           restore-keys: |
-            qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.base_sha }}-
+            qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-
 
       - name: 'Run Qwen Code Review'
         id: 'review'
@@ -341,23 +361,6 @@ jobs:
           openai_base_url: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           openai_model: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           prompt: '${{ steps.pr.outputs.review_prompt }}'
-
-      # Save cache after a successful review on pull_request_target events
-      # (any of opened / reopened / ready_for_review / synchronize). Comment
-      # and workflow_dispatch triggers are excluded so manual re-reviews do
-      # not overwrite the author-driven cache lineage. Both PR head SHA and
-      # base SHA go into the key — see the restore step above for why base
-      # is required to avoid stale incremental diffs across base changes.
-      - name: 'Save review cache'
-        if: |-
-          steps.review.outcome == 'success' &&
-          github.event_name == 'pull_request_target' &&
-          steps.size.outputs.head_sha != '' &&
-          steps.size.outputs.base_sha != ''
-        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
-        with:
-          path: '.qwen/review-cache'
-          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.base_sha }}-${{ steps.size.outputs.head_sha }}'
 
       - name: 'Post dry-run summary'
         if: |-
@@ -373,6 +376,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 'Post review summary comment'
+        id: 'post-summary'
         if: |-
           steps.review.outcome == 'success' &&
           steps.pr.outputs.should_comment == 'true'
@@ -397,6 +401,27 @@ jobs:
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --body-file qwen-pr-review-summary-comment.md
+
+      # Save cache only AFTER the review summary comment was successfully
+      # posted. Saving before publication would persist "this head was
+      # reviewed" state even if `gh pr comment` later failed (rate-limit,
+      # network, deleted PR, etc.) — the next synchronize would then
+      # restore the cache, bundled /review would short-circuit on
+      # "No new changes since last review" or scope to a tiny incremental
+      # diff, and the findings that never reached the PR would be lost.
+      # Gating on post-summary.outcome makes cache advancement track
+      # comment delivery, not just model success.
+      - name: 'Save review cache'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.post-summary.outcome == 'success' &&
+          github.event_name == 'pull_request_target' &&
+          steps.size.outputs.head_sha != '' &&
+          steps.size.outputs.merge_base_sha != ''
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen/review-cache'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
 
       - name: 'Post fallback comment on review failure'
         if: |-

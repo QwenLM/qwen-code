@@ -23,11 +23,12 @@
 **范围**：
 
 - 在 `qwen-code-pr-review.yml` 触发列表加入 `pull_request_target.synchronize`
-- 在 PR context 解析里记录 `baseRefOid` 和 `headRefOid`（通过 `gh pr view --json baseRefOid,headRefOid`）
+- 在 PR context 解析里记录 `baseRefOid`、`headRefOid` 和 **merge base SHA**。merge base 通过 `gh api repos/<owner>/<repo>/compare/<base_sha>...<head_sha>` 的 `merge_base_commit.sha` 获取
 - 在 review step 前后加 `actions/cache/restore` + `actions/cache/save`，path 指向主项目目录 `.qwen/review-cache/`
-- cache key 用 `qwen-review-<pr#>-<baseRefOid>-<headRefOid>`，`restore-keys` 用 `qwen-review-<pr#>-<baseRefOid>-` 前缀。base SHA 必进 key，否则 "Update branch" 或 base retarget 后 prefix 仍能 hit 旧 cache，bundled skill 会把上游 main 的改动当成 PR 改动评审
+- cache key 用 `qwen-review-<pr#>-<merge_base_sha>-<head_sha>`，`restore-keys` 用 `qwen-review-<pr#>-<merge_base_sha>-` 前缀。**必须用 merge base 而非 baseRefOid**：base 没动但作者 Update branch 时 baseRefOid 不变，restore-keys 仍能 hit 旧 cache，bundled skill 会把 merge 引入的上游 commits 当成 PR 改动评审；merge base 在 Update branch / rebase / retarget 时会前移，正好匹配 cache 应该失效的边界
 - 只有 `pull_request_target.synchronize` 在 review 前 restore cache；评论触发和 `workflow_dispatch` 默认强制重跑，避免同 SHA cache 命中后直接 "No new changes" 退出
-- 加本地 fixture 覆盖 `opened` / `synchronize` / comment / workflow_dispatch / "Update branch" 后 base SHA 变化等场景的 PR context 解析和 cache key 生成
+- **Save cache 必须在 `Post review summary comment` 之后执行**，并依赖 `steps.post-summary.outcome == 'success'`。否则 `gh pr comment` 失败时 cache 推进会丢评论但保留"已评"状态，下次 synchronize 把 findings 弄丢
+- 加本地 fixture 覆盖 `opened` / `synchronize` / comment / workflow_dispatch / "Update branch" 引起的 merge base 前移 / `gh pr comment` 失败导致 Save 跳过 等场景的 PR context 解析和 cache key 生成
 
 **不在此 PR**：
 
@@ -164,7 +165,7 @@ Phase 2/3/7 可并行。Phase 4/5 必须串行，但不依赖 bundled skill rele
 每个 Phase 合入前的 acceptance：
 
 - **P1**：现有 review 在 main 上跑成功，新 PR 触发 bundled action 评审，加了 `.qwen/review-rules.md` 后 gate 按预期工作（用 dry-run 验证）
-- **P2**：同一 PR 连续 push 两次，第二次评审从 cache restore，bundled skill 日志显示 "incremental review (last sha: ...)"；同一 SHA 下评论 `@qwen /review focus text` 仍会强制重跑，不出现 "No new changes since last review" 直接退出；点 "Update branch from base"（base SHA 改变）后 cache 不被 prefix-match 命中，bundled skill 走 full review
+- **P2**：同一 PR 连续 push 两次，第二次评审从 cache restore，bundled skill 日志显示 "incremental review (last sha: ...)"；同一 SHA 下评论 `@qwen /review focus text` 仍会强制重跑，不出现 "No new changes since last review" 直接退出；点 "Update branch from base"（merge base 前移）后 cache 不被 prefix-match 命中，bundled skill 走 full review；模拟 `gh pr comment` 失败，下次 synchronize 重跑评审而不是 short-circuit（验证 Save 依赖 post-summary 成功）
 - **P3**：合入后任何后续 PR 都能 cite `docs/design/code-review/*`
 - **P4**：故意造一个"明显偏离 roadmap"的测试 PR，Design Gate 输出 BLOCK 并 cite roadmap 行号；workflow 不调用 bundled `/review`；缺少 validation evidence 的普通 feature 输出 ADVISORY_ONLY，高风险 feature 输出 BLOCK
 - **P5**：故意造一个跟 PR #3863 同类的"加 OpenAI-compat provider /model list"测试 PR，(c) 检测命中 #3863 并输出 cite 链接
