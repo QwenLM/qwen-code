@@ -1197,4 +1197,156 @@ describe('PR 21 — auth device-flow events', () => {
     expect(next.terminalEvent).toBeUndefined();
     expect(next.unrecognizedKnownEventCount).toBe(0);
   });
+
+  // #4282 fold-in 3 (gpt-5.5 C8): reducer + parser coverage for the 5
+  // PR 17 mutation events. Covers happy-path counter + last-snapshot
+  // accumulation, malformed-payload rejection (must round-trip through
+  // `asKnownDaemonEvent → undefined` and increment
+  // `unrecognizedKnownEventCount` rather than the event-specific
+  // counter), and the envelope-level `originatorClientId` merge.
+  describe('PR 17 mutation events', () => {
+    it('approval_mode_changed: increments counter, copies envelope originator', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 5,
+        v: 1,
+        type: 'approval_mode_changed',
+        originatorClientId: 'client-A',
+        data: {
+          sessionId: 'sess-1',
+          previous: 'default',
+          next: 'yolo',
+          persisted: true,
+        },
+      });
+      expect(next.approvalModeChangedCount).toBe(1);
+      expect(next.approvalMode).toBe('yolo');
+      expect(next.lastApprovalModeChange?.next).toBe('yolo');
+      expect(next.lastApprovalModeChange?.persisted).toBe(true);
+      // Envelope `originatorClientId` was merged onto the snapshot.
+      expect(next.lastApprovalModeChange?.originatorClientId).toBe('client-A');
+    });
+
+    it('approval_mode_changed: malformed payload routes to unrecognized counter', () => {
+      const malformed: DaemonEvent = {
+        id: 6,
+        v: 1,
+        type: 'approval_mode_changed',
+        // Missing `next`, `persisted` — fails `isApprovalModeChangedData`.
+        data: { sessionId: 'sess-1', previous: 'default' },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+      const next = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        malformed,
+      );
+      expect(next.unrecognizedKnownEventCount).toBe(1);
+      expect(next.approvalModeChangedCount).toBe(0);
+      expect(next.approvalMode).toBeUndefined();
+    });
+
+    it('tool_toggled: increments counter, stores last snapshot with envelope originator', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 7,
+        v: 1,
+        type: 'tool_toggled',
+        originatorClientId: 'client-B',
+        data: { toolName: 'run_shell_command', enabled: false },
+      });
+      expect(next.toolToggleCount).toBe(1);
+      expect(next.lastToolToggle?.toolName).toBe('run_shell_command');
+      expect(next.lastToolToggle?.enabled).toBe(false);
+      expect(next.lastToolToggle?.originatorClientId).toBe('client-B');
+    });
+
+    it('workspace_initialized: accepts noop / created / overwrote actions', () => {
+      const initial = createDaemonSessionViewState();
+      const afterCreate = reduceDaemonSessionEvent(initial, {
+        id: 8,
+        v: 1,
+        type: 'workspace_initialized',
+        data: { path: '/work/QWEN.md', action: 'created' },
+      });
+      expect(afterCreate.workspaceInitCount).toBe(1);
+      expect(afterCreate.lastWorkspaceInit?.action).toBe('created');
+      const afterNoop = reduceDaemonSessionEvent(afterCreate, {
+        id: 9,
+        v: 1,
+        type: 'workspace_initialized',
+        data: { path: '/work/QWEN.md', action: 'noop' },
+      });
+      expect(afterNoop.workspaceInitCount).toBe(2);
+      expect(afterNoop.lastWorkspaceInit?.action).toBe('noop');
+      // Bogus action literal is rejected by the parser.
+      const malformed: DaemonEvent = {
+        id: 10,
+        v: 1,
+        type: 'workspace_initialized',
+        data: { path: '/work/QWEN.md', action: 'replaced' },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+    });
+
+    it('mcp_server_restarted: counter + last snapshot + envelope originator merge', () => {
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 11,
+        v: 1,
+        type: 'mcp_server_restarted',
+        originatorClientId: 'client-C',
+        data: { serverName: 'docs', durationMs: 1234 },
+      });
+      expect(next.mcpRestartCount).toBe(1);
+      expect(next.mcpRestartRefusedCount).toBe(0);
+      expect(next.lastMcpRestart?.serverName).toBe('docs');
+      expect(next.lastMcpRestart?.durationMs).toBe(1234);
+      expect(next.lastMcpRestart?.originatorClientId).toBe('client-C');
+    });
+
+    it('mcp_server_restart_refused: routes to refused counter only, all reasons accepted', () => {
+      const initial = createDaemonSessionViewState();
+      const reasons: Array<'in_flight' | 'disabled' | 'budget_would_exceed'> = [
+        'in_flight',
+        'disabled',
+        'budget_would_exceed',
+      ];
+      let state = initial;
+      for (const [i, reason] of reasons.entries()) {
+        state = reduceDaemonSessionEvent(state, {
+          id: 12 + i,
+          v: 1,
+          type: 'mcp_server_restart_refused',
+          data: { serverName: 'docs', reason },
+        });
+      }
+      expect(state.mcpRestartRefusedCount).toBe(3);
+      expect(state.mcpRestartCount).toBe(0);
+      expect(state.lastMcpRestartRefused?.reason).toBe('budget_would_exceed');
+      // Bogus reason literal is rejected by the parser.
+      const malformed: DaemonEvent = {
+        id: 99,
+        v: 1,
+        type: 'mcp_server_restart_refused',
+        data: { serverName: 'docs', reason: 'made_up_reason' },
+      };
+      expect(asKnownDaemonEvent(malformed)).toBeUndefined();
+    });
+
+    it('mergeOriginator: prefers data-level originator over envelope when both present', () => {
+      // The daemon does not currently populate `data.originatorClientId`,
+      // but the field is declared on the Data interfaces. If a future
+      // daemon version sets it directly, we must not clobber it with
+      // the envelope value.
+      const next = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        id: 50,
+        v: 1,
+        type: 'tool_toggled',
+        originatorClientId: 'envelope-client',
+        data: {
+          toolName: 'Bash',
+          enabled: true,
+          originatorClientId: 'data-client',
+        },
+      });
+      expect(next.lastToolToggle?.originatorClientId).toBe('data-client');
+    });
+  });
 });

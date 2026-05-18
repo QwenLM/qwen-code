@@ -450,6 +450,20 @@ export class McpClientManager {
   }
 
   /**
+   * Whether a discovery / reconnect for `serverName` is currently in
+   * flight (started but not yet resolved). Used by the daemon's
+   * `POST /workspace/mcp/:server/restart` route (#4175 Wave 4 PR 17)
+   * to short-circuit a redundant restart with `skipped:in_flight`
+   * rather than awaiting the original discovery promise. Calling
+   * `discoverMcpToolsForServer` during an in-flight pass is safe
+   * (it joins the existing promise), but the route prefers the
+   * fast-path skip so the HTTP latency stays bounded.
+   */
+  isServerDiscovering(serverName: string): boolean {
+    return this.serverDiscoveryPromises.has(serverName);
+  }
+
+  /**
    * PR 14 fix (review #4247 wenshao R7 line 464): drop a server's
    * entry from the per-pass refusal log, if present. The
    * `indexOf` + `splice` pattern was repeated at 4 sites

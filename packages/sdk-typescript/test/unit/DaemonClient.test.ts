@@ -1182,6 +1182,273 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
+    it('POSTs the mode and returns the typed result', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'yolo',
+          previous: 'default',
+          persisted: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setSessionApprovalMode('s-1', 'yolo');
+      expect(result).toEqual({
+        sessionId: 's-1',
+        mode: 'yolo',
+        previous: 'default',
+        persisted: false,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/approval-mode');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ mode: 'yolo' });
+    });
+
+    it('forwards persist:true in the body when requested', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'auto-edit',
+          previous: 'default',
+          persisted: true,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setSessionApprovalMode('s-1', 'auto-edit', {
+        persist: true,
+      });
+      expect(result.persisted).toBe(true);
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        mode: 'auto-edit',
+        persist: true,
+      });
+    });
+
+    it('omits persist field when persist is undefined or false', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'yolo',
+          previous: 'default',
+          persisted: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionApprovalMode('s-1', 'yolo', { persist: false });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ mode: 'yolo' });
+    });
+
+    it('sends X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'plan',
+          previous: 'default',
+          persisted: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionApprovalMode('s-1', 'plan', {
+        clientId: 'client-1',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 403 trust-gate rejection', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(403, {
+          error: 'untrusted folder',
+          code: 'trust_gate',
+          errorKind: 'auth_env_error',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.setSessionApprovalMode('s-1', 'yolo'),
+      ).rejects.toMatchObject({ status: 403 });
+    });
+  });
+
+  describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
+    it('POSTs the enabled flag and URL-encodes the tool name', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { toolName: 'Bash', enabled: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setWorkspaceToolEnabled('Bash', false);
+      expect(result).toEqual({ toolName: 'Bash', enabled: false });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/tools/Bash/enable');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ enabled: false });
+    });
+
+    it('encodes MCP-qualified tool names with double underscores', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          toolName: 'mcp__github__create_issue',
+          enabled: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setWorkspaceToolEnabled('mcp__github__create_issue', false);
+      // `encodeURIComponent` does NOT encode `_`, so the path stays
+      // readable; the assertion pins this so a well-meaning future
+      // refactor that double-encodes accidentally is caught.
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/tools/mcp__github__create_issue/enable',
+      );
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { toolName: 'Bash', enabled: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setWorkspaceToolEnabled('Bash', false, {
+        clientId: 'client-1',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 401 when daemon strict-gates the route', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(401, { error: 'token required', code: 'token_required' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.setWorkspaceToolEnabled('Bash', false),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+  });
+
+  describe('initWorkspace (#4175 Wave 4 PR 17)', () => {
+    it('POSTs an empty body when force is omitted', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { path: '/work/QWEN.md', action: 'created' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.initWorkspace();
+      expect(result).toEqual({ path: '/work/QWEN.md', action: 'created' });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/init');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('forwards force:true in the body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { path: '/work/QWEN.md', action: 'overwrote' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.initWorkspace({ force: true });
+      expect(result.action).toBe('overwrote');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ force: true });
+    });
+
+    it('omits force when explicitly false (default-empty body)', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { path: '/work/QWEN.md', action: 'created' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.initWorkspace({ force: false });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('throws on 409 conflict', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, {
+          error: 'file exists',
+          code: 'workspace_init_conflict',
+          path: '/work/QWEN.md',
+          existingSize: 1234,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.initWorkspace()).rejects.toMatchObject({
+        status: 409,
+      });
+    });
+  });
+
+  describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
+    it('POSTs an empty body and returns the typed result on success', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 1234,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.restartMcpServer('docs');
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: true,
+        durationMs: 1234,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/mcp/docs/restart');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('returns the soft-skip discriminated shape unchanged', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          restarted: false,
+          skipped: true,
+          reason: 'in_flight',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.restartMcpServer('docs');
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: false,
+        skipped: true,
+        reason: 'in_flight',
+      });
+    });
+
+    it('URL-encodes the server name', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'foo bar',
+          restarted: true,
+          durationMs: 0,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.restartMcpServer('foo bar');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/foo%20bar/restart',
+      );
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 0,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.restartMcpServer('docs', { clientId: 'client-1' });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 404 when the daemon reports an unknown server', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'no such server' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.restartMcpServer('ghost')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(

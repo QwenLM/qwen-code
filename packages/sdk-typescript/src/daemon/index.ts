@@ -37,6 +37,7 @@ export {
 } from './events.js';
 export { parseSseStream, SseFramingError } from './sse.js';
 export {
+  DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
   isDaemonContentHash,
@@ -45,9 +46,19 @@ export {
 export type {
   DaemonAgentChangedData,
   DaemonAgentChangedEvent,
+  DaemonApprovalModeChangedData,
+  DaemonApprovalModeChangedEvent,
   DaemonClientEvictedData,
   DaemonClientEvictedEvent,
   DaemonControlEvent,
+  DaemonMcpServerRestartedData,
+  DaemonMcpServerRestartedEvent,
+  DaemonMcpServerRestartRefusedData,
+  DaemonMcpServerRestartRefusedEvent,
+  DaemonToolToggledData,
+  DaemonToolToggledEvent,
+  DaemonWorkspaceInitializedData,
+  DaemonWorkspaceInitializedEvent,
   DaemonEventEnvelope,
   DaemonKnownEventType,
   DaemonMemoryChangedData,
@@ -101,6 +112,11 @@ export type {
 export type {
   DaemonAgentLevel,
   DaemonAgentMutationResult,
+  DaemonApprovalMode,
+  DaemonApprovalModeResult,
+  DaemonInitWorkspaceResult,
+  DaemonMcpRestartResult,
+  DaemonToolToggleResult,
   DaemonAvailableCommand,
   DaemonCapabilities,
   DaemonContextFileScope,

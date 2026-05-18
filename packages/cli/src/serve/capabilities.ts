@@ -116,6 +116,40 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. Clients should still pre-flight `require_auth` separately for
   // deployment posture; this tag only means the route contract exists.
   workspace_file_write: { since: 'v1' },
+  // #4175 Wave 4 PR 17. Daemon hosts the session-level approval-mode
+  // control route `POST /session/:id/approval-mode` (gated by the
+  // mutation gate, strict). The route accepts `{mode, persist?}` —
+  // `persist:true` also writes `tools.approvalMode` to workspace
+  // settings via the daemon's `loadedSettings` handle. SDK helper:
+  // `DaemonClient.setSessionApprovalMode`.
+  session_approval_mode_control: { since: 'v1' },
+  // #4175 Wave 4 PR 17. `POST /workspace/tools/:name/enable` toggles a
+  // tool name in the workspace's `tools.disabled` settings list. The
+  // bridge writes the settings file directly (no ACP roundtrip) and
+  // fan-outs a `tool_toggled` event to all live session SSE buses.
+  // Already-registered tools in active sessions are NOT retroactively
+  // unregistered — the toggle takes effect on the next ACP child spawn
+  // (`tools.disabled` is consulted at `Config` construction time).
+  workspace_tool_toggle: { since: 'v1' },
+  // #4175 Wave 4 PR 17. `POST /workspace/init` scaffolds an empty
+  // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
+  // the bound workspace root. Body: `{force?: boolean}`. Default
+  // refuses with 409 when the file already exists; `force: true`
+  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill
+  // the file, the caller should follow up with
+  // `POST /session/:id/prompt`.
+  workspace_init: { since: 'v1' },
+  // #4175 Wave 4 PR 17. `POST /workspace/mcp/:server/restart` performs
+  // a single-server MCP restart (disconnect + reconnect + rediscover)
+  // through the ACP child's `McpClientManager`. Pre-checks the live
+  // budget snapshot from PR 14 v1: when the target server is not
+  // already in `reservedSlots` AND the live count would exceed the
+  // configured budget under `enforce` mode, returns 200 with
+  // `{restarted:false, skipped:true, reason:'budget_would_exceed'}`
+  // rather than triggering a refusal cascade. Other skip reasons:
+  // `'in_flight'` (concurrent discovery in progress), `'disabled'`
+  // (server is configured but explicitly disabled).
+  workspace_mcp_restart: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

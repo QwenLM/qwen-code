@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { SkillError } from '@qwen-code/qwen-code-core';
+import { SkillError, TrustGateError } from '@qwen-code/qwen-code-core';
 import { describe, expect, it } from 'vitest';
 import {
   BridgeTimeoutError,
@@ -85,6 +85,17 @@ describe('mapDomainErrorToErrorKind', () => {
     expect(mapDomainErrorToErrorKind(new SyntaxError('bad json'))).toBe(
       'parse_error',
     );
+  });
+
+  it('classifies TrustGateError as auth_env_error (recognized via .name across package boundaries)', () => {
+    const err = new TrustGateError('untrusted folder rejects YOLO');
+    expect(mapDomainErrorToErrorKind(err)).toBe('auth_env_error');
+    // Synthesize the same class by name alone — verifies the matcher works
+    // even when a bundled-twice instance breaks `instanceof` symmetry.
+    const synthetic = Object.assign(new Error('synthetic'), {
+      name: 'TrustGateError',
+    });
+    expect(mapDomainErrorToErrorKind(synthetic)).toBe('auth_env_error');
   });
 
   it('classifies ModelConfigError subclasses (recognized via .name) as auth_env_error', () => {

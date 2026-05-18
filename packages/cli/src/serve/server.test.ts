@@ -29,6 +29,7 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
+import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
 import {
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -37,6 +38,7 @@ import {
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -118,7 +120,16 @@ const EXPECTED_STAGE1_FEATURES = [
   // hash-aware text mutation routes behind the strict mutation gate.
   'workspace_file_bytes',
   'workspace_file_write',
+  // #4175 Wave 4 PR 17. Mutation control routes (approval mode toggle,
+  // workspace tool enable/disable, init scaffold, MCP server restart).
+  'session_approval_mode_control',
+  'workspace_tool_toggle',
+  'workspace_init',
+  'workspace_mcp_restart',
   // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
+  // Registry order on origin/main has PR 21 appended last, so the
+  // baseline assertion below mirrors that even though PR 21 landed
+  // before PR 17 chronologically.
   'auth_device_flow',
 ] as const;
 
@@ -136,6 +147,13 @@ const EXPECTED_REGISTERED_FEATURES = [
 ] as const;
 
 interface FakeBridgeOpts {
+  /**
+   * #4282 fold-in 1 (gpt-5.5 C2): tests that exercise workspace
+   * mutation routes with `X-Qwen-Client-Id` set need the fakeBridge
+   * to advertise those ids as "known", or the new client-id
+   * validator returns 400. Defaults to an empty set.
+   */
+  knownClientIds?: Iterable<string>;
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
@@ -186,6 +204,38 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  setApprovalModeImpl?: (
+    sessionId: string,
+    mode: ApprovalMode,
+    opts: { persist: boolean },
+    context?: BridgeClientRequestContext,
+  ) => Promise<{
+    sessionId: string;
+    mode: ApprovalMode;
+    previous: ApprovalMode;
+    persisted: boolean;
+  }>;
+  setToolEnabledImpl?: (
+    toolName: string,
+    enabled: boolean,
+    originatorClientId: string | undefined,
+  ) => Promise<{ toolName: string; enabled: boolean }>;
+  initWorkspaceImpl?: (
+    initOpts: { force?: boolean },
+    originatorClientId: string | undefined,
+  ) => Promise<{ path: string; action: 'created' | 'overwrote' | 'noop' }>;
+  restartMcpServerImpl?: (
+    serverName: string,
+    originatorClientId: string | undefined,
+  ) => Promise<
+    | { serverName: string; restarted: true; durationMs: number }
+    | {
+        serverName: string;
+        restarted: false;
+        skipped: true;
+        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      }
+  >;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -245,6 +295,25 @@ interface FakeBridge extends HttpAcpBridge {
     sessionId: string;
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
+  }>;
+  setApprovalModeCalls: Array<{
+    sessionId: string;
+    mode: ApprovalMode;
+    opts: { persist: boolean };
+    context?: BridgeClientRequestContext;
+  }>;
+  setToolEnabledCalls: Array<{
+    toolName: string;
+    enabled: boolean;
+    originatorClientId?: string;
+  }>;
+  initWorkspaceCalls: Array<{
+    initOpts: { force?: boolean };
+    originatorClientId?: string;
+  }>;
+  restartMcpServerCalls: Array<{
+    serverName: string;
+    originatorClientId?: string;
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -382,6 +451,41 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       availableSkills: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
+  const setApprovalModeImpl =
+    opts.setApprovalModeImpl ??
+    (async (
+      sessionId: string,
+      mode: ApprovalMode,
+      o: { persist: boolean },
+    ) => ({
+      sessionId,
+      mode,
+      previous: ApprovalMode.DEFAULT,
+      persisted: o.persist,
+    }));
+  const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
+  const setToolEnabledImpl =
+    opts.setToolEnabledImpl ??
+    (async (toolName: string, enabled: boolean) => ({
+      toolName,
+      enabled,
+    }));
+  const initWorkspaceCalls: FakeBridge['initWorkspaceCalls'] = [];
+  const initWorkspaceImpl =
+    opts.initWorkspaceImpl ??
+    (async () => ({
+      path: path.resolve(WS_BOUND, 'QWEN.md'),
+      action: 'created' as const,
+    }));
+  const restartMcpServerCalls: FakeBridge['restartMcpServerCalls'] = [];
+  const restartMcpServerImpl =
+    opts.restartMcpServerImpl ??
+    (async (serverName: string) => ({
+      serverName,
+      restarted: true as const,
+      durationMs: 42,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -417,6 +521,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextCalls,
     sessionSupportedCommandsCalls,
     setModelCalls,
+    setApprovalModeCalls,
+    setToolEnabledCalls,
+    initWorkspaceCalls,
+    restartMcpServerCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -540,6 +648,37 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
     },
+    async setSessionApprovalMode(sessionId, mode, o, context) {
+      setApprovalModeCalls.push({
+        sessionId,
+        mode,
+        opts: o,
+        ...(context ? { context } : {}),
+      });
+      return setApprovalModeImpl(sessionId, mode, o, context);
+    },
+    async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
+      setToolEnabledCalls.push({
+        toolName,
+        enabled,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return setToolEnabledImpl(toolName, enabled, originatorClientId);
+    },
+    async initWorkspace(initOpts, originatorClientId) {
+      initWorkspaceCalls.push({
+        initOpts,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return initWorkspaceImpl(initOpts, originatorClientId);
+    },
+    async restartMcpServer(serverName, originatorClientId) {
+      restartMcpServerCalls.push({
+        serverName,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return restartMcpServerImpl(serverName, originatorClientId);
+    },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
       return closeImpl(sessionId, context);
@@ -571,9 +710,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       // exercised against a live bridge.
     },
     knownClientIds() {
-      // Default empty set — workspace mutation tests opt in by
-      // overriding the bridge in their suite.
-      return new Set<string>();
+      // Default empty set; tests pass `{knownClientIds: ['client-1']}`
+      // to opt into validation success on workspace mutation routes.
+      return new Set<string>(opts.knownClientIds ?? []);
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
@@ -2051,6 +2190,501 @@ describe('createServeApp', () => {
         .send({ modelId: 'qwen3-coder' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/approval-mode (#4175 Wave 4 PR 17)', () => {
+    // Strict-gated route: refuses on no-token loopback defaults. All
+    // tests configure a token and forward `Authorization: Bearer …`.
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/approval-mode')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ mode: 'yolo' });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('200 with the typed result on success and persist defaults to false', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        previous: 'default',
+        persisted: false,
+      });
+      expect(bridge.setApprovalModeCalls).toHaveLength(1);
+      expect(bridge.setApprovalModeCalls[0]).toMatchObject({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        opts: { persist: false },
+      });
+    });
+
+    it('forwards persist:true to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'auto-edit', persist: true });
+      expect(res.status).toBe(200);
+      expect(res.body.persisted).toBe(true);
+      expect(bridge.setApprovalModeCalls[0]?.opts).toEqual({ persist: true });
+    });
+
+    it('passes client identity context into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ mode: 'plan' });
+      expect(res.status).toBe(200);
+      expect(bridge.setApprovalModeCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('400 on missing or unknown mode literal', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const missing = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_approval_mode');
+      expect(missing.body.allowed).toEqual([
+        'plan',
+        'default',
+        'auto-edit',
+        'yolo',
+      ]);
+      const unknown = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'super-yolo' });
+      expect(unknown.status).toBe(400);
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('400 when persist is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo', persist: 'truthy' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_persist_flag');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('403 with errorKind=auth_env_error when bridge throws TrustGateError', async () => {
+      const bridge = fakeBridge({
+        setApprovalModeImpl: async () => {
+          throw new TrustGateError(
+            'Cannot enable privileged approval modes in an untrusted folder.',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'trust_gate',
+        errorKind: 'auth_env_error',
+      });
+    });
+
+    it('404 when bridge reports unknown session', async () => {
+      const bridge = fakeBridge({
+        setApprovalModeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/missing/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /workspace/init (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/init')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('200 with action:created and force=false on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(200);
+      expect(res.body.action).toBe('created');
+      expect(res.body.path).toContain('QWEN.md');
+      expect(bridge.initWorkspaceCalls[0]).toMatchObject({
+        initOpts: { force: false },
+      });
+    });
+
+    it('forwards force:true to the bridge', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => ({
+          path: path.resolve(WS_BOUND, 'QWEN.md'),
+          action: 'overwrote' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({
+        force: true,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.action).toBe('overwrote');
+      expect(bridge.initWorkspaceCalls[0]?.initOpts).toEqual({ force: true });
+    });
+
+    it('passes client identity into the bridge', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): the workspace mutation route
+      // validates `X-Qwen-Client-Id` against `bridge.knownClientIds()`.
+      // Register `client-1` so the validation succeeds and the
+      // originator stamp lands on the bridge call.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/init'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+      expect(bridge.initWorkspaceCalls[0]?.originatorClientId).toBe('client-1');
+    });
+
+    it('400 invalid_client_id when X-Qwen-Client-Id is not in knownClientIds', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): the validator rejects forged
+      // headers with a structured 400 instead of stamping the
+      // originator on the SSE event.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('400 when force is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({
+        force: 'yes',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_force_flag');
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('409 with structured payload when bridge throws WorkspaceInitConflictError', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => {
+          throw new WorkspaceInitConflictError('/work/bound/QWEN.md', 1234);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'workspace_init_conflict',
+        path: '/work/bound/QWEN.md',
+        existingSize: 1234,
+      });
+    });
+  });
+
+  describe('POST /workspace/mcp/:server/restart (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/mcp/docs/restart')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(401);
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('200 with restarted:true on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        serverName: 'docs',
+        restarted: true,
+        durationMs: 42,
+      });
+      expect(bridge.restartMcpServerCalls).toHaveLength(1);
+      expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('docs');
+    });
+
+    it('200 on soft skip with structured reason', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async (serverName) => ({
+          serverName,
+          restarted: false as const,
+          skipped: true as const,
+          reason: 'budget_would_exceed' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        serverName: 'docs',
+        restarted: false,
+        skipped: true,
+        reason: 'budget_would_exceed',
+      });
+    });
+
+    it('passes client identity into the bridge', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): see /workspace/init test above.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/mcp/docs/restart'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+      expect(bridge.restartMcpServerCalls[0]?.originatorClientId).toBe(
+        'client-1',
+      );
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/mcp/docs/restart'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({});
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('decodes URL-encoded server names', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // Server name with hyphen + dot is a legitimate stdio MCP config key.
+      const res = await auth(
+        request(app).post(
+          `/workspace/mcp/${encodeURIComponent('foo-bar.io')}/restart`,
+        ),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('foo-bar.io');
+    });
+
+    it('404 when bridge reports SessionNotFoundError (no live channel)', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async () => {
+          throw new SessionNotFoundError('mcp:docs');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(404);
+    });
+
+    it('400 when serverName exceeds 256 chars (#4282 fold-in 4 S1)', async () => {
+      // Mirror the existing tool-name length cap so an unbounded path
+      // parameter can't bloat SSE event bodies, ACP messages, or error
+      // responses with arbitrarily long server names.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const overlong = 'a'.repeat(257);
+      const res = await auth(
+        request(app).post(`/workspace/mcp/${overlong}/restart`),
+      ).send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+  });
+
+  describe('POST /workspace/tools/:name/enable (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/tools/Bash/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ enabled: false });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('200 with the typed result on success (disable)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ toolName: 'Bash', enabled: false });
+      expect(bridge.setToolEnabledCalls).toHaveLength(1);
+      expect(bridge.setToolEnabledCalls[0]).toMatchObject({
+        toolName: 'Bash',
+        enabled: false,
+      });
+    });
+
+    it('200 on enable=true (re-enable a previously disabled tool)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: true });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ toolName: 'Bash', enabled: true });
+      expect(bridge.setToolEnabledCalls[0]?.enabled).toBe(true);
+    });
+
+    it('passes client identity into the bridge', async () => {
+      // #4282 fold-in 1 (gpt-5.5 C2): see /workspace/init test above.
+      const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/tools/Bash/enable'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ enabled: false });
+      expect(bridge.setToolEnabledCalls[0]?.originatorClientId).toBe(
+        'client-1',
+      );
+    });
+
+    it('400 invalid_client_id on unknown X-Qwen-Client-Id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/tools/Bash/enable'))
+        .set('X-Qwen-Client-Id', 'forged-client')
+        .send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_client_id',
+        clientId: 'forged-client',
+      });
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('400 when enabled is missing or non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const missing = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_enabled_flag');
+      const bad = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: 'truthy' });
+      expect(bad.status).toBe(400);
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('accepts URL-encoded MCP-qualified tool names', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // The SDK helper `encodeURIComponent`s the tool name; the route
+      // path must round-trip the underscored MCP-qualified form
+      // (`mcp__github__create_issue`) without mangling it.
+      const res = await auth(
+        request(app).post('/workspace/tools/mcp__github__create_issue/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(bridge.setToolEnabledCalls[0]?.toolName).toBe(
+        'mcp__github__create_issue',
+      );
+    });
+
+    it('trims surrounding whitespace before persisting (#4282 fold-in 4 C3)', async () => {
+      // The disk read path (`loadCliConfig` → `Set` of trimmed strings)
+      // applies `.trim()` when consuming `tools.disabled`. Without
+      // matching the route's write path, disabling URL-encoded
+      // `%20Bash%20` would persist `" Bash "` verbatim and the next
+      // ACP child spawn would key on `"Bash"` — leaving the entry
+      // permanently stuck because re-enable for `"Bash"` would
+      // `.delete("Bash")` on a Set containing `" Bash "`.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/%20Bash%20/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(bridge.setToolEnabledCalls[0]?.toolName).toBe('Bash');
+    });
+
+    it('400 when whitespace-only path parameter trims to empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // `%20%20` is two spaces — survives the path-segment guard but
+      // collapses to '' after trim. Surface the same 400 the
+      // routing layer would return for an empty segment.
+      const res = await auth(
+        request(app).post('/workspace/tools/%20%20/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_tool_name');
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
     });
   });
 

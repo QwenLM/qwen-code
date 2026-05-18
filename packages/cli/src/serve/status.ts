@@ -59,6 +59,18 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
 } as const;
 
+/**
+ * Control-plane (mutation) ACP extMethods introduced in #4175 Wave 4 PR 17.
+ * Distinct from `SERVE_STATUS_EXT_METHODS` so reviewers can grep mutation
+ * surface independently from read-only diagnostics. Each route in
+ * `server.ts` forwards through the matching extMethod into `acpAgent.ts`
+ * which then mutates Config / ToolRegistry / McpClientManager state.
+ */
+export const SERVE_CONTROL_EXT_METHODS = {
+  sessionApprovalMode: 'qwen/control/session/approval_mode',
+  workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
+} as const;
+
 export type ServeStatus =
   | 'ok'
   | 'warning'
@@ -563,6 +575,10 @@ export function mapDomainErrorToErrorKind(
   }
   if (err instanceof SyntaxError) return 'parse_error';
   if (!(err instanceof Error)) return undefined;
+  // `TrustGateError` is defined in `@qwen-code/qwen-code-core/config`; we
+  // match by `.name` rather than `instanceof` because cross-package bundling
+  // can produce duplicate class instances where `instanceof` returns false.
+  if (err.name === 'TrustGateError') return 'auth_env_error';
   if (MODEL_CONFIG_ERROR_NAMES.has(err.name)) return 'auth_env_error';
   const code = (err as { code?: unknown }).code;
   if (typeof code === 'string' && FS_MISSING_CODES.has(code)) {

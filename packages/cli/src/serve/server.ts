@@ -7,6 +7,8 @@
 import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   bearerAuth,
@@ -35,9 +37,12 @@ import {
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -1302,6 +1307,208 @@ export function createServeApp(
     }
   });
 
+  app.post(
+    '/session/:id/approval-mode',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17 — first strict-gated session mutation
+      // surface after PR 14 v1. Validates `mode` against the closed
+      // `APPROVAL_MODES` enum and an optional `persist: boolean` flag.
+      // The bridge applies the change inside the ACP child's per-session
+      // `Config` and (when `persist: true`) writes `tools.approvalMode`
+      // to workspace settings via the `persistApprovalMode` hook wired
+      // in `runQwenServe.ts`.
+      const sessionId = req.params['id'];
+      const body = safeBody(req);
+      const mode = body['mode'];
+      const persist = body['persist'];
+      if (
+        typeof mode !== 'string' ||
+        !APPROVAL_MODES.includes(mode as ApprovalMode)
+      ) {
+        res.status(400).json({
+          error: '`mode` is required and must be one of the allowed values',
+          code: 'invalid_approval_mode',
+          allowed: APPROVAL_MODES,
+        });
+        return;
+      }
+      if (persist !== undefined && typeof persist !== 'boolean') {
+        res.status(400).json({
+          error: '`persist` must be a boolean when provided',
+          code: 'invalid_persist_flag',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const response = await bridge.setSessionApprovalMode(
+          sessionId,
+          mode as ApprovalMode,
+          { persist: persist === true },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/approval-mode',
+          sessionId,
+        });
+      }
+    },
+  );
+
+  app.post(
+    '/workspace/mcp/:server/restart',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17. Forwards through the ACP child's
+      // `McpClientManager.discoverMcpToolsForServer` after a budget
+      // pre-check on PR 14 v1's accounting. Soft refusals are 200 OK
+      // with `{restarted:false, skipped:true, reason}`; unknown server
+      // names or no live ACP channel are hard errors mapped to 4xx/5xx
+      // via sendBridgeError.
+      const serverName = req.params['server'];
+      if (!serverName || typeof serverName !== 'string') {
+        res.status(400).json({
+          error: 'Server name path parameter is required',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      // #4282 fold-in 4 (qwen-latest S1): match the
+      // `MAX_TOOL_NAME_LENGTH` cap so the server name (which propagates
+      // into SSE event bodies, ACP messages, and error responses) can't
+      // be used to bloat any of those surfaces with an unbounded
+      // path-parameter input.
+      if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      // #4282 fold-in 1 (gpt-5.5 C2): validate `X-Qwen-Client-Id`
+      // against `bridge.knownClientIds()` so the originator stamped
+      // onto `mcp_server_restart*` events is grounded in a known
+      // identity rather than a forged header.
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.restartMcpServer(serverName, clientId);
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/mcp/:server/restart',
+        });
+      }
+    },
+  );
+
+  app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
+    // #4175 Wave 4 PR 17. Scaffold-only init: the bridge writes an
+    // empty QWEN.md without invoking the LLM. Default refuses
+    // overwrite (409); body `{force: true}` overrides.
+    const body = safeBody(req);
+    const force = body['force'];
+    if (force !== undefined && typeof force !== 'boolean') {
+      res.status(400).json({
+        error: '`force` must be a boolean when provided',
+        code: 'invalid_force_flag',
+      });
+      return;
+    }
+    // #4282 fold-in 1 (gpt-5.5 C2): validate against known client ids.
+    const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.initWorkspace(
+        { force: force === true },
+        clientId,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /workspace/init' });
+    }
+  });
+
+  app.post(
+    '/workspace/tools/:name/enable',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17. Toggles a tool name in the workspace
+      // `tools.disabled` settings list. Strict-gated alongside other
+      // Wave 4 mutation routes; bridge writes the file directly (no
+      // ACP roundtrip) and fan-outs `tool_toggled` to every live
+      // session SSE bus. Already-registered tools in live sessions
+      // are NOT retroactively unregistered — toggling takes effect on
+      // the next ACP child spawn or session refresh.
+      const rawToolName = req.params['name'];
+      if (!rawToolName || typeof rawToolName !== 'string') {
+        res.status(400).json({
+          error: 'Tool name path parameter is required',
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      // #4282 fold-in 4 (qwen-latest C3): trim before persistence so the
+      // write path matches the read path. `loadCliConfig` applies
+      // `.trim()` when consuming `tools.disabled` at child spawn, so a
+      // leading/trailing space stored verbatim would never round-trip:
+      // disable would persist `" Bash "`, the spawn would key on
+      // `"Bash"`, and a re-enable for `"Bash"` would leave the original
+      // entry permanently stuck.
+      const toolName = rawToolName.trim();
+      if (toolName.length === 0) {
+        res.status(400).json({
+          error: 'Tool name path parameter is required',
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      // #4282 fold-in 2 (deepseek SV1): cap the tool name length so
+      // an extremely long path parameter can't bloat the workspace
+      // settings file. Sized at 256 to comfortably accommodate the
+      // longest legitimate MCP qualified names
+      // (`mcp__<server>__<tool>`) while staying well under any
+      // settings-file pathological-input concern. Mirrors the
+      // explicit caps on `cwd` (`MAX_WORKSPACE_PATH_LENGTH`) and
+      // `X-Qwen-Client-Id` (`MAX_CLIENT_ID_LENGTH`).
+      if (toolName.length > MAX_TOOL_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Tool name exceeds ${MAX_TOOL_NAME_LENGTH}-character limit`,
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      const body = safeBody(req);
+      const enabled = body['enabled'];
+      if (typeof enabled !== 'boolean') {
+        res.status(400).json({
+          error: '`enabled` is required and must be a boolean',
+          code: 'invalid_enabled_flag',
+        });
+        return;
+      }
+      // #4282 fold-in 1 (gpt-5.5 C2): validate against known client ids.
+      const clientId = parseAndValidateWorkspaceClientId(req, res, bridge);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.setWorkspaceToolEnabled(
+          toolName,
+          enabled,
+          clientId,
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/tools/:name/enable',
+        });
+      }
+    },
+  );
+
   app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
     const sessionId = req.params['id'];
     const requestId = req.params['requestId'];
@@ -1657,6 +1864,10 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
 
 const CLIENT_ID_HEADER = 'x-qwen-client-id';
 const MAX_CLIENT_ID_LENGTH = 128;
+/** #4282 fold-in 2 (deepseek SV1) — see /workspace/tools/:name/enable. */
+const MAX_TOOL_NAME_LENGTH = 256;
+/** #4282 fold-in 4 (qwen-latest S1) — see /workspace/mcp/:server/restart. */
+const MAX_SERVER_NAME_LENGTH = 256;
 const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
@@ -1797,6 +2008,37 @@ function parseClientIdHeader(
       error:
         '`X-Qwen-Client-Id` must be a non-empty token of 128 characters or fewer',
       code: 'invalid_client_id',
+    });
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * #4282 fold-in 1 (gpt-5.5 C2). Workspace-level mutation routes validate
+ * the parsed `X-Qwen-Client-Id` against `bridge.knownClientIds()` so the
+ * `originatorClientId` stamped onto fan-out events is grounded in a
+ * client identity the daemon previously issued. Without this check, any
+ * authenticated caller could forge the originator on `tool_toggled`,
+ * `workspace_initialized`, and `mcp_server_restart*` events.
+ *
+ * Mirrors the inline check pattern in `workspaceMemory.ts` /
+ * `workspaceAgents.ts` from PR 16. Returns the validated client id
+ * (or `undefined` when no header was supplied), `null` when a 400 has
+ * already been emitted by `parseClientIdHeader` or this validator.
+ */
+function parseAndValidateWorkspaceClientId(
+  req: import('express').Request,
+  res: import('express').Response,
+  bridge: HttpAcpBridge,
+): string | undefined | null {
+  const raw = parseClientIdHeader(req, res);
+  if (raw === null || raw === undefined) return raw;
+  if (!bridge.knownClientIds().has(raw)) {
+    res.status(400).json({
+      error: `Client id "${raw}" is not registered for this workspace`,
+      code: 'invalid_client_id',
+      clientId: raw,
     });
     return null;
   }
@@ -2004,6 +2246,59 @@ function sendBridgeError(
   err: unknown,
   ctx?: { route?: string; sessionId?: string },
 ): void {
+  if (err instanceof WorkspaceInitConflictError) {
+    // #4175 Wave 4 PR 17. The target file already exists with non-
+    // whitespace content and the caller did not pass `force: true`.
+    // Body carries the resolved path + size so SDK clients can render
+    // a "file already exists; pass force: true to overwrite" prompt
+    // without re-stat'ing the workspace.
+    res.status(409).json({
+      error: err.message,
+      code: 'workspace_init_conflict',
+      path: err.path,
+      existingSize: err.existingSize,
+    });
+    return;
+  }
+  if (err instanceof McpServerNotFoundError) {
+    // #4282 fold-in 1 (gpt-5.5 C5). Stable 404 for "MCP server name
+    // not in `mcpServers` config" so callers can distinguish a typo
+    // from an internal daemon failure.
+    res.status(404).json({
+      error: err.message,
+      code: 'mcp_server_not_found',
+      serverName: err.serverName,
+    });
+    return;
+  }
+  if (err instanceof McpServerRestartFailedError) {
+    // #4282 fold-in 1 (gpt-5.5 C4). 502 because the daemon understood
+    // the request and the upstream (the MCP server / its child
+    // process) failed to come back online. `errorKind: 'protocol_error'`
+    // shares the closed PR-13 taxonomy.
+    res.status(502).json({
+      error: err.message,
+      code: 'mcp_server_restart_failed',
+      errorKind: 'protocol_error',
+      serverName: err.serverName,
+      mcpStatus: err.mcpStatus,
+    });
+    return;
+  }
+  if (err instanceof TrustGateError) {
+    // #4175 Wave 4 PR 17: trust-folder rejection from
+    // `Config.setApprovalMode`. 403 because the daemon understood the
+    // request but the workspace's trust posture forbids the privileged
+    // mode. `errorKind: 'auth_env_error'` shares the closed PR 13
+    // taxonomy so SDK consumers branch on the same enum already used by
+    // preflight / env diagnostics.
+    res.status(403).json({
+      error: err.message,
+      code: 'trust_gate',
+      errorKind: 'auth_env_error',
+    });
+    return;
+  }
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
