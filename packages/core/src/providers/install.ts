@@ -88,10 +88,12 @@ export async function applyProviderInstallPlan(
   } = options;
 
   settings.backup?.();
+  const previousEnvValues = new Map<string, string | undefined>();
 
   try {
-    // Set environment variables
+    // Set environment variables (snapshot previous values for rollback)
     for (const [key, value] of Object.entries(plan.env ?? {})) {
+      previousEnvValues.set(key, process.env[key]);
       settings.setValue(`env.${key}`, value);
       process.env[key] = value;
     }
@@ -155,6 +157,13 @@ export async function applyProviderInstallPlan(
     return { updatedModelProviders };
   } catch (error) {
     settings.restore?.();
+    for (const [key, prev] of previousEnvValues) {
+      if (prev === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = prev;
+      }
+    }
     throw error;
   }
 }

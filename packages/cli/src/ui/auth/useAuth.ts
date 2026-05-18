@@ -11,17 +11,17 @@ import {
   logAuth,
   type Config,
   buildInstallPlan,
+  applyProviderInstallPlan,
   type ProviderConfig,
   type ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
+import { createLoadedSettingsAdapter } from '../../config/loadedSettingsAdapter.js';
 import { useQwenAuth } from '../hooks/useQwenAuth.js';
 import { AuthState, MessageType } from '../types.js';
 import type { HistoryItem } from '../types.js';
 import { t } from '../../i18n/index.js';
-
-import { applyProviderInstallPlan } from '../../auth/install/applyProviderInstallPlan.js';
 
 /**
  * Normalize model IDs: split by comma, trim, deduplicate, remove empty.
@@ -152,7 +152,13 @@ export const useAuthCommand = (
         setAuthError(null);
 
         const plan = buildInstallPlan(providerConfig, inputs);
-        await applyProviderInstallPlan(plan, { settings, config });
+        await applyProviderInstallPlan(plan, {
+          settings: createLoadedSettingsAdapter(settings),
+          reloadModelProviders: (mp) => config.reloadModelProvidersConfig(mp),
+          syncAuthState: (authType, modelId) =>
+            config.getModelsConfig().syncAfterAuthRefresh(authType, modelId),
+          refreshAuth: (authType) => config.refreshAuth(authType),
+        });
 
         completeAuthentication();
 
