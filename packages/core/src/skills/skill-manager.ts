@@ -686,7 +686,12 @@ export class SkillManager {
       const paths = parsePathsField(frontmatter);
 
       // Optional `priority` frontmatter: higher values sort first.
-      const priority = parsePriorityField(frontmatter, filePath);
+      // Pass our own logger so the warning is tagged [SKILL_MANAGER]
+      // rather than [SKILL_LOAD] — matches the namespace of the rest of
+      // the project/user/bundled parse path.
+      const priority = parsePriorityField(frontmatter, filePath, (msg) =>
+        debugLogger.warn(msg),
+      );
 
       const config: SkillConfig = {
         name,

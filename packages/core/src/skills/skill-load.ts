@@ -291,6 +291,12 @@ export function validateConfig(
 export function parsePriorityField(
   frontmatter: Record<string, unknown>,
   filePath: string,
+  // Optional logger so the caller's namespace tags the warning. Without
+  // this, a warning for a project/user/bundled SKILL.md emitted from
+  // SkillManager.parseSkillContent would be tagged `[SKILL_LOAD]` —
+  // misleading for log filtering. Defaults to skill-load's own logger
+  // for the original (extension) call site.
+  warn: (message: string) => void = (message) => debugLogger.warn(message),
 ): number | undefined {
   const raw = frontmatter['priority'];
   if (raw === undefined || raw === null || raw === '') {
@@ -298,7 +304,7 @@ export function parsePriorityField(
   }
 
   if (typeof raw !== 'number' || !Number.isFinite(raw)) {
-    debugLogger.warn(
+    warn(
       `Ignoring invalid priority value in ${filePath}: expected a finite number.`,
     );
     return undefined;
