@@ -45,6 +45,7 @@ import type {
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  DaemonToolToggleResult,
 } from './types.js';
 
 /**
@@ -876,6 +877,45 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/approval-mode');
         }
         return (await res.json()) as DaemonApprovalModeResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Toggle a tool name in the workspace's
+   * `tools.disabled` settings list. Strict-gated mutation route — the
+   * daemon must be configured with a bearer token. The daemon writes
+   * the settings file directly and fan-outs a `tool_toggled` event to
+   * every live session SSE bus.
+   *
+   * Already-registered tools in active sessions are NOT retroactively
+   * unregistered. The toggle takes effect on the next ACP child spawn
+   * — listeners that need the live tool list to reflect the change
+   * should also `POST /workspace/mcp/:server/restart` (when the tool
+   * is MCP-discovered) or open a new session.
+   *
+   * Pre-flight `caps.features.workspace_tool_toggle` before calling.
+   */
+  async setWorkspaceToolEnabled(
+    toolName: string,
+    enabled: boolean,
+    clientId?: string,
+  ): Promise<DaemonToolToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/tools/${encodeURIComponent(toolName)}/enable`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/tools/:name/enable',
+          );
+        }
+        return (await res.json()) as DaemonToolToggleResult;
       },
     );
   }

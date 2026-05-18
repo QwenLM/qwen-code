@@ -7,12 +7,8 @@
 import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
-import type {
-  ApprovalMode} from '@qwen-code/qwen-code-core';
-import {
-  APPROVAL_MODES,
-  TrustGateError,
-} from '@qwen-code/qwen-code-core';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { APPROVAL_MODES, TrustGateError } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   bearerAuth,
@@ -1355,6 +1351,51 @@ export function createServeApp(
         sendBridgeError(res, err, {
           route: 'POST /session/:id/approval-mode',
           sessionId,
+        });
+      }
+    },
+  );
+
+  app.post(
+    '/workspace/tools/:name/enable',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17. Toggles a tool name in the workspace
+      // `tools.disabled` settings list. Strict-gated alongside other
+      // Wave 4 mutation routes; bridge writes the file directly (no
+      // ACP roundtrip) and fan-outs `tool_toggled` to every live
+      // session SSE bus. Already-registered tools in live sessions
+      // are NOT retroactively unregistered — toggling takes effect on
+      // the next ACP child spawn or session refresh.
+      const toolName = req.params['name'];
+      if (!toolName || typeof toolName !== 'string') {
+        res.status(400).json({
+          error: 'Tool name path parameter is required',
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      const body = safeBody(req);
+      const enabled = body['enabled'];
+      if (typeof enabled !== 'boolean') {
+        res.status(400).json({
+          error: '`enabled` is required and must be a boolean',
+          code: 'invalid_enabled_flag',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.setWorkspaceToolEnabled(
+          toolName,
+          enabled,
+          clientId,
+        );
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/tools/:name/enable',
         });
       }
     },

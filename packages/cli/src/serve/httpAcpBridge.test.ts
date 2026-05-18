@@ -4278,6 +4278,127 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
+    it('throws when no persistDisabledTools callback is wired', async () => {
+      const bridge = makeBridge();
+      await expect(
+        bridge.setWorkspaceToolEnabled('Bash', false, undefined),
+      ).rejects.toThrow(/persistDisabledTools/);
+    });
+
+    it('invokes the persist callback with the workspace + name + enabled flag', async () => {
+      const calls: Array<{
+        workspace: string;
+        toolName: string;
+        enabled: boolean;
+      }> = [];
+      const bridge = makeBridge({
+        persistDisabledTools: async (workspace, toolName, enabled) => {
+          calls.push({ workspace, toolName, enabled });
+        },
+      });
+      const result = await bridge.setWorkspaceToolEnabled(
+        'Bash',
+        false,
+        undefined,
+      );
+      expect(result).toEqual({ toolName: 'Bash', enabled: false });
+      expect(calls).toEqual([
+        { workspace: WS_A, toolName: 'Bash', enabled: false },
+      ]);
+    });
+
+    it('does NOT spawn an ACP child even when called repeatedly', async () => {
+      let factoryCalls = 0;
+      const bridge = makeBridge({
+        channelFactory: async () => {
+          factoryCalls += 1;
+          throw new Error('channel factory should not be invoked');
+        },
+        persistDisabledTools: async () => {},
+      });
+      await bridge.setWorkspaceToolEnabled('Bash', false, undefined);
+      await bridge.setWorkspaceToolEnabled('Read', true, undefined);
+      expect(factoryCalls).toBe(0);
+    });
+
+    it('fan-outs tool_toggled events to every live session bus', async () => {
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        new AgentSideConnection(() => new FakeAgent() as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistDisabledTools: async () => {},
+      });
+      // Two thread-scope sessions on the same workspace, so both
+      // entries live in the byId map and both should observe the
+      // workspace-scoped fan-out.
+      const a = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const b = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const aborts = [new AbortController(), new AbortController()];
+      const itA = bridge
+        .subscribeEvents(a.sessionId, { signal: aborts[0]!.signal })
+        [Symbol.asyncIterator]();
+      const itB = bridge
+        .subscribeEvents(b.sessionId, { signal: aborts[1]!.signal })
+        [Symbol.asyncIterator]();
+      await bridge.setWorkspaceToolEnabled('Bash', false, undefined);
+      const [evA, evB] = await Promise.all([itA.next(), itB.next()]);
+      expect(evA.value?.type).toBe('tool_toggled');
+      expect(evB.value?.type).toBe('tool_toggled');
+      expect(evA.value?.data).toEqual({ toolName: 'Bash', enabled: false });
+      expect(evB.value?.data).toEqual({ toolName: 'Bash', enabled: false });
+      aborts.forEach((a) => a.abort());
+      await bridge.shutdown();
+    });
+
+    it('stamps tool_toggled with the originator clientId when supplied', async () => {
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        new AgentSideConnection(() => new FakeAgent() as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistDisabledTools: async () => {},
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      await bridge.setWorkspaceToolEnabled('Bash', false, session.clientId);
+      const next = await it.next();
+      expect(next.value?.originatorClientId).toBe(session.clientId);
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
   describe('subscribeEvents', () => {
     it('throws SessionNotFoundError for unknown session ids', () => {
       const bridge = makeBridge({

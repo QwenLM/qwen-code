@@ -123,6 +123,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'auth_device_flow',
   // #4175 Wave 4 PR 17.
   'session_approval_mode_control',
+  'workspace_tool_toggle',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -200,6 +201,11 @@ interface FakeBridgeOpts {
     previous: ApprovalMode;
     persisted: boolean;
   }>;
+  setToolEnabledImpl?: (
+    toolName: string,
+    enabled: boolean,
+    originatorClientId: string | undefined,
+  ) => Promise<{ toolName: string; enabled: boolean }>;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -265,6 +271,11 @@ interface FakeBridge extends HttpAcpBridge {
     mode: ApprovalMode;
     opts: { persist: boolean };
     context?: BridgeClientRequestContext;
+  }>;
+  setToolEnabledCalls: Array<{
+    toolName: string;
+    enabled: boolean;
+    originatorClientId?: string;
   }>;
   closeCalls: Array<{
     sessionId: string;
@@ -415,6 +426,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       previous: ApprovalMode.DEFAULT,
       persisted: o.persist,
     }));
+  const setToolEnabledCalls: FakeBridge['setToolEnabledCalls'] = [];
+  const setToolEnabledImpl =
+    opts.setToolEnabledImpl ??
+    (async (toolName: string, enabled: boolean) => ({
+      toolName,
+      enabled,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -451,6 +469,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionSupportedCommandsCalls,
     setModelCalls,
     setApprovalModeCalls,
+    setToolEnabledCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -582,6 +601,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return setApprovalModeImpl(sessionId, mode, o, context);
+    },
+    async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
+      setToolEnabledCalls.push({
+        toolName,
+        enabled,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return setToolEnabledImpl(toolName, enabled, originatorClientId);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -2227,6 +2254,93 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /workspace/tools/:name/enable (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/tools/Bash/enable')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ enabled: false });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('200 with the typed result on success (disable)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ toolName: 'Bash', enabled: false });
+      expect(bridge.setToolEnabledCalls).toHaveLength(1);
+      expect(bridge.setToolEnabledCalls[0]).toMatchObject({
+        toolName: 'Bash',
+        enabled: false,
+      });
+    });
+
+    it('200 on enable=true (re-enable a previously disabled tool)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: true });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ toolName: 'Bash', enabled: true });
+      expect(bridge.setToolEnabledCalls[0]?.enabled).toBe(true);
+    });
+
+    it('passes client identity into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/tools/Bash/enable'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ enabled: false });
+      expect(bridge.setToolEnabledCalls[0]?.originatorClientId).toBe(
+        'client-1',
+      );
+    });
+
+    it('400 when enabled is missing or non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const missing = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_enabled_flag');
+      const bad = await auth(
+        request(app).post('/workspace/tools/Bash/enable'),
+      ).send({ enabled: 'truthy' });
+      expect(bad.status).toBe(400);
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
+    });
+
+    it('accepts URL-encoded MCP-qualified tool names', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // The SDK helper `encodeURIComponent`s the tool name; the route
+      // path must round-trip the underscored MCP-qualified form
+      // (`mcp__github__create_issue`) without mangling it.
+      const res = await auth(
+        request(app).post('/workspace/tools/mcp__github__create_issue/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(bridge.setToolEnabledCalls[0]?.toolName).toBe(
+        'mcp__github__create_issue',
+      );
     });
   });
 

@@ -1268,6 +1268,56 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setWorkspaceToolEnabled (#4175 Wave 4 PR 17)', () => {
+    it('POSTs the enabled flag and URL-encodes the tool name', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { toolName: 'Bash', enabled: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setWorkspaceToolEnabled('Bash', false);
+      expect(result).toEqual({ toolName: 'Bash', enabled: false });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/tools/Bash/enable');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ enabled: false });
+    });
+
+    it('encodes MCP-qualified tool names with double underscores', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          toolName: 'mcp__github__create_issue',
+          enabled: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setWorkspaceToolEnabled('mcp__github__create_issue', false);
+      // `encodeURIComponent` does NOT encode `_`, so the path stays
+      // readable; the assertion pins this so a well-meaning future
+      // refactor that double-encodes accidentally is caught.
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/tools/mcp__github__create_issue/enable',
+      );
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { toolName: 'Bash', enabled: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setWorkspaceToolEnabled('Bash', false, 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 401 when daemon strict-gates the route', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(401, { error: 'token required', code: 'token_required' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.setWorkspaceToolEnabled('Bash', false),
+      ).rejects.toMatchObject({ status: 401 });
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(

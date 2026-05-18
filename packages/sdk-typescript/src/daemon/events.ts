@@ -36,6 +36,7 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'auth_device_flow_cancelled',
   // #4175 Wave 4 PR 17 — mutation control events.
   'approval_mode_changed',
+  'tool_toggled',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -261,6 +262,22 @@ export interface DaemonApprovalModeChangedData {
   [key: string]: unknown;
 }
 
+/**
+ * #4175 Wave 4 PR 17. Workspace-scoped: fan-outs to every active
+ * session SSE bus when `POST /workspace/tools/:name/enable` mutates
+ * the workspace `tools.disabled` settings list. The event is emitted
+ * regardless of whether the tool is currently registered — it
+ * communicates intent, not registry state. Live sessions retain
+ * already-registered tools; the toggle takes effect on the next ACP
+ * child spawn or `ToolRegistry.refresh()`.
+ */
+export interface DaemonToolToggledData {
+  toolName: string;
+  enabled: boolean;
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -321,6 +338,10 @@ export type DaemonApprovalModeChangedEvent = DaemonEventEnvelope<
   'approval_mode_changed',
   DaemonApprovalModeChangedData
 >;
+export type DaemonToolToggledEvent = DaemonEventEnvelope<
+  'tool_toggled',
+  DaemonToolToggledData
+>;
 
 export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
   'auth_device_flow_started',
@@ -362,7 +383,8 @@ export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
   | DaemonPermissionResolvedEvent
   | DaemonPermissionAlreadyResolvedEvent
-  | DaemonApprovalModeChangedEvent;
+  | DaemonApprovalModeChangedEvent
+  | DaemonToolToggledEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -437,6 +459,14 @@ export interface DaemonSessionViewState {
   approvalMode?: string;
   approvalModeChangedCount: number;
   lastApprovalModeChange?: DaemonApprovalModeChangedData;
+  /**
+   * #4175 Wave 4 PR 17. Workspace-scoped fan-out — every session bus
+   * receives `tool_toggled` events so cross-session UIs can update
+   * "this tool is disabled in the workspace" badges in real time.
+   * Non-terminal.
+   */
+  toolToggleCount: number;
+  lastToolToggle?: DaemonToolToggledData;
 }
 
 export function createDaemonSessionViewState(
@@ -468,6 +498,8 @@ export function createDaemonSessionViewState(
     approvalMode: seed.approvalMode,
     approvalModeChangedCount: seed.approvalModeChangedCount ?? 0,
     lastApprovalModeChange: seed.lastApprovalModeChange,
+    toolToggleCount: seed.toolToggleCount ?? 0,
+    lastToolToggle: seed.lastToolToggle,
   };
 }
 
@@ -568,6 +600,10 @@ export function asKnownDaemonEvent(
     case 'approval_mode_changed':
       return isApprovalModeChangedData(event.data)
         ? (event as DaemonApprovalModeChangedEvent)
+        : undefined;
+    case 'tool_toggled':
+      return isToolToggledData(event.data)
+        ? (event as DaemonToolToggledEvent)
         : undefined;
     default:
       return undefined;
@@ -742,6 +778,15 @@ export function reduceDaemonSessionEvent(
         approvalMode: event.data.next,
         approvalModeChangedCount: base.approvalModeChangedCount + 1,
         lastApprovalModeChange: event.data,
+      };
+    case 'tool_toggled':
+      // Workspace-scoped — same `tool_toggled` envelope is fan-out to
+      // every session, so adapters can render "this tool was disabled
+      // by another client" without polling.
+      return {
+        ...base,
+        toolToggleCount: base.toolToggleCount + 1,
+        lastToolToggle: event.data,
       };
     default: {
       const _exhaustive: never = event;
@@ -1220,6 +1265,14 @@ function isApprovalModeChangedData(
     isNonEmptyString(value['previous']) &&
     isNonEmptyString(value['next']) &&
     typeof value['persisted'] === 'boolean'
+  );
+}
+
+function isToolToggledData(value: unknown): value is DaemonToolToggledData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['toolName']) &&
+    typeof value['enabled'] === 'boolean'
   );
 }
 

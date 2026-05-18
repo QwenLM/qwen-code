@@ -289,6 +289,26 @@ export async function runQwenServe(
         const fresh = loadSettings(workspace);
         fresh.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
       },
+      // #4175 Wave 4 PR 17: `POST /workspace/tools/:name/enable` writes
+      // through this callback. Re-reads settings on each call (same
+      // freshness rationale as `persistApprovalMode`) and merges into
+      // the existing `tools.disabled` array — concurrent toggles from
+      // other writers stay safe across the read/modify/write window.
+      persistDisabledTools: async (workspace, toolName, enabled) => {
+        const fresh = loadSettings(workspace);
+        const merged = fresh.merged.tools?.disabled;
+        const current = Array.isArray(merged)
+          ? merged.filter((v): v is string => typeof v === 'string')
+          : [];
+        const next = new Set(current);
+        if (enabled) next.delete(toolName);
+        else next.add(toolName);
+        fresh.setValue(
+          SettingScope.Workspace,
+          'tools.disabled',
+          [...next].sort(),
+        );
+      },
     });
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`

@@ -728,6 +728,18 @@ export interface DaemonApprovalModeResult {
 }
 
 /**
+ * #4175 Wave 4 PR 17. Result body of `POST /workspace/tools/:name/
+ * enable`. The `enabled` flag echoes the requested state; daemon
+ * always succeeds when the bridge has a `persistDisabledTools` hook
+ * (production wires it). Already-registered tools in active sessions
+ * are not retroactively unregistered — see `tool_toggled` event docs.
+ */
+export interface DaemonToolToggleResult {
+  toolName: string;
+  enabled: boolean;
+}
+
+/**
  * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
  * server-side `Date.now()` epoch (ms) the daemon stored for this
  * session. `clientId` is echoed back only when the caller supplied a

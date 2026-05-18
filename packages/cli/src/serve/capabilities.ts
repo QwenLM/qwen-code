@@ -123,6 +123,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // settings via the daemon's `loadedSettings` handle. SDK helper:
   // `DaemonClient.setSessionApprovalMode`.
   session_approval_mode_control: { since: 'v1' },
+  // #4175 Wave 4 PR 17. `POST /workspace/tools/:name/enable` toggles a
+  // tool name in the workspace's `tools.disabled` settings list. The
+  // bridge writes the settings file directly (no ACP roundtrip) and
+  // fan-outs a `tool_toggled` event to all live session SSE buses.
+  // Already-registered tools in active sessions are NOT retroactively
+  // unregistered — the toggle takes effect on the next ACP child spawn
+  // (`tools.disabled` is consulted at `Config` construction time).
+  workspace_tool_toggle: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

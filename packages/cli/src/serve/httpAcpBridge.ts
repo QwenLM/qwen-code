@@ -44,12 +44,8 @@ import {
   type ServeWorkspaceSkillsStatus,
 } from './status.js';
 import { buildEnvStatusFromProcess } from './envSnapshot.js';
-import type {
-  ApprovalMode} from '@qwen-code/qwen-code-core';
-import {
-  TrustGateError,
-  canUseRipgrep,
-} from '@qwen-code/qwen-code-core';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { TrustGateError, canUseRipgrep } from '@qwen-code/qwen-code-core';
 import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
 import type {
   CancelNotification,
@@ -463,6 +459,30 @@ export interface HttpAcpBridge {
   }>;
 
   /**
+   * Add or remove a tool name from the workspace's `tools.disabled`
+   * settings list and fan-out a `tool_toggled` event to every live
+   * session SSE bus. Does NOT consult the ACP child — settings are
+   * file IO the daemon owns directly. Already-registered tools in
+   * active sessions stay registered until the next ACP child spawn
+   * (`tools.disabled` is consulted at `Config` construction time, so
+   * the toggle takes effect on the next workspace-wide refresh).
+   *
+   * Unknown tool names are accepted: the daemon has no authoritative
+   * tool registry to validate against (built-ins live inside the ACP
+   * child, MCP tools are discovered post-spawn). Pre-disabling a
+   * not-yet-installed MCP tool is a legitimate use case.
+   *
+   * Throws when the daemon was constructed without a
+   * `persistDisabledTools` callback — direct embeds / tests must opt
+   * in to write semantics.
+   */
+  setWorkspaceToolEnabled(
+    toolName: string,
+    enabled: boolean,
+    originatorClientId: string | undefined,
+  ): Promise<{ toolName: string; enabled: boolean }>;
+
+  /**
    * Kill the agent process for the session and remove it from the maps.
    * Used by the HTTP route layer to reap orphans created when a client
    * disconnects mid-spawn (the server-side child kept being created
@@ -865,6 +885,23 @@ export interface BridgeOptions {
   persistApprovalMode?: (
     boundWorkspace: string,
     mode: ApprovalMode,
+  ) => Promise<void>;
+  /**
+   * #4175 Wave 4 PR 17 — optional callback for mutating
+   * `tools.disabled` in workspace settings. Invoked by
+   * `setWorkspaceToolEnabled` to add (`enabled: false`) or remove
+   * (`enabled: true`) `toolName` from the persisted disabled set.
+   * The default `runQwenServe` wires this to a fresh
+   * `loadSettings(boundWorkspace)` per call so concurrent edits from
+   * other writers (CLI, another daemon, an editor) are picked up.
+   * Bridge tests / embedded callers may omit it; without the hook
+   * `setWorkspaceToolEnabled` throws a clear error rather than
+   * silently dropping the write.
+   */
+  persistDisabledTools?: (
+    boundWorkspace: string,
+    toolName: string,
+    enabled: boolean,
   ) => Promise<void>;
 }
 
@@ -1657,6 +1694,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
   }
   const boundWorkspace = opts.boundWorkspace;
   const persistApprovalMode = opts.persistApprovalMode;
+  const persistDisabledTools = opts.persistDisabledTools;
 
   // #3803 §02 single-workspace model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
@@ -2437,6 +2475,32 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       getTransportClosedReject(entry),
     ]);
     return response as unknown as T;
+  };
+
+  /**
+   * Fan-out an event to every live session bus in the daemon. Used by
+   * workspace-scoped mutation routes (#4175 Wave 4 PR 17) — the
+   * `tool_toggled` and `mcp_server_restarted` events are not session-
+   * scoped, but every active SSE subscriber should still see them so
+   * cross-client UIs stay in sync. Errors from individual buses (e.g.
+   * already-closed) are swallowed — a single torn-down session must
+   * not block the broadcast to its peers.
+   *
+   * Named `broadcastWorkspaceEvent` to leave room for PR 16's
+   * forthcoming `publishWorkspaceEvent` — the post-merge fold-in
+   * collapses the two helpers (PR 21 #4255 follows the same naming
+   * convention to ease that consolidation).
+   */
+  const broadcastWorkspaceEvent = (
+    envelope: Omit<BridgeEvent, 'id' | 'v'>,
+  ): void => {
+    for (const entry of byId.values()) {
+      try {
+        entry.events.publish(envelope);
+      } catch {
+        /* bus closed for this session; skip */
+      }
+    }
   };
 
   const createSessionEntry = (
@@ -3671,6 +3735,28 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         previous: response.previous,
         persisted,
       };
+    },
+
+    async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
+      // #4175 Wave 4 PR 17. Pure file IO + event fan-out — no ACP
+      // roundtrip. The settings file is the source of truth; live
+      // sessions retain their already-registered tools until the next
+      // ACP child spawn (when `tools.disabled` is consulted at Config
+      // construction time).
+      if (!persistDisabledTools) {
+        throw new Error(
+          'setWorkspaceToolEnabled requires `persistDisabledTools` in ' +
+            'BridgeOptions; runQwenServe wires the production callback. ' +
+            'Direct embeds and tests must opt in.',
+        );
+      }
+      await persistDisabledTools(boundWorkspace, toolName, enabled);
+      broadcastWorkspaceEvent({
+        type: 'tool_toggled',
+        data: { toolName, enabled },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      return { toolName, enabled };
     },
 
     async killSession(sessionId, opts) {
