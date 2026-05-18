@@ -4092,6 +4092,118 @@ describe('GeminiChat', async () => {
       const fr = chat.getHistory()[2]!.parts![0]!.functionResponse;
       expect((fr?.response as { error?: string })?.error).toBe('custom reason');
     });
+
+    it('does NOT synthesize when the real functionResponse lives in a non-adjacent later user turn', () => {
+      // Regression for the qwen-latest-series-invite-beta-v28 thread on
+      // PR #4176: shape `[user, model[fc], user[text], user[fr_real]]`
+      // arises when the user aborts a long-running tool, types a
+      // follow-up text turn, and then the React scheduler's late
+      // submitQuery appends the real tool_result as a SEPARATE user
+      // entry. The repair pass previously checked only history[i+1]
+      // (the immediate next turn) — the real fr at history[i+2] was
+      // invisible, so the repair synthesized a duplicate `error` fr for
+      // a callId that already had a real result. The downstream dedup
+      // in `useGeminiStream.handleCompletedTools` then dropped the REAL
+      // tool_result on the next submission (its callId was now
+      // "already in history" because of the synthetic), and the model
+      // only ever saw the error placeholder — silently swapping a real
+      // success for an error.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'open /tmp/long.txt' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_nonadjacent_real',
+                name: 'read_file',
+                args: { path: '/tmp/long.txt' },
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'never mind, do something else' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call_nonadjacent_real',
+                name: 'read_file',
+                response: { output: 'real file contents' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      // No synthesis: the real fr at history[3] satisfies the model[fc]
+      // at history[1].
+      expect(result.injected).toEqual([]);
+      const history = chat.getHistory();
+      // History shape is unchanged: 4 entries, no inserted synthetic.
+      expect(history.length).toBe(4);
+      expect(history[3]!.parts![0]!.functionResponse?.response).toEqual({
+        output: 'real file contents',
+      });
+      // The follow-up text turn is untouched (no synthetic fr hoisted
+      // into it — confirms the forward-scan fix, not just a no-op
+      // synthesis).
+      expect(history[2]!.parts).toEqual([
+        { text: 'never mind, do something else' },
+      ]);
+    });
+
+    it('still synthesizes for a partial mismatch when forward scan misses one callId', () => {
+      // Counterpart to the above: when the real fr only covers SOME
+      // of the callIds in a parallel tool_use, the missing ones must
+      // still get synthetic error fr's hoisted onto the immediate next
+      // user turn (preserving the existing parallel-tool_use behavior).
+      // Confirms the forward-scan didn't accidentally over-collect.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'fan out two reads' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'cid_a', name: 'read_file', args: {} },
+            },
+            {
+              functionCall: { id: 'cid_b', name: 'read_file', args: {} },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'follow up' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'cid_a',
+                name: 'read_file',
+                response: { output: 'real for a' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns();
+
+      // cid_a satisfied by real fr at history[3]; cid_b missing →
+      // synthetic for cid_b only.
+      expect(result.injected).toEqual([{ callId: 'cid_b', name: 'read_file' }]);
+      const history = chat.getHistory();
+      expect(history.length).toBe(4);
+      // Synthetic for cid_b hoisted into history[2] (immediate next
+      // user turn) before the text part.
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe('cid_b');
+      expect(history[2]!.parts![1]).toEqual({ text: 'follow up' });
+      // Real fr for cid_a still at history[3], untouched.
+      expect(history[3]!.parts![0]!.functionResponse?.id).toBe('cid_a');
+    });
   });
 
   describe('output token recovery', () => {

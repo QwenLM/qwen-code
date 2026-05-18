@@ -441,17 +441,34 @@ export function repairOrphanedToolUseTurns(
     }
     if (expected.size === 0) continue;
 
-    const next = history[i + 1];
+    // Scan forward across EVERY consecutive user turn until the next
+    // non-user (model) entry, gathering all functionResponse ids. The
+    // real tool_result for this model[fc] may live in a non-adjacent
+    // user turn — common shape: user aborts a long-running tool, types
+    // a follow-up text turn, then the React scheduler's late
+    // submitQuery appends the real `user[fr]` as a SEPARATE turn,
+    // producing `model[fc], user[text], user[fr_real]`. Without
+    // forward scanning, `matched` would be empty (only `user[text]`
+    // visited), the repair would synthesize an `error` `functionResponse`
+    // for a callId that already has a real result downstream, and the
+    // `handleCompletedTools` dedup would then drop the REAL result on
+    // the next submission (callId already in history → submit skipped),
+    // so the model only ever sees the synthetic error placeholder.
+    // (qwen-latest-series-invite-beta-v28 thread on PR #4176.)
     const matched = new Set<string>();
-    if (next?.role === 'user') {
-      for (const part of next.parts ?? []) {
+    let scanIdx = i + 1;
+    while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
+      for (const part of history[scanIdx].parts ?? []) {
         const id = part.functionResponse?.id;
         if (id) matched.add(id);
       }
+      scanIdx++;
     }
 
     const missing = [...expected.entries()].filter(([id]) => !matched.has(id));
     if (missing.length === 0) continue;
+
+    const next = history[i + 1];
 
     const syntheticParts: Part[] = missing.map(([callId, name]) => ({
       functionResponse: {
@@ -1622,6 +1639,18 @@ export class GeminiChat {
     ) {
       this.history.pop();
     }
+    // Today this is safe even without the reset — only trailing user
+    // entries are popped, which can't shift the index of an earlier
+    // `model` partial. But every other history-mutation method now
+    // clears the partial-push state in lockstep
+    // (clearHistory/addHistory/setHistory/truncateHistory/
+    // stripThoughtsFromHistory), so omitting it here would be a silent
+    // exception to the uniform invariant: a future caller invoking
+    // this method between the deferred JSONL flush and the next
+    // `sendMessageStream` would otherwise leave a stale marker that
+    // happens to line up with whatever model entry is at that index
+    // in the meanwhile.
+    this.clearPendingPartialState();
   }
 
   /**
@@ -1886,6 +1915,28 @@ export class GeminiChat {
         // partial `model[functionCall]` as a stale leading model turn in
         // front of the retry's real response.
         this.pendingPartialAssistantTurnIndex = this.history.length - 1;
+        // Trace the push event so the lifecycle is observable end-to-end:
+        // dedup in `useGeminiStream.handleCompletedTools` already logs
+        // `[REPAIR] Dropping ...`, and `repairOrphanedToolUseTurnsInHistory`
+        // logs `[REPAIR] Synthesized ...`. Without a corresponding
+        // `[PARTIAL_PUSH]` line here, an investigator looking at a
+        // stale-partial wedge sees the downstream symptom but has no
+        // anchor for when/why the partial originated.
+        debugLogger.warn(
+          '[PARTIAL_PUSH] Persisting partial assistant turn for ' +
+            'mid-stream error recovery (will be rolled back if retry ' +
+            'succeeds, kept if break is unretryable). ' +
+            `pendingIndex=${this.pendingPartialAssistantTurnIndex} ` +
+            `callIds=${consolidatedHistoryParts
+              .map((p) => p.functionCall?.id)
+              .filter((id): id is string => Boolean(id))
+              .join(',')} ` +
+            `error=${
+              streamError instanceof Error
+                ? streamError.message
+                : String(streamError)
+            }`,
+        );
       }
       throw streamError;
     }
