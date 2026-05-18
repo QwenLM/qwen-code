@@ -180,6 +180,20 @@ export function createWorkspaceFileSystemFactory(
       useQwenignore: true,
       ignoreDirs: [],
     });
+  // Freeze the `Ignore` instance so it cannot be mutated after
+  // the factory builds it. The `Ignore` class exposes a public
+  // `add(patterns): this` method that mutates state in-place;
+  // every `forRequest()` returns a `WorkspaceFileSystemImpl`
+  // sharing this same instance, so a future "ignore this
+  // pattern for this session" feature calling `.add()` would
+  // silently corrupt all concurrent requests. `Object.freeze`
+  // turns the mutation into a `TypeError` instead of a silent
+  // cross-request leak — surfacing the architectural mistake
+  // before it ships. Read paths (`getFileFilter` /
+  // `getDirectoryFilter`) are unaffected. Operators wanting
+  // per-session ignore rules should pass a different `Ignore`
+  // instance via `deps.ignore` to a separate factory.
+  Object.freeze(ignore);
   const audit: AuditPublisher = createAuditPublisher({
     emit: deps.emit,
     boundWorkspace,
@@ -409,6 +423,24 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // `maxBytes`.
       enforceReadBytesSize(st.size);
       let buf = await fsp.readFile(p as string);
+      // Post-read size sanity check — same TOCTOU window as
+      // `readText` (concurrent appender keeps the same inode, so
+      // `assertInodeStableAfterRead` doesn't catch *growth*).
+      // The pre-stat gate sees the size at stat time; an attacker
+      // can grow the file from sub-cap to multi-GB between
+      // `fsp.stat` and `fsp.readFile`, OOMing the daemon. Reject
+      // post-read if the buffer ended up over the hard cap. The
+      // proper fix (fd-based read with `fileHandle.stat` +
+      // bounded `fileHandle.read`) is a hardening follow-up.
+      if (buf.length > MAX_READ_BYTES) {
+        throw new FsError(
+          'file_too_large',
+          `file grew during read to ${buf.length} bytes (cap ${MAX_READ_BYTES})`,
+          {
+            hint: 'concurrent writer detected via post-read size; retry or readText for capped truncation',
+          },
+        );
+      }
       // Soft cap: caller's `opts.maxBytes` is a window cap matching
       // the parameter name's promise. Earlier semantics treated
       // it as a "reject if file > maxBytes" gate, which violated
@@ -522,18 +554,29 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // walk root.
       const cwd = (opts.cwd as string | undefined) ?? this.deps.boundWorkspace;
       let cwdReal: string;
-      try {
-        cwdReal = await fsp.realpath(path.resolve(cwd));
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException)?.code;
-        if (code === 'ENOENT') {
-          throw new FsError(
-            'path_not_found',
-            `glob cwd does not exist: ${cwd}`,
-            { cause: err },
-          );
+      // Short-circuit when `cwd` is exactly the canonical
+      // boundWorkspace — the factory already canonicalized it via
+      // `realpathSync.native`, so a per-request async `realpath`
+      // is a redundant syscall. Saves the syscall on the common
+      // path (route handlers omitting `opts.cwd` to glob the
+      // whole workspace) without losing the canonicalization
+      // guarantee — the factory's stored value IS the canonical.
+      if (cwd === this.deps.boundWorkspace) {
+        cwdReal = cwd;
+      } else {
+        try {
+          cwdReal = await fsp.realpath(path.resolve(cwd));
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code === 'ENOENT') {
+            throw new FsError(
+              'path_not_found',
+              `glob cwd does not exist: ${cwd}`,
+              { cause: err },
+            );
+          }
+          throw err;
         }
-        throw err;
       }
       if (!isWithinRoot(cwdReal, this.deps.boundWorkspace)) {
         throw new FsError(
@@ -903,19 +946,22 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
  */
 function safeUtf8Truncate(buf: Buffer, maxBytes: number): Buffer {
   if (buf.length <= maxBytes) return buf;
+  // Walk `end` back through any UTF-8 continuation bytes
+  // (`0b10xxxxxx`) at the cut position. After the loop:
+  //   - `end == 0`, OR
+  //   - `buf[end]` is a leading byte (top bits `0xxxxxxx`,
+  //     `110xxxxx`, `1110xxxx`, or `11110xxx`).
+  // Either way, `subarray(0, end)` is exactly the longest
+  // codepoint-aligned prefix at most `maxBytes` long: if
+  // `buf[end]` is the leading byte of an incomplete sequence
+  // we exclude it; if `buf[end]` is ASCII (i.e. the original
+  // `maxBytes` happened to land on a codepoint boundary) the
+  // walk-back is a no-op and we still cut at `maxBytes`.
+  // The earlier "seqLen check" was dead code — `subarray(0,
+  // end)` already excludes the leading byte at index `end`,
+  // so no further adjustment is ever needed.
   let end = maxBytes;
   while (end > 0 && (buf[end] & 0xc0) === 0x80) end--;
-  if (end > 0) {
-    const lead = buf[end - 1];
-    let seqLen = 1;
-    if ((lead & 0x80) === 0) seqLen = 1;
-    else if ((lead & 0xe0) === 0xc0) seqLen = 2;
-    else if ((lead & 0xf0) === 0xe0) seqLen = 3;
-    else if ((lead & 0xf8) === 0xf0) seqLen = 4;
-    if (seqLen > 1 && end - 1 + seqLen > maxBytes) {
-      end = end - 1;
-    }
-  }
   return buf.subarray(0, end);
 }
 
@@ -961,15 +1007,6 @@ async function assertInodeStableAfterRead(
   }
 }
 
-/**
- * Map a `Stats` or `Dirent` (both expose the same `isFile` /
- * `isDirectory` / `isSymbolicLink` methods) to the boundary's
- * narrow `kind` union. `FsStat['kind']` and `FsEntry['kind']` are
- * the same 4-value union, so a single helper keeps the
- * classification rule in one place — reviewer flagged the previous
- * `kindFromStats` + `kindFromDirent` pair as a maintenance hazard
- * (drift risk if the union grows).
- */
 /**
  * Pre-write TOCTOU guard. Mirrors the post-read inode check but
  * runs BEFORE the actual write. The earlier `resolve()` →
@@ -1018,6 +1055,13 @@ async function assertNotSymlinkBeforeWrite(p: string): Promise<void> {
   }
 }
 
+/**
+ * Map a `Stats` or `Dirent` (both expose the same `isFile` /
+ * `isDirectory` / `isSymbolicLink` methods) to the boundary's
+ * narrow `kind` union. `FsStat['kind']` and `FsEntry['kind']` are
+ * the same 4-value union, so a single helper keeps the
+ * classification rule in one place.
+ */
 function kindFromStatLike(s: {
   isFile(): boolean;
   isDirectory(): boolean;

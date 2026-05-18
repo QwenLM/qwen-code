@@ -399,6 +399,12 @@ export async function resolveWithinWorkspace(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code === 'ENOENT' && ENOENT_TOLERATING_INTENTS.has(intent)) {
+      // Captured iff the symlink chain validated successfully —
+      // we then return this verified canonical instead of falling
+      // through to a re-walk from `absolute` (which would
+      // re-traverse the chain and could pick up an attacker's
+      // mid-walk symlink swap).
+      let symlinkResolvedCanonical: string | null = null;
       // Dangling-symlink write-escape guard. `realpath` follows
       // symlinks, so a path like `<ws>/leak -> /etc/cron.d/evil`
       // (where the target doesn't exist YET) throws ENOENT here.
@@ -481,7 +487,13 @@ export async function resolveWithinWorkspace(
         // Only run the containment check when we actually traversed
         // at least one symlink — `firstHopTarget !== null` means the
         // input was a symlink (vs a path through a non-existent
-        // ancestor that wasn't itself a symlink).
+        // ancestor that wasn't itself a symlink). The verified
+        // `canonicalTarget` becomes the function's result; we DO
+        // NOT re-walk from `absolute` afterwards, since that would
+        // open a TOCTOU window between the check and the re-walk
+        // where an attacker swapping an intermediate symlink
+        // could produce a different canonical than the one we
+        // just verified.
         if (firstHopTarget !== null) {
           const { ancestor: targetAncestor, tail: targetTail } =
             await findExistingAncestor(cursor);
@@ -493,9 +505,19 @@ export async function resolveWithinWorkspace(
             throw new FsError(
               'symlink_escape',
               `dangling symlink target escapes workspace: ${input}`,
-              { hint: `symlink points to ${firstHopTarget}` },
+              {
+                // Hint must NOT embed the symlink target — `recordDenied`
+                // forwards `hint` into `fs.denied` even in privacy mode,
+                // and an absolute outside-target string would leak the
+                // attacker's intended exfiltration path through audit
+                // events. Operators wanting the actual target value
+                // run with `QWEN_AUDIT_RAW_PATHS=1` and read it from
+                // `relPath` / `message`.
+                hint: 'symlink chain leaves the workspace; enable QWEN_AUDIT_RAW_PATHS for the resolved target',
+              },
             );
           }
+          symlinkResolvedCanonical = canonicalTarget;
         }
       } catch (err2) {
         if (err2 instanceof FsError) throw err2;
@@ -506,9 +528,18 @@ export async function resolveWithinWorkspace(
         const code2 = (err2 as NodeJS.ErrnoException)?.code;
         if (code2 !== 'ENOENT') throw err2;
       }
-      const { ancestor, tail } = await findExistingAncestor(absolute);
-      const ancestorReal = await fsp.realpath(ancestor);
-      canonical = tail ? path.join(ancestorReal, tail) : ancestorReal;
+      // If the symlink-walk produced a verified canonical, use it
+      // instead of re-walking from `absolute` (which would discard
+      // the verification and admit a TOCTOU swap window). The
+      // re-walk is only the right behavior when no symlink was
+      // present at all.
+      if (symlinkResolvedCanonical !== null) {
+        canonical = symlinkResolvedCanonical;
+      } else {
+        const { ancestor, tail } = await findExistingAncestor(absolute);
+        const ancestorReal = await fsp.realpath(ancestor);
+        canonical = tail ? path.join(ancestorReal, tail) : ancestorReal;
+      }
     } else if (code === 'ENOENT') {
       throw new FsError('path_not_found', `path does not exist: ${input}`, {
         cause: err,

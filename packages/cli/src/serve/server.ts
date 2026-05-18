@@ -45,21 +45,39 @@ import {
 } from './fs/index.js';
 
 /**
- * Build a no-op fs-audit emitter that logs a single warning the
- * first time it's invoked. The default factory uses this so a
- * regression that silently strips audit events shows up in
- * operator logs instead of disappearing — `() => {}` is the
- * "obvious" no-op but offers no failure signal. PR 19/20's
- * `runQwenServe` injection replaces this with a real per-session
- * emit, so legitimate production traffic never hits the warning.
+ * Build a no-op fs-audit emitter that logs a warning every
+ * `WARN_EVERY` dropped events with as much context as the audit
+ * payload exposes. The default factory uses this so a regression
+ * that silently strips audit events shows up in operator logs
+ * instead of disappearing — the earlier one-shot warn was a
+ * permanent silent no-op after the first event, which made a PR
+ * 19/20 regression where `runQwenServe` forgets to inject the real
+ * factory completely invisible (every write 403s; nothing in
+ * audit; one stale stderr line easy to miss for background
+ * daemons). Periodic warning + dropped-event count + first-event
+ * `errorKind` + `pathHash` make the regression actionable.
+ *
+ * PR 19/20's `runQwenServe` injection replaces this with a real
+ * per-session emit, so legitimate production traffic never hits
+ * the warning.
  */
 function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
-  let warned = false;
+  const WARN_EVERY = 100;
+  let droppedCount = 0;
   return (event: BridgeEvent) => {
-    if (!warned) {
-      warned = true;
+    droppedCount += 1;
+    if (droppedCount === 1 || droppedCount % WARN_EVERY === 0) {
+      const data = event.data as
+        | { errorKind?: string; pathHash?: string; intent?: string }
+        | undefined;
+      const ctx: string[] = [];
+      if (data?.errorKind) ctx.push(`errorKind=${data.errorKind}`);
+      if (data?.intent) ctx.push(`intent=${data.intent}`);
+      if (data?.pathHash) ctx.push(`pathHash=${data.pathHash}`);
+      const ctxStr = ctx.length > 0 ? ` (${ctx.join(' ')})` : '';
       writeStderrLine(
-        `qwen serve: fs audit emit is the default no-op (event ${event.type} dropped). ` +
+        `qwen serve: fs audit emit is the default no-op — ${droppedCount} event(s) dropped so far. ` +
+          `Latest type=${event.type}${ctxStr}. ` +
           `Inject deps.fsFactory in createServeApp to wire audit into the EventBus.`,
       );
     }

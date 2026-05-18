@@ -61,6 +61,16 @@ export interface FsAccessAuditPayload {
   intent: Intent;
   route: string;
   pathHash: string;
+  /**
+   * ACP session id from `AuditContext.sessionId`, when known.
+   * Multi-session daemons need this to correlate audit events
+   * back to the session that triggered them — `originatorClientId`
+   * alone identifies the *client*, not the *session*. Always
+   * present when the calling route is session-scoped (PR 19/20
+   * routes that take `:sessionId`); absent on workspace-scoped
+   * routes that have no session context.
+   */
+  sessionId?: string;
   /** Workspace-relative path; only populated when QWEN_AUDIT_RAW_PATHS=1. */
   relPath?: string;
   sizeBytes?: number;
@@ -74,6 +84,8 @@ export interface FsDeniedAuditPayload {
   intent: Intent;
   route: string;
   pathHash: string;
+  /** See `FsAccessAuditPayload.sessionId` — same semantics. */
+  sessionId?: string;
   relPath?: string;
   errorKind: FsErrorKind;
   hint?: string;
@@ -189,6 +201,7 @@ export function createAuditPublisher(
         pathHash: hashPath(absolute),
         durationMs: record.durationMs,
       };
+      if (ctx.sessionId) payload.sessionId = ctx.sessionId;
       if (record.sizeBytes !== undefined) payload.sizeBytes = record.sizeBytes;
       if (record.truncated) payload.truncated = true;
       if (record.matchedIgnore) payload.matchedIgnore = record.matchedIgnore;
@@ -213,6 +226,7 @@ export function createAuditPublisher(
         pathHash: hashPath(probe),
         errorKind: record.errorKind,
       };
+      if (ctx.sessionId) payload.sessionId = ctx.sessionId;
       if (record.hint) payload.hint = record.hint;
       // `message` carries the underlying `FsError.message`, which
       // many throw-sites embed `${p}` (absolute workspace path) or

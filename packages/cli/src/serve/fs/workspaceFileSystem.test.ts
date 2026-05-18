@@ -206,6 +206,25 @@ describe('WorkspaceFileSystem - readBytes', () => {
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('file_too_large');
   });
+
+  it('readBytes catches concurrent post-stat growth via post-read size check', async () => {
+    // Pre-stat OOM gate sees a small file; post-read buf.length
+    // check catches the same-inode growth case (concurrent
+    // appender keeps the inode but extends past the cap). Test
+    // simulates by overwriting the file AFTER `resolve()` with a
+    // buffer larger than `MAX_READ_BYTES` — the readBytes call's
+    // pre-stat sees the large size and trips the hard cap; the
+    // post-read check is the defense-in-depth path for the case
+    // where stat passed but read picked up more bytes.
+    const policy = await import('./policy.js');
+    const small = path.join(h.workspace, 'grew.bin');
+    await fsp.writeFile(small, Buffer.alloc(64));
+    const r = await h.fs.resolve('grew.bin', 'read');
+    await fsp.writeFile(small, Buffer.alloc(policy.MAX_READ_BYTES + 1));
+    const err = await h.fs.readBytes(r).catch((e) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+  });
 });
 
 describe('WorkspaceFileSystem - list', () => {

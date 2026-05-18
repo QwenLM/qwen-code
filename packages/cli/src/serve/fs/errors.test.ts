@@ -135,11 +135,32 @@ describe('wrapAsFsError', () => {
     expect(new FsError('io_error', 'disk full').status).toBe(503);
   });
 
-  it('falls back to the configured default kind for unknown errnos', () => {
-    expect(wrapAsFsError(errno('EWHATEVER')).kind).toBe('permission_denied');
+  it('falls back to internal_error (not permission_denied) for unknown errnos and non-errno errors', () => {
+    // Default fallback used to be `permission_denied`, which mis-paged
+    // security oncall on a TypeError or null-deref. The new default is
+    // `internal_error` (HTTP 500) so monitoring keys stay aligned with
+    // the actual class of fault.
+    expect(wrapAsFsError(errno('EWHATEVER')).kind).toBe('internal_error');
+    expect(wrapAsFsError(new TypeError('null deref')).kind).toBe(
+      'internal_error',
+    );
+    // Caller can still override.
     expect(wrapAsFsError(errno('EWHATEVER'), 'parse_error').kind).toBe(
       'parse_error',
     );
+  });
+
+  it('internal_error has HTTP status 500', () => {
+    expect(new FsError('internal_error', 'bug').status).toBe(500);
+  });
+
+  it('non-Error values fall back to internal_error not permission_denied', () => {
+    // `string thrown` from somewhere weird. Earlier default of
+    // permission_denied would page security oncall for what
+    // is a developer ticket.
+    const out = wrapAsFsError('boom');
+    expect(out.kind).toBe('internal_error');
+    expect(out.status).toBe(500);
   });
 
   it('preserves the original error as cause', () => {

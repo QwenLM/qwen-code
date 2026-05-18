@@ -35,6 +35,17 @@ export type FsErrorKind =
    * failure" to PR 19/20 route handlers and SDK consumers.
    */
   | 'io_error'
+  /**
+   * Catch-all for non-errno errors that reach the boundary
+   * (`TypeError`, programmer-error throws, native module
+   * exceptions, etc.). Distinguished from `permission_denied`
+   * because monitoring pipelines key on `errorKind` for
+   * security alerting — conflating "code bug" with "ACL
+   * denied" pages security oncall for what should be a
+   * developer ticket. The 500 status communicates "daemon
+   * internal fault" to PR 19/20 route handlers.
+   */
+  | 'internal_error'
   | 'parse_error';
 
 /**
@@ -45,7 +56,7 @@ export type FsErrorKind =
  * boundary is being asked to model a transport-level concern that
  * doesn't belong here (5xx, 401/403 from auth, etc.).
  */
-export type FsErrorStatus = 400 | 403 | 404 | 413 | 422 | 503;
+export type FsErrorStatus = 400 | 403 | 404 | 413 | 422 | 500 | 503;
 
 /**
  * Default HTTP status mapping. Centralized here so callers can throw
@@ -64,6 +75,7 @@ const DEFAULT_STATUS_BY_KIND: Record<FsErrorKind, FsErrorStatus> = {
   untrusted_workspace: 403,
   permission_denied: 403,
   io_error: 503,
+  internal_error: 500,
   parse_error: 400,
 };
 
@@ -120,7 +132,7 @@ export function isFsError(err: unknown): err is FsError {
  */
 export function wrapAsFsError(
   err: unknown,
-  fallbackKind: FsErrorKind = 'permission_denied',
+  fallbackKind: FsErrorKind = 'internal_error',
 ): FsError {
   if (err instanceof FsError) return err;
   const errno = (err as NodeJS.ErrnoException | undefined)?.code;
