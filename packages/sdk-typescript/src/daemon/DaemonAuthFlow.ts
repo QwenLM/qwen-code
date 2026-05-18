@@ -186,11 +186,21 @@ async function pollUntilTerminal(
       snapshot = await client.getDeviceFlow(start.deviceFlowId, { clientId });
     } catch (err: unknown) {
       if (err instanceof DaemonHttpError && err.status === 404) {
-        // The entry was evicted post-grace; treat as terminal and stop.
+        // PR #4255 fold-in 3 (#4): a 404 here can mean (a) the entry
+        // expired and the sweeper reaped it past the terminal grace
+        // window, (b) the daemon was restarted and lost the registry,
+        // (c) the deviceFlowId was wrong / spoofed. The earlier
+        // synthetic `'expired'` status conflated all three. Surface
+        // `status: 'error'` + `errorKind: 'not_found_or_evicted'`
+        // so SDK consumers can distinguish "your flow expired during
+        // your disconnect" from "this id was never valid on this
+        // daemon."
         return {
           deviceFlowId: start.deviceFlowId,
           providerId: start.providerId,
-          status: 'expired',
+          status: 'error',
+          errorKind: 'not_found_or_evicted',
+          hint: 'device-flow not found on daemon (evicted past terminal grace, daemon restart, or unknown deviceFlowId)',
           createdAt: now,
         };
       }

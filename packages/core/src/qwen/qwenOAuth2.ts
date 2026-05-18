@@ -994,14 +994,26 @@ async function authWithQwenDeviceFlow(
 // rather than re-deriving it from a raw octal literal.
 export const QWEN_CREDENTIAL_FILE_MODE = 0o600;
 
-export async function cacheQwenCredentials(credentials: QwenCredentials) {
+export async function cacheQwenCredentials(
+  credentials: QwenCredentials,
+  opts?: { signal?: AbortSignal },
+) {
   const filePath = getQwenCachedCredentialPath();
   try {
     await fs.mkdir(path.dirname(filePath), { recursive: true });
 
     const credString = JSON.stringify(credentials, null, 2);
+    // PR #4255 fold-in 3 (#10): thread `signal` into `fs.writeFile` so
+    // the device-flow registry's persist-timeout + cancelController
+    // can actually abort the in-flight disk write. The earlier C3 fix
+    // armed the timer at the registry boundary but the chain ended
+    // there — `fs.writeFile` itself didn't see the signal, so a
+    // wedged disk (NFS stall, encrypted-volume contention) would
+    // still hang the call until the OS-level timeout. Optional shape
+    // preserves backward compat for non-daemon callers.
     await fs.writeFile(filePath, credString, {
       mode: QWEN_CREDENTIAL_FILE_MODE,
+      ...(opts?.signal ? { signal: opts.signal } : {}),
     });
     // `fs.writeFile`'s `mode` only applies when the file is CREATED; an
     // existing `oauth_creds.json` written under a broader umask (or by

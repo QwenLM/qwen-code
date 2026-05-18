@@ -668,25 +668,37 @@ export function createServeApp(
     },
   );
 
-  app.get('/workspace/auth/device-flow/:id', async (req, res) => {
-    const id = req.params['id'];
-    if (!id) {
-      res.status(404).json({
-        error: 'Device-flow id required',
-        code: 'device_flow_not_found',
-      });
-      return;
-    }
-    const view = deviceFlowRegistry.get(id);
-    if (!view) {
-      res.status(404).json({
-        error: `Device-flow ${id} not found`,
-        code: 'device_flow_not_found',
-      });
-      return;
-    }
-    res.status(200).json(toDeviceFlowStateBody(view));
-  });
+  // PR #4255 fold-in 3: this GET surfaces `userCode` /
+  // `verificationUri` / `verificationUriComplete` for pending entries
+  // — material an attacker on the same loopback host could use to
+  // shoulder-surf the IdP approval flow. POST + DELETE are already
+  // strict; aligning GET to `mutate({ strict: true })` closes the
+  // information-disclosure asymmetry (the sibling
+  // `GET /workspace/auth/status` stays bearer-only because its
+  // pendingDeviceFlows entries intentionally omit `userCode`).
+  app.get(
+    '/workspace/auth/device-flow/:id',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const id = req.params['id'];
+      if (!id) {
+        res.status(404).json({
+          error: 'Device-flow id required',
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      const view = deviceFlowRegistry.get(id);
+      if (!view) {
+        res.status(404).json({
+          error: `Device-flow ${id} not found`,
+          code: 'device_flow_not_found',
+        });
+        return;
+      }
+      res.status(200).json(toDeviceFlowStateBody(view));
+    },
+  );
 
   app.delete(
     '/workspace/auth/device-flow/:id',

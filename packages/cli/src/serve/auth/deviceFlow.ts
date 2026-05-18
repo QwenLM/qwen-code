@@ -39,6 +39,17 @@ export const DEVICE_FLOW_SLOW_DOWN_BUMP_MS = 5_000;
  * PR #4255 review C3.
  */
 export const DEVICE_FLOW_PERSIST_TIMEOUT_MS = 30_000;
+/**
+ * Hard ceiling on `provider.start()`. A hung IdP (network partition,
+ * unresponsive `requestDeviceAuthorization` endpoint) without this
+ * would leave the per-`providerId` slot in `inFlightStarts` occupied
+ * forever, blocking ALL subsequent `POST /workspace/auth/device-flow`
+ * requests for the same provider until daemon restart. 30s matches
+ * `DEVICE_FLOW_PERSIST_TIMEOUT_MS` and is well over typical IdP
+ * round-trip times for `device/code` (sub-second on a healthy IdP).
+ * PR #4255 review fold-in 3 (#2).
+ */
+export const DEVICE_FLOW_START_TIMEOUT_MS = 30_000;
 
 export type DeviceFlowProviderId = 'qwen-oauth';
 export const DEVICE_FLOW_SUPPORTED_PROVIDERS: readonly DeviceFlowProviderId[] =
@@ -188,19 +199,20 @@ export type DeviceFlowPollResult =
       /** The provider persists credentials and returns metadata for the
        *  `auth_device_flow_authorized` event. The registry passes its
        *  per-entry `cancelController.signal` so a slow disk I/O
-       *  (NFS, encrypted volumes) honors `cancel()` / `dispose()`. */
+       *  (NFS, encrypted volumes) honors `cancel()` / `dispose()`.
+       *
+       *  PR #4255 review (post-fold-in-2 redirection): the earlier
+       *  `unpersist()` companion was removed. When `persist()` succeeds
+       *  AND a cancel/dispose transitioned the entry mid-await, the
+       *  registry now FORCES the entry to `authorized` and keeps the
+       *  on-disk credentials. Rationale: the user already approved on
+       *  the IdP page (RFC 8628 device_code is single-use), so the
+       *  microsecond cancel race shouldn't waste their approval. The
+       *  audit trail records the race for incident response. */
       persist(opts: { signal: AbortSignal }): Promise<{
         expiresAt?: number;
         accountAlias?: string;
       }>;
-      /** Best-effort rollback for the cancel × success race. After
-       *  `persist()` succeeds, if `transitionTerminal(authorized)`
-       *  returns false (entry was cancelled / disposed during
-       *  persist), the registry calls `unpersist()` so disk state
-       *  matches the cancelled flow status. Failure to unpersist is
-       *  audited but not propagated — the user re-running auth will
-       *  overwrite. PR #4255 review C4. */
-      unpersist?(): Promise<void>;
     }
   | {
       kind: 'error';
@@ -291,20 +303,7 @@ export interface DeviceFlowAuditSink {
     deviceFlowId: string;
     providerId: DeviceFlowProviderId;
     clientId?: string;
-    /**
-     * `lost_success` is the audit-only branch: the IdP minted credentials
-     * but the entry transitioned (cancel / dispose) while we awaited
-     * `provider.persist()`. The `device_code` is now consumed upstream
-     * (RFC 8628 single-use), so the operator should expect a follow-up
-     * `auth.start` from the same client.
-     */
-    status:
-      | 'started'
-      | 'authorized'
-      | 'failed'
-      | 'cancelled'
-      | 'expired'
-      | 'lost_success';
+    status: 'started' | 'authorized' | 'failed' | 'cancelled' | 'expired';
     errorKind?: DeviceFlowErrorKind;
     expiresInMs?: number;
     /** Free-form audit detail. Used by the C4 lost-success rollback
@@ -513,9 +512,27 @@ export class DeviceFlowRegistry {
     provider: DeviceFlowProvider,
   ): Promise<{ view: DeviceFlowPublicView; attached: boolean }> {
     const cancelController = new AbortController();
-    const startResult = await provider.start({
-      signal: cancelController.signal,
+    // PR #4255 review fold-in 3 (#2): bound `provider.start()` with a
+    // hard timeout. Without this, a hung IdP leaves the
+    // `inFlightStarts` slot occupied forever and blocks every
+    // subsequent POST for the same providerId until daemon restart.
+    // The timer aborts the start's signal so a signal-aware provider
+    // can tear down its in-flight `fetch`; the timeout-rejected
+    // promise unwinds through `start()`'s `finally` which clears the
+    // `inFlightStarts` entry.
+    const startTimer = this.schedule(DEVICE_FLOW_START_TIMEOUT_MS, () => {
+      try {
+        cancelController.abort(new Error('device-flow start timeout'));
+      } catch {
+        // best-effort
+      }
     });
+    let startResult: DeviceFlowStartResult;
+    try {
+      startResult = await provider.start({ signal: cancelController.signal });
+    } finally {
+      this.clearScheduled(startTimer);
+    }
     // PR #4255 review S6: dispose() may have run while we awaited
     // `provider.start()`. If we proceed past this point the resulting
     // entry would land in `byId` / `byProvider` AFTER `dispose()`
@@ -762,61 +779,58 @@ export class DeviceFlowRegistry {
         } finally {
           this.clearScheduled(persistTimeout);
         }
-        if (this.transitionTerminal(entry, 'authorized')) {
-          this.deps.events.publish(
-            {
-              type: 'authorized',
-              data: {
-                deviceFlowId: entry.deviceFlowId,
-                providerId: entry.providerId,
-                expiresAt: metadata.expiresAt,
-                accountAlias: metadata.accountAlias,
-              },
-            },
-            entry.initiatorClientId,
-          );
-          this.deps.audit?.record({
-            deviceFlowId: entry.deviceFlowId,
-            providerId: entry.providerId,
-            clientId: entry.initiatorClientId,
-            status: 'authorized',
-          });
-        } else {
-          // PR #4255 review C4: cancel × success race rollback. The
-          // poll returned success and `persist()` already wrote
-          // credentials to disk; meanwhile cancel/dispose transitioned
-          // the entry to a non-pending state. Without rollback the
-          // user's view (cancelled / expired) diverges from disk
-          // (a valid token sitting at `~/.qwen/oauth_creds.json`).
-          // Best-effort `unpersist()` brings disk back into line with
-          // the registry's terminal state; failure here is audited
-          // but not propagated — re-running auth would overwrite the
-          // file anyway, so a noisy rollback failure isn't worth
-          // surfacing to the user.
-          if (result.unpersist) {
-            try {
-              await result.unpersist();
-            } catch (rollbackErr: unknown) {
-              this.deps.audit?.record({
-                deviceFlowId: entry.deviceFlowId,
-                providerId: entry.providerId,
-                clientId: entry.initiatorClientId,
-                status: 'failed',
-                errorKind: 'persist_failed',
-                hint:
-                  rollbackErr instanceof Error
-                    ? `lost_success rollback failed: ${rollbackErr.message}`
-                    : 'lost_success rollback failed',
-              });
-            }
-          }
-          this.deps.audit?.record({
-            deviceFlowId: entry.deviceFlowId,
-            providerId: entry.providerId,
-            clientId: entry.initiatorClientId,
-            status: 'lost_success',
-          });
+        // PR #4255 fold-in 3 — C4 reversed (was: unpersist on race).
+        //
+        // The user already approved on the IdP page. The
+        // `device_code` is RFC 8628 single-use, so a microsecond
+        // cancel/dispose racing with `persist()` shouldn't waste their
+        // approval — re-running the flow would force them through the
+        // browser-prompt + paste-code dance again for a click whose
+        // intent was likely "stop the wait" rather than "undo my
+        // already-completed approval". Match gh CLI / Auth0 SDK /
+        // git-credential-manager: IdP approval wins the race.
+        //
+        // `transitionTerminal(authorized)` may return false because
+        // `cancel()` / `dispose()` got there first; in that case it
+        // already cleared `pollHandle` + secrets + `byProvider`.
+        // Override `entry.status` to `authorized` so the GET endpoint
+        // and reducer state converge on the actual outcome (disk has
+        // credentials, IdP says authorized). Either way we publish
+        // `authorized` + audit. The race is captured via `hint` for
+        // incident-response correlation.
+        const wonRace = this.transitionTerminal(entry, 'authorized');
+        if (!wonRace) {
+          // Force-authorize: the prior terminal call (cancel /
+          // dispose / sweeper-expired) already did the cleanup
+          // side-effects — we only need to overwrite the status +
+          // clear any errorKind it stamped.
+          entry.status = 'authorized';
+          entry.errorKind = undefined;
+          entry.hint = undefined;
         }
+        this.deps.events.publish(
+          {
+            type: 'authorized',
+            data: {
+              deviceFlowId: entry.deviceFlowId,
+              providerId: entry.providerId,
+              expiresAt: metadata.expiresAt,
+              accountAlias: metadata.accountAlias,
+            },
+          },
+          entry.initiatorClientId,
+        );
+        this.deps.audit?.record({
+          deviceFlowId: entry.deviceFlowId,
+          providerId: entry.providerId,
+          clientId: entry.initiatorClientId,
+          status: 'authorized',
+          ...(wonRace
+            ? {}
+            : {
+                hint: 'lost_success_kept (cancel/dispose lost race against persist; credentials kept per IdP approval)',
+              }),
+        });
         return;
       }
       case 'error':

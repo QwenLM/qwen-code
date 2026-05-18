@@ -6,7 +6,6 @@
 
 import {
   cacheQwenCredentials,
-  clearQwenCredentials,
   generatePKCEPair,
   isDeviceAuthorizationSuccess,
   isDeviceTokenPending,
@@ -16,6 +15,7 @@ import {
   type IQwenOAuth2Client,
   type QwenCredentials,
 } from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   brandSecret,
   revealSecret,
@@ -68,21 +68,37 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       // Network / parse / non-2xx errors from the Qwen IdP. Wrap so the
       // route layer maps to `502 upstream_error` rather than the generic
       // `500` fall-through in `sendBridgeError`.
+      //
+      // PR #4255 fold-in 3 (#9): the raw `err.message` from the
+      // QwenOAuth2Client embeds the full IdP response body (which can
+      // be HTML from a reverse proxy / WAF — hundreds of bytes,
+      // potentially leaking infrastructure detail). Use a stable
+      // bounded message for the route response; the original err
+      // detail goes through stderr audit only via the registry's
+      // standard error path (qwenOAuth2.ts logs via `debugLogger`
+      // when needed).
+      const detail = err instanceof Error ? err.message : String(err);
+      writeStderrLine(`[serve] qwen device-flow start failed (raw): ${detail}`);
       throw new UpstreamDeviceFlowError(
-        `Qwen device authorization request failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        'Qwen IdP device authorization request failed',
       );
     }
     if (opts.signal.aborted) {
       throw new UpstreamDeviceFlowError('device-flow start aborted');
     }
     if (!isDeviceAuthorizationSuccess(auth)) {
+      // PR #4255 fold-in 3 (#9): same sanitization as the catch above
+      // — well-formed but unsuccessful IdP responses can carry
+      // arbitrary `error_description` text that we don't want in the
+      // SDK-visible 502 hint. Static message; raw envelope to stderr.
       const errorData = auth as { error?: string; error_description?: string };
+      writeStderrLine(
+        `[serve] qwen device-flow start error envelope (raw): error=${
+          errorData?.error ?? 'unknown'
+        } description=${errorData?.error_description ?? '(none)'}`,
+      );
       throw new UpstreamDeviceFlowError(
-        `Qwen device authorization failed: ${errorData?.error ?? 'unknown'} - ${
-          errorData?.error_description ?? 'no details provided'
-        }`,
+        'Qwen IdP rejected the device authorization request',
       );
     }
     return {
@@ -171,21 +187,23 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       const client = this.client;
       return {
         kind: 'success',
-        // PR #4255 review C3: `persist({signal})` lets the registry
-        // abort a wedged disk write via the entry's
-        // `cancelController`. The Qwen path's `cacheQwenCredentials`
-        // doesn't currently take a signal — that's a follow-up; for
-        // now the registry's hard timeout (DEVICE_FLOW_PERSIST_TIMEOUT_MS)
-        // bounds the wait + the post-write disposed check below
-        // ensures we don't update the in-process client after a
-        // dispose-during-persist race.
-        async persist(_persistOpts: { signal: AbortSignal }) {
+        // PR #4255 review C3 + fold-in 3 (#10): `persist({signal})`
+        // is now threaded end-to-end. The registry passes its
+        // per-entry `cancelController.signal`; we forward it to
+        // `cacheQwenCredentials({signal})` which forwards to
+        // `fs.writeFile(..., {signal})`. A wedged disk write aborts
+        // immediately when `cancel()` / `dispose()` / the
+        // 30s `DEVICE_FLOW_PERSIST_TIMEOUT_MS` fires, instead of
+        // hanging until the OS-level timeout.
+        async persist(persistOpts: { signal: AbortSignal }) {
           // Order matters: write to disk FIRST. If `cacheQwenCredentials`
           // throws (EACCES, EROFS, ENOSPC) we MUST NOT update the
           // in-process client — otherwise the daemon enters a zombie
           // state where this session "remembers" the token but a
           // restart loses it.
-          await cacheQwenCredentials(credentials);
+          await cacheQwenCredentials(credentials, {
+            signal: persistOpts.signal,
+          });
           try {
             client.setCredentials(credentials);
           } catch {
@@ -202,13 +220,10 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
           // can populate it; the type stays optional.
           return { expiresAt };
         },
-        // PR #4255 review C4: cancel-during-success rollback. If the
-        // registry's `transitionTerminal(authorized)` returns false
-        // (entry was cancelled / disposed mid-persist), unpersist
-        // restores disk parity with the cancelled flow status.
-        async unpersist() {
-          await clearQwenCredentials();
-        },
+        // PR #4255 fold-in 3: `unpersist` was removed in favor of
+        // honoring the IdP's already-completed approval over a
+        // microsecond cancel/dispose race. See registry success
+        // branch for the rationale + audit hint.
       };
     }
     if (isDeviceTokenPending(response)) {

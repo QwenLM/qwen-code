@@ -154,7 +154,6 @@ class FakeProvider implements DeviceFlowProvider {
           this.persistCalls += 1;
           return inner.persist(persistOpts);
         },
-        ...(inner.unpersist ? { unpersist: inner.unpersist } : {}),
       };
     }
     return next;
