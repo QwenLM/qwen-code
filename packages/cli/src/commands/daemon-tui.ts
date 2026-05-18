@@ -12,6 +12,7 @@ import type {
   DaemonTuiUpdate,
   DaemonTuiSessionClient,
 } from '../ui/daemon/DaemonTuiAdapter.js';
+import { createDaemonTuiSession as createDaemonTuiSessionClient } from '../ui/daemon/createDaemonTuiSession.js';
 
 interface DaemonTuiArgs {
   'daemon-url': string;
@@ -88,21 +89,14 @@ function printDaemonUpdate(update: DaemonTuiUpdate): void {
 async function createDaemonTuiSession(
   argv: DaemonTuiArgs,
 ): Promise<DaemonTuiSessionClient> {
-  const { DaemonClient, DaemonSessionClient } = await import('@qwen-code/sdk');
-  const client = new DaemonClient({
-    baseUrl: argv['daemon-url'],
-    token: argv.token ?? process.env['QWEN_SERVER_TOKEN'],
-  });
   const workspaceCwd = argv.workspace ?? process.cwd();
-  if (argv['session-id']) {
-    return await DaemonSessionClient.load(client, argv['session-id'], {
-      workspaceCwd,
-    });
-  }
-  return await DaemonSessionClient.createOrAttach(client, {
+  return await createDaemonTuiSessionClient({
+    daemonUrl: argv['daemon-url'],
+    token: argv.token,
     workspaceCwd,
-    ...(argv.model ? { modelServiceId: argv.model } : {}),
-    ...(argv['session-scope'] ? { sessionScope: argv['session-scope'] } : {}),
+    model: argv.model,
+    sessionId: argv['session-id'],
+    sessionScope: argv['session-scope'],
   });
 }
 

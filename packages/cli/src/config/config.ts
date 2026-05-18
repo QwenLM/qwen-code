@@ -138,6 +138,12 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
+  experimentalDaemonTui?: boolean | undefined;
+  daemonUrl?: string | undefined;
+  daemonToken?: string | undefined;
+  daemonSessionId?: string | undefined;
+  daemonSessionScope?: 'single' | 'thread' | undefined;
+  daemonModel?: string | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -673,6 +679,42 @@ export async function parseArguments(): Promise<CliArgs> {
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
           default: false,
         })
+        .option('experimental-daemon-tui', {
+          type: 'boolean',
+          description:
+            'Experimental: render the normal TUI against a running qwen serve daemon.',
+          hidden: true,
+        })
+        .option('daemon-url', {
+          type: 'string',
+          description:
+            'Experimental daemon TUI: base URL of a running qwen serve daemon.',
+          hidden: true,
+        })
+        .option('daemon-token', {
+          type: 'string',
+          description: 'Experimental daemon TUI: bearer token for the daemon.',
+          hidden: true,
+        })
+        .option('daemon-session-id', {
+          type: 'string',
+          description:
+            'Experimental daemon TUI: attach to an existing daemon session.',
+          hidden: true,
+        })
+        .option('daemon-session-scope', {
+          type: 'string',
+          choices: ['single', 'thread'] as const,
+          description:
+            'Experimental daemon TUI: session scope for new daemon sessions.',
+          hidden: true,
+        })
+        .option('daemon-model', {
+          type: 'string',
+          description:
+            'Experimental daemon TUI: model service id for new daemon sessions.',
+          hidden: true,
+        })
         .option('channel', {
           type: 'string',
           choices: ['VSCode', 'ACP', 'SDK', 'CI'],
@@ -1079,6 +1121,26 @@ export async function parseArguments(): Promise<CliArgs> {
   // Apply ACP fallback: if acp or experimental-acp is present but no explicit --channel, treat as ACP
   if ((result['acp'] || result['experimentalAcp']) && !result['channel']) {
     (result as Record<string, unknown>)['channel'] = 'ACP';
+  }
+
+  if (result['experimentalDaemonTui']) {
+    process.env['QWEN_EXPERIMENTAL_DAEMON_TUI'] = '1';
+    if (typeof result['daemonUrl'] === 'string') {
+      process.env['QWEN_DAEMON_URL'] = result['daemonUrl'];
+    }
+    if (typeof result['daemonToken'] === 'string') {
+      process.env['QWEN_DAEMON_TOKEN'] = result['daemonToken'];
+    }
+    if (typeof result['daemonSessionId'] === 'string') {
+      process.env['QWEN_DAEMON_SESSION_ID'] = result['daemonSessionId'];
+    }
+    if (typeof result['daemonSessionScope'] === 'string') {
+      process.env['QWEN_DAEMON_SESSION_SCOPE'] = result['daemonSessionScope'];
+    }
+    if (typeof result['daemonModel'] === 'string') {
+      process.env['QWEN_DAEMON_MODEL'] = result['daemonModel'];
+    }
+    process.env['QWEN_DAEMON_WORKSPACE'] = process.cwd();
   }
 
   return result as unknown as CliArgs;

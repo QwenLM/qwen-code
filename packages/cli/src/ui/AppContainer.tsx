@@ -132,6 +132,8 @@ import {
   useGeminiStream,
   type CancelSubmitInfo,
 } from './hooks/useGeminiStream.js';
+import { useDaemonTuiStream } from './daemon/useDaemonTuiStream.js';
+import { getDaemonTuiRuntimeOptions } from './daemon/daemonTuiOptions.js';
 import type { TrackedExecutingToolCall } from './hooks/useReactToolScheduler.js';
 import { useVim } from './hooks/vim.js';
 import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
@@ -290,6 +292,11 @@ const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
+  const daemonTuiOptions = useMemo(
+    () => getDaemonTuiRuntimeOptions(config),
+    [config],
+  );
+  const daemonTuiEnabled = daemonTuiOptions.enabled;
   const historyManager = useHistory();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
@@ -469,6 +476,15 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Initialize config (runs once on mount)
   useEffect(() => {
+    if (daemonTuiEnabled) {
+      profileCheckpoint('config_initialize_start');
+      profileCheckpoint('config_initialize_end');
+      setConfigInitialized(true);
+      profileCheckpoint('input_enabled');
+      finalizeStartupProfile(config.getSessionId());
+      return;
+    }
+
     (async () => {
       // Note: the program will not work if this fails so let errors be
       // handled by the global catch.
@@ -572,6 +588,7 @@ export const AppContainer = (props: AppContainerProps) => {
    * without waiting.
    */
   useEffect(() => {
+    if (daemonTuiEnabled) return undefined;
     if (!isConfigInitialized) return undefined;
     const geminiClient = config.getGeminiClient();
     if (!geminiClient) return undefined;
@@ -675,7 +692,7 @@ export const AppContainer = (props: AppContainerProps) => {
       if (flushTimer !== null) clearTimeout(flushTimer);
       clearTimeout(finalizeCap);
     };
-  }, [isConfigInitialized, config]);
+  }, [isConfigInitialized, config, daemonTuiEnabled]);
 
   // Track idle state via ref so the update handler can defer notifications
   // while the model is streaming, without triggering re-renders.
@@ -1151,6 +1168,9 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
+  const useActiveGeminiStream = daemonTuiEnabled
+    ? useDaemonTuiStream
+    : useGeminiStream;
 
   const {
     streamingState,
@@ -1166,7 +1186,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
-  } = useGeminiStream(
+  } = useActiveGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
     historyManager.addItem,
@@ -1187,6 +1207,7 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
     logger,
+    daemonTuiOptions,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -1826,7 +1847,7 @@ export const AppContainer = (props: AppContainerProps) => {
       !isEditorDialogOpen &&
       !showWelcomeBackDialog &&
       welcomeBackChoice !== 'restart' &&
-      geminiClient?.isInitialized?.()
+      (daemonTuiEnabled || geminiClient?.isInitialized?.())
     ) {
       handleFinalSubmit(initialPrompt);
       initialPromptSubmitted.current = true;
@@ -1842,6 +1863,7 @@ export const AppContainer = (props: AppContainerProps) => {
     showWelcomeBackDialog,
     welcomeBackChoice,
     geminiClient,
+    daemonTuiEnabled,
   ]);
 
   // Generate prompt suggestions when streaming completes
@@ -1876,6 +1898,7 @@ export const AppContainer = (props: AppContainerProps) => {
     // Skip when dialogs are active, in plan mode, elicitation pending, or last response was error
     if (
       followupSuggestionsEnabled &&
+      !daemonTuiEnabled &&
       config.isInteractive() &&
       !config.getSdkMode() &&
       prevStreamingStateRef.current === StreamingState.Responding &&
