@@ -32,6 +32,27 @@ import {
 const QWEN_OAUTH_SCOPE = 'openid profile email model.completion';
 
 /**
+ * Maximum length of raw IdP detail written to stderr for operator
+ * audit. PR #4255 fold-in 6 review thread #5: the raw `err.message`
+ * from `QwenOAuth2Client` embeds the full upstream response body,
+ * which on a misbehaving reverse proxy / WAF can be megabytes of
+ * HTML — and container log-aggregation pipelines (Loki, Fluent Bit,
+ * Stackdriver) typically truncate or reject lines past 4–32 KiB,
+ * meaning the *useful* prefix is lost downstream. Truncate here so
+ * the kept prefix is the part with the actual IdP error code /
+ * description, with a `[+N more]` tail so the reader knows how much
+ * was dropped. 2 KiB is comfortably below every aggregator's per-line
+ * cap and large enough to retain a structured JSON error envelope.
+ */
+const STDERR_DETAIL_MAX = 2_048;
+
+function truncateForStderr(detail: string): string {
+  if (detail.length <= STDERR_DETAIL_MAX) return detail;
+  const dropped = detail.length - STDERR_DETAIL_MAX;
+  return `${detail.slice(0, STDERR_DETAIL_MAX)}…[+${dropped} bytes truncated]`;
+}
+
+/**
  * Qwen-OAuth implementation of `DeviceFlowProvider` for `qwen serve`.
  *
  * Uses the lower-level `QwenOAuth2Client` primitives (`requestDeviceAuthorization`
@@ -79,7 +100,9 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       // standard error path (qwenOAuth2.ts logs via `debugLogger`
       // when needed).
       const detail = err instanceof Error ? err.message : String(err);
-      writeStderrLine(`[serve] qwen device-flow start failed (raw): ${detail}`);
+      writeStderrLine(
+        `[serve] qwen device-flow start failed (raw): ${truncateForStderr(detail)}`,
+      );
       throw new UpstreamDeviceFlowError(
         'Qwen IdP device authorization request failed',
       );
@@ -94,9 +117,11 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       // SDK-visible 502 hint. Static message; raw envelope to stderr.
       const errorData = auth as { error?: string; error_description?: string };
       writeStderrLine(
-        `[serve] qwen device-flow start error envelope (raw): error=${
-          errorData?.error ?? 'unknown'
-        } description=${errorData?.error_description ?? '(none)'}`,
+        truncateForStderr(
+          `[serve] qwen device-flow start error envelope (raw): error=${
+            errorData?.error ?? 'unknown'
+          } description=${errorData?.error_description ?? '(none)'}`,
+        ),
       );
       throw new UpstreamDeviceFlowError(
         'Qwen IdP rejected the device authorization request',

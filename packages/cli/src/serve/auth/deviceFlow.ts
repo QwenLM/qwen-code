@@ -51,9 +51,15 @@ export const DEVICE_FLOW_PERSIST_TIMEOUT_MS = 30_000;
  */
 export const DEVICE_FLOW_START_TIMEOUT_MS = 30_000;
 
-export type DeviceFlowProviderId = 'qwen-oauth';
-export const DEVICE_FLOW_SUPPORTED_PROVIDERS: readonly DeviceFlowProviderId[] =
-  ['qwen-oauth'];
+// PR #4255 fold-in 6 review thread #2: derive the type from the
+// supported-providers tuple so adding/removing a provider id
+// requires touching exactly ONE site. The earlier shape (standalone
+// union + `readonly DeviceFlowProviderId[]` annotation) let the
+// type and the array drift apart silently. Mirrors the codebase's
+// `SERVE_ERROR_KINDS` / `ServeErrorKind` pattern in `status.ts`.
+export const DEVICE_FLOW_SUPPORTED_PROVIDERS = ['qwen-oauth'] as const;
+export type DeviceFlowProviderId =
+  (typeof DEVICE_FLOW_SUPPORTED_PROVIDERS)[number];
 
 export type DeviceFlowStatus =
   | 'pending'
@@ -228,6 +234,11 @@ export type DeviceFlowPollResult =
 
 export interface DeviceFlowProvider {
   readonly providerId: DeviceFlowProviderId;
+  /**
+   * Begin a device-authorization grant against the IdP. Same SSE-leak
+   * sanitization rule as `poll()` applies to thrown error messages —
+   * see `poll()` `@remarks` below.
+   */
   start(opts: { signal: AbortSignal }): Promise<DeviceFlowStartResult>;
   /**
    * Poll the upstream IdP for the user's authorization decision. The
@@ -236,6 +247,35 @@ export interface DeviceFlowProvider {
    * quota after it's logically given up. Providers that pass `signal`
    * to their `fetch` get cleanest tear-down; those that ignore it
    * still see the post-`await` guard suppress the resolved frame.
+   *
+   * @remarks
+   * **Provider-author contract — sanitize before throwing.** The
+   * registry's `runPollTick` catch block forwards `err.message`
+   * verbatim into the `auth_device_flow_failed` event's `hint`
+   * field, which is workspace-broadcast over SSE to every subscriber
+   * (and durably stored in the registry's terminal entry). A naive
+   * provider that re-throws a `fetch` failure or upstream payload
+   * untouched will leak: (a) full IdP response bodies (HTML error
+   * pages from a reverse proxy / WAF can run into hundreds of
+   * kilobytes), (b) infrastructure detail (internal hostnames, proxy
+   * banners), (c) ANY embedded secret material the upstream
+   * accidentally echoed.
+   *
+   * Two equally-correct paths for new providers:
+   *   1. **Resolve to a typed `error` result** — return
+   *      `{ kind: 'error', errorKind, hint }` with a *bounded
+   *      static-or-pattern hint*. This is the preferred path; it
+   *      keeps full structured-error fidelity and drops nothing.
+   *   2. **Throw, but only with a sanitized `Error.message`** — if
+   *      the implementation finds it more natural to throw,
+   *      construct the thrown `Error` with a *short bounded sentence
+   *      that contains no IdP body / banner / secret*. Send the raw
+   *      detail through `writeStderrLine` for operator audit; the
+   *      thrown `message` is the SSE-visible surface.
+   *
+   * `qwenDeviceFlowProvider` is the canonical example — see PR #4255
+   * review S2 + fold-in 3 #9 + fold-in 5 #4 for the historical
+   * regressions this contract prevents.
    */
   poll(
     state: {
@@ -333,6 +373,20 @@ interface DeviceFlowEntry {
   errorKind?: DeviceFlowErrorKind;
   hint?: string;
   initiatorClientId?: string;
+  /**
+   * Most-recent client id observed on a take-over POST (per-provider
+   * singleton). Initially `undefined`; populated only when a second
+   * caller's `initiatorClientId` differs from `entry.initiatorClientId`.
+   * Surfaced through the audit trail so incident response can see
+   * "client A started this flow, client B took it over at 12:34" —
+   * useful when two SDK processes race on the same Qwen account
+   * across hosts. Event-routing still uses the original
+   * `initiatorClientId` (events are workspace-broadcast; the
+   * originator field is metadata, and changing it mid-flow would
+   * break SDK reducers that key on it). PR #4255 fold-in 6 review
+   * thread #6.
+   */
+  lastOriginatorClientId?: string;
   lastPolledAt?: number;
   createdAt: number;
   terminalAt?: number;
@@ -556,6 +610,7 @@ export class DeviceFlowRegistry {
     // Fast-path: an existing pending entry → idempotent take-over.
     const existing = this.byProvider.get(params.providerId);
     if (existing && existing.status === 'pending') {
+      this.recordTakeover(existing, params.initiatorClientId);
       return { view: toPublicView(existing), attached: true };
     }
     // Coalesce concurrent fresh starts for the same providerId.
@@ -564,7 +619,13 @@ export class DeviceFlowRegistry {
       const result = await inFlight;
       // The first start created an entry; this caller is a take-over of
       // the just-created flow (NOT a fresh IdP request). Recompute the
-      // shape so the second caller's `attached: true` is honest.
+      // shape so the second caller's `attached: true` is honest. PR
+      // #4255 fold-in 6 #6: also stamp the second caller's id on the
+      // entry's `lastOriginatorClientId` so audit shows the take-over.
+      const justCreated = this.byProvider.get(params.providerId);
+      if (justCreated) {
+        this.recordTakeover(justCreated, params.initiatorClientId);
+      }
       return { view: result.view, attached: true };
     }
     if (this.countActive() >= DEVICE_FLOW_MAX_CONCURRENT) {
@@ -1003,6 +1064,35 @@ export class DeviceFlowRegistry {
         void _exhaustive;
       }
     }
+  }
+
+  /**
+   * Record a take-over: a second SDK client posted
+   * `POST /workspace/auth/device-flow` for a provider that already has
+   * a pending entry (or one being created in `inFlightStarts`). When
+   * the second caller's `initiatorClientId` differs from the entry's,
+   * stamp it on `entry.lastOriginatorClientId` and emit an audit
+   * breadcrumb. No event publish — the per-provider singleton's
+   * `started` event was already broadcast workspace-wide, and emitting
+   * a second `started` would confuse SDK reducers (the `attached:
+   * true` HTTP response is the second caller's signal). PR #4255
+   * fold-in 6 review thread #6.
+   */
+  private recordTakeover(
+    entry: DeviceFlowEntry,
+    takeoverClientId: string | undefined,
+  ): void {
+    if (!takeoverClientId) return;
+    if (takeoverClientId === entry.initiatorClientId) return;
+    if (takeoverClientId === entry.lastOriginatorClientId) return;
+    entry.lastOriginatorClientId = takeoverClientId;
+    this.deps.audit?.record({
+      deviceFlowId: entry.deviceFlowId,
+      providerId: entry.providerId,
+      clientId: takeoverClientId,
+      status: 'started',
+      hint: `take-over (per-provider singleton; original initiator=${entry.initiatorClientId ?? '(none)'})`,
+    });
   }
 
   /**

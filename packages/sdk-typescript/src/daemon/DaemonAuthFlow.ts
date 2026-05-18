@@ -10,12 +10,27 @@ import type { DaemonAuthProviderId, DaemonDeviceFlowState } from './types.js';
 /**
  * Grace period added past the daemon-stated `expiresAt` before
  * `awaitCompletion` gives up. Covers (a) clock skew between SDK and
- * daemon, (b) the daemon's own ~30s sweeper interval (so we don't
- * bail one tick before the daemon would surface a synthetic `expired`
- * terminal), and (c) per-poll network latency. Matches the registry's
- * `DEVICE_FLOW_SWEEP_INTERVAL_MS` so an `awaitCompletion` caller
- * observes the daemon's authoritative final state rather than timing
- * out client-side ahead of the sweeper.
+ * daemon, (b) the daemon's own sweep interval (so we don't bail one
+ * tick before the daemon would surface a synthetic `expired`
+ * terminal), and (c) per-poll network latency.
+ *
+ * **Why 30 s, and which daemon constant it relates to.** The relevant
+ * daemon-side constant is `DEVICE_FLOW_SWEEP_INTERVAL_MS` (the
+ * interval at which the registry's sweeper RUNS — currently 30 s),
+ * NOT `DEVICE_FLOW_TERMINAL_GRACE_MS` (the 5-minute window during
+ * which terminal entries remain GET-able before eviction). One sweep
+ * cycle past `expiresAt` is enough to flip the entry to a synthetic
+ * `expired`/`expired_token` terminal state; once that happens the
+ * SDK's GET poll will return it immediately. Waiting any longer
+ * client-side just delays the inevitable. PR #4255 fold-in 6 review
+ * thread #3.
+ *
+ * **Not** to be confused with `TERMINAL_GRACE_MS` — terminal entries
+ * remain queryable for 5 minutes after they go terminal, but that's
+ * a reconnect-affordance for SDK clients that want to *re-read* a
+ * settled state, not a window `awaitCompletion` needs to wait
+ * through. Keep this aligned with `SWEEP_INTERVAL_MS`; if the daemon
+ * ever raises its sweep cadence, raise this in lockstep.
  */
 export const DEVICE_FLOW_EXPIRY_GRACE_MS = 30_000;
 

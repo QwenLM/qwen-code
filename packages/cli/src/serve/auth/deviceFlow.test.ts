@@ -259,12 +259,14 @@ describe('DeviceFlowRegistry — start / public view', () => {
   let provider: FakeProvider;
   let registry: DeviceFlowRegistry;
   let events: ReturnType<typeof buildRegistry>['events'];
+  let auditLines: ReturnType<typeof buildRegistry>['auditLines'];
 
   beforeEach(() => {
     provider = new FakeProvider();
     const built = buildRegistry(provider);
     registry = built.registry;
     events = built.events;
+    auditLines = built.auditLines;
   });
 
   afterEach(() => {
@@ -299,6 +301,46 @@ describe('DeviceFlowRegistry — start / public view', () => {
     expect(second.view.deviceFlowId).toBe(first.view.deviceFlowId);
     // Critical: provider.start should NOT have been called a second time.
     expect(provider.startCount).toBe(1);
+  });
+
+  it('take-over by a different clientId emits a take-over audit (fold-in 6 #6)', async () => {
+    await registry.start({
+      providerId: 'qwen-oauth',
+      initiatorClientId: 'sdk-client-A',
+    });
+    auditLines.length = 0;
+    await registry.start({
+      providerId: 'qwen-oauth',
+      initiatorClientId: 'sdk-client-B',
+    });
+    const takeoverAudit = auditLines.find(
+      (line) =>
+        line['status'] === 'started' &&
+        line['clientId'] === 'sdk-client-B' &&
+        typeof line['hint'] === 'string' &&
+        (line['hint'] as string).startsWith('take-over'),
+    );
+    expect(takeoverAudit).toBeDefined();
+    expect(takeoverAudit?.['hint']).toContain('sdk-client-A');
+  });
+
+  it('take-over by the SAME clientId does not emit a take-over audit', async () => {
+    await registry.start({
+      providerId: 'qwen-oauth',
+      initiatorClientId: 'sdk-client-A',
+    });
+    auditLines.length = 0;
+    await registry.start({
+      providerId: 'qwen-oauth',
+      initiatorClientId: 'sdk-client-A',
+    });
+    expect(
+      auditLines.some(
+        (line) =>
+          typeof line['hint'] === 'string' &&
+          (line['hint'] as string).startsWith('take-over'),
+      ),
+    ).toBe(false);
   });
 
   it('concurrent start() for the same providerId coalesces — provider.start fires once', async () => {
