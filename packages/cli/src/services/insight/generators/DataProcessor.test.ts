@@ -18,6 +18,7 @@ const mockLogger = vi.hoisted(() => ({
   warn: vi.fn(),
   debug: vi.fn(),
 }));
+const mockRunSideQuery = vi.hoisted(() => vi.fn());
 
 // Mock dependencies
 vi.mock('@qwen-code/qwen-code-core', async () => {
@@ -28,6 +29,7 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     ...actual,
     read: vi.fn(),
     createDebugLogger: vi.fn(() => mockLogger),
+    runSideQuery: mockRunSideQuery,
   };
 });
 
@@ -55,6 +57,9 @@ describe('DataProcessor', () => {
     vi.clearAllMocks();
 
     mockGenerateJson = vi.fn();
+    mockRunSideQuery.mockImplementation((_config, request) =>
+      mockGenerateJson(request),
+    );
     mockConfig = {
       getBaseLlmClient: vi.fn(() => ({
         generateJson: mockGenerateJson,
@@ -1527,6 +1532,65 @@ describe('DataProcessor', () => {
         expect.stringMatching(/[\\/]facets[\\/]cached-session\.json$/),
         JSON.stringify(result[0], null, 2),
         'utf-8',
+      );
+    });
+
+    it('should reuse normalized cached facets when writeback fails', async () => {
+      const conversationalRecords: ChatRecord[] = [
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Hello' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+        {
+          sessionId: 'cached-session',
+          timestamp: '2025-01-15T10:01:00Z',
+          type: 'assistant',
+          message: { role: 'assistant', parts: [{ text: 'Hi' }] },
+          uuid: '',
+          parentUuid: null,
+          cwd: '',
+          version: '',
+        },
+      ];
+      const writeError = new Error('disk full');
+
+      mockedReadJsonlFile.mockResolvedValue(conversationalRecords);
+      mockedFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          underlying_goal: 'Cached goal',
+          brief_summary: 'Cached summary',
+        }),
+      );
+      mockedFs.writeFile.mockRejectedValueOnce(writeError);
+
+      const files = [{ path: '/test/cached-session.jsonl', mtime: 1000 }];
+
+      const result = await (
+        dataProcessor as unknown as {
+          generateFacets(
+            files: Array<{ path: string; mtime: number }>,
+            facetsOutputDir?: string,
+          ): Promise<SessionFacets[]>;
+        }
+      ).generateFacets(files, '/facets');
+
+      expect(mockGenerateJson).not.toHaveBeenCalled();
+      expect(result).toEqual([
+        expect.objectContaining({
+          session_id: 'cached-session',
+          underlying_goal: 'Cached goal',
+          brief_summary: 'Cached summary',
+        }),
+      ]);
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        'Failed to write back normalized facet for cached-session:',
+        writeError,
       );
     });
   });

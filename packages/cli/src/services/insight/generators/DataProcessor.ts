@@ -1260,11 +1260,21 @@ None captured`;
                   );
                   throw new Error('Malformed cached insight facet');
                 }
-                await fs.writeFile(
-                  existingFacetPath,
-                  JSON.stringify(normalizedFacet, null, 2),
-                  'utf-8',
-                );
+                const normalizedData = JSON.stringify(normalizedFacet, null, 2);
+                if (existingData !== normalizedData) {
+                  try {
+                    await fs.writeFile(
+                      existingFacetPath,
+                      normalizedData,
+                      'utf-8',
+                    );
+                  } catch (writeError) {
+                    logger.warn(
+                      `Failed to write back normalized facet for ${sessionId}:`,
+                      writeError,
+                    );
+                  }
+                }
                 completed++;
                 if (onProgress) {
                   const percent = 20 + Math.round((completed / total) * 60);

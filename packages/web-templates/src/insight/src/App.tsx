@@ -149,13 +149,15 @@ function InsightApp({ data }: { data: InsightData }) {
     data.qualitative?.interactionStyle,
   );
   const showImpressiveWorkflows =
-    hasMeaningfulValue(data.qualitative?.impressiveWorkflows) ||
-    hasRecordEntries(data.primarySuccess) ||
-    hasRecordEntries(data.outcomes);
+    !!data.qualitative &&
+    (hasMeaningfulValue(data.qualitative.impressiveWorkflows) ||
+      hasRecordEntries(data.primarySuccess) ||
+      hasRecordEntries(data.outcomes));
   const showFrictionPoints =
-    hasMeaningfulValue(data.qualitative?.frictionPoints) ||
-    hasRecordEntries(data.satisfaction) ||
-    hasRecordEntries(data.friction);
+    !!data.qualitative &&
+    (hasMeaningfulValue(data.qualitative.frictionPoints) ||
+      hasRecordEntries(data.satisfaction) ||
+      hasRecordEntries(data.friction));
   const showFeatures =
     !!data.qualitative &&
     (hasMeaningfulArray(data.qualitative.improvements?.Qwen_md_additions) ||
