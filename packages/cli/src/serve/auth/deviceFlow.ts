@@ -125,7 +125,32 @@ export type DeviceFlowErrorKind =
    *  to disk / permissions rather than chasing an IdP outage. The
    *  `device_code` was consumed upstream, so the user must
    *  `client.auth.start` again after fixing the underlying disk
-   *  condition. */
+   *  condition.
+   *
+   *  @remarks
+   *  **Lost-success / retry-after-persist-failed UX caveat.** When
+   *  the failure originated from `provider.persist()` ignoring the
+   *  registry's signal AND the underlying disk write later
+   *  succeeded (PR #4255 fold-in 9 #7 — only reachable for
+   *  non-conforming future providers; the Qwen provider honors
+   *  signal end-to-end), the daemon emits
+   *  `auth_device_flow_failed`/`persist_failed` to SSE while the
+   *  credentials are silently on disk. A naive SDK retry (\"disk
+   *  transient, try again\") will hit the IdP a second time with
+   *  a fresh `device_code`, prompting the user a second time —
+   *  but the FIRST credential set is already valid. If the second
+   *  prompt times out without approval, the user is logged in
+   *  (from the first lost-success persist) without realizing they
+   *  retried.
+   *
+   *  Mitigations for SDK consumers writing retry logic:
+   *  - Call `client.auth.getStatus()` (`GET /workspace/auth/status`)
+   *    before re-prompting on `persist_failed`. If the daemon
+   *    reports an active credential for the provider, the previous
+   *    persist committed and a retry would be redundant.
+   *  - Operators can grep daemon stderr / audit log for
+   *    `lost_success_after_timeout` to detect occurrences of the
+   *    inconsistency window. */
   | 'persist_failed';
 
 /**

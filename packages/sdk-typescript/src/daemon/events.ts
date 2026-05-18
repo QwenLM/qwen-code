@@ -719,9 +719,16 @@ export interface DaemonDeviceFlowReducerState {
   intervalMs?: number;
   /** Most recent SSE event id observed for this flow (NOT a wall-clock
    *  timestamp). Used as a monotonic counter so out-of-order delivery
-   *  doesn't let a stale frame overwrite a newer one. `0` if the
-   *  underlying envelope omitted `id` (synthetic / terminal frames). */
-  lastSeenEventId: number;
+   *  doesn't let a stale frame overwrite a newer one. `undefined` if
+   *  the underlying envelope omitted `id` (synthetic / SDK-internal
+   *  frames). PR #4255 round-9 #6: changed from `number` (defaulting
+   *  to 0) to `number | undefined` — the daemon-side EventBus assigns
+   *  ids ≥ 1, so `0` is a sentinel that has no meaning in real
+   *  traffic, but the monotonic gate (`rawEventId <= lastSeenEventId`)
+   *  would reject any future synthetic frame using `id: 0`. The gate
+   *  already short-circuits on `existing.lastSeenEventId !== undefined`,
+   *  so undefined is safe. */
+  lastSeenEventId: number | undefined;
   /** Set on `authorized` to the credential's expiry, when known. */
   authorizedExpiresAt?: number;
   /** Best-effort non-PII account label echoed from `authorized`. */
@@ -787,7 +794,7 @@ export function reduceDaemonAuthEvent(
           [providerId]: {
             deviceFlowId: event.data.deviceFlowId,
             status: 'pending',
-            lastSeenEventId: rawEvent.id ?? existing?.lastSeenEventId ?? 0,
+            lastSeenEventId: rawEvent.id ?? existing?.lastSeenEventId,
           },
         },
       };
