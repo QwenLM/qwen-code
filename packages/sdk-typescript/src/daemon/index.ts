@@ -30,6 +30,7 @@ export { parseSseStream, SseFramingError } from './sse.js';
 export {
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
+  isDaemonContentHash,
   requireWorkspaceCwd,
 } from './types.js';
 export type {

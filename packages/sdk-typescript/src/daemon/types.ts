@@ -413,6 +413,14 @@ export interface DaemonWriteMemoryResult {
 
 export type DaemonContentHash = `sha256:${string}`;
 
+const DAEMON_CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
+
+export function isDaemonContentHash(
+  value: unknown,
+): value is DaemonContentHash {
+  return typeof value === 'string' && DAEMON_CONTENT_HASH_RE.test(value);
+}
+
 export interface DaemonWorkspaceFile {
   kind: 'file';
   path: string;
@@ -439,15 +447,23 @@ export interface DaemonWorkspaceFileBytes {
   hash?: DaemonContentHash;
 }
 
-export interface DaemonWorkspaceFileWriteRequest {
+interface DaemonWorkspaceFileWriteRequestBase {
   path: string;
   content: string;
-  mode: 'create' | 'replace';
-  expectedHash?: DaemonContentHash;
   bom?: boolean;
   encoding?: string;
   lineEnding?: 'crlf' | 'lf';
 }
+
+export type DaemonWorkspaceFileWriteRequest =
+  | (DaemonWorkspaceFileWriteRequestBase & {
+      mode: 'create';
+      expectedHash?: DaemonContentHash;
+    })
+  | (DaemonWorkspaceFileWriteRequestBase & {
+      mode: 'replace';
+      expectedHash: DaemonContentHash;
+    });
 
 export interface DaemonWorkspaceFileEditRequest {
   path: string;

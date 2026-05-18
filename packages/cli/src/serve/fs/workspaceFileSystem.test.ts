@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -595,6 +595,20 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(await fsp.readFile(target, 'utf-8')).toBe('foo=42\nbar=2\n');
   });
 
+  it('editAtomic validates expectedHash against the edited snapshot first', async () => {
+    const target = path.join(h.workspace, 'atomic-edit-stale.txt');
+    await fsp.writeFile(target, 'foo=1\n');
+    const r = await h.fs.resolve('atomic-edit-stale.txt', 'edit');
+    const err = await h.fs
+      .editAtomic(r, 'missing', 'foo=2', {
+        expectedHash: rawHash('different\n'),
+      })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('hash_mismatch');
+    expect(await fsp.readFile(target, 'utf-8')).toBe('foo=1\n');
+  });
+
   it('editAtomic rejects absent and ambiguous matches with typed errors', async () => {
     const target = path.join(h.workspace, 'atomic-ambiguous.txt');
     await fsp.writeFile(target, 'x\nx\n');
@@ -753,6 +767,43 @@ describe('WorkspaceFileSystem - TOCTOU + UTF-8 + cwd hardening', () => {
     expect(['symlink_escape']).toContain((err as { kind: string }).kind);
     const outsideContent = await fsp.readFile(outside, 'utf-8');
     expect(outsideContent).toBe('foo=1\n');
+  });
+
+  it('writeTextAtomic does not write through a swapped temporary symlink', async () => {
+    const outside = path.join(h.scratch, 'temp-race-outside.txt');
+    await fsp.writeFile(outside, 'outside\n');
+    const originalOpen = fsp.open.bind(fsp);
+    const openSpy = vi
+      .spyOn(fsp, 'open')
+      .mockImplementation(async (...args) => {
+        const fh = await originalOpen(...args);
+        const candidate = String(args[0]);
+        if (
+          candidate.includes('.temp-race.txt.') &&
+          candidate.endsWith('.tmp') &&
+          args[1] === 'wx'
+        ) {
+          const originalWriteFile = fh.writeFile.bind(fh);
+          vi.spyOn(fh, 'writeFile').mockImplementation(async (...writeArgs) => {
+            await fsp.unlink(candidate);
+            await fsp.symlink(outside, candidate, 'file');
+            return originalWriteFile(...writeArgs);
+          });
+        }
+        return fh;
+      });
+
+    try {
+      const r = await h.fs.resolve('temp-race.txt', 'write');
+      const err = await h.fs
+        .writeTextAtomic(r, 'secret\n', { mode: 'create' })
+        .catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('symlink_escape');
+      expect(await fsp.readFile(outside, 'utf-8')).toBe('outside\n');
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 
   it('readBytes rejects opts.maxBytes above MAX_READ_BYTES', async () => {

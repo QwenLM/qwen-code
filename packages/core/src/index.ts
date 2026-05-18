@@ -137,6 +137,7 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
+export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';

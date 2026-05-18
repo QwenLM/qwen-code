@@ -13,6 +13,7 @@ import {
 } from '../../src/daemon/DaemonClient.js';
 import {
   DaemonCapabilityMissingError,
+  isDaemonContentHash,
   requireWorkspaceCwd,
 } from '../../src/daemon/types.js';
 import type {
@@ -140,6 +141,14 @@ describe('DaemonClient', () => {
   });
 
   describe('workspace file helpers', () => {
+    it('validates daemon content hashes with the daemon regex', () => {
+      expect(isDaemonContentHash(`sha256:${'a'.repeat(64)}`)).toBe(true);
+      expect(isDaemonContentHash(`sha256:${'A'.repeat(64)}`)).toBe(false);
+      expect(isDaemonContentHash(`sha256:${'a'.repeat(63)}`)).toBe(false);
+      expect(isDaemonContentHash('md5:' + 'a'.repeat(64))).toBe(false);
+      expect(isDaemonContentHash(undefined)).toBe(false);
+    });
+
     it('reads text files with query params and client identity', async () => {
       const payload = {
         kind: 'file',

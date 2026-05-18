@@ -12,6 +12,7 @@ export {
   DaemonSessionClient,
   asKnownDaemonEvent,
   createDaemonSessionViewState,
+  isDaemonContentHash,
   isDaemonEventType,
   isKnownDaemonEvent,
   parseSseStream,
