@@ -891,6 +891,62 @@ describe('DeviceFlowRegistry — persist failure paths (fold-in 10 #1)', () => {
     }
   });
 
+  it('records lost_success_after_timeout when persist resolves AFTER the registry timeout (round-12 #8)', async () => {
+    // PR #4255 round-12 #8 (Cy_ZH): pins the split-brain detector
+    // for non-conforming providers. fold-in 9 #7 added an
+    // independent tracker on the original `result.persist(...)`
+    // promise: if the race timed out (`persistTimedOut === true`)
+    // AND the underlying persist later resolved successfully,
+    // emit a `lost_success_after_timeout` audit breadcrumb.
+    // Reachable scenario: provider's persist runs non-abortable
+    // I/O (mkdir/chmod/mv outside the `fs.writeFile` signal
+    // path) and the disk write succeeds 100ms after the 30s
+    // timeout fires.
+    const provider = new FakeProvider();
+    let resolveLate!: (m: { expiresAt?: number }) => void;
+    const latePersist = new Promise<{ expiresAt?: number }>((resolve) => {
+      resolveLate = resolve;
+    });
+    provider.pollScript = [
+      {
+        kind: 'success',
+        // Persist intentionally ignores signal — models a
+        // non-conforming provider. Resolves only when the test
+        // fires it.
+        persist: () => latePersist,
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      // Drive first poll → success → enter persist race.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Advance past PERSIST_TIMEOUT_MS so the race fires its timer.
+      env.clock.tick(DEVICE_FLOW_PERSIST_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Registry already published persist_failed and transitioned.
+      // Now the non-cooperative provider "silently" commits anyway.
+      resolveLate({ expiresAt: 1_700_000_999_000 });
+      await flushAsync();
+      const lostSuccessAudit = auditLines.find(
+        (line) =>
+          typeof line['hint'] === 'string' &&
+          (line['hint'] as string).startsWith('lost_success_after_timeout'),
+      );
+      expect(lostSuccessAudit).toBeDefined();
+      // The audit line records `status: 'authorized'` so operators
+      // can grep "tokens are on disk despite persist_failed event."
+      expect(lostSuccessAudit?.['status']).toBe('authorized');
+      expect(lostSuccessAudit?.['hint']).toContain('1700000999000');
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('persist throws past expiresAt → persist_failed (NOT expired_token; fold-in 9 #13)', async () => {
     // Round-8 #13: previously the registry classified this branch as
     // `expired_token`, routing operator remediation to "tell user to

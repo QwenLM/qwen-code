@@ -62,6 +62,19 @@ export const DEVICE_FLOW_START_TIMEOUT_MS = 30_000;
  */
 export const DEVICE_FLOW_MAX_EXPIRES_IN_SEC = 60 * 60;
 /**
+ * Operator-safe lower bound on the IdP-provided `expires_in`.
+ * Symmetric with `DEVICE_FLOW_MAX_EXPIRES_IN_SEC`. PR #4255 round-12
+ * #5 (gpt-5.5 review Cy_ZF): a misbehaving / fuzzed IdP returning
+ * `expires_in: 0.5` would produce `expiresAt = now() + 500 ms` —
+ * the very first poll (clamped at `>=1 s`) would fire AFTER
+ * `expiresAt` and the entry would expire before any user could
+ * authorize. RFC 8628 §3.2 calls 5–30 minutes "reasonable"; sub-30 s
+ * `expires_in` is effectively non-compliant. Floor lifts those
+ * pathological values to 30 s so the user gets at least one
+ * chance to complete the IdP page.
+ */
+export const DEVICE_FLOW_MIN_EXPIRES_IN_SEC = 30;
+/**
  * Upper bound on the polling interval. RFC 8628's normal `interval`
  * + `slow_down` bumps live in the 5–30 s range; values past 60 s
  * indicate an IdP misbehaving (or, more likely, `1e12` from a
@@ -794,9 +807,16 @@ export class DeviceFlowRegistry {
     // `DEVICE_FLOW_MAX_EXPIRES_IN_SEC` so a malformed/malicious IdP
     // can't tie up a per-provider slot beyond an operator-safe
     // bound.
+    // PR #4255 round-12 #5 (Cy_ZF): symmetric upper + lower bounds.
+    // The `MAX` clamp defends against `1e12` (year-pinning); the
+    // new `MIN` floor defends against `0.5` (entry expires before
+    // the first poll fires).
     const expiresInSec =
       Number.isFinite(startResult.expiresIn) && startResult.expiresIn > 0
-        ? Math.min(startResult.expiresIn, DEVICE_FLOW_MAX_EXPIRES_IN_SEC)
+        ? Math.min(
+            DEVICE_FLOW_MAX_EXPIRES_IN_SEC,
+            Math.max(DEVICE_FLOW_MIN_EXPIRES_IN_SEC, startResult.expiresIn),
+          )
         : 600;
     const expiresAt = this.now() + expiresInSec * 1000;
     // Same defense for `interval`: a non-finite-positive value would
@@ -1000,13 +1020,38 @@ export class DeviceFlowRegistry {
         hint: 'provider.poll() failed; see daemon audit log for details',
       };
     }
+    // PR #4255 round-12 #1 (gpt-5.5 review CzSpN): also re-check
+    // `this.disposed` after the await. `dispose()` clears
+    // `this.byId` / `this.byProvider` and aborts the entry's
+    // signal but doesn't mutate the captured `entry.status` (it
+    // wipes secrets but leaves the status field untouched). A
+    // provider that already resolved or doesn't honor abort can
+    // therefore enter the `success` branch below and call
+    // `result.persist({...})` — committing credentials on a
+    // shutting-down daemon. Same shape as the disposal guard
+    // already present at the top of the method (line 948); this
+    // closes the post-await window.
+    if (this.disposed) return;
     if (entry.status !== 'pending') return;
     switch (result.kind) {
       case 'pending':
         this.schedulePoll(entry, provider);
         return;
       case 'slow_down':
-        entry.intervalMs += DEVICE_FLOW_SLOW_DOWN_BUMP_MS;
+        // PR #4255 round-12 #4 (Cy_Y9): re-clamp against
+        // `DEVICE_FLOW_MAX_INTERVAL_MS`. A misbehaving / malicious
+        // IdP that keeps returning `slow_down` would otherwise
+        // push `intervalMs` past the documented bound — eventually
+        // past Node's `TIMEOUT_MAX` (≈24.8 d) at which point the
+        // poll never fires within `expiresAt`. Each bump is only
+        // 5 s so reaching `TIMEOUT_MAX` is impractical, but the
+        // invariant `intervalMs <= MAX_INTERVAL_MS` is documented
+        // as load-bearing in `DEVICE_FLOW_MAX_INTERVAL_MS`'s
+        // JSDoc. Symmetric with the doStart clamp.
+        entry.intervalMs = Math.min(
+          DEVICE_FLOW_MAX_INTERVAL_MS,
+          entry.intervalMs + DEVICE_FLOW_SLOW_DOWN_BUMP_MS,
+        );
         this.deps.events.publish(
           {
             type: 'throttled',
@@ -1061,9 +1106,35 @@ export class DeviceFlowRegistry {
         // "provider's persist MUST honor signal"; this tracker
         // catches violations and emits a `lost_success_after_timeout`
         // audit breadcrumb so operators see the inconsistency.
-        const persistTracker = result.persist({
-          signal: entry.cancelController.signal,
-        });
+        // PR #4255 round-12 #2 (gpt-5.5 review Cy_ZG): defensively
+        // wrap the `result.persist({signal})` call in a try/catch.
+        // The persist invocation happens BEFORE the surrounding
+        // `new Promise` constructor (the tracker is captured by
+        // reference inside the constructor), so a synchronous throw
+        // from a non-conforming provider — e.g. a top-of-function
+        // validation `if (!signal) throw …` — would NOT be caught
+        // by the outer try/catch around `await new Promise(...)`.
+        // `runPollTick` is invoked via `void this.runPollTick(...)`
+        // so the escaped throw becomes an `unhandledRejection`. The
+        // try/catch routes it through the same persistError path
+        // that handles a rejected-promise return.
+        let persistTracker: Promise<{
+          expiresAt?: number;
+          accountAlias?: string;
+        }>;
+        try {
+          persistTracker = result.persist({
+            signal: entry.cancelController.signal,
+          });
+        } catch (syncErr) {
+          persistError = syncErr;
+          persistTracker = Promise.reject(syncErr);
+          // Suppress the unhandled-rejection warning on the
+          // synthetic rejected promise — we own the recovery via
+          // `persistError` and the lost_success branch below
+          // explicitly catches its rejection too.
+          persistTracker.catch(() => {});
+        }
         persistTracker.then(
           (lateMeta) => {
             // Only fire when the race was timed out AND the underlying
@@ -1085,26 +1156,36 @@ export class DeviceFlowRegistry {
             // failure, the registry already published it).
           },
         );
-        try {
-          metadata = await new Promise<{
-            expiresAt?: number;
-            accountAlias?: string;
-          }>((resolve, reject) => {
-            persistTimer = this.schedule(DEVICE_FLOW_PERSIST_TIMEOUT_MS, () => {
-              persistTimedOut = true;
-              try {
-                entry.cancelController.abort(new Error('persist timeout'));
-              } catch {
-                // best-effort
-              }
-              reject(new Error('persist timeout'));
+        if (persistError === undefined) {
+          try {
+            metadata = await new Promise<{
+              expiresAt?: number;
+              accountAlias?: string;
+            }>((resolve, reject) => {
+              persistTimer = this.schedule(
+                DEVICE_FLOW_PERSIST_TIMEOUT_MS,
+                () => {
+                  persistTimedOut = true;
+                  try {
+                    entry.cancelController.abort(new Error('persist timeout'));
+                  } catch {
+                    // best-effort
+                  }
+                  reject(new Error('persist timeout'));
+                },
+              );
+              persistTracker.then(resolve, reject);
             });
-            persistTracker.then(resolve, reject);
-          });
-        } catch (err: unknown) {
-          persistError = err;
-        } finally {
-          if (persistTimer !== undefined) this.clearScheduled(persistTimer);
+          } catch (err: unknown) {
+            persistError = err;
+          } finally {
+            if (persistTimer !== undefined) this.clearScheduled(persistTimer);
+            entry.persistInFlight = false;
+          }
+        } else {
+          // Sync-throw branch: skip the race entirely (we already
+          // have persistError) but reset persistInFlight so the
+          // sweeper / cancel can resume their normal posture.
           entry.persistInFlight = false;
         }
         if (this.disposed) return;

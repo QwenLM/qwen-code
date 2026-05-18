@@ -16,7 +16,6 @@ import {
 } from './auth.js';
 import {
   DeviceFlowRegistry,
-  DEVICE_FLOW_SUPPORTED_PROVIDERS,
   setDeviceFlowRegistry,
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
@@ -355,6 +354,28 @@ export function createServeApp(
           if (line.expiresInMs !== undefined) {
             parts.push(`expiresInMs=${Math.max(0, line.expiresInMs)}`);
           }
+          // PR #4255 round-12 #7 (gpt-5.5 review CzSpd): include
+          // `line.hint` in the production stderr line. The
+          // registry uses the hint slot for operator-only
+          // breadcrumbs that aren't surfaced over SSE: the static
+          // catch-all hint "provider.poll() threw (raw): ..."
+          // (round-8 #1), `lost_success_after_timeout` (round-8
+          // #7's split-brain detector), `persist_also_failed_past_expiry`
+          // (round-8 #13), `take-over` audit on per-provider
+          // singleton, and `deferred (persist in flight; ...)` on
+          // cancel-during-persist. Without echoing here, the
+          // documented troubleshooting trail is invisible in
+          // production. Bound at 1 KiB so a misbehaving caller
+          // can't spam stderr.
+          if (line.hint) {
+            const STDERR_HINT_MAX = 1_024;
+            const hint =
+              line.hint.length > STDERR_HINT_MAX
+                ? `${line.hint.slice(0, STDERR_HINT_MAX)}…[+${line.hint.length - STDERR_HINT_MAX} bytes truncated]`
+                : line.hint;
+            // Quote the hint so multi-word values stay parseable.
+            parts.push(`hint=${JSON.stringify(hint)}`);
+          }
           writeStderrLine(parts.join(' '));
         },
       },
@@ -621,15 +642,20 @@ export function createServeApp(
         });
         return;
       }
-      if (
-        !DEVICE_FLOW_SUPPORTED_PROVIDERS.includes(
-          providerIdRaw as DeviceFlowProviderId,
-        )
-      ) {
+      // PR #4255 round-12 #3 (gpt-5.5 review CzSpe): validate
+      // against the runtime provider map, not the static
+      // `DEVICE_FLOW_SUPPORTED_PROVIDERS` tuple. The static tuple
+      // is the SDK-facing default; `deps.deviceFlowProviders` is
+      // the documented extension hook for tests / future
+      // providers. Hardcoding the static tuple here meant
+      // injected providers were rejected at the route while still
+      // being registered in `deviceFlowProviderMap` — easy to
+      // break when adding a second provider.
+      if (!deviceFlowProviderMap.has(providerIdRaw as DeviceFlowProviderId)) {
         res.status(400).json({
           error: `Unsupported device-flow provider: ${providerIdRaw}`,
           code: 'unsupported_provider',
-          supportedProviders: [...DEVICE_FLOW_SUPPORTED_PROVIDERS],
+          supportedProviders: Array.from(deviceFlowProviderMap.keys()),
         });
         return;
       }
@@ -647,7 +673,7 @@ export function createServeApp(
         // `provider.start()` again).
         res
           .status(attached ? 200 : 201)
-          .json(toDeviceFlowStartResponseBody(view, attached));
+          .json(toDeviceFlowStartResponseBody(view, attached, clientId));
       } catch (err) {
         if (err instanceof UnsupportedDeviceFlowProviderError) {
           res
@@ -751,7 +777,10 @@ export function createServeApp(
         providerId: view.providerId,
         ...(view.expiresAt !== undefined ? { expiresAt: view.expiresAt } : {}),
       })),
-      supportedDeviceFlowProviders: [...DEVICE_FLOW_SUPPORTED_PROVIDERS],
+      // PR #4255 round-12 #3: derive from runtime provider map so
+      // injected providers are surfaced. Single source of truth
+      // matches the POST validation above.
+      supportedDeviceFlowProviders: Array.from(deviceFlowProviderMap.keys()),
     });
   });
 
@@ -1690,6 +1719,7 @@ function parseOptionalWorkspaceCwd(
 function toDeviceFlowStartResponseBody(
   view: DeviceFlowPublicView,
   attached: boolean,
+  callerClientId?: string,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     deviceFlowId: view.deviceFlowId,
@@ -1704,7 +1734,21 @@ function toDeviceFlowStartResponseBody(
   if (view.verificationUriComplete) {
     body['verificationUriComplete'] = view.verificationUriComplete;
   }
-  if (view.initiatorClientId) {
+  // PR #4255 round-12 #6 (gpt-5.5 review CzHOK): minor info-leak
+  // close-out — only echo `initiatorClientId` back to a take-over
+  // POST when the caller is the same client that started the flow
+  // (or when the take-over caller explicitly identified
+  // themselves and matches the original starter). An anonymous
+  // take-over caller (no `X-Qwen-Client-Id`) gets no echo of the
+  // original starter's id; this preserves the symmetry "the
+  // daemon respects the absence of `X-Qwen-Client-Id` as a
+  // privacy signal." Bearer-gated already, so the blast radius
+  // was small, but the asymmetry is now closed.
+  if (
+    view.initiatorClientId &&
+    callerClientId !== undefined &&
+    callerClientId === view.initiatorClientId
+  ) {
     body['initiatorClientId'] = view.initiatorClientId;
   }
   return body;
