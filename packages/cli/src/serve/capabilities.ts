@@ -20,6 +20,18 @@ export interface ServeProtocolVersions {
 
 export interface ServeCapabilityDescriptor {
   since: ServeProtocolVersion;
+  /**
+   * Sub-mode names supported by this capability, when the feature has
+   * more than one operating mode and clients benefit from feature-
+   * detecting the active set. Optional — baseline tags (always-on,
+   * single behavior) omit this field.
+   *
+   * Introduced for `mcp_guardrails` (issue #4175 PR 14) where the
+   * tag advertises `['warn', 'enforce']` so clients can pre-flight
+   * whether the daemon supports refusal-on-budget-exhausted before
+   * relying on `mcp_child_refused_batch` semantics.
+   */
+  modes?: readonly string[];
 }
 
 export const SERVE_CAPABILITY_REGISTRY = {
@@ -71,6 +83,19 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_supported_commands: { since: 'v1' },
   session_close: { since: 'v1' },
   session_metadata: { since: 'v1' },
+  // Issue #4175 PR 14. Daemon supports the MCP client guardrail
+  // surface: an in-process counter exposed on `GET /workspace/mcp`
+  // (`clientCount`, `clientBudget`, `budgetMode`, `budgets[]`), a
+  // `--mcp-client-budget=N` flag with `--mcp-budget-mode={enforce,
+  // warn, off}`, and a `disabledReason: 'budget'` tag on per-server
+  // cells when refused at discovery. `modes` enumerates the
+  // implemented behaviors — clients pre-flight `'enforce'` before
+  // relying on refusal semantics, since a future split (e.g. PR 23
+  // shared pool) could shift enforcement elsewhere. Listed BEFORE
+  // `require_auth` so always-on tags stay grouped together;
+  // `require_auth` is the only conditional tag, kept last for
+  // visibility in `Object.keys(SERVE_CAPABILITY_REGISTRY)`.
+  mcp_guardrails: { since: 'v1', modes: ['warn', 'enforce'] },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

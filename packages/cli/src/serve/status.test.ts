@@ -14,6 +14,13 @@ import {
 
 describe('SERVE_ERROR_KINDS', () => {
   it('exposes the roadmap-defined error kinds in stable order', () => {
+    // PR 13 introduced the closed taxonomy with seven preflight/env
+    // kinds; PR 14 added `'budget_exhausted'` for MCP guardrail
+    // refusals (see #4175 PR 14); PR 16 added `'stat_failed'` for
+    // non-ENOENT stat failures on workspace memory discovery (see
+    // #4175 PR 16). Future additions append to this list — the
+    // order is part of the contract so SDK consumers can pattern-
+    // match without per-kind lookups.
     expect(SERVE_ERROR_KINDS).toEqual([
       'missing_binary',
       'blocked_egress',
@@ -23,6 +30,7 @@ describe('SERVE_ERROR_KINDS', () => {
       'missing_file',
       'parse_error',
       'stat_failed',
+      'budget_exhausted',
     ]);
   });
 });

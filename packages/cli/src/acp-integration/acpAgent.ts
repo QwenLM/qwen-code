@@ -12,6 +12,7 @@ import {
   createDebugLogger,
   QwenOAuth2Event,
   qwenOAuth2Events,
+  MCP_BUDGET_WARN_FRACTION,
   MCPServerConfig,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
@@ -87,6 +88,8 @@ import {
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
   type ServeErrorKind,
+  type ServeMcpBudgetMode,
+  type ServeMcpBudgetStatusCell,
   type ServeMcpDiscoveryState,
   type ServeMcpServerRuntimeStatus,
   type ServeMcpTransport,
@@ -691,6 +694,41 @@ class QwenAgent implements Agent {
     try {
       const workspaceCwd = this.workspaceCwd(config);
       const servers = config.getMcpServers() ?? {};
+
+      // PR 14: pull live accounting + budget config from the child's
+      // McpClientManager so the daemon's read-only route reflects the
+      // single source of truth (not a daemon-side polled cache).
+      // `getToolRegistry()` and `getMcpClientManager()` are best-effort
+      // — older test stubs or partially-initialized configs may not
+      // expose them; in that case we fall back to "no budget surface".
+      let clientCount: number | undefined;
+      let clientBudget: number | undefined;
+      let budgetMode: ServeMcpBudgetMode | undefined;
+      let refusedSet: ReadonlySet<string> = new Set<string>();
+      try {
+        const manager = config.getToolRegistry()?.getMcpClientManager();
+        if (manager) {
+          const accounting = manager.getMcpClientAccounting();
+          clientCount = accounting.total;
+          clientBudget = manager.getMcpClientBudget();
+          budgetMode = manager.getMcpBudgetMode();
+          refusedSet = new Set(accounting.refusedServerNames);
+        }
+      } catch (err) {
+        // Accounting failure must not crash the snapshot — the per-
+        // server data is still useful even without budget overlay.
+        // PR 14 fix (review #4247 wenshao S7a): bumped from
+        // `debugLogger.debug` to stderr `process.stderr.write` so a
+        // production daemon emits a visible warning when accounting
+        // breaks. `debugLogger.debug` is gated on the operator
+        // having set debug=true, which makes silent slot-leak / type-
+        // mismatch failures invisible in real deployments.
+        process.stderr.write(
+          `qwen serve: getMcpClientAccounting failed: ` +
+            `${err instanceof Error ? err.message : String(err)}\n`,
+        );
+      }
+
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd,
@@ -699,14 +737,39 @@ class QwenAgent implements Agent {
         servers: Object.entries(servers).map(([name, server]) => {
           const disabled = config.isMcpServerDisabled(name);
           const rawStatus = getMCPServerStatus(name);
+          const refusedByBudget = refusedSet.has(name);
+          // PR 14 fix (review #4247): config-disable takes precedence
+          // over budget-refusal. `lastRefusedServerNames` is a
+          // per-discovery-pass snapshot; if an operator runs
+          // `/mcp disable <name>` against a server that was refused
+          // last pass, the entry stays in the refused list until the
+          // next discovery pass clears it (`McpClientManager.removeServer`
+          // now drops the entry too — see sibling fix). Either way,
+          // a `disabled` cell should NEVER show `budget_exhausted` —
+          // the operator's deliberate disable wins.
+          const effectivelyRefused = refusedByBudget && !disabled;
           const out: ServeWorkspaceMcpServerStatus = {
             kind: 'mcp_server',
-            status: this.mcpCellStatus(rawStatus, disabled),
+            // Refused-by-budget shadows the raw status: the rawStatus
+            // is `DISCONNECTED` (we never tried to connect), but the
+            // operator-facing severity is `error` with an explanatory
+            // errorKind rather than the generic disconnected `error`.
+            status: effectivelyRefused
+              ? 'error'
+              : this.mcpCellStatus(rawStatus, disabled),
             name,
             mcpStatus: this.mcpStatus(rawStatus),
             transport: this.mcpTransport(server),
             disabled,
           };
+          if (effectivelyRefused) {
+            out.errorKind = 'budget_exhausted';
+            out.disabledReason = 'budget';
+            out.hint =
+              'Raise --mcp-client-budget or remove servers from mcpServers config.';
+          } else if (disabled) {
+            out.disabledReason = 'config';
+          }
           const description =
             server && typeof server === 'object'
               ? (server as { description?: unknown }).description
@@ -723,6 +786,31 @@ class QwenAgent implements Agent {
           }
           return out;
         }),
+        ...(clientCount !== undefined ? { clientCount } : {}),
+        ...(clientBudget !== undefined ? { clientBudget } : {}),
+        ...(budgetMode !== undefined ? { budgetMode } : {}),
+        ...(budgetMode !== undefined
+          ? {
+              // PR 14 fix (review #4247 wenshao R2-#6): filter out
+              // servers that are now config-disabled so the
+              // workspace cell matches the per-server cell
+              // precedence (`effectivelyRefused = refusedByBudget
+              // && !disabled` above). Pre-fix a server disabled
+              // after being refused would render `disabled` on its
+              // per-server row but `error: budget_exhausted` on the
+              // workspace row — confusing for dashboards. Use
+              // `Array.from(refusedSet).filter(...)` to apply the
+              // same disabled gate the per-server loop applies.
+              budgets: this.buildBudgetCells(
+                clientCount ?? 0,
+                clientBudget,
+                budgetMode,
+                Array.from(refusedSet).filter(
+                  (n) => !config.isMcpServerDisabled(n),
+                ).length,
+              ),
+            }
+          : {}),
       };
     } catch (error) {
       return {
@@ -733,6 +821,88 @@ class QwenAgent implements Agent {
         errors: [this.errorCell('mcp', error)],
       };
     }
+  }
+
+  /**
+   * Build the MCP budget status cells exposed on `GET /workspace/mcp`
+   * (PR 14). v1 emits one cell with `scope: 'session'` — each ACP
+   * session has its own `McpClientManager`, so the budget enforces
+   * per-session (snapshot reflects the bootstrap session's view).
+   * Wave 5 PR 23 (shared MCP pool) will add `scope: 'workspace'`
+   * for true per-workspace aggregation. Consumers MUST tolerate
+   * additional entries with unrecognized scope values (drop, don't
+   * fail).
+   *
+   * Cell `status` semantics:
+   *   - `error`   — refusals happened this pass (only possible in enforce mode)
+   *   - `warning` — live count crossed 75% of budget (warn or enforce mode)
+   *   - `ok`      — under threshold (or `off` mode)
+   *
+   * **`liveCount` vs `reservedSlots.size` (PR 14 review #4247 R9 #5)**:
+   * `liveCount` here is `accounting.total` — only `MCPServerStatus.CONNECTED`
+   * clients. Enforcement (`tryReserveSlot`) on the other hand uses
+   * `reservedSlots.size` — all reserved names, including in-flight
+   * connects and never-connected stale entries. The two diverge when
+   * servers hold a slot during the connect handshake or after a
+   * connect failure that didn't release (e.g. `'already_held'`
+   * reconnect timeouts). The snapshot intentionally uses the live
+   * count for **operator observability** — "how many MCP clients
+   * are actually serving requests right now" — while enforcement
+   * uses the reservation count to prevent capacity races across
+   * `Promise.all` microtask boundaries. PR 14b's typed events
+   * should consider exposing both for real-time pressure signals.
+   */
+  private buildBudgetCells(
+    liveCount: number,
+    budget: number | undefined,
+    mode: ServeMcpBudgetMode,
+    refusedCount: number,
+  ): ServeMcpBudgetStatusCell[] {
+    // PR 14 fix (review #4247): when no `--mcp-client-budget` is
+    // configured the manager resolves to `mode: 'off'`. The protocol
+    // docs and SDK type comments promise `budgets: []` for that case;
+    // a synthetic `mcp_budget` cell carrying nothing actionable was
+    // (a) protocol-noncompliant, (b) clutter — clients iterating
+    // `budgets[]` to render rows would draw an "ok" budget row for
+    // uncapped workspaces. Always return empty so the top-level
+    // `budgetMode: 'off'` field is the sole signal that guardrails
+    // are inactive.
+    if (mode === 'off') return [];
+    let status: ServeStatus = 'ok';
+    let errorKind: ServeErrorKind | undefined;
+    let hint: string | undefined;
+    if (refusedCount > 0) {
+      status = 'error';
+      errorKind = 'budget_exhausted';
+      hint =
+        'Raise --mcp-client-budget or remove servers from mcpServers config.';
+    } else if (
+      budget !== undefined &&
+      budget > 0 &&
+      liveCount >= MCP_BUDGET_WARN_FRACTION * budget
+    ) {
+      status = 'warning';
+      hint = `Live MCP clients are above ${Math.round(
+        MCP_BUDGET_WARN_FRACTION * 100,
+      )}% of the configured budget.`;
+    }
+    const cell: ServeMcpBudgetStatusCell = {
+      kind: 'mcp_budget',
+      // PR 14 v1: per-session, not per-workspace. Each ACP session has
+      // its own `Config`/`McpClientManager` (via `newSessionConfig`)
+      // and reads `QWEN_SERVE_MCP_CLIENT_BUDGET` independently.
+      // Snapshot shows the bootstrap session's view. Wave 5 PR 23
+      // shared MCP pool will graduate this to `'workspace'`.
+      scope: 'session',
+      status,
+      liveCount,
+      mode,
+      refusedCount,
+    };
+    if (budget !== undefined) cell.budget = budget;
+    if (errorKind) cell.errorKind = errorKind;
+    if (hint) cell.hint = hint;
+    return [cell];
   }
 
   private errorCell(

@@ -320,6 +320,53 @@ describe('createHttpAcpBridge', () => {
     );
   });
 
+  it('forwards childEnvOverrides to the channelFactory at spawn time (#4247 R6 line 216)', async () => {
+    // Round 6 (wenshao R5 line 216): pre-fix `runQwenServe` set
+    // `process.env` globally to pass the MCP budget config to the
+    // ACP child. With concurrent embedded daemons, the last
+    // `runQwenServe` to set the var would silently win for all
+    // other daemons' subsequent spawns (because
+    // `defaultSpawnChannelFactory` snapshots `process.env` AT
+    // SPAWN TIME, not at runQwenServe time). The fix routes the
+    // env through `BridgeOptions.childEnvOverrides` closed over
+    // inside each bridge — so each bridge's spawn factory sees
+    // ITS own overrides, regardless of what other daemons did.
+    const seenEnvs: Array<Record<string, string | undefined> | undefined> = [];
+    const factory: ChannelFactory = async (_cwd, env) => {
+      // Snapshot the override map so later iterations don't
+      // accidentally mutate the recorded value.
+      seenEnvs.push(env ? { ...env } : env);
+      return makeChannel().channel;
+    };
+    const bridge1 = makeBridge({
+      channelFactory: factory,
+      childEnvOverrides: {
+        QWEN_SERVE_MCP_CLIENT_BUDGET: '5',
+        QWEN_SERVE_MCP_BUDGET_MODE: 'enforce',
+      },
+    });
+    const bridge2 = makeBridge({
+      channelFactory: factory,
+      childEnvOverrides: {
+        QWEN_SERVE_MCP_CLIENT_BUDGET: '20',
+        QWEN_SERVE_MCP_BUDGET_MODE: 'warn',
+      },
+    });
+    await bridge1.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge2.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(seenEnvs).toHaveLength(2);
+    expect(seenEnvs[0]).toEqual({
+      QWEN_SERVE_MCP_CLIENT_BUDGET: '5',
+      QWEN_SERVE_MCP_BUDGET_MODE: 'enforce',
+    });
+    expect(seenEnvs[1]).toEqual({
+      QWEN_SERVE_MCP_CLIENT_BUDGET: '20',
+      QWEN_SERVE_MCP_BUDGET_MODE: 'warn',
+    });
+    await bridge1.shutdown();
+    await bridge2.shutdown();
+  });
+
   it('spawns a session and returns the agent-assigned id', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
