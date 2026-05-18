@@ -384,6 +384,15 @@ describe('workspace memory routes', () => {
     });
 
     it('omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on', async () => {
+      // Windows ignores Unix-style permission bits passed to
+      // `fs.chmod` — the directory stays writable, the POST succeeds
+      // with 200, and the EACCES path this test exercises is
+      // unreachable. The route logic itself is platform-agnostic; the
+      // Ubuntu + macOS runs cover it. Mirrors the
+      // `process.platform === 'win32'` early-return idiom already used
+      // in `customBanner.test.ts:232`.
+      if (process.platform === 'win32') return;
+
       // Default: production response carries no `errorMessage` or
       // `filePath` fields — operators read the daemon stderr log
       // for the path. Setting QWEN_SERVE_DEBUG=1 enables both.

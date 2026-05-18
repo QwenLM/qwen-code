@@ -677,6 +677,18 @@ describe('workspace agents routes', () => {
   });
 
   it('returns 500 agent_delete_partial when one level unlink silently fails', async () => {
+    // Windows ignores Unix-style permission bits passed to
+    // `fs.chmod` — the user-agents directory stays writable, the
+    // unlink succeeds, and the partial-delete path this test
+    // exercises is unreachable. SubagentManager's `unlink` import
+    // (`import * as fs from 'fs/promises'`) creates a sealed
+    // namespace object that vitest can't `spyOn`, so a per-platform
+    // mock is also off-limits. The route logic itself is
+    // platform-agnostic; the Ubuntu + macOS runs cover it. Mirrors
+    // the `process.platform === 'win32'` early-return idiom used in
+    // `customBanner.test.ts:232`.
+    if (process.platform === 'win32') return;
+
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
 
