@@ -4487,4 +4487,47 @@ describe('auth device-flow routes', () => {
     expect(differentCaller.body).not.toHaveProperty('verificationUriComplete');
     expect(differentCaller.body).not.toHaveProperty('initiatorClientId');
   });
+
+  it('GET /workspace/auth/device-flow/:id returns userCode for an anonymously-started flow when the GET caller is also anonymous', async () => {
+    // PR #4291 follow-up review (qwen-latest, #3): the original
+    // gate required both `initiatorClientId` AND `callerClientId`
+    // to be defined and equal — which silently locked anonymous-
+    // started flows out of their own data (the SDK that didn't
+    // pass `X-Qwen-Client-Id` on POST also doesn't pass it on
+    // GET, but the response body switched from "useful" to
+    // "redacted public envelope" with HTTP 200 and no error). Fix:
+    // also accept `both undefined` as the same caller. The gate's
+    // purpose is to prevent CROSS-client reads, not to lock
+    // anonymous flows out of themselves.
+    const { app } = buildApp({ token: 'tkn' });
+    // Start anonymously (no X-Qwen-Client-Id header).
+    const post = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    const id = post.body.deviceFlowId as string;
+    expect(typeof id).toBe('string');
+    // Anonymous GET — must still see the verification fields.
+    const anonGet = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(anonGet.status).toBe(200);
+    expect(anonGet.body.deviceFlowId).toBe(id);
+    expect(anonGet.body.userCode).toBe('USER-1');
+    expect(anonGet.body.verificationUri).toBe('https://idp.example/verify');
+    // No initiatorClientId — there wasn't one (anonymous start).
+    expect(anonGet.body).not.toHaveProperty('initiatorClientId');
+    // An IDENTIFIED caller, however, is NOT the same caller —
+    // they don't get the verification fields.
+    const identified = await request(app)
+      .get(`/workspace/auth/device-flow/${id}`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('X-Qwen-Client-Id', 'sdk-X');
+    expect(identified.status).toBe(200);
+    expect(identified.body).not.toHaveProperty('userCode');
+    expect(identified.body).not.toHaveProperty('verificationUri');
+  });
 });

@@ -716,6 +716,16 @@ export function createServeApp(
   // information-disclosure asymmetry (the sibling
   // `GET /workspace/auth/status` stays bearer-only because its
   // pendingDeviceFlows entries intentionally omit `userCode`).
+  //
+  // PR #4291 follow-up review (qwen-latest, #4): GET now also runs
+  // `parseClientIdHeader` to drive the `callerIsInitiator` gate in
+  // `toDeviceFlowStateBody`. INTENTIONAL contract change: a malformed
+  // `X-Qwen-Client-Id` (>128 chars or invalid characters) returns
+  // `400 invalid_client_id` instead of the previous 200, matching the
+  // POST/DELETE behavior. SDK clients that send the header on POST
+  // should send a valid value on GET too. Anonymous callers (header
+  // absent) are unaffected and continue to work as pre-PR-4291 — the
+  // both-undefined branch in `callerIsInitiator` covers them.
   app.get(
     '/workspace/auth/device-flow/:id',
     mutate({ strict: true }),
@@ -1800,17 +1810,30 @@ function toDeviceFlowStateBody(
   // the daemon bearer token already wins; locking down GET further
   // would require binding identity into bearer-token issuance, which
   // is a separate architectural change.
+  // PR #4291 follow-up review (qwen-latest, #3): the gate must accept
+  // the both-undefined case too, otherwise an anonymously-started flow
+  // (POST without `X-Qwen-Client-Id` → `initiatorClientId === undefined`)
+  // becomes silently unreadable: even the same anonymous caller GETting
+  // the same id can no longer retrieve `userCode`/`verificationUri` —
+  // the body switches from "what they got from POST" to a redacted
+  // public envelope, with HTTP 200, no error. Pre-PR-4291 GET returned
+  // these fields to anyone with the bearer; this gate's purpose is to
+  // prevent CROSS-client reads, not to lock anonymous flows out of
+  // their own data.
   const callerIsInitiator =
-    view.initiatorClientId !== undefined &&
-    callerClientId !== undefined &&
-    callerClientId === view.initiatorClientId;
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId);
   if (callerIsInitiator) {
     if (view.userCode) body['userCode'] = view.userCode;
     if (view.verificationUri) body['verificationUri'] = view.verificationUri;
     if (view.verificationUriComplete) {
       body['verificationUriComplete'] = view.verificationUriComplete;
     }
-    body['initiatorClientId'] = view.initiatorClientId;
+    if (view.initiatorClientId) {
+      body['initiatorClientId'] = view.initiatorClientId;
+    }
   }
   return body;
 }

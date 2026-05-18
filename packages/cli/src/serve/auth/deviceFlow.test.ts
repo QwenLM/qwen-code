@@ -719,22 +719,101 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
       expect(failed).toBeDefined();
       if (failed && failed.emission.type === 'failed') {
         expect(failed.emission.data.errorKind).toBe('upstream_error');
-        expect(failed.emission.data.hint).toContain(
+        // PR #4291 follow-up review (qwen-latest, #2): the SSE/HTTP
+        // hint must distinguish a registry-side timeout from a
+        // provider throw. At 3 AM, on-call reading "provider.poll()
+        // threw" would grep the provider source for a non-existent
+        // throw site — when the actual issue is a hung IdP.
+        expect(failed.emission.data.hint).toContain('timed out after');
+        expect(failed.emission.data.hint).toContain('check IdP connectivity');
+        // Negative assertion: the misleading provider-throw hint
+        // MUST NOT appear on the timeout path.
+        expect(failed.emission.data.hint).not.toContain(
           'see daemon audit log for details',
         );
       }
-      // Audit captures the raw timeout error for the operator.
+      // Audit captures the timeout for the operator. Critically, the
+      // audit hint MUST NOT route through the `provider.poll() threw
+      // (raw)` template — that's reserved for actual provider throws
+      // and would mis-direct triage. On the timeout path the hint
+      // field is omitted entirely (rawProviderError stays undefined).
       const auditFailure = auditLines.find(
         (line) =>
           line['status'] === 'failed' && line['errorKind'] === 'upstream_error',
       );
       expect(auditFailure).toBeDefined();
-      // PR #4291 follow-up review (Qwen Code review summary 🔵 Low):
+      const auditHint = auditFailure?.['hint'] as string | undefined;
+      if (auditHint !== undefined) {
+        expect(auditHint).not.toContain('provider.poll() threw (raw)');
+      }
+      // PR #4291 follow-up review (Qwen Code review summary):
       // poll-tick must NOT reschedule itself after a timeout-driven
       // upstream_error (the entry has already transitioned to error
       // state; another poll would be a `entry.status !== 'pending'`
       // no-op at best, log noise at worst). Pin the invariant.
       expect(provider.pollCount).toBe(1);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('records lost_late_poll_after_timeout when provider.poll() resolves AFTER the registry race timeout (follow-up review #5)', async () => {
+    // PR #4291 follow-up review (qwen-latest, #5): symmetric with
+    // `lost_success_after_timeout` on the persist path. A flaky IdP
+    // that responds 1s past the 30s ceiling should leave an audit
+    // breadcrumb saying "IdP IS responsive, just slow" — without
+    // this, the daemon and the operator get the same observability
+    // as a fully unresponsive IdP. The fix attaches a passive
+    // observer to the original `provider.poll()` promise.
+    const provider = new FakeProvider();
+    let resolveLate!: (r: DeviceFlowPollResult) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>((resolve) => {
+      resolveLate = resolve;
+    });
+    // Custom hook: poll returns the controllable promise, ignoring signal.
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      expect(provider.pollCount).toBe(1);
+      // Fire the registry race timer.
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Outer wrapper rejected; entry transitioned to error/upstream_error.
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('error');
+      // No `lost_late_poll_after_timeout` line YET — the original
+      // promise hasn't resolved.
+      expect(
+        auditLines.some((line) =>
+          (line['hint'] as string | undefined)?.includes(
+            'lost_late_poll_after_timeout',
+          ),
+        ),
+      ).toBe(false);
+      // Now the IdP belatedly responds.
+      resolveLate({ kind: 'pending' });
+      await flushAsync();
+      // The passive observer must have recorded an audit line.
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      expect(lateAudit?.['errorKind']).toBe('upstream_error');
+      expect(lateAudit?.['hint']).toContain('kind=pending');
+      expect(lateAudit?.['hint']).toContain(
+        `${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling`,
+      );
     } finally {
       registry.dispose();
     }

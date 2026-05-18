@@ -611,6 +611,26 @@ export class UpstreamDeviceFlowError extends Error {
 }
 
 /**
+ * Sentinel error raised by `runPollTick`'s own `Promise.race` timer when
+ * `provider.poll()` exceeds `DEVICE_FLOW_POLL_TIMEOUT_MS`. PR #4291
+ * follow-up review (qwen-latest): the catch block previously routed
+ * this through the same `provider.poll() threw (raw): ...` audit path
+ * as a real provider throw, mis-leading on-call into investigating
+ * provider code when the actual issue is a hung IdP / network
+ * partition. The sentinel lets the catch differentiate the two and
+ * emit a timeout-specific audit + hint.
+ */
+export class DeviceFlowPollTimeoutError extends Error {
+  readonly code = 'poll_timeout';
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`device-flow poll timeout after ${timeoutMs}ms`);
+    this.name = 'DeviceFlowPollTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+/**
  * Typed accessors for parking the `DeviceFlowRegistry` on
  * `express.Application['locals']`. The string key is shared between
  * `createServeApp` (writer) and `runQwenServe`'s shutdown drain
@@ -1059,6 +1079,7 @@ export class DeviceFlowRegistry {
     entry.lastPolledAt = now;
     let result: DeviceFlowPollResult;
     let rawProviderError: string | undefined;
+    let pollTimedOut = false;
     // PR #4255 follow-up review thread (deepseek-v4-pro): bound
     // `provider.poll()` with the same `Promise.race` shape used by
     // `doStart` / persist. The cooperative `entry.cancelController.signal`
@@ -1068,26 +1089,39 @@ export class DeviceFlowRegistry {
     // promise indefinitely (occupying the per-provider singleton until
     // sweeper / daemon restart). The rejecting timer aborts the signal
     // first so cooperative providers can still tear down cleanly.
+    //
+    // PR #4291 follow-up review (qwen-latest, #5): keep a reference to
+    // the original `provider.poll()` promise so we can detect a LATE
+    // success/error after our race timer already settled the wrapper.
+    // Without this, a flaky IdP that responds 1s past the 30s timeout
+    // would silently no-op (the second `.then(resolve, ...)` lands on
+    // an already-settled outer promise) — operator has no signal that
+    // the IdP is in fact responsive (just slow). Symmetric with the
+    // `lost_success_after_timeout` audit on the persist path (fold-in
+    // 9 #7 of #4255).
     let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let providerPollPromise: Promise<DeviceFlowPollResult> | undefined;
     try {
       result = await new Promise<DeviceFlowPollResult>((resolve, reject) => {
         pollTimer = this.schedule(DEVICE_FLOW_POLL_TIMEOUT_MS, () => {
+          pollTimedOut = true;
           try {
-            entry.cancelController.abort(new Error('device-flow poll timeout'));
+            entry.cancelController.abort(
+              new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS),
+            );
           } catch {
             // best-effort
           }
-          reject(new Error('device-flow poll timeout'));
+          reject(new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS));
         });
-        provider
-          .poll(
-            {
-              deviceCode: entry.deviceCode!,
-              pkceVerifier: entry.pkceVerifier,
-            },
-            { signal: entry.cancelController.signal },
-          )
-          .then(resolve, reject);
+        providerPollPromise = provider.poll(
+          {
+            deviceCode: entry.deviceCode!,
+            pkceVerifier: entry.pkceVerifier,
+          },
+          { signal: entry.cancelController.signal },
+        );
+        providerPollPromise.then(resolve, reject);
       });
     } catch (err: unknown) {
       // PR #4255 fold-in 9 review thread #1 (refines fold-in 8 #1):
@@ -1101,14 +1135,75 @@ export class DeviceFlowRegistry {
       // outermost defense layer; the full raw `err.message` flows
       // through the audit channel (whose backing impl writes to
       // stderr) for operator visibility.
-      rawProviderError = err instanceof Error ? err.message : String(err);
-      result = {
-        kind: 'error',
-        errorKind: 'upstream_error',
-        hint: 'provider.poll() failed; see daemon audit log for details',
-      };
+      //
+      // PR #4291 follow-up review (qwen-latest, #2): the previous
+      // shape routed our own race-timer rejection through the same
+      // `provider.poll() threw (raw): ...` audit path as a real
+      // provider throw — at 3 AM, on-call would mis-triage as
+      // "provider bug" and waste time investigating provider code.
+      // Branch on `DeviceFlowPollTimeoutError` to use a dedicated
+      // hint + suppress the misleading "raw" audit path.
+      if (err instanceof DeviceFlowPollTimeoutError) {
+        result = {
+          kind: 'error',
+          errorKind: 'upstream_error',
+          hint: `provider.poll() timed out after ${err.timeoutMs}ms; check IdP connectivity`,
+        };
+        // rawProviderError stays undefined — the audit branch reads
+        // that to decide whether to emit the misleading "threw (raw)"
+        // line. Timeout is not a provider throw.
+      } else {
+        rawProviderError = err instanceof Error ? err.message : String(err);
+        result = {
+          kind: 'error',
+          errorKind: 'upstream_error',
+          hint: 'provider.poll() failed; see daemon audit log for details',
+        };
+      }
     } finally {
       if (pollTimer !== undefined) this.clearScheduled(pollTimer);
+    }
+    // PR #4291 follow-up review (qwen-latest, #5): if our race timer
+    // settled the wrapper as a timeout, attach a passive observer on
+    // the original `provider.poll()` promise so a late resolution
+    // (IdP eventually responded after the 30s ceiling) leaves an
+    // operator audit breadcrumb. Without this, a flaky-but-responsive
+    // IdP looks identical to a fully unresponsive one. Mirrors the
+    // `lost_success_after_timeout` pattern on the persist path.
+    if (pollTimedOut && providerPollPromise !== undefined) {
+      const tracked = providerPollPromise;
+      // Detached on purpose; the catch on the ORIGINAL promise has
+      // already happened (via the wrapper) — the observer below
+      // sees the eventual settlement of the same promise. Both
+      // success and error branches go through audit only.
+      void tracked.then(
+        (latePollResult) => {
+          this.deps.audit?.record({
+            deviceFlowId: entry.deviceFlowId,
+            providerId: entry.providerId,
+            clientId: entry.initiatorClientId,
+            status: 'failed',
+            errorKind: 'upstream_error',
+            hint: `lost_late_poll_after_timeout: provider.poll() resolved kind=${latePollResult.kind} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
+          });
+        },
+        (lateErr: unknown) => {
+          // Late rejection from the same provider promise. Don't
+          // double-audit if the wrapper already saw this same error
+          // (we'd be double-counting the same I/O failure).
+          if (lateErr instanceof DeviceFlowPollTimeoutError) return;
+          const detail =
+            lateErr instanceof Error ? lateErr.message : String(lateErr);
+          this.deps.audit?.record({
+            deviceFlowId: entry.deviceFlowId,
+            providerId: entry.providerId,
+            clientId: entry.initiatorClientId,
+            status: 'failed',
+            errorKind: 'upstream_error',
+            hint: `lost_late_poll_after_timeout: provider.poll() rejected after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling: ${detail.length > 256 ? `${detail.slice(0, 256)}…[+${detail.length - 256} bytes]` : detail}`,
+          });
+        },
+      );
     }
     // PR #4255 round-12 #1 (gpt-5.5 review CzSpN): also re-check
     // `this.disposed` after the await. `dispose()` clears
