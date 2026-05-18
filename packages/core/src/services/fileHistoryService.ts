@@ -18,6 +18,7 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { diffLines, structuredPatch, type Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { MAX_DIFF_SIZE_BYTES } from '../utils/gitDiff.js';
 
 const debugLogger = createDebugLogger('FILE_HISTORY');
 
@@ -65,6 +66,10 @@ export interface TurnFileDiff {
   isDeleted: boolean;
   linesAdded: number;
   linesRemoved: number;
+  /** True when the before/after content exceeded `MAX_DIFF_SIZE_BYTES` and
+   *  hunk generation was skipped to keep dialog memory bounded. The stats
+   *  remain a best-effort line-count delta. */
+  oversized: boolean;
 }
 
 export interface TurnDiff {
@@ -290,6 +295,51 @@ async function computeDiffStatsForFile(
   }
 
   return { filesChanged, insertions, deletions };
+}
+
+interface EndpointReadOk {
+  content: string;
+  exists: boolean;
+}
+
+/**
+ * Read one endpoint of a turn diff (either a snapshot backup or, when the
+ * "after" endpoint is the live worktree, the file on disk).
+ *
+ * Returns `'unreadable'` when the backup metadata claims a real file but
+ * `readFile` fails (deleted out from under us, permission flip, corrupt).
+ * `getTurnDiff` skips rows for which either endpoint is unreadable, so the
+ * dialog never fabricates phantom hunks against an empty string we never
+ * actually had.
+ */
+async function readEndpointContent(
+  backup: FileHistoryBackup | undefined,
+  worktreePath: string | undefined,
+  sessionId: string,
+): Promise<EndpointReadOk | 'unreadable'> {
+  if (worktreePath !== undefined) {
+    const live = await readFileOrNull(worktreePath);
+    return { content: live ?? '', exists: live !== null };
+  }
+  if (!backup) return { content: '', exists: false };
+  if (backup.backupFileName === null) return { content: '', exists: false };
+  const text = await readFileOrNull(
+    resolveBackupPath(backup.backupFileName, sessionId),
+  );
+  if (text === null) return 'unreadable';
+  return { content: text, exists: true };
+}
+
+function countLines(text: string): number {
+  if (text === '') return 0;
+  let count = 1;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10 /* \n */) count++;
+  }
+  // A trailing newline already accounted for the final empty token; don't
+  // double-count it as an extra line.
+  if (text.charCodeAt(text.length - 1) === 10) count--;
+  return count;
 }
 
 /**
@@ -692,39 +742,53 @@ export class FileHistoryService {
       return null;
     }
 
-    const beforeContent = beforeBackup
-      ? beforeBackup.backupFileName === null
-        ? ''
-        : ((await readFileOrNull(
-            resolveBackupPath(beforeBackup.backupFileName, this.sessionId),
-          )) ?? '')
-      : '';
-    const beforeExists = !!beforeBackup && beforeBackup.backupFileName !== null;
+    const beforeRead = await readEndpointContent(
+      beforeBackup,
+      undefined,
+      this.sessionId,
+    );
+    // A non-null backup name that fails to read means we cannot produce a
+    // trustworthy "before" content — fabricating an empty string would
+    // present every line as a fresh addition. Skip the row instead.
+    if (beforeRead === 'unreadable') return null;
 
-    let afterContent: string;
-    let afterExists: boolean;
-    if (afterFromWorktree) {
-      const live = await readFileOrNull(filePath);
-      afterContent = live ?? '';
-      afterExists = live !== null;
-    } else if (afterBackup) {
-      if (afterBackup.backupFileName === null) {
-        afterContent = '';
-        afterExists = false;
-      } else {
-        afterContent =
-          (await readFileOrNull(
-            resolveBackupPath(afterBackup.backupFileName, this.sessionId),
-          )) ?? '';
-        afterExists = true;
-      }
-    } else {
-      afterContent = beforeContent;
-      afterExists = beforeExists;
-    }
+    const afterRead = afterFromWorktree
+      ? await readEndpointContent(undefined, filePath, this.sessionId)
+      : await readEndpointContent(afterBackup, undefined, this.sessionId);
+    if (afterRead === 'unreadable') return null;
+
+    const beforeContent = beforeRead.content;
+    const beforeExists = beforeRead.exists;
+    const afterContent = afterRead.content;
+    const afterExists = afterRead.exists;
 
     if (beforeContent === afterContent && beforeExists === afterExists) {
       return null;
+    }
+
+    // Cap the patch input to keep dialog memory bounded: a single 50MB
+    // generated file should not allocate hundreds of MB of hunk strings
+    // when `/diff` opens. Report the file with stats but no hunks; the
+    // dialog renders an "(oversized — diff omitted)" tag for these.
+    const oversized =
+      Buffer.byteLength(beforeContent, 'utf8') > MAX_DIFF_SIZE_BYTES ||
+      Buffer.byteLength(afterContent, 'utf8') > MAX_DIFF_SIZE_BYTES;
+
+    if (oversized) {
+      // Coarse line-count delta so the file row still shows a meaningful
+      // `+N -M` summary. Counting newlines is O(n) but allocates nothing
+      // extra past the strings we already hold.
+      const beforeLines = beforeExists ? countLines(beforeContent) : 0;
+      const afterLines = afterExists ? countLines(afterContent) : 0;
+      return {
+        filePath,
+        hunks: [],
+        isNewFile: !beforeExists && afterExists,
+        isDeleted: beforeExists && !afterExists,
+        linesAdded: Math.max(0, afterLines - beforeLines),
+        linesRemoved: Math.max(0, beforeLines - afterLines),
+        oversized: true,
+      };
     }
 
     const patch = structuredPatch(
@@ -757,6 +821,7 @@ export class FileHistoryService {
       isDeleted: beforeExists && !afterExists,
       linesAdded,
       linesRemoved,
+      oversized: false,
     };
   }
 

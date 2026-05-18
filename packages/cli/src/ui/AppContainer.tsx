@@ -2576,6 +2576,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeHelpDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
+    isDiffDialogOpen,
+    closeDiffDialog,
   });
 
   const handleExit = useCallback(

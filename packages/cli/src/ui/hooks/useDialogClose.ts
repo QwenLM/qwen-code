@@ -69,6 +69,10 @@ export interface DialogCloseOptions {
   // Background tasks dialog
   isBackgroundTasksDialogOpen: boolean;
   closeBackgroundTasksDialog: () => void;
+
+  // Diff dialog
+  isDiffDialogOpen?: boolean;
+  closeDiffDialog?: () => void;
 }
 
 /**
@@ -141,6 +145,14 @@ export function useDialogClose(options: DialogCloseOptions) {
       // Ctrl+C and the global escape path dismiss it without escalating
       // to exit prompts.
       options.closeBackgroundTasksDialog();
+      return true;
+    }
+
+    if (options.isDiffDialogOpen && options.closeDiffDialog) {
+      // /diff dialog — same rationale as the background-tasks dialog:
+      // Ctrl+C should dismiss the dialog rather than fall through to the
+      // exit-prompt path or cancel the (non-existent) request.
+      options.closeDiffDialog();
       return true;
     }
 

@@ -731,5 +731,58 @@ describe('FileHistoryService', () => {
       expect(turn1!.files).toHaveLength(0);
       expect(turn1!.stats.filesChanged).toBe(0);
     });
+
+    // Regression for the silent-empty-string bug: a backup that records a
+    // real backupFileName but is unreadable on disk used to be coerced to
+    // '', producing a fake "every line added" diff. Now we drop the row
+    // entirely so the dialog doesn't lie about phantom changes.
+    it('skips files whose backup file is missing on disk', async () => {
+      const file = join(projectDir, 'lostbackup.txt');
+      await writeFile(file, 'before');
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'after');
+      await service.makeSnapshot('p2');
+
+      // Wipe the backup directory between makeSnapshot('p2') and the diff
+      // read. The snapshot records still point at the deleted file paths.
+      await rm(join(storageDir, 'file-history'), {
+        recursive: true,
+        force: true,
+      });
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      expect(turn1!.files).toHaveLength(0);
+    });
+
+    // Regression for the unbounded structuredPatch allocation: a single
+    // huge file in history could blow up TUI memory when /diff opens.
+    // Oversized rows now skip hunk construction but still surface in the
+    // file list with best-effort line-count stats.
+    it('flags oversized files instead of allocating large hunks', async () => {
+      const file = join(projectDir, 'big.txt');
+      // 1.5 MB > MAX_DIFF_SIZE_BYTES (1 MB)
+      const big = 'x'.repeat(1_500_000);
+      await writeFile(file, big);
+
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      // Append a small amount so before !== after but both endpoints are
+      // still oversized.
+      await writeFile(file, big + '\nappended\n');
+      await service.makeSnapshot('p2');
+
+      const turn1 = await service.getTurnDiff('p1');
+      expect(turn1).toBeDefined();
+      const entry = turn1!.files.find((f) => f.filePath === file);
+      expect(entry).toBeDefined();
+      expect(entry!.oversized).toBe(true);
+      expect(entry!.hunks).toEqual([]);
+      // Best-effort stats: we appended 2 lines (the empty line after the
+      // first \n and "appended").
+      expect(entry!.linesAdded).toBeGreaterThanOrEqual(1);
+    });
   });
 });

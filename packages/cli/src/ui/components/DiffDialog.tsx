@@ -22,6 +22,7 @@ import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { useTurnDiffs, type TurnDiffEntry } from '../hooks/useTurnDiffs.js';
 import { useDiffData } from '../hooks/useDiffData.js';
 import { DiffRenderer } from './messages/DiffRenderer.js';
+import { sanitizeFilenameForDisplay } from '../utils/textUtils.js';
 import { t } from '../../i18n/index.js';
 
 const MAX_VISIBLE_FILES = 8;
@@ -35,7 +36,13 @@ export interface DiffDialogProps {
 }
 
 type UnifiedFile = {
+  /** Raw repo-relative path. Used as a stable map key against
+   *  `current.hunks` / `TurnDiff.files[].filePath`. Never rendered to the
+   *  terminal — those keys can contain ANSI escapes or bare control bytes
+   *  (git allows them in tracked / untracked paths via `-z`). */
   path: string;
+  /** Sanitized version of `path` safe to drop into a `<Text>` node. */
+  displayPath: string;
   added: number;
   removed: number;
   isBinary: boolean;
@@ -43,6 +50,7 @@ type UnifiedFile = {
   isDeleted: boolean;
   isNewFile: boolean;
   truncated: boolean;
+  oversized: boolean;
 };
 
 type Source =
@@ -146,8 +154,11 @@ export function DiffDialog({
   useKeypress(
     (key) => {
       const name = key.name;
-      const ctrl = key.ctrl;
-      if (name === 'escape' || (ctrl && name === 'c')) {
+      // Ctrl+C is intentionally NOT handled here — the AppContainer-level
+      // handler routes it through `closeAnyOpenDialog`, where this dialog
+      // is registered. Handling it both places would double-fire and
+      // could escalate to the exit prompt after the dialog already closed.
+      if (name === 'escape') {
         handleClose();
         return;
       }
@@ -364,17 +375,20 @@ function FileRow({
   maxPathChars: number;
 }): React.JSX.Element {
   const pointer = selected ? '› ' : '  ';
-  const tag = file.isNewFile
-    ? t(' (new)')
-    : file.isDeleted
-      ? t(' (deleted)')
-      : file.isUntracked
-        ? t(' (untracked)')
-        : file.truncated
-          ? t(' (truncated)')
-          : '';
+  const tag = file.oversized
+    ? t(' (oversized — diff omitted)')
+    : file.isNewFile
+      ? t(' (new)')
+      : file.isDeleted
+        ? t(' (deleted)')
+        : file.isUntracked
+          ? t(' (untracked)')
+          : file.truncated
+            ? t(' (truncated)')
+            : '';
   // Head-truncate so the basename (the part users actually read) is kept.
-  const path = truncatePathStart(file.path, maxPathChars);
+  // Use the sanitized displayPath — `file.path` may carry raw control bytes.
+  const path = truncatePathStart(file.displayPath, maxPathChars);
   return (
     <Box flexDirection="row">
       <Text
@@ -436,10 +450,17 @@ function FileDetail({
       <Text color={theme.text.secondary}>{t('Binary file — no diff.')}</Text>
     );
   }
+  if (file.oversized) {
+    return (
+      <Text color={theme.text.secondary}>
+        {t('Oversized file — diff omitted. Use `git diff` to inspect.')}
+      </Text>
+    );
+  }
   if (!diffText) {
     return (
       <Text color={theme.text.secondary}>
-        {t('No hunks available for {{path}}.', { path: file.path })}
+        {t('No hunks available for {{path}}.', { path: file.displayPath })}
       </Text>
     );
   }
@@ -447,12 +468,12 @@ function FileDetail({
   return (
     <Box flexDirection="column">
       <Text bold color={theme.text.primary}>
-        {truncatePathStart(file.path, contentWidth)}
+        {truncatePathStart(file.displayPath, contentWidth)}
       </Text>
       <Box marginTop={1}>
         <DiffRenderer
           diffContent={diffText}
-          filename={file.path}
+          filename={file.displayPath}
           availableTerminalHeight={availableHeight}
           contentWidth={contentWidth}
         />
@@ -505,6 +526,7 @@ function perFileToUnified(path: string, s: PerFileStats): UnifiedFile {
   const total = (s.added ?? 0) + (s.removed ?? 0);
   return {
     path,
+    displayPath: sanitizeFilenameForDisplay(path),
     added: s.added ?? 0,
     removed: s.isUntracked ? 0 : (s.removed ?? 0),
     isBinary: !!s.isBinary,
@@ -512,6 +534,7 @@ function perFileToUnified(path: string, s: PerFileStats): UnifiedFile {
     isDeleted: !!s.isDeleted,
     isNewFile: !!s.isUntracked,
     truncated: !!s.truncated || (!s.isBinary && total > MAX_LINES_PER_FILE),
+    oversized: false,
   };
 }
 
@@ -522,6 +545,7 @@ function turnToFiles(diff: TurnDiff): UnifiedFile[] {
 function turnFileToUnified(f: TurnFileDiff): UnifiedFile {
   return {
     path: f.filePath,
+    displayPath: sanitizeFilenameForDisplay(f.filePath),
     added: f.linesAdded,
     removed: f.linesRemoved,
     isBinary: false,
@@ -529,6 +553,7 @@ function turnFileToUnified(f: TurnFileDiff): UnifiedFile {
     isDeleted: f.isDeleted,
     isNewFile: f.isNewFile,
     truncated: false,
+    oversized: f.oversized,
   };
 }
 
@@ -544,8 +569,12 @@ function hunksToUnifiedDiff(
 ): string {
   // DiffRenderer expects unified-diff text starting with the file header so
   // its `--- /+++` skip works. We hand it a minimal envelope plus the hunk
-  // headers and lines verbatim.
-  const lines: string[] = [`--- a/${filePath}`, `+++ b/${filePath}`];
+  // headers and lines verbatim. Sanitize the embedded path to defang any
+  // control bytes git could have round-tripped (DiffRenderer drops the
+  // `---` line and only skips `+++` past unknown content, but sanitizing
+  // both keeps oddities from sneaking into log captures).
+  const safePath = sanitizeFilenameForDisplay(filePath);
+  const lines: string[] = [`--- a/${safePath}`, `+++ b/${safePath}`];
   for (const h of hunks) {
     lines.push(
       `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`,
@@ -571,6 +600,19 @@ function emptyMessage(
     if (!currentResult) {
       return t(
         'No diff available. Either this is not a git repository, HEAD is missing, or a merge/rebase/cherry-pick/revert is in progress.',
+      );
+    }
+    // `fetchGitDiff` returns `filesCount > 0` with an empty `perFileStats`
+    // map when the diff exceeds MAX_FILES_FOR_DETAILS — calling that case
+    // "clean" would silently hide a large dirty tree. Surface it explicitly.
+    if (currentResult.stats.filesCount > 0) {
+      return t(
+        '{{count}} files changed but the diff is too large to list per-file (+{{added}} / -{{removed}}). Use `git diff` for details.',
+        {
+          count: String(currentResult.stats.filesCount),
+          added: String(currentResult.stats.linesAdded),
+          removed: String(currentResult.stats.linesRemoved),
+        },
       );
     }
     return t('Working tree is clean.');
