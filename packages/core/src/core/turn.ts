@@ -171,6 +171,17 @@ export enum CompressionStatus {
 
   /** The compression was not necessary and no action was taken */
   NOOP,
+
+  /**
+   * The compression succeeded but the summary output hit
+   * COMPACT_MAX_OUTPUT_TOKENS, suggesting truncation. Distinct from
+   * `EMPTY_SUMMARY` so telemetry can separate prompt-quality failures
+   * (empty / nonsensical summary) from capacity failures (output cap
+   * hit, may need a higher cap or finer-grained splitter).
+   * `isCompressionFailureStatus` treats this as a failure so it counts
+   * toward the per-chat circuit breaker. (R5.2)
+   */
+  COMPRESSION_FAILED_OUTPUT_TRUNCATED,
 }
 
 export interface ChatCompressionInfo {

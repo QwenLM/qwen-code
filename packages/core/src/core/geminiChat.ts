@@ -105,7 +105,8 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
   return (
     status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
-    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
   );
 }
 
@@ -450,11 +451,27 @@ export class GeminiChat {
   private lastPromptTokenCount = 0;
 
   /**
-   * Number of consecutive auto-compaction failures for this chat. The cheap-gate
-   * NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3) until a successful
-   * compress (forced or not) resets it to 0. Replaces the single-shot
-   * hasFailedCompressionAttempt lock that previously disabled auto-compaction
-   * for the rest of the session on any failure.
+   * Number of consecutive auto-compaction failures for this chat. The
+   * cheap-gate NOOPs once this reaches MAX_CONSECUTIVE_FAILURES (default 3)
+   * until a successful compress (forced or not) resets it to 0. Replaces the
+   * single-shot hasFailedCompressionAttempt lock that previously disabled
+   * auto-compaction for the rest of the session on any failure.
+   *
+   * SEMANTICS (R5.3): this counter tracks "non-force, non-hard-rescue
+   * consecutive failures", NOT every failure literally.
+   *   - Auto-compaction failures (cheap-gate path): increment by 1.
+   *   - Manual `/compress` failures: skipped (`force=true` → `!force`
+   *     guard in the failure branch).
+   *   - Hard-tier rescue failures: skipped (force=true) AND the counter
+   *     is reset to 0 BEFORE the rescue call (sendMessageStream), so
+   *     repeated hard-rescue failures never accumulate here. The rationale
+   *     is fail-open: hard predicts imminent overflow, so we should keep
+   *     trying regardless of recent failures. Reactive overflow is the
+   *     real safety net for that path — it bumps the counter by +1 so
+   *     N reactive failures will still trip the breaker.
+   *
+   * If you're debugging "why is hard-rescue firing but the counter is 0",
+   * that's by design.
    */
   private consecutiveFailures = 0;
 

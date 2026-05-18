@@ -136,11 +136,21 @@ export interface ChatCompressionSettings {
 
 ### Breaking change 处理
 
-启动时 `Config` 加载发现 `chatCompression.contextPercentageThreshold` 存在：
+**用户面：** 启动时 `Config` 加载发现 `chatCompression.contextPercentageThreshold` 存在：
 
 - 写入 stderr 一行警告：`"chatCompression.contextPercentageThreshold has been removed and is now controlled by built-in thresholds."`
 - **不**报错、**不**阻塞启动
 - 字段值被忽略
+
+**SDK 面（R5.4）：** `CompressOptions` 的 `hasFailedCompressionAttempt: boolean` 字段重命名为 `consecutiveFailures: number`。两点差异：
+
+|      | 旧字段                         | 新字段                                                               |
+| ---- | ------------------------------ | -------------------------------------------------------------------- |
+| 名称 | `hasFailedCompressionAttempt`  | `consecutiveFailures`                                                |
+| 类型 | `boolean`                      | `number`                                                             |
+| 语义 | `true` = 永久禁用 auto-compact | `>= MAX_CONSECUTIVE_FAILURES`（默认 3）= 暂时禁用直到 force 成功重置 |
+
+仓库内只有 `GeminiChat.tryCompress` 一个内部消费方，所以内部 migration 风险低；但 `@qwen-code/qwen-code-core` 是 published package、`CompressOptions` 在 d.ts 里可见，下游 SDK 直接调 `service.compress({ ..., hasFailedCompressionAttempt: true })` 的代码会拿到 TS 编译错误。**迁移指引：** 把 `true` 改为 `MAX_CONSECUTIVE_FAILURES`（或任意 >= 3 的整数），`false` 改为 `0`。如果调用方维护自己的失败计数，直接传入即可。
 
 ## Token 估算补偿
 

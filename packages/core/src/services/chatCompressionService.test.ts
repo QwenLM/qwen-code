@@ -2116,11 +2116,12 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     expect(callArg.config?.maxOutputTokens).toBe(20_000);
   });
 
-  it('returns FAILED_EMPTY_SUMMARY when the summary output hits the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
+  it('returns FAILED_OUTPUT_TRUNCATED when the summary output hits the COMPACT_MAX_OUTPUT_TOKENS cap (likely truncated)', async () => {
     // Mock the side-query to return a non-empty summary that exactly hits the
-    // 20K cap — the guard added in this PR should drop the result and surface
-    // it as a failure so non-force callers tick the consecutive-failure
-    // breaker (review #4168 R1.1: NOOP made the breaker never trip).
+    // 20K cap — the guard should drop the result and surface it as a failure
+    // with a status distinct from EMPTY_SUMMARY so telemetry can separate
+    // prompt-quality failures (empty) from capacity failures (truncated).
+    // (R1.1 made the breaker tick; R5.2 split the status.)
     vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>truncated...',
       usage: {
@@ -2166,7 +2167,7 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     });
 
     expect(result.info.compressionStatus).toBe(
-      CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
     );
     expect(result.newHistory).toBeNull();
     expect(warn).toHaveBeenCalledWith(
