@@ -694,7 +694,7 @@ describe('<MainContent />', () => {
               <UIStateContext.Provider
                 value={createUIState({
                   useTerminalBuffer: true,
-                  activePtyId: 'pty-xyz',
+                  activePtyId: 1,
                   history: stableHistory,
                   pendingHistoryItems: stablePending,
                   slashCommands: stableSlashCommands,

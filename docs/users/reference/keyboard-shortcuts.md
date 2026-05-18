@@ -67,6 +67,19 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `1-9`                         | Select an item by its number.                                                                                 |
 | (multi-digit)                 | For items with numbers greater than 9, press the digits in quick succession to select the corresponding item. |
 
+## History scrollback
+
+Active only when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History). In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
+
+| Shortcut     | Description                                          |
+| ------------ | ---------------------------------------------------- |
+| `Shift+Up`   | Scroll history up one line.                          |
+| `Shift+Down` | Scroll history down one line.                        |
+| `PgUp`       | Scroll history up one page (viewport height).        |
+| `PgDn`       | Scroll history down one page (viewport height).      |
+| `Ctrl+Home`  | Jump to the top of the conversation.                 |
+| `Ctrl+End`   | Jump to the bottom (and re-engage live auto-follow). |
+
 ## IDE Integration
 
 | Shortcut | Description                       |

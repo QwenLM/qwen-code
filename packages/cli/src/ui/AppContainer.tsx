@@ -843,11 +843,15 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // In VP mode (ui.useTerminalBuffer) the React tree fully owns the visible
-  // region via ink 7 native overflow clipping, so writing clearTerminal /
-  // cursorTo+eraseDown to the host terminal is a wasted flash and corrupts
-  // the in-app scroll position. Skip the physical write and only bump the
-  // remount key — the VP path ignores the key (uses state-driven scroll
-  // reset), but the legacy `<Static>` path still needs it.
+  // region via ink 7 native overflow clipping. Writing clearTerminal /
+  // cursorTo+eraseDown would be a wasted flash and would also corrupt the
+  // in-app scroll position. The remount-key bump is also a near-no-op for
+  // VP: nothing in the VP render path is keyed by historyRemountKey, so
+  // the only reason to bump it is to keep the legacy `<Static>` branch in
+  // sync if the user toggles `useTerminalBuffer` off mid-session. The
+  // visible refresh in VP mode comes for free from the React tree
+  // re-reading `mergedHistory` / `allVirtualItems` on whatever state
+  // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {

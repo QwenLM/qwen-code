@@ -455,14 +455,16 @@ export const MainContent = () => {
   );
 
   // Refs for streaming-only UI state (activePtyId, embeddedShellFocused,
-  // isEditorDialogOpen). Reading these via refs inside `renderVirtualItem`
-  // keeps the callback identity stable when these flip mid-stream (e.g., a
-  // shell tool starts/stops while a Gemini turn streams). Without the refs,
-  // every flip would rebuild `renderVirtualItem`, invalidate
-  // `VirtualizedList.renderedItems`'s useMemo, and force every static item
-  // to re-render — defeating the `StaticRender`/memo freeze. Pending items
-  // are correctly captured because their `item` reference changes per tick,
-  // so the per-item render is called fresh and reads the latest ref values.
+  // isEditorDialogOpen) AND for pending source-copy offsets. Reading these
+  // via refs inside `renderVirtualItem` keeps the callback identity stable
+  // when they change mid-stream (a shell tool starts/stops, a new pending
+  // chunk lands). Without the refs, every change would rebuild
+  // `renderVirtualItem`, invalidate `VirtualizedList.renderedItems`'s
+  // useMemo, and rebuild JSX for every visible item — defeating
+  // `StaticRender`/`memo(HistoryItemDisplay)`'s skip. Pending items are
+  // still correctly re-rendered because their `item` reference changes
+  // per tick, so the per-item render is called fresh and reads the latest
+  // ref values.
   const pendingStateRef = useRef({
     activePtyId: uiState.activePtyId,
     embeddedShellFocused: uiState.embeddedShellFocused,
@@ -477,16 +479,19 @@ export const MainContent = () => {
     constrainHeight: uiState.constrainHeight,
     availableTerminalHeight,
   };
+  const pendingSourceCopyOffsetsRef = useRef(pendingSourceCopyOffsetsByIndex);
+  pendingSourceCopyOffsetsRef.current = pendingSourceCopyOffsetsByIndex;
 
   // Stable renderItem: deps shrink to inputs that legitimately change the
   // render output for a given item identity (terminalWidth, slashCommands,
-  // compactLabel, summary absorption, source-copy offsets). Streaming-only
-  // state is read from `pendingStateRef` so callback identity is stable.
+  // compactLabel, summary absorption, static-history source-copy offsets).
+  // Streaming-only state — including pending source-copy offsets — is read
+  // from refs so callback identity is stable.
   const renderVirtualItem = useCallback(
     ({ item }: { item: HistoryItem }) => {
       const isPending = item.id < 0;
       const sourceCopyIndexOffsets = isPending
-        ? pendingSourceCopyOffsetsByIndex[-item.id - 1]
+        ? pendingSourceCopyOffsetsRef.current[-item.id - 1]
         : sourceCopyOffsetsByHistoryItem.get(item);
       if (isPending) {
         const ps = pendingStateRef.current;
@@ -532,7 +537,6 @@ export const MainContent = () => {
       getCompactLabel,
       isSummaryAbsorbed,
       sourceCopyOffsetsByHistoryItem,
-      pendingSourceCopyOffsetsByIndex,
     ],
   );
 
