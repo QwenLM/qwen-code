@@ -584,6 +584,32 @@ export class GeminiChat {
   private pendingPartialAssistantTurnIndex: number | null = null;
 
   /**
+   * Deferred-flush record for the partial assistant turn pushed on a
+   * mid-stream error. Stashed instead of immediately appended to the
+   * chat-recording JSONL so a subsequent retry-success can roll back the
+   * persisted record alongside the in-memory pop. Without deferral, the
+   * JSONL transcript keeps the failed attempt even though live history
+   * dropped it — `--resume` rehydrates the failed `model[functionCall]`
+   * turn and the resumed model context picks up a tool_use the in-session
+   * run intentionally discarded (yiliang114 repro on PR #4176).
+   *
+   * Lifecycle is paired with `pendingPartialAssistantTurnIndex`:
+   *  - Set together on stream-error + hasToolCall + hasContent.
+   *  - Cleared together by `popPartialIfPushed` when the retry loop
+   *    rolls the partial back.
+   *  - Flushed together to JSONL after the retry loop exits if the
+   *    partial survived (unretryable break path → about to throw to
+   *    the caller). At that point the partial is durable in memory and
+   *    the recording must match.
+   *  - Reset on `sendMessageStream` entry / setHistory / clearHistory /
+   *    truncateHistory / addHistory / stripThoughtsFromHistory so a leak
+   *    from any exotic path can't bleed into a future send.
+   */
+  private pendingPartialAssistantRecord:
+    | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+    | null = null;
+
+  /**
    * Heap-pressure compaction is process-wide pressure applied per chat. If one
    * heap-triggered attempt cannot reduce history, briefly back off this chat
    * so every subsequent send does not immediately pay for another compression
@@ -826,8 +852,13 @@ export class GeminiChat {
     // Clear any partial-push marker left over from a prior unretryable
     // break path — the marker is per-send; carrying it across sends
     // would let the next send's retry catch wrongly pop a now-valid
-    // model entry sitting at the stale index.
+    // model entry sitting at the stale index. The deferred-record
+    // stash gets the same per-send reset for the same reason: a
+    // leftover from a prior unretryable break would otherwise get
+    // appended to JSONL by THIS send's retry-loop flush, attaching
+    // someone else's failed turn to this conversation.
     this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
 
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
@@ -974,6 +1005,13 @@ export class GeminiChat {
                 self.history.splice(idx, 1);
               }
               self.pendingPartialAssistantTurnIndex = null;
+              // Discard the deferred chat-recording record alongside the
+              // in-memory pop so the JSONL transcript also drops the
+              // failed attempt. (Paired with the stash in
+              // processStreamResponse — see the field-level comment on
+              // `pendingPartialAssistantRecord` for the failure mode this
+              // fixes.)
+              self.pendingPartialAssistantRecord = null;
             };
 
             // Handle rate-limit / throttling errors returned as stream content.
@@ -1167,6 +1205,23 @@ export class GeminiChat {
             }
             break;
           }
+        }
+
+        // The retry loop has settled: any partial that was rolled back
+        // had its stash cleared by `popPartialIfPushed`; any partial that
+        // survived (success break with no partial set, or unretryable
+        // break with the partial kept) is now durable in memory, so the
+        // deferred chat-recording append must finally land on disk.
+        // Without this flush the unretryable-break path persists the
+        // partial in `this.history` but the JSONL transcript silently
+        // drops it — `--resume` then loads a truncated transcript that
+        // doesn't match the live session shape, and the orphan-tool_use
+        // repair pass at session-load has nothing to repair.
+        if (self.pendingPartialAssistantRecord) {
+          self.chatRecordingService?.recordAssistantTurn(
+            self.pendingPartialAssistantRecord,
+          );
+          self.pendingPartialAssistantRecord = null;
         }
 
         // Max output tokens escalation: if the retry loop succeeded with
@@ -1459,8 +1514,11 @@ export class GeminiChat {
     // shows up at that index in a future send (defense-in-depth — the
     // helper also bounds-checks, but a stale marker that happens to
     // line up with a real model turn could otherwise pop the wrong
-    // entry).
+    // entry). Drop the deferred-record stash for the same reason: a
+    // later flush would otherwise append a turn that doesn't match
+    // the (now-empty) live history.
     this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
   }
 
   /**
@@ -1478,8 +1536,12 @@ export class GeminiChat {
     // clearHistory: any future addHistory variant that splices into
     // the middle (instead of plain push) would shift indices and a
     // stale marker could splice the wrong entry. Belt-and-suspenders;
-    // the next sendMessageStream entry also clears it.
+    // the next sendMessageStream entry also clears it. The
+    // deferred-record stash is paired with the marker — keeping it
+    // around past an external addHistory could let a subsequent
+    // retry-loop flush land a stale partial in JSONL.
     this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
   }
 
   setHistory(history: Content[]): void {
@@ -1489,8 +1551,10 @@ export class GeminiChat {
     // marker MUST be cleared — otherwise `popPartialIfPushed` could find
     // a model turn at the stale index in the replacement history and
     // splice an entry that has nothing to do with the original partial
-    // push, corrupting the conversation.
+    // push, corrupting the conversation. Drop the paired deferred-record
+    // stash too: its referent (the model turn at the old index) is gone.
     this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
   }
 
   truncateHistory(keepCount: number): void {
@@ -1500,8 +1564,10 @@ export class GeminiChat {
     // the marker rather than try to fix it up — it's per-send and
     // ephemeral, so losing it across a truncate is safe (the
     // sendMessageStream that pushed it has already finished or will
-    // start fresh on the next call).
+    // start fresh on the next call). Drop the paired deferred-record
+    // stash for the same reason.
     this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
   }
 
   stripThoughtsFromHistory(): void {
@@ -1510,8 +1576,11 @@ export class GeminiChat {
       .filter((content): content is Content => content !== null);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
-    // exists. Clear it for the same reason setHistory does.
+    // exists. Clear it for the same reason setHistory does. The deferred
+    // chat-recording stash is paired with the marker — drop it too so a
+    // later flush can't land a turn that doesn't exist in live history.
     this.pendingPartialAssistantTurnIndex = null;
+    this.pendingPartialAssistantRecord = null;
   }
 
   /**
@@ -1712,7 +1781,7 @@ export class GeminiChat {
     ) {
       const contextWindowSize =
         this.config.getContentGeneratorConfig()?.contextWindowSize;
-      this.chatRecordingService?.recordAssistantTurn({
+      const recordArgs = {
         model,
         message: [
           ...(thoughtContentPart ? [thoughtContentPart] : []),
@@ -1730,7 +1799,22 @@ export class GeminiChat {
         ],
         tokens: usageMetadata,
         contextWindowSize,
-      });
+      };
+      if (streamError !== null) {
+        // Stream-error + tool-use partial: defer the JSONL append until
+        // the outer retry loop decides whether to roll back this attempt.
+        // If the same send retries successfully, popPartialIfPushed clears
+        // this stash and the failed attempt never lands on disk; if the
+        // retry path doesn't apply (unretryable break), the stash is
+        // flushed at the rethrow site so JSONL stays aligned with the
+        // partial that survives in-memory. Without this, retry-success
+        // leaves a failed `model[functionCall]` durable in JSONL and
+        // `--resume` rehydrates a turn the live session correctly
+        // discarded (yiliang114 PR #4176 repro).
+        this.pendingPartialAssistantRecord = recordArgs;
+      } else {
+        this.chatRecordingService?.recordAssistantTurn(recordArgs);
+      }
     }
 
     // Mid-stream failure recovery: if the upstream stream threw (typical on

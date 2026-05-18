@@ -2524,6 +2524,188 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('rolls back the chat-recording entry too when the retry succeeds (yiliang114 PR #4176 follow-up)', async () => {
+      // The in-memory rollback test above asserts `this.history` ends
+      // clean after a retry-success. This test asserts the same about
+      // chat-recording JSONL: the failed attempt's `recordAssistantTurn`
+      // call must NOT have been flushed, so `--resume` won't rehydrate
+      // a model[functionCall] turn the live session correctly discarded.
+      // Without the deferred-flush stash + popPartialIfPushed clear,
+      // `recordAssistantTurn` was called twice (once for the partial,
+      // once for the success) and only the in-memory pop fixed live
+      // history; the durable transcript stayed corrupt.
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        const failingStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_failed_retry_recording',
+                        name: 'read_file',
+                        args: { path: '/tmp/a.txt' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw tpmError;
+        })();
+        const successStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Success after retry' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failingStream)
+          .mockResolvedValueOnce(successStream);
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-recording-rollback',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+        for (;;) {
+          const next = iterator.next();
+          await vi.advanceTimersByTimeAsync(60_000);
+          const r = await next;
+          if (r.done) break;
+        }
+
+        // Exactly one recording: the successful retry's text turn.
+        // The failed attempt's partial functionCall must have been
+        // discarded by `popPartialIfPushed` clearing the deferred-flush
+        // stash, never reaching the JSONL.
+        expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+        const recordedMessage = recordAssistantTurn.mock.calls[0]![0]
+          ?.message as Array<{ text?: string; functionCall?: unknown }>;
+        const recordedText = recordedMessage.find((p) => p.text)?.text;
+        expect(recordedText).toBe('Success after retry');
+        // No functionCall part anywhere in the recorded turn.
+        expect(recordedMessage.some((p) => p.functionCall)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('flushes the chat-recording entry on the unretryable break path (kept partial → durable JSONL)', async () => {
+      // Counterpart to the rollback test: when the retry budget is
+      // exhausted (or the error is unretryable from the start), the
+      // partial assistant turn IS kept in `this.history` — and the
+      // chat-recording JSONL must match. Without the deferred-flush
+      // path firing at the rethrow site, the JSONL silently drops a
+      // partial that's still in live history, and the orphan-tool_use
+      // repair pass at session-load has no dangling functionCall to
+      // close → `--resume` first send 400s with the very wedge the
+      // repair was supposed to escape.
+      vi.useFakeTimers();
+      try {
+        const recordAssistantTurn = vi.fn();
+        const chatWithRecording = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          {
+            recordAssistantTurn,
+            recordChatCompression: vi.fn(),
+          } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+          uiTelemetryService,
+        );
+
+        // Unretryable: a non-rate-limit, non-InvalidStream error after
+        // a tool_use chunk lands. The catch block falls through to
+        // `break` with the partial kept in memory.
+        const failingStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      functionCall: {
+                        id: 'call_unretryable_kept',
+                        name: 'read_file',
+                        args: { path: '/tmp/k.txt' },
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+          throw new Error('synthetic unretryable mid-stream failure');
+        })();
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(failingStream);
+
+        const stream = await chatWithRecording.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-recording-flush-on-break',
+        );
+        const iterator = stream[Symbol.asyncIterator]();
+        await expect(
+          (async () => {
+            for (;;) {
+              const r = await iterator.next();
+              if (r.done) return;
+            }
+          })(),
+        ).rejects.toThrow(/synthetic unretryable/);
+
+        // In-memory: partial is kept (the wedge-recovery contract that
+        // the rest of this PR's machinery relies on).
+        const history = chatWithRecording.getHistory();
+        const lastModelTurn = history.findLast((h) => h.role === 'model');
+        expect(
+          lastModelTurn?.parts?.some(
+            (p) => p.functionCall?.id === 'call_unretryable_kept',
+          ),
+        ).toBe(true);
+
+        // JSONL: must contain the same partial turn so `--resume` sees
+        // a transcript that matches live history. Exactly one record
+        // (no success retry happened on this path).
+        expect(recordAssistantTurn).toHaveBeenCalledTimes(1);
+        const recordedMessage = recordAssistantTurn.mock.calls[0]![0]
+          ?.message as Array<{ functionCall?: { id?: string } }>;
+        expect(
+          recordedMessage.some(
+            (p) => p.functionCall?.id === 'call_unretryable_kept',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should retry on TPM throttling StreamContentError with initial delay', async () => {
       vi.useFakeTimers();
 
