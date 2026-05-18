@@ -1812,6 +1812,66 @@ class QwenAgent implements Agent {
         projectHooks: this.settings.getProjectHooks(),
       },
     );
+    // PR 14b fix #2 (codex review round 1): register the MCP guardrail
+    // budget-event callback BEFORE `config.initialize()`. Pre-fix the
+    // registration ran AFTER initialize, which (a) missed end-of-pass
+    // events under `QWEN_CODE_LEGACY_MCP_BLOCKING=1` (synchronous
+    // discovery completes inside initialize, before our setter runs)
+    // and (b) raced against background-discovery completion under the
+    // default progressive mode. `Config.setMcpBudgetEventCallback`
+    // stashes the callback and `createToolRegistry` applies it to the
+    // manager BEFORE `discoverAllTools` / `startMcpDiscoveryInBackground`
+    // fires, closing both windows.
+    //
+    // sessionId source: `config.getSessionId()` reads the Config's own
+    // session id (auto-assigned via `randomUUID()` in the Config
+    // constructor when no override is passed — see `config.ts:849`),
+    // so the value is available immediately after `loadCliConfig`
+    // returns. The closure pins it for the manager's whole lifetime.
+    //
+    // Defensive `typeof` checks tolerate stub Configs / ToolRegistries
+    // in older tests (older fixtures may omit `setMcpBudgetEventCallback`
+    // or `getSessionId`).
+    const wiredSessionId =
+      typeof config.getSessionId === 'function'
+        ? config.getSessionId()
+        : undefined;
+    if (
+      typeof config.setMcpBudgetEventCallback === 'function' &&
+      wiredSessionId !== undefined
+    ) {
+      const sid = wiredSessionId;
+      config.setMcpBudgetEventCallback((event) => {
+        // Fire-and-forget: `extNotification` returns Promise<void> but
+        // the manager's call site doesn't await. `.catch` suppresses
+        // unhandled rejections — a mid-flight ACP disconnect would
+        // otherwise crash the child. Snapshot still carries the state
+        // for clients that reconnect.
+        //
+        // PR 14b fix (codex round 3 — DeepSeek): pre-fix the catch
+        // handler was `() => {}`, silently dropping every error
+        // including "real" ones (serialization bugs, protocol
+        // violations) — operators had no debug trail. Now logs at
+        // `debug` level: ACP channel closure during shutdown is the
+        // expected case and would spam at higher levels, but `debug`
+        // is opt-in so when an oncall engineer DOES turn it on for
+        // an MCP guardrail incident, they see exactly which event
+        // dropped and why.
+        void this.connection
+          .extNotification('qwen/notify/session/mcp-budget-event', {
+            v: 1,
+            sessionId: sid,
+            ...event,
+          })
+          .catch((err: unknown) => {
+            debugLogger.debug(
+              `MCP budget extNotification dropped ` +
+                `(session=${sid}, kind=${event.kind}): ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+      });
+    }
     await config.initialize();
     // Same reasoning as the top-level runAcpAgent path: ACP feeds session
     // messages to the model immediately, so we cannot return a Config whose

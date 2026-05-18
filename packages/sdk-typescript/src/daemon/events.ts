@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonEvent, PermissionOutcome } from './types.js';
+import type {
+  DaemonEvent,
+  DaemonMcpTransport,
+  PermissionOutcome,
+} from './types.js';
 
 const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
@@ -19,6 +23,13 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'client_evicted',
   'slow_client_warning',
   'stream_error',
+  // PR 14b — MCP guardrail push events. See `mcp_guardrail_events`
+  // capability tag. Both fire on the per-session SSE bus; consumers
+  // should pre-flight `caps.features.includes('mcp_guardrail_events')`
+  // before relying on these for non-snapshot UX (the `GET /workspace/mcp`
+  // snapshot still encodes the same state).
+  'mcp_budget_warning',
+  'mcp_child_refused_batch',
   // Issue #4175 PR 16: workspace-level mutation signals fanned out
   // through every active session's bus. Non-terminal — informational
   // for adapters that want to render "memory just changed" / "agent X
@@ -143,6 +154,59 @@ export interface DaemonSlowClientWarningData {
 
 export interface DaemonStreamErrorData {
   error: string;
+  [key: string]: unknown;
+}
+
+/**
+ * PR 14b: payload for the `mcp_budget_warning` SSE frame. Fired on the
+ * upward 75% crossing of `reservedSlots.size / clientBudget`. Re-arms
+ * only after the ratio drops below 37.5% — so a budget that flaps just
+ * above the threshold doesn't produce a flood of identical warnings.
+ *
+ * `liveCount` (CONNECTED clients) and `reservedCount` (configured set,
+ * including in-flight reservations) are exposed separately so SDK
+ * consumers can render either lens. The snapshot (`GET /workspace/mcp`)
+ * is the source of truth for state-after-reconnect; this event is the
+ * change-edge.
+ *
+ * `mode` is `'warn' | 'enforce'` because the warning fires in either
+ * mode (only `'off'` skips the state machine entirely).
+ */
+export interface DaemonMcpBudgetWarningData {
+  liveCount: number;
+  reservedCount: number;
+  budget: number;
+  thresholdRatio: 0.75;
+  mode: 'warn' | 'enforce';
+  [key: string]: unknown;
+}
+
+/**
+ * PR 14b: per-server entry inside a `mcp_child_refused_batch` payload.
+ * `transport` is the family resolved at refusal time via the daemon's
+ * `mcpTransportOf` helper; future refusal causes (Wave 5+) would
+ * extend `reason` beyond `'budget_exhausted'`.
+ */
+export interface DaemonMcpRefusedServer {
+  name: string;
+  transport: DaemonMcpTransport;
+  reason: 'budget_exhausted';
+  [key: string]: unknown;
+}
+
+/**
+ * PR 14b: payload for the `mcp_child_refused_batch` SSE frame. Fires
+ * once per `discoverAllMcpTools*` pass when at least one server was
+ * refused, OR as a length-1 batch on the `readResource` lazy-spawn
+ * refusal path. `mode` is the literal `'enforce'` because `warn` mode
+ * never refuses (so this event never fires under `warn`).
+ */
+export interface DaemonMcpChildRefusedBatchData {
+  refusedServers: DaemonMcpRefusedServer[];
+  budget: number;
+  liveCount: number;
+  reservedCount: number;
+  mode: 'enforce';
   [key: string]: unknown;
 }
 
@@ -379,6 +443,14 @@ export type DaemonStreamErrorEvent = DaemonEventEnvelope<
   'stream_error',
   DaemonStreamErrorData
 >;
+export type DaemonMcpBudgetWarningEvent = DaemonEventEnvelope<
+  'mcp_budget_warning',
+  DaemonMcpBudgetWarningData
+>;
+export type DaemonMcpChildRefusedBatchEvent = DaemonEventEnvelope<
+  'mcp_child_refused_batch',
+  DaemonMcpChildRefusedBatchData
+>;
 export type DaemonMemoryChangedEvent = DaemonEventEnvelope<
   'memory_changed',
   DaemonMemoryChangedData
@@ -460,6 +532,17 @@ export type DaemonStreamLifecycleEvent =
   | DaemonStreamErrorEvent;
 
 /**
+ * PR 14b: MCP guardrail push events. Grouped as their own union member
+ * (rather than folded into `DaemonStreamLifecycleEvent`) because they
+ * report McpClientManager state, not the SSE subscriber's queue health
+ * or the daemon's stream lifecycle. Adapters that only care about
+ * "is the stream alive" can ignore this whole branch.
+ */
+export type DaemonMcpGuardrailEvent =
+  | DaemonMcpBudgetWarningEvent
+  | DaemonMcpChildRefusedBatchEvent;
+
+/**
  * Issue #4175 PR 16: workspace-level mutation signals fanned out
  * through every active session's bus. Non-terminal; clients use them
  * to refresh cached views of workspace memory / agents.
@@ -472,6 +555,7 @@ export type KnownDaemonEvent =
   | DaemonSessionEvent
   | DaemonControlEvent
   | DaemonStreamLifecycleEvent
+  | DaemonMcpGuardrailEvent
   | DaemonWorkspaceMutationEvent
   | DaemonAuthEvent;
 
@@ -509,6 +593,25 @@ export interface DaemonSessionViewState {
    */
   slowClientWarningCount: number;
   lastSlowClientWarning?: DaemonSlowClientWarningData;
+  /**
+   * PR 14b: count of `mcp_budget_warning` frames this stream has
+   * observed. Non-terminal — warning fires on the upward 75% crossing
+   * and re-arms below 37.5%, so a flapping budget produces at most
+   * one warning per crossing episode. Adapters tap this counter to
+   * surface MCP-pressure UI; the snapshot at `GET /workspace/mcp`
+   * still carries the authoritative state-after-reconnect.
+   */
+  mcpBudgetWarningCount: number;
+  lastMcpBudgetWarning?: DaemonMcpBudgetWarningData;
+  /**
+   * PR 14b: count of `mcp_child_refused_batch` frames this stream has
+   * observed. Each frame is a single batch (per discovery pass, or
+   * length-1 from `readResource`'s lazy-spawn refusal); the count
+   * reflects batches not refused-server entries. Mirrors the
+   * snapshot's `disabledReason: 'budget'` per-server tag.
+   */
+  mcpChildRefusedBatchCount: number;
+  lastMcpChildRefusedBatch?: DaemonMcpChildRefusedBatchData;
   /**
    * Issue #4175 PR 16: most recent workspace mutation observed on this
    * stream (memory or agent change). Non-terminal — adapters render a
@@ -581,6 +684,10 @@ export function createDaemonSessionViewState(
       seed.lastUnmatchedPermissionResolutionId,
     slowClientWarningCount: seed.slowClientWarningCount ?? 0,
     lastSlowClientWarning: seed.lastSlowClientWarning,
+    mcpBudgetWarningCount: seed.mcpBudgetWarningCount ?? 0,
+    lastMcpBudgetWarning: seed.lastMcpBudgetWarning,
+    mcpChildRefusedBatchCount: seed.mcpChildRefusedBatchCount ?? 0,
+    lastMcpChildRefusedBatch: seed.lastMcpChildRefusedBatch,
     lastWorkspaceMutation: seed.lastWorkspaceMutation,
     lastWorkspaceMutationType: seed.lastWorkspaceMutationType,
     approvalMode: seed.approvalMode,
@@ -662,6 +769,14 @@ export function asKnownDaemonEvent(
     case 'stream_error':
       return isStreamErrorData(event.data)
         ? (event as DaemonStreamErrorEvent)
+        : undefined;
+    case 'mcp_budget_warning':
+      return isMcpBudgetWarningData(event.data)
+        ? (event as DaemonMcpBudgetWarningEvent)
+        : undefined;
+    case 'mcp_child_refused_batch':
+      return isMcpChildRefusedBatchData(event.data)
+        ? (event as DaemonMcpChildRefusedBatchEvent)
         : undefined;
     case 'memory_changed':
       return isMemoryChangedData(event.data)
@@ -846,6 +961,24 @@ export function reduceDaemonSessionEvent(
         terminalEvent: chooseTerminalEvent(base.terminalEvent, event),
         streamError: event.data,
         pendingPermissions: {},
+      };
+    case 'mcp_budget_warning':
+      // Non-terminal: budget pressure is a status signal, not a stream
+      // close. Count + capture latest so adapters can render
+      // "MCP pressure" UI; `alive` and `pendingPermissions` unchanged.
+      return {
+        ...base,
+        mcpBudgetWarningCount: base.mcpBudgetWarningCount + 1,
+        lastMcpBudgetWarning: event.data,
+      };
+    case 'mcp_child_refused_batch':
+      // Non-terminal: refusals are operator-actionable signals (raise
+      // budget / drop servers), not stream lifecycle events. The
+      // session keeps running with a smaller MCP fleet.
+      return {
+        ...base,
+        mcpChildRefusedBatchCount: base.mcpChildRefusedBatchCount + 1,
+        lastMcpChildRefusedBatch: event.data,
       };
     case 'memory_changed':
       // Non-terminal: adapters render a "memory just changed" hint and
@@ -1297,6 +1430,71 @@ function isSlowClientWarningData(
 
 function isStreamErrorData(value: unknown): value is DaemonStreamErrorData {
   return isRecord(value) && isNonEmptyString(value['error']);
+}
+
+function isMcpBudgetWarningData(
+  value: unknown,
+): value is DaemonMcpBudgetWarningData {
+  // PR 14b fix (codex round 6): `thresholdRatio` is validated as a
+  // finite number, NOT pinned to the literal `0.75`. The SDK's
+  // role here is wire-shape validation; threshold semantics are
+  // owned by the daemon's `MCP_BUDGET_WARN_FRACTION` constant
+  // (`packages/core/src/tools/mcp-client-manager.ts`) and documented
+  // in `qwen-serve-protocol.md`. Pinning the literal in the SDK
+  // would mean a daemon-side change to e.g. 0.80 silently routes
+  // every warning through `unrecognizedKnownEventCount` — a
+  // cross-package coordination hazard with no operator-visible
+  // failure mode. The `DaemonMcpBudgetWarningData.thresholdRatio`
+  // type still narrows to `0.75` for current daemons; future
+  // multi-threshold support (e.g. 0.5 critical) would extend the
+  // type AND the wire shape via a `severity` discriminator field.
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value['liveCount']) &&
+    isFiniteNumber(value['reservedCount']) &&
+    isFiniteNumber(value['budget']) &&
+    isFiniteNumber(value['thresholdRatio']) &&
+    (value['mode'] === 'warn' || value['mode'] === 'enforce')
+  );
+}
+
+function isMcpRefusedServerEntry(
+  value: unknown,
+): value is DaemonMcpRefusedServer {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['name'])) return false;
+  if (value['reason'] !== 'budget_exhausted') return false;
+  // Transport family must be one of the known kinds. Reject silently
+  // for forward-compat: a daemon emitting an unknown transport is
+  // likely speaking a newer wire than this SDK release.
+  const transport = value['transport'];
+  return (
+    transport === 'stdio' ||
+    transport === 'sse' ||
+    transport === 'http' ||
+    transport === 'websocket' ||
+    transport === 'sdk' ||
+    transport === 'unknown'
+  );
+}
+
+function isMcpChildRefusedBatchData(
+  value: unknown,
+): value is DaemonMcpChildRefusedBatchData {
+  return (
+    isRecord(value) &&
+    Array.isArray(value['refusedServers']) &&
+    value['refusedServers'].every(isMcpRefusedServerEntry) &&
+    isFiniteNumber(value['budget']) &&
+    isFiniteNumber(value['liveCount']) &&
+    isFiniteNumber(value['reservedCount']) &&
+    // `mode` is a literal `'enforce'` — `warn` mode never refuses, so
+    // `'warn'`-tagged refusal payloads are protocol garbage. Reject
+    // them so the reducer sees the raw event under the
+    // `unrecognizedKnownEventCount` branch instead of silently
+    // accepting a malformed shape.
+    value['mode'] === 'enforce'
+  );
 }
 
 function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {

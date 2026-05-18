@@ -96,6 +96,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `require_auth` is the only conditional tag, kept last for
   // visibility in `Object.keys(SERVE_CAPABILITY_REGISTRY)`.
   mcp_guardrails: { since: 'v1', modes: ['warn', 'enforce'] },
+  // Issue #4175 PR 14b. Daemon emits typed push events for MCP budget
+  // state crossings: `mcp_budget_warning` (synthetic, fires once per
+  // upward 75% crossing with hysteresis re-arm at 37.5%) and
+  // `mcp_child_refused_batch` (coalesced, one per discovery pass /
+  // length-1 per readResource refusal, only in `enforce` mode). SDK
+  // reducer narrows both via `KnownDaemonEvent` (`DaemonSessionViewState`
+  // exposes `mcpBudgetWarningCount`, `lastMcpBudgetWarning`,
+  // `mcpChildRefusedBatchCount`, `lastMcpChildRefusedBatch`). Always-on once
+  // PR 14b lands; orthogonal to `mcp_guardrails` (the snapshot
+  // surface). Listed alongside `mcp_guardrails` to keep the MCP-related
+  // tags grouped.
+  mcp_guardrail_events: { since: 'v1' },
   // Issue #4175 PR 19. Daemon supports the read-only workspace file
   // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`. The
   // four routes are gated as a single feature because they share the

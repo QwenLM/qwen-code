@@ -4787,6 +4787,510 @@ describe('createHttpAcpBridge', () => {
     });
   });
 
+  // PR 14b: ext-notification handler for child→bridge MCP budget events.
+  // Translates `qwen/notify/session/mcp-budget-event` into session-scoped
+  // SSE frames (`mcp_budget_warning` / `mcp_child_refused_batch`).
+  describe('extNotification — MCP budget events (PR 14b)', () => {
+    it('publishes mcp_budget_warning when the child fires the warning event', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+
+      const collected: Array<{ id?: number; type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ id: e.id, type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('mcp_budget_warning');
+      // PR 14b drops the routing fields (`v`, `sessionId`, `kind`)
+      // from `data` since the SSE envelope already encodes them.
+      expect(collected[0]?.data).toEqual({
+        liveCount: 4,
+        reservedCount: 4,
+        budget: 4,
+        thresholdRatio: 0.75,
+        mode: 'warn',
+      });
+      expect(collected[0]?.id).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('publishes mcp_child_refused_batch when the child fires the refused-batch event', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          kind: 'refused_batch',
+          refusedServers: [
+            { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+          ],
+          budget: 1,
+          liveCount: 1,
+          reservedCount: 1,
+          mode: 'enforce',
+        },
+      );
+
+      const collected: Array<{ type: string; data: unknown }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type, data: e.data });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('mcp_child_refused_batch');
+      expect(collected[0]?.data).toEqual({
+        refusedServers: [
+          { name: 'b', transport: 'stdio', reason: 'budget_exhausted' },
+        ],
+        budget: 1,
+        liveCount: 1,
+        reservedCount: 1,
+        mode: 'enforce',
+      });
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('drops unknown extNotification methods, kinds, and missing sessionIds silently', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent();
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(session.sessionId, {
+        signal: abort.signal,
+      });
+
+      // Unknown method — drop.
+      void capturedConn!.extNotification('qwen/notify/session/unknown-event', {
+        sessionId: session.sessionId,
+        kind: 'budget_warning',
+      });
+      // Missing sessionId — drop.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        { kind: 'budget_warning' },
+      );
+      // Unknown kind — drop.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        { sessionId: session.sessionId, kind: 'mystery_kind' },
+      );
+      // Resolvable sessionId but session id doesn't exist — drop.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          sessionId: 'nonexistent',
+          kind: 'budget_warning',
+          liveCount: 1,
+          reservedCount: 1,
+          budget: 1,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+      // Real event — must arrive AFTER all drops above.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+
+      const collected: Array<{ type: string }> = [];
+      for await (const e of iter) {
+        collected.push({ type: e.type });
+        if (collected.length === 1) break;
+      }
+      // Exactly one event got through. Codex review fix #1 changed
+      // the "unknown sessionId" path from drop to buffer — the
+      // `nonexistent` frame above is now sitting in the early-event
+      // buffer (it never registers, so it'll TTL out). All other
+      // drops (unknown method, missing sessionId, unknown kind)
+      // remain hard-drops.
+      expect(collected).toEqual([{ type: 'mcp_budget_warning' }]);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('buffers events for a not-yet-registered sessionId, drains them on registration (codex fix #1)', async () => {
+      // Codex review round 1, finding #1: budget events fired during
+      // a session's startup window (between `connection.newSession`
+      // dispatching and `byId.set`) reach `BridgeClient.extNotification`
+      // with a valid sessionId but no matching entry. Pre-fix those
+      // were dropped silently; post-fix they're buffered and replayed
+      // via `drainEarlyEvents` so SSE subscribers see them as the
+      // FIRST frames of the new session.
+      //
+      // This test exercises the buffer + drain mechanism directly,
+      // pre-buffering for a sessionId that doesn't yet exist, then
+      // creating that session via newSessionImpl-controlled id and
+      // verifying the drain replayed the frame onto the new EventBus.
+      // (Forcing the actual production race window is timing-flaky;
+      // the mechanism is the invariant we care about.)
+      let capturedConn: AgentSideConnection | undefined;
+      // Use sessionScope: 'thread' + a deterministic id-prefix so
+      // `spawnOrAttach` returns an id we can pre-target.
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({ sessionIdPrefix: 'pre-buffer' });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+
+      // Boot ANY session first to get the channel + BridgeClient
+      // alive (factory + AgentSideConnection are constructed lazily
+      // on first spawn). After this, subsequent spawns share the
+      // channel and BridgeClient.
+      const seed = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Pre-buffer for the NEXT thread-scope session id. FakeAgent
+      // names them `<prefix>:<cwd>#<n>`; the seed was call 1
+      // (suffix ''), the next will be call 2 (suffix '#2').
+      const futureSessionId = `pre-buffer:${WS_A}#2`;
+      expect(seed.sessionId).not.toBe(futureSessionId);
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: futureSessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+
+      // Give the bridge's reader loop a tick to dispatch the
+      // notification onto BridgeClient.extNotification — it goes
+      // through `bufferEarlyEvent` because `futureSessionId` isn't
+      // in `byId` yet.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Now create the future session. `createSessionEntry`'s new
+      // `drainEarlyEvents` call replays the buffered frame onto the
+      // freshly-constructed EventBus.
+      const target = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(target.sessionId).toBe(futureSessionId);
+
+      // Subscribe with `lastEventId: 0` so the replay-ring drain
+      // path runs (live-only subscriptions skip the ring per
+      // `eventBus.ts` semantics). Production SSE clients reconnecting
+      // with `Last-Event-ID: 0` get this same behavior.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(target.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const collected: Array<{ id?: number; type: string }> = [];
+      for await (const e of iter) {
+        collected.push({ id: e.id, type: e.type });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('mcp_budget_warning');
+      // Drained frame went through `events.publish`, so it gets an
+      // `id` — PR 14b events are session-scoped + replayable.
+      expect(collected[0]?.id).toBe(1);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('tombstones closed sessionIds so late notifications cannot leak into a future load of the same id (codex round 5 fix)', async () => {
+      // Codex round 5 finding: pre-fix, after a session was killed
+      // / closed, a late `extNotification` from its dying child for
+      // the same id would land in `earlyEvents`. If the SAME
+      // sessionId came back via `session/load`/`session/resume`
+      // within the 60s TTL, `drainEarlyEvents` would replay stale
+      // prior-session telemetry onto the NEW subscriber.
+      //
+      // Fix: every `byId.delete(sid)` site now calls
+      // `BridgeClient.markSessionClosed(sid)`, which tombstones the
+      // id (rejecting future `bufferEarlyEvent` calls for it) and
+      // purges any frames already buffered for it.
+      let capturedConn: AgentSideConnection | undefined;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          loadSessionImpl: () => ({ configOptions: [] }),
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+
+      // 1) Spawn session A — id = SESS_A.
+      const sess = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sessionId = sess.sessionId;
+      expect(sessionId).toBe(SESS_A);
+
+      // 2) Close session A — calls byId.delete + markSessionClosed.
+      await bridge.closeSession(sessionId);
+
+      // 3) Simulate a LATE notification from the (now-defunct)
+      // child for the closed sessionId. Pre-fix this would land in
+      // `earlyEvents`. Post-fix the tombstone rejects it.
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+      // Give the bridge's read loop time to dispatch the notification.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // 4) Re-load the SAME persisted sessionId via session/load.
+      // createSessionEntry runs drainEarlyEvents — pre-fix the stale
+      // frame would be replayed onto the new session's bus.
+      const loaded = await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(loaded.sessionId).toBe(sessionId);
+
+      // 5) Subscribe with lastEventId: 0 to drain the replay ring.
+      // Post-fix, no `mcp_budget_warning` should be in the ring
+      // (the late notification was dropped at buffer time, not
+      // drained on registration).
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(loaded.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const collected: Array<{ type: string }> = [];
+      const drainPromise = (async () => {
+        for await (const e of iter) {
+          collected.push({ type: e.type });
+        }
+      })();
+      // Give the iterator a tick to pull replay frames.
+      await new Promise((r) => setTimeout(r, 50));
+      abort.abort();
+      await drainPromise;
+
+      // No mcp_budget_warning leaked through.
+      expect(collected.filter((e) => e.type === 'mcp_budget_warning')).toEqual(
+        [],
+      );
+
+      await bridge.shutdown();
+    });
+
+    it('purges buffered guardrail events when restore fails so retry-success does not replay stale frames (codex round 7 fix)', async () => {
+      // Codex round 7 finding: round-6 added `markRestoreInFlight`
+      // so `bufferEarlyEvent` accepts frames for tombstoned ids
+      // during a restore. If the restore FAILS, pre-fix
+      // `clearRestoreInFlight` only released the allow-list and
+      // left buffered frames in `earlyEvents[id]`. A subsequent
+      // successful retry (`session/load` of the same id within
+      // 60s) would `drainEarlyEvents` those stale frames into the
+      // new session.
+      //
+      // Fix: failure path now calls `markSessionClosed` which both
+      // re-tombstones the id AND purges `earlyEvents[id]`.
+      let capturedConn: AgentSideConnection | undefined;
+      let loadAttempt = 0;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        // First load attempt fails; second attempt succeeds. The
+        // child's notification fires DURING the failing first
+        // attempt — pre-fix it would survive the failure.
+        const fakeAgent = new FakeAgent({
+          loadSessionImpl: async (req, agent) => {
+            loadAttempt += 1;
+            if (loadAttempt === 1) {
+              // Buffer a guardrail event for this restore window
+              // BEFORE failing, simulating the round-6-allow-list
+              // behavior.
+              void agent;
+              void capturedConn!.extNotification(
+                'qwen/notify/session/mcp-budget-event',
+                {
+                  v: 1,
+                  sessionId: req.sessionId,
+                  kind: 'budget_warning',
+                  liveCount: 4,
+                  reservedCount: 4,
+                  budget: 4,
+                  thresholdRatio: 0.75,
+                  mode: 'warn',
+                },
+              );
+              // Tiny yield so the bridge dispatches the notification
+              // before we throw.
+              await new Promise((r) => setTimeout(r, 5));
+              throw new Error('simulated transient load failure');
+            }
+            return { configOptions: [] };
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+
+      // Pre-tombstone: spawn + close session with the id we'll later load.
+      const sess = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sessionId = sess.sessionId;
+      await bridge.closeSession(sessionId);
+
+      // First load — fails after the child queues a guardrail event.
+      // ACP wraps the agent throw as a JSON-RPC "Internal error";
+      // the original message lives in `data.details` but the assertion
+      // only needs to verify the load rejected.
+      await expect(
+        bridge.loadSession({ sessionId, workspaceCwd: WS_A }),
+      ).rejects.toThrow();
+
+      // Retry — succeeds. Pre-fix this would replay the queued
+      // guardrail event onto the new session's bus.
+      const loaded = await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(loaded.sessionId).toBe(sessionId);
+
+      // Verify no stale guardrail event leaked.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(loaded.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const collected: Array<{ type: string }> = [];
+      const drainPromise = (async () => {
+        for await (const e of iter) {
+          collected.push({ type: e.type });
+        }
+      })();
+      await new Promise((r) => setTimeout(r, 50));
+      abort.abort();
+      await drainPromise;
+      expect(collected.filter((e) => e.type === 'mcp_budget_warning')).toEqual(
+        [],
+      );
+
+      await bridge.shutdown();
+    });
+  });
+
   describe('maxSessions cap (chiga0 Rec 3)', () => {
     it('refuses NEW spawns past the cap with SessionLimitExceededError', async () => {
       let n = 0;

@@ -1204,6 +1204,28 @@ export class InvalidPermissionOptionError extends Error {
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
+/**
+ * PR 14b fix #1 (codex review round 1): bounded buffering for ACP
+ * `extNotification` frames that arrive on `BridgeClient` before the
+ * matching session has been registered in `byId`. The bridge populates
+ * `byId` only AFTER `connection.newSession` returns, but the child's
+ * MCP discovery runs INSIDE `newSession` and may fire budget events
+ * synchronously before the response makes it back. Without buffering,
+ * those frames hit `resolveEntry → undefined` and are silently dropped
+ * — the very first replay-ring slot for the new session is missing
+ * the events that fired during its creation.
+ *
+ * The triple bound (max sessions × max events per session × TTL)
+ * caps worst-case heap retention even if a malicious / buggy child
+ * spammed `extNotification` for sessionIds that never register:
+ * 64 × 32 × ~200B ≈ 400 KB total. TTL is generous (60s — far longer
+ * than realistic session creation latency of seconds) so brief
+ * scheduling pauses don't cause real warnings to be evicted.
+ */
+const MAX_EARLY_EVENT_SESSIONS = 64;
+const MAX_EARLY_EVENTS_PER_SESSION = 32;
+const EARLY_EVENT_TTL_MS = 60_000;
+
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
@@ -1470,6 +1492,301 @@ class BridgeClient implements Client {
         ? { originatorClientId: entry.activePromptOriginatorClientId }
         : {}),
     });
+  }
+
+  /**
+   * PR 14b fix #1 (codex review round 1): bounded early-event buffer.
+   * Frames are keyed by sessionId; each entry tracks its `expiresAt`
+   * for lazy TTL-based eviction in `bufferEarlyEvent`. Drained by
+   * `drainEarlyEvents` whenever the bridge registers a session with
+   * a matching id. See MAX_EARLY_EVENT_* constants for capacity
+   * bounds.
+   */
+  private readonly earlyEvents = new Map<
+    string,
+    {
+      frames: Array<Omit<BridgeEvent, 'id' | 'v'>>;
+      expiresAt: number;
+    }
+  >();
+
+  /**
+   * PR 14b fix (codex review round 5): tombstone for closed/killed
+   * session ids. Pre-fix, `extNotification` buffered events for any
+   * unknown sessionId — including ids of just-closed sessions whose
+   * dying child fired one last `extNotification` between
+   * `byId.delete(sid)` and the channel actually exiting. If the SAME
+   * id was later re-registered via `session/load` or `session/resume`
+   * within the buffer's 60s TTL, `drainEarlyEvents` would replay
+   * stale prior-session telemetry (false budget warnings, refused
+   * server names from the OLD session) onto the NEW subscriber.
+   *
+   * Tombstone semantics:
+   * - Marked when the bridge removes a sessionId from `byId` (kill
+   *   path, channel.exited handler, closeSession).
+   * - Concurrently purges any in-flight `earlyEvents[id]` so a
+   *   buffered-but-undelivered frame can't leak either.
+   * - `bufferEarlyEvent` rejects tombstoned ids (the dying child's
+   *   late notification just gets dropped).
+   * - `drainEarlyEvents` clears the tombstone — a fresh
+   *   `createSessionEntry` for the same id is the legitimate
+   *   "load/resume of a persisted session id" case, and at that
+   *   point any stale event has already been rejected at buffer time.
+   * - TTL = `EARLY_EVENT_TTL_MS` (60s) — same as the early-event
+   *   buffer, so by the time a tombstone expires there can be no
+   *   stale frame for that id anywhere in the system.
+   */
+  private readonly tombstonedSessionIds = new Map<string, number>();
+
+  /**
+   * PR 14b fix (codex review round 6): allow-list of sessionIds that
+   * are currently being restored via `session/load` /
+   * `session/resume`. Bypasses the tombstone check in
+   * `bufferEarlyEvent` so restore-time guardrail events for a
+   * previously-closed id flow through to the future
+   * `createSessionEntry → drainEarlyEvents` call.
+   *
+   * Pre-fix the round-5 tombstone protected against post-mortem
+   * stale events from dying children (correct), but it ALSO
+   * rejected legitimate restore-time events for the same id
+   * because `markSessionClosed` (60s TTL) is set BEFORE a future
+   * `load` can clear the tombstone via `drainEarlyEvents` (which
+   * only runs AFTER `createSessionEntry`, which only runs AFTER the
+   * ACP `loadSession`/`unstable_resumeSession` returns). The
+   * restored child's MCP discovery firing during that ACP call
+   * window had its budget events silently dropped.
+   *
+   * Bridge factory enters the set before awaiting the ACP restore
+   * call and exits the set on settle (success or failure). Multi-
+   * waiter coalescing on the same id is naturally handled — the
+   * Set is idempotent on add and the cleanup is paired with the
+   * IIFE that does the ACP call (only one such IIFE per id at a
+   * time).
+   */
+  private readonly inFlightRestoreIds = new Set<string>();
+
+  /**
+   * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
+   * method is recognized today — `qwen/notify/session/mcp-budget-event`
+   * — translating the McpClientManager's budget-event payload into a
+   * session-scoped SSE frame. Unknown methods, unknown event kinds,
+   * and missing sessionIds are dropped silently for forward-compat
+   * (a future child can add new notification methods without breaking
+   * this handler; an older daemon can ignore them cleanly).
+   *
+   * Codex review fix #1: when the sessionId IS present but the
+   * `byId`-resolvable entry is not yet registered (the child fired
+   * the event during its own `newSession` handler, before
+   * `connection.newSession` returned to `doSpawn`), buffer the frame
+   * and replay it on `drainEarlyEvents`.
+   */
+  async extNotification(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    if (method !== 'qwen/notify/session/mcp-budget-event') return;
+    const sessionId = params['sessionId'];
+    if (typeof sessionId !== 'string') return;
+    const kind = params['kind'];
+    const type =
+      kind === 'budget_warning'
+        ? 'mcp_budget_warning'
+        : kind === 'refused_batch'
+          ? 'mcp_child_refused_batch'
+          : undefined;
+    if (!type) return;
+    // Strip the routing fields (`v`, `sessionId`, `kind`) from the
+    // outbound `data` payload — the SSE frame already carries `v` at
+    // the envelope level (`EVENT_SCHEMA_VERSION`) and the session id
+    // is implicit from the endpoint, so duplicating them in `data`
+    // would be noise. `kind` is encoded as the frame `type`.
+    const { v: _v, sessionId: _sid, kind: _kind, ...rest } = params;
+    void _v;
+    void _sid;
+    void _kind;
+    const entry = this.resolveEntry(sessionId);
+    const frame: Omit<BridgeEvent, 'id' | 'v'> = {
+      type,
+      data: rest,
+      ...(entry?.activePromptOriginatorClientId
+        ? { originatorClientId: entry.activePromptOriginatorClientId }
+        : {}),
+    };
+    if (entry) {
+      entry.events.publish(frame);
+      return;
+    }
+    // No entry yet — buffer for `drainEarlyEvents`. The bridge calls
+    // `drainEarlyEvents` immediately after `byId.set(sessionId, entry)`
+    // in `createSessionEntry`; if the session never registers (spawn
+    // failure), the entry is GC'd by TTL after EARLY_EVENT_TTL_MS.
+    this.bufferEarlyEvent(sessionId, frame);
+  }
+
+  /**
+   * PR 14b fix #1: enqueue `frame` for `sessionId`. Lazy TTL sweep
+   * runs first so caller doesn't pay for stale entries before
+   * deciding whether the session-cap is reached. New sessionIds
+   * past `MAX_EARLY_EVENT_SESSIONS` are dropped (defense against a
+   * malicious / buggy child fanning out fake sessionIds); same-
+   * sessionId frames past `MAX_EARLY_EVENTS_PER_SESSION` are dropped
+   * to bound per-session memory.
+   */
+  private bufferEarlyEvent(
+    sessionId: string,
+    frame: Omit<BridgeEvent, 'id' | 'v'>,
+  ): void {
+    const now = Date.now();
+    // PR 14b fix (codex round 5): drop frames for ids the bridge has
+    // already marked closed/killed. Sweep + check before any other
+    // work so a malicious / buggy child can't keep appending
+    // post-mortem frames against an old id. Live ids that re-register
+    // (load/resume) clear their tombstone in `drainEarlyEvents`.
+    //
+    // Round 6 amendment: skip the tombstone check for ids currently
+    // being restored. Pre-amendment a `close → load same id` sequence
+    // within 60s lost any restore-time guardrail events because the
+    // tombstone outlived `bufferEarlyEvent` but `drainEarlyEvents`
+    // (which clears it) only runs after the ACP restore returns.
+    this.sweepExpiredTombstones(now);
+    if (
+      this.tombstonedSessionIds.has(sessionId) &&
+      !this.inFlightRestoreIds.has(sessionId)
+    ) {
+      writeStderrLine(
+        `qwen serve: dropping mcp guardrail extNotification ` +
+          `for tombstoned session ${JSON.stringify(sessionId)} ` +
+          `(post-close stale event)`,
+      );
+      return;
+    }
+    this.sweepExpiredEarlyEvents(now);
+    let buf = this.earlyEvents.get(sessionId);
+    if (!buf) {
+      if (this.earlyEvents.size >= MAX_EARLY_EVENT_SESSIONS) {
+        // PR 14b fix (codex round 6): observability. Other drop
+        // sites in this PR all log; the silent return here was the
+        // outlier. Stays at stderr (visible without debug=true)
+        // because hitting this cap means the daemon is under
+        // notification pressure from 64+ concurrent sessions —
+        // worth surfacing.
+        writeStderrLine(
+          `qwen serve: dropping mcp guardrail extNotification — ` +
+            `early-event buffer at MAX_EARLY_EVENT_SESSIONS ` +
+            `(${MAX_EARLY_EVENT_SESSIONS}); possible session-id fanout abuse`,
+        );
+        return;
+      }
+      buf = { frames: [], expiresAt: now + EARLY_EVENT_TTL_MS };
+      this.earlyEvents.set(sessionId, buf);
+    }
+    if (buf.frames.length >= MAX_EARLY_EVENTS_PER_SESSION) {
+      writeStderrLine(
+        `qwen serve: dropping mcp guardrail extNotification ` +
+          `for session ${JSON.stringify(sessionId)} — per-session ` +
+          `cap (${MAX_EARLY_EVENTS_PER_SESSION}) reached`,
+      );
+      return;
+    }
+    buf.frames.push(frame);
+  }
+
+  private sweepExpiredEarlyEvents(now: number): void {
+    for (const [sid, buf] of this.earlyEvents) {
+      if (buf.expiresAt <= now) this.earlyEvents.delete(sid);
+    }
+  }
+
+  private sweepExpiredTombstones(now: number): void {
+    for (const [sid, expiresAt] of this.tombstonedSessionIds) {
+      if (expiresAt <= now) this.tombstonedSessionIds.delete(sid);
+    }
+  }
+
+  /**
+   * PR 14b fix (codex round 5): mark a sessionId as closed so a late
+   * `extNotification` from the dying child can't leak into the
+   * early-event buffer. Bridge factory calls this from every
+   * `byId.delete(sid)` site (kill path, channel.exited handler,
+   * closeSession). Idempotent on already-tombstoned ids — refreshes
+   * the TTL so a recently-killed id stays dead long enough for any
+   * in-flight stale frames to expire.
+   */
+  markSessionClosed(sessionId: string): void {
+    const now = Date.now();
+    // PR 14b fix (codex round 7): bound `tombstonedSessionIds` under
+    // session churn. Pre-fix `sweepExpiredTombstones` was only called
+    // inside `bufferEarlyEvent`; on a daemon that closes/kills many
+    // sessions but rarely receives extNotifications (the common
+    // production pattern when MCP guardrail mode is `off`), the map
+    // grew monotonically and the documented 60s TTL didn't bound
+    // memory. Sweeping at every close is O(map size) but cheap (one
+    // integer compare per entry); under any realistic workload the
+    // map stays small.
+    this.sweepExpiredTombstones(now);
+    this.tombstonedSessionIds.set(sessionId, now + EARLY_EVENT_TTL_MS);
+    // Purge any frames already buffered for this id — they're now
+    // stale by definition (their session is dead).
+    this.earlyEvents.delete(sessionId);
+  }
+
+  /**
+   * PR 14b fix (codex round 6): mark a sessionId as currently being
+   * restored via `session/load` / `session/resume`. While in this set,
+   * `bufferEarlyEvent` accepts frames for the id even if it's
+   * tombstoned — so restore-time guardrail events from the freshly-
+   * restored child reach `drainEarlyEvents` instead of being rejected
+   * by the close-window tombstone.
+   *
+   * Bridge factory calls this BEFORE awaiting the ACP restore call.
+   * `clearRestoreInFlight` is paired in the matching `finally` so a
+   * failed restore doesn't leave a dangling allow-list entry.
+   * Idempotent — safe to call repeatedly during coalesced restores.
+   */
+  markRestoreInFlight(sessionId: string): void {
+    this.inFlightRestoreIds.add(sessionId);
+  }
+
+  /**
+   * PR 14b fix (codex round 6): companion to `markRestoreInFlight`.
+   * Bridge factory calls this when the restore IIFE settles —
+   * after `createSessionEntry` runs (success) or after the ACP
+   * restore call fails (error). After the entry is registered,
+   * `bufferEarlyEvent` is no longer reached for this id (notifications
+   * route through `entry.events.publish`), so the allow-list entry
+   * has no further effect — but cleared anyway to prevent the Set
+   * from growing forever under high restore churn.
+   */
+  clearRestoreInFlight(sessionId: string): void {
+    this.inFlightRestoreIds.delete(sessionId);
+  }
+
+  /**
+   * PR 14b fix #1: drain any frames buffered for `sessionId` onto
+   * `entry.events`. Bridge calls this immediately after
+   * `byId.set(sessionId, entry)` in `createSessionEntry`. The frames
+   * were captured before the entry existed (e.g. MCP discovery during
+   * the child's `newSession` handler), so draining them now lands
+   * them in the replay ring as the FIRST events of this session —
+   * SDK consumers reconnecting with `Last-Event-ID: 0` see them on
+   * their initial subscription.
+   *
+   * Public so the bridge factory can call it directly. Idempotent on
+   * unknown sessionIds.
+   */
+  drainEarlyEvents(sessionId: string, entry: SessionEntry): void {
+    // PR 14b fix (codex round 5): a fresh registration clears any
+    // tombstone for this id — this is the legitimate
+    // "load/resume of a persisted session id" case. Any stale
+    // pre-tombstone frame was already rejected by `bufferEarlyEvent`
+    // above; clearing the tombstone now means subsequent
+    // notifications for this re-attached session (which is now in
+    // `byId`) flow through the normal `entry.events.publish` path.
+    this.tombstonedSessionIds.delete(sessionId);
+    const buf = this.earlyEvents.get(sessionId);
+    if (!buf) return;
+    for (const frame of buf.frames) entry.events.publish(frame);
+    this.earlyEvents.delete(sessionId);
   }
 
   async writeTextFile(
@@ -2219,6 +2536,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             /* bus already closed */
           }
           byId.delete(sid);
+          // PR 14b fix (codex round 5): tombstone the id so any
+          // late `extNotification` from the dying child can't leak
+          // into the early-event buffer for a future load/resume of
+          // the same persisted session id.
+          info.client.markSessionClosed(sid);
           if (defaultEntry === sessEntry) defaultEntry = undefined;
           sessEntry.events.close();
         }
@@ -2656,6 +2978,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    // PR 14b fix #1 (codex review round 1): drain any guardrail
+    // events that fired during this session's `newSession` handler
+    // (before this entry registered) onto the freshly-created
+    // EventBus. Idempotent on unknown sessionIds.
+    ci.client.drainEarlyEvents(entry.sessionId, entry);
     return entry;
   };
 
@@ -2789,6 +3116,15 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       pendingRestoreEvents.set(req.sessionId, restoreEvents);
       ci = await ensureChannel();
       ci.pendingRestoreIds.add(req.sessionId);
+      // PR 14b fix (codex round 6): mark this id as in-flight restore
+      // BEFORE the ACP `loadSession`/`unstable_resumeSession` call.
+      // Restore-time guardrail events arriving on the bridge during
+      // that ACP call hit `bufferEarlyEvent` BEFORE the
+      // post-restore `createSessionEntry → drainEarlyEvents` clears
+      // the (close-window) tombstone, so without this allow-list the
+      // tombstone would silently drop them. Cleared in the matching
+      // `finally` below regardless of success / failure.
+      ci.client.markRestoreInFlight(req.sessionId);
       // Restore is a low-frequency one-shot path, so we register a
       // fresh `channel.exited` listener per call instead of going
       // through `getTransportClosedReject` (which exists to keep
@@ -2922,9 +3258,27 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       };
     })().finally(() => {
       ci?.pendingRestoreIds.delete(req.sessionId);
+      // PR 14b fix (codex round 6): pair with `markRestoreInFlight`.
+      // Once the IIFE settles, either `createSessionEntry` ran
+      // (`drainEarlyEvents` already cleared the tombstone) or the
+      // restore failed (handled below).
+      ci?.client.clearRestoreInFlight(req.sessionId);
       pendingRestoreEvents.delete(req.sessionId);
       if (!registeredEntry) {
         restoreEvents.close();
+        // PR 14b fix (codex round 7): on restore failure, purge any
+        // guardrail events that the child buffered during this
+        // restore window AND re-tombstone the id. Pre-fix the
+        // round-6 allow-list (`markRestoreInFlight`) let
+        // `bufferEarlyEvent` accept frames during the ACP call;
+        // failure here only cleared the allow-list entry, leaving
+        // queued frames in `earlyEvents`. A subsequent successful
+        // `session/load`/`session/resume` for the same id within
+        // 60s would then `drainEarlyEvents` those stale frames into
+        // the new session — exactly the leak round 5's tombstone
+        // was meant to prevent. `markSessionClosed` already does
+        // both: refresh tombstone + delete `earlyEvents[id]`.
+        ci?.client.markSessionClosed(req.sessionId);
       }
     });
 
@@ -3385,6 +3739,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         resolvePending(id, { outcome: { outcome: 'cancelled' } });
       }
       byId.delete(sessionId);
+      // PR 14b fix (codex round 5): tombstone the closed sessionId
+      // so any late `extNotification` from the (now-defunct) child
+      // can't seed the early-event buffer and leak into a future
+      // load/resume of the same persisted id.
+      ci?.client.markSessionClosed(sessionId);
       try {
         entry.events.publish({
           type: 'session_closed',
@@ -4143,6 +4502,12 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
       }
+      // PR 14b fix (codex round 5): tombstone the killed sessionId
+      // so any in-flight `extNotification` from the (about-to-be-
+      // killed) child can't seed the early-event buffer for a
+      // subsequent load/resume of the same persisted id. See the
+      // matching guard in BridgeClient.bufferEarlyEvent.
+      ci?.client.markSessionClosed(sessionId);
       // Resolve any still-pending permission as cancelled (matches the
       // shutdown path) so callers awaiting requestPermission unwind.
       for (const id of Array.from(entry.pendingPermissionIds)) {

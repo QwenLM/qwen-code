@@ -50,6 +50,13 @@ export {
   type DaemonEvent,
   type DaemonEventEnvelope,
   type DaemonKnownEventType,
+  // PR 14b — MCP guardrail push-event types.
+  type DaemonMcpBudgetWarningData,
+  type DaemonMcpBudgetWarningEvent,
+  type DaemonMcpChildRefusedBatchData,
+  type DaemonMcpChildRefusedBatchEvent,
+  type DaemonMcpGuardrailEvent,
+  type DaemonMcpRefusedServer,
   type DaemonMcpDiscoveryState,
   type DaemonMcpServerRuntimeStatus,
   type DaemonMcpTransport,
