@@ -3783,7 +3783,53 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         if (code !== 'ENOENT') throw err;
         // ENOENT — fall through to create.
       }
-      if (action !== 'noop') {
+      if (action === 'created') {
+        // #4297 fold-in 5 (wenshao critical, addresses #3260836305).
+        // Close the TOCTOU window between the `lstat`/`readFile`
+        // checks above and this write by using `'wx'`
+        // (O_WRONLY|O_CREAT|O_EXCL): the open atomically refuses
+        // when ANY inode (regular file, dir, symlink, …) exists at
+        // the target path, so a local attacker can't slip a symlink
+        // between our checks and follow it through here. EEXIST
+        // bubbles up as `WorkspaceInitSymlinkError(kind: 'target')`
+        // so the route still returns a structured 400 instead of a
+        // generic 500 — the most likely cause of an EEXIST after we
+        // already proved ENOENT is a race-created symlink.
+        let fh: import('node:fs/promises').FileHandle;
+        try {
+          fh = await fs.open(target, 'wx');
+        } catch (err) {
+          const code = (err as { code?: unknown } | null | undefined)?.code;
+          if (code === 'EEXIST') {
+            throw new WorkspaceInitSymlinkError(
+              target,
+              'target',
+              `Workspace context file ${JSON.stringify(target)} appeared ` +
+                `between our absence check and the create — refusing to ` +
+                `proceed (a regular file or symlink was just placed at the ` +
+                `target path, and following it could escape the workspace).`,
+            );
+          }
+          throw err;
+        }
+        try {
+          await fh.writeFile('', 'utf8');
+        } finally {
+          await fh.close();
+        }
+      } else if (action === 'overwrote') {
+        // FIXME (#4297 fold-in 5, addresses #3260836305): the
+        // `force: true` overwrite path still has a TOCTOU window —
+        // the symlink check above is point-in-time and `writeFile`
+        // here will follow a race-substituted symlink. The original
+        // FIXME at the top of `initWorkspace` plans migration to
+        // `WorkspaceFileSystem` (PR 18 boundary), which will close
+        // this via `O_NOFOLLOW`-aware open. Until then, the
+        // documented trust posture (daemon binds to an
+        // operator-chosen workspace, no cross-user write access in
+        // the Stage 1 deployment shape) accepts this gap. The
+        // `'wx'`-based create path above is the more common case
+        // and is now race-safe.
         await fs.writeFile(target, '', 'utf8');
       }
       broadcastWorkspaceEvent({

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -5041,6 +5041,67 @@ describe('createHttpAcpBridge', () => {
         expect((err as Error).message).toMatch(/is a symlink/);
         // External file untouched.
         expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
+      } finally {
+        await fsp.rm(escapeTarget, { recursive: true, force: true });
+      }
+    });
+
+    it('atomic create refuses an EEXIST race after lstat passed (#4297 fold-in 5 TOCTOU)', async () => {
+      // The PR 17 `lstat` check is point-in-time: a local attacker
+      // with workspace write access could replace the target with a
+      // symlink between the check and the write, and the previous
+      // `fs.writeFile` would have followed the link out of the
+      // workspace. The fold-in 5 fix uses `fs.open(target, 'wx')` —
+      // O_WRONLY|O_CREAT|O_EXCL — which atomically refuses any
+      // pre-existing inode at the path.
+      //
+      // This test simulates the race by pre-creating a symlink AND
+      // stubbing `fs.lstat` to lie about it (return a regular-file
+      // shape). Without the `'wx'` guard the bridge would proceed to
+      // `writeFile` and follow the symlink. With it, the open call
+      // fails with EEXIST and we throw `WorkspaceInitSymlinkError`.
+      const escapeTarget = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-init-toctou-'),
+      );
+      try {
+        const externalFile = path.join(escapeTarget, 'EXTERNAL.md');
+        await fsp.writeFile(externalFile, '# external', 'utf8');
+        const targetPath = path.join(tmpWs, 'QWEN.md');
+        await fsp.symlink(externalFile, targetPath);
+        // Pretend `lstat` reports a regular file (the race window
+        // where the symlink was placed AFTER our stat). The 'wx'
+        // open should still atomically refuse.
+        const fakeStats = {
+          isSymbolicLink: () => false,
+          isFile: () => true,
+          isDirectory: () => false,
+          isCharacterDevice: () => false,
+          isBlockDevice: () => false,
+          isFIFO: () => false,
+          isSocket: () => false,
+        } as unknown as import('node:fs').Stats;
+        const lstatSpy = vi
+          .spyOn(fsp, 'lstat')
+          .mockResolvedValueOnce(fakeStats);
+        // ALSO stub readFile so the existence check above doesn't
+        // short-circuit into the conflict path; we want the create
+        // branch to attempt `fs.open(target, 'wx')`.
+        const readFileSpy = vi
+          .spyOn(fsp, 'readFile')
+          .mockRejectedValueOnce(
+            Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+          );
+        try {
+          const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+          const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+          expect(err).toBeInstanceOf(WorkspaceInitSymlinkError);
+          expect((err as WorkspaceInitSymlinkError).kind).toBe('target');
+          // External file must not have been touched.
+          expect(await fsp.readFile(externalFile, 'utf8')).toBe('# external');
+        } finally {
+          lstatSpy.mockRestore();
+          readFileSpy.mockRestore();
+        }
       } finally {
         await fsp.rm(escapeTarget, { recursive: true, force: true });
       }
