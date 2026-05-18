@@ -224,8 +224,10 @@ describe('installation scripts', () => {
     expect(script).toContain('Uninstall:');
     expect(script).toContain('uninstall-qwen-standalone.ps1');
     expect(script).toContain('VERSION_POINTER_VALUE');
+    expect(script).toContain('call :ValidateSemverValue');
+    expect(script).toContain('RESOLVED_VERSION_PATH=v!VERSION_POINTER_VALUE!');
     expect(script).toContain('QWEN_VERSION_VALUE');
-    expect(script).toContain("Write-Output ('v' + $value)");
+    expect(script).toContain(':ValidateSemverValue');
     expect(script).not.toContain(
       'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*$"',
     );
