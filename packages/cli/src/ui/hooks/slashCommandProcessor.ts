@@ -649,7 +649,14 @@ export const useSlashCommandProcessor = (
                   };
                 case 'message':
                   if (result.messageType === 'info') {
-                    if (resolvedCommandPath[0] !== historyCommand.name) {
+                    // Only suppress info messages from /history expand-now
+                    // (which self-manages UI via loadHistory + refreshStatic).
+                    // Other subcommands like collapse-on-resume need their
+                    // confirmation messages shown to the user.
+                    const isSelfManaged =
+                      resolvedCommandPath[0] === historyCommand.name &&
+                      resolvedCommandPath[1] === 'expand-now';
+                    if (!isSelfManaged) {
                       addMessage({
                         type: MessageType.INFO,
                         content: result.content,

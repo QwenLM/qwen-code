@@ -83,17 +83,16 @@ export function useResumeCommand(
     remount,
   } = options;
 
-  const hasHistoryManager = !!historyManager;
   const { addItem, clearItems, loadHistory } = historyManager;
   const handleResume = useCallback(
     async (sessionId: string) => {
-      if (!config || !hasHistoryManager || !startNewSession) {
+      if (!config || !startNewSession) {
         return;
       }
 
       if (hasBlockingBackgroundWork(config)) {
         closeResumeDialog();
-        addItem?.(
+        addItem(
           {
             type: MessageType.ERROR,
             text: BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
@@ -131,8 +130,8 @@ export function useResumeCommand(
         collapseOnResume,
       );
 
-      clearItems?.();
-      loadHistory?.(uiHistoryItems);
+      clearItems();
+      loadHistory(uiHistoryItems);
 
       // Update session history core.
       resetBackgroundStateForSessionSwitch(config);
@@ -158,7 +157,7 @@ export function useResumeCommand(
 
       const recovered = await config.loadPausedBackgroundAgents(sessionId);
       if (recovered.length > 0) {
-        addItem?.(
+        addItem(
           {
             type: MessageType.INFO,
             text: config
@@ -173,12 +172,11 @@ export function useResumeCommand(
       // additionalContext can be injected into the resumed model context.
 
       // Refresh terminal UI.
-      remount?.();
+      remount();
     },
     [
       closeResumeDialog,
       config,
-      hasHistoryManager,
       addItem,
       clearItems,
       loadHistory,

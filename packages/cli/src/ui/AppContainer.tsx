@@ -2351,9 +2351,13 @@ export const AppContainer = (props: AppContainerProps) => {
 
           geminiClient.truncateHistory(apiTruncateIndex);
 
-          // Strip suppressOnRestore flags so rewound items remain visible
+          // Strip suppressOnRestore flags and filter out collapse-summary items
+          // so rewound items remain visible without stale summary text
           const truncatedUi = originalHistory
-            .filter((h) => h.id < userItem.id)
+            .filter(
+              (h) =>
+                h.id < userItem.id && h.display?.kind !== 'collapse-summary',
+            )
             .map(stripSuppressOnRestore);
           historyManager.loadHistory(truncatedUi);
 

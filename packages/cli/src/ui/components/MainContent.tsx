@@ -170,7 +170,7 @@ export const MainContent = () => {
   // multiple groups are merged, the first group's summary wins (see below).
   const summaryByCallId = useMemo(() => {
     const map = new Map<string, string>();
-    for (const item of uiState.history) {
+    for (const item of visibleHistory) {
       if (item.type === 'tool_use_summary') {
         for (const callId of item.precedingToolUseIds) {
           // First summary wins — earlier summaries represent the opening
@@ -182,7 +182,7 @@ export const MainContent = () => {
       }
     }
     return map;
-  }, [uiState.history]);
+  }, [visibleHistory]);
 
   const isSummaryAbsorbed = useCallback(
     (item: HistoryItem | HistoryItemWithoutId): boolean => {
