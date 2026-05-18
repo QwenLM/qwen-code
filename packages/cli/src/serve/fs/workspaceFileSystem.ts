@@ -421,6 +421,22 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           buf =
             read.bytesRead === toRead ? buf : buf.subarray(0, read.bytesRead);
         }
+        // Bind the returned bytes to a stable on-disk snapshot: an
+        // in-place rewrite (size unchanged, content changed) or
+        // append/truncate between the pre-stat and read would
+        // otherwise leave us with a buffer that no longer matches
+        // the file. Mirror `readStableRegularFileBuffer` and require
+        // ino+size+mtime to be unchanged on the same fd before
+        // emitting the response — clients use the full-window hash
+        // as an optimistic-concurrency token, so a stale snapshot
+        // must surface as a retryable `hash_mismatch`.
+        const afterRead = await fh.stat();
+        assertSameFile(st, afterRead, p as string, 'read');
+        if (afterRead.size !== st.size || afterRead.mtimeMs !== st.mtimeMs) {
+          throw new FsError('hash_mismatch', `file changed during read: ${p}`, {
+            hint: 'retry after re-reading the latest file hash',
+          });
+        }
       } finally {
         await fh.close();
       }
@@ -1368,6 +1384,17 @@ async function atomicWriteTextResolvedFile(
   const target = input.target as string;
   const parent = path.dirname(target);
   const parentStat = await fsp.lstat(parent);
+  // Defense-in-depth against a parent-symlink swap. A full fix
+  // requires parent-fd / `openat`-style publish (Node stdlib does
+  // not expose this) — tracked alongside the fd-based read
+  // follow-up referenced by `assertInodeStableAfterRead`. This
+  // guard at least surfaces an obviously-swapped parent before
+  // we open the temp file or rename through it.
+  if (parentStat.isSymbolicLink()) {
+    throw new FsError('symlink_escape', `parent path is a symlink: ${parent}`, {
+      hint: 're-resolve the target after detecting parent-symlink swaps',
+    });
+  }
   if (!parentStat.isDirectory()) {
     throw new FsError(
       'parse_error',
@@ -1402,7 +1429,11 @@ async function atomicWriteTextResolvedFile(
     await tempHandle.close();
     tempHandle = undefined;
     await assertTempPathMatchesStat(tmpPath, tempStat);
-    await renameWithRetryLocal(tmpPath, target, 3, 50);
+    if (input.mode === 'create') {
+      await publishCreateNoClobber(tmpPath, target);
+    } else {
+      await renameWithRetryLocal(tmpPath, target, 3, 50);
+    }
     tempLive = false;
     await fsyncParentDirBestEffort(parent);
     return encoded;
@@ -1641,6 +1672,38 @@ async function assertTempPathMatchesStat(
     );
   }
   assertSameFile(expected, st, tmpPath, 'write');
+}
+
+// POSIX `rename(src, dest)` overwrites an existing regular file,
+// which would silently break the public `mode: 'create'` contract
+// if an external process raced us between the absence check and
+// the publish. `link()` is the portable no-clobber publish: it
+// returns `EEXIST` atomically when `dest` already exists, on both
+// POSIX filesystems and NTFS. The early `assertCreateTargetAbsent`
+// stays in place to give friendlier `symlink_escape` /
+// `file_already_exists` errors on the non-racing path; this is the
+// hard guarantee that closes the race window.
+async function publishCreateNoClobber(
+  tmpPath: string,
+  target: string,
+): Promise<void> {
+  try {
+    await fsp.link(tmpPath, target);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'EEXIST') {
+      throw new FsError(
+        'file_already_exists',
+        `file already exists: ${target}`,
+      );
+    }
+    throw err;
+  }
+  // After link(), tmp and target name the same inode. Drop the
+  // tmp name best-effort — if unlink fails the publish has still
+  // succeeded, so we must not bubble the error and confuse the
+  // caller into thinking the create failed.
+  await fsp.unlink(tmpPath).catch(() => undefined);
 }
 
 async function renameWithRetryLocal(
