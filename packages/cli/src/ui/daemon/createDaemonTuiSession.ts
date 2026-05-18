@@ -24,6 +24,8 @@ export async function createDaemonTuiSession(
     token: options.token ?? process.env['QWEN_SERVER_TOKEN'],
   });
 
+  // workspaceCwd is interpreted by the daemon/runtime host. For remote-daemon
+  // testing it must be the remote workspace path, not the local terminal cwd.
   if (options.sessionId) {
     return await DaemonSessionClient.load(client, options.sessionId, {
       workspaceCwd: options.workspaceCwd,

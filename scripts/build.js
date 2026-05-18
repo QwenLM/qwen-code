@@ -38,9 +38,9 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 // 2. web-templates (embeddable web templates - used by cli)
 // 3. channel-base (base channel infrastructure - used by channel adapters and cli)
 // 4. channel adapters (depend on channel-base)
-// 5. cli (depends on core, web-templates, channel packages)
-// 6. webui (shared UI components - used by vscode companion)
-// 7. sdk (no internal dependencies)
+// 5. sdk (daemon client protocol helpers consumed by daemon-backed adapters)
+// 6. cli (depends on core, web-templates, channel packages, sdk)
+// 7. webui (shared UI components - used by vscode companion)
 // 8. vscode-ide-companion (depends on webui)
 const buildOrder = [
   'packages/core',
@@ -50,9 +50,9 @@ const buildOrder = [
   'packages/channels/weixin',
   'packages/channels/dingtalk',
   'packages/channels/plugin-example',
+  'packages/sdk-typescript',
   'packages/cli',
   'packages/webui',
-  'packages/sdk-typescript',
   'packages/vscode-ide-companion',
 ];
 

@@ -17,6 +17,7 @@ export interface DaemonTuiRuntimeOptions {
 }
 
 function isEnabled(value: string | undefined): boolean {
+  // Accept the common hidden-flag/env conventions used by local smoke scripts.
   return value === '1' || value === 'true' || value === 'yes';
 }
 
@@ -36,6 +37,9 @@ export function getDaemonTuiRuntimeOptions(
     sessionId: process.env['QWEN_DAEMON_SESSION_ID'],
     sessionScope: readSessionScope(),
     model: process.env['QWEN_DAEMON_MODEL'] ?? config.getModel(),
+    // For local-local runs this falls back to the current target dir. For
+    // local-TUI-to-remote-daemon runs, callers must pass the daemon-visible
+    // workspace path explicitly.
     workspaceCwd: process.env['QWEN_DAEMON_WORKSPACE'] ?? config.getTargetDir(),
   };
 }

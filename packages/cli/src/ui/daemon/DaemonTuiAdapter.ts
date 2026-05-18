@@ -17,6 +17,17 @@ import {
   type IndividualToolCallDisplay,
 } from '../types.js';
 
+/**
+ * Daemon-native TUI adapter.
+ *
+ * This layer consumes typed daemon SSE events and projects them into the
+ * existing Ink history/tool view model. It intentionally does not proxy PTY
+ * bytes; a PTY proxy can be useful for compatibility/debugging, but the TUI
+ * migration target is the shared typed-event/reducer path.
+ *
+ * TODO(#3803): replace this draft-local reducer with the shared daemon
+ * client/protocol reducer once that package boundary is stabilized.
+ */
 export interface DaemonTuiEvent {
   id?: number;
   v: 1;

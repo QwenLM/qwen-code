@@ -43,8 +43,17 @@ import {
 } from './createDaemonTuiSession.js';
 import type { DaemonTuiRuntimeOptions } from './daemonTuiOptions.js';
 
+/**
+ * Daemon-backed implementation of the useGeminiStream contract.
+ *
+ * The hook is deliberately a renderer adapter: prompts go through
+ * DaemonSessionClient, typed daemon events are reduced by DaemonTuiAdapter, and
+ * the resulting view items are rendered by the normal TUI. It must not grow a
+ * PTY proxy or a second runtime path.
+ */
 type GeminiStreamResult = ReturnType<typeof useGeminiStream>;
 type SubmitQuery = GeminiStreamResult['submitQuery'];
+type MergeableTextHistoryItem = Extract<HistoryItemWithoutId, { text: string }>;
 
 interface QueuedSubmission {
   query: PartListUnion;
@@ -73,6 +82,30 @@ function partListToText(parts: PartListUnion): string {
   return list.map((part) => stringifyPart(part)).join('');
 }
 
+function isMergeableTextItem(
+  item: HistoryItemWithoutId,
+): item is MergeableTextHistoryItem {
+  return (
+    item.type === 'gemini' ||
+    item.type === 'gemini_content' ||
+    item.type === 'gemini_thought' ||
+    item.type === 'gemini_thought_content'
+  );
+}
+
+function canMergeTextItemTypes(
+  a: MergeableTextHistoryItem['type'],
+  b: MergeableTextHistoryItem['type'],
+): boolean {
+  const assistantText =
+    (a === 'gemini' || a === 'gemini_content') &&
+    (b === 'gemini' || b === 'gemini_content');
+  const thoughtText =
+    (a === 'gemini_thought' || a === 'gemini_thought_content') &&
+    (b === 'gemini_thought' || b === 'gemini_thought_content');
+  return assistantText || thoughtText;
+}
+
 function mergePendingItem(
   pendingItems: HistoryItemWithoutId[],
   incoming: HistoryItemWithoutId,
@@ -80,21 +113,9 @@ function mergePendingItem(
   const last = pendingItems[pendingItems.length - 1];
   if (
     last &&
-    (last.type === 'gemini' || last.type === 'gemini_content') &&
-    (incoming.type === 'gemini' || incoming.type === 'gemini_content')
-  ) {
-    return [
-      ...pendingItems.slice(0, -1),
-      { type: last.type, text: `${last.text}${incoming.text}` },
-    ];
-  }
-
-  if (
-    last &&
-    (last.type === 'gemini_thought' ||
-      last.type === 'gemini_thought_content') &&
-    (incoming.type === 'gemini_thought' ||
-      incoming.type === 'gemini_thought_content')
+    isMergeableTextItem(last) &&
+    isMergeableTextItem(incoming) &&
+    canMergeTextItemTypes(last.type, incoming.type)
   ) {
     return [
       ...pendingItems.slice(0, -1),
@@ -247,6 +268,9 @@ export const useDaemonTuiStream = (
           );
           return;
         case 'permission_request':
+          // TODO(#3803): wire this to the native permission dialog before this
+          // draft can graduate. Showing a warning keeps the unsupported
+          // security-sensitive path visible during daemon-native renderer tests.
           setPending((current) => [
             ...current,
             {
@@ -258,6 +282,8 @@ export const useDaemonTuiStream = (
           ]);
           return;
         case 'permission_resolved':
+          // TODO(#3803): once native daemon permission UI is wired, update the
+          // active dialog/tool group instead of appending an informational row.
           setPending((current) => [
             ...current,
             {
@@ -388,6 +414,8 @@ export const useDaemonTuiStream = (
           if (slashCommandResult.type === 'submit_prompt') {
             query = slashCommandResult.content;
           } else {
+            // TODO(#3803): slash commands that schedule local tools need
+            // daemon control-plane routes or explicit client-capability RPCs.
             addItem(
               {
                 type: MessageType.WARNING,

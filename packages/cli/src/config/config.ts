@@ -1140,6 +1140,9 @@ export async function parseArguments(): Promise<CliArgs> {
     if (typeof result['daemonModel'] === 'string') {
       process.env['QWEN_DAEMON_MODEL'] = result['daemonModel'];
     }
+    // Hidden draft path: bridge CLI flags into the daemon-native TUI adapter.
+    // For now the normal local TUI flag only exercises local-local daemon use;
+    // remote daemon smoke tests should pass QWEN_DAEMON_WORKSPACE explicitly.
     process.env['QWEN_DAEMON_WORKSPACE'] = process.cwd();
   }
 

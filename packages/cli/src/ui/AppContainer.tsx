@@ -1168,7 +1168,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
-  const useActiveGeminiStream = daemonTuiEnabled
+  const useStreamBackend = daemonTuiEnabled
     ? useDaemonTuiStream
     : useGeminiStream;
 
@@ -1186,7 +1186,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
-  } = useActiveGeminiStream(
+  } = useStreamBackend(
     config.getGeminiClient(),
     historyManager.history,
     historyManager.addItem,
@@ -1896,6 +1896,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Only trigger when transitioning from Responding to Idle (and enabled)
     // Skip when dialogs are active, in plan mode, elicitation pending, or last response was error
+    // TODO(#3803): re-enable daemon-backed follow-up suggestions once the
+    // daemon stream exposes the token/count state this local helper expects.
     if (
       followupSuggestionsEnabled &&
       !daemonTuiEnabled &&
