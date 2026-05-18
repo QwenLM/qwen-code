@@ -734,6 +734,80 @@ describe('workspace agents routes', () => {
     }
   });
 
+  it('DELETE /workspace/agents/:agentType?scope=workspace removes only the project shadow', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'scoped-delete',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a scoped-delete project agent',
+      scope: 'workspace',
+    });
+    await request(app).post('/workspace/agents').send({
+      name: 'scoped-delete',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a scoped-delete user agent',
+      scope: 'global',
+    });
+
+    const res = await request(app).delete(
+      '/workspace/agents/scoped-delete?scope=workspace',
+    );
+    expect(res.status).toBe(204);
+
+    // Project file gone; user file still exists.
+    await expect(
+      fs.access(path.join(workspace, QWEN_DIR, 'agents', 'scoped-delete.md')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fs.access(path.join(globalDir, 'agents', 'scoped-delete.md')),
+    ).resolves.toBeUndefined();
+
+    // Exactly one agent_changed event, at project level.
+    const events = (bridge as unknown as { events: RecordedEvent[] }).events;
+    const deleteEvents = events.filter(
+      (e) =>
+        e.type === 'agent_changed' &&
+        (e.data as { change: string }).change === 'deleted',
+    );
+    expect(deleteEvents).toHaveLength(1);
+    expect((deleteEvents[0]?.data as { level: string }).level).toBe('project');
+  });
+
+  it('POST /workspace/agents/:agentType?scope=global updates the user shadow', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'scoped-update',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a scoped-update project agent',
+      scope: 'workspace',
+    });
+    await request(app).post('/workspace/agents').send({
+      name: 'scoped-update',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a scoped-update user agent',
+      scope: 'global',
+    });
+
+    const res = await request(app)
+      .post('/workspace/agents/scoped-update?scope=global')
+      .send({ description: 'NEW user-level description (longer than ten)' });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(true);
+    expect(res.body.agent.level).toBe('user');
+    expect(res.body.agent.description).toBe(
+      'NEW user-level description (longer than ten)',
+    );
+
+    // Project-level definition is untouched.
+    const projectFile = await fs.readFile(
+      path.join(workspace, QWEN_DIR, 'agents', 'scoped-update.md'),
+      'utf8',
+    );
+    expect(projectFile).toContain('a description longer than ten chars');
+  });
+
   it('rejects 422 when create has whitespace-only systemPrompt', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });

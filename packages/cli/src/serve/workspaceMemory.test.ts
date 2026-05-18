@@ -355,6 +355,34 @@ describe('workspace memory routes', () => {
       expect(events).toHaveLength(0);
     });
 
+    it('returns 413 memory_file_too_large when existing QWEN.md exceeds the 16 MB cap', async () => {
+      // Write a 17 MB existing QWEN.md, then attempt append. The
+      // helper's pre-read `fs.stat` must refuse with the typed
+      // error → the route maps it to 413.
+      const filePath = path.join(workspace, 'QWEN.md');
+      // 17 MB of `x` characters. Bypass the helper's mutex / cap by
+      // writing directly via fs (simulating an externally-grown file
+      // outside the daemon's control).
+      const big = 'x'.repeat(17 * 1024 * 1024);
+      await fs.writeFile(filePath, big, 'utf8');
+
+      const bridge = buildBridgeStub();
+      const app = buildApp({ bridge, boundWorkspace: workspace });
+      const res = await request(app)
+        .post('/workspace/memory')
+        .send({ scope: 'workspace', mode: 'append', content: '- entry' });
+
+      expect(res.status).toBe(413);
+      expect(res.body.code).toBe('memory_file_too_large');
+      expect(res.body.scope).toBe('workspace');
+      expect(res.body.mode).toBe('append');
+      expect(res.body.bytes).toBe(17 * 1024 * 1024);
+      expect(res.body.limit).toBe(16 * 1024 * 1024);
+      // Default response: no filePath, no path-embedding error message.
+      expect(res.body.filePath).toBeUndefined();
+      expect(res.body.error).not.toContain(filePath);
+    });
+
     it('omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on', async () => {
       // Default: production response carries no `errorMessage` or
       // `filePath` fields — operators read the daemon stderr log

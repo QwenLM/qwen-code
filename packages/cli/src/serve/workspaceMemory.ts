@@ -10,10 +10,12 @@ import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   Storage,
   WorkspaceMemoryFileTooLargeError,
+  WorkspaceMemoryWriteTimeoutError,
   getAllGeminiMdFilenames,
   writeWorkspaceContextFile,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { isServeDebugMode } from './debugMode.js';
 import type { HttpAcpBridge } from './httpAcpBridge.js';
 import {
   createIdleWorkspaceMemoryStatus,
@@ -75,22 +77,6 @@ export interface WorkspaceMemoryRouteDeps {
 }
 
 const MAX_MEMORY_CONTENT_BYTES = 1024 * 1024;
-
-/**
- * Mirrors `isServeDebugLoggingEnabled` in `httpAcpBridge.ts`. When the
- * env var is set (and not a falsy literal), error responses include
- * `errorMessage` + `filePath` for triage; without it those fields
- * are omitted to avoid leaking absolute filesystem paths in the
- * response body. Inlined rather than exported across files because
- * the helper is two lines and the bridge module is the local owner
- * of the env-var contract — copying the predicate keeps the route
- * self-contained at trivial duplication cost.
- */
-function debugMode(): boolean {
-  const value = process.env['QWEN_SERVE_DEBUG'];
-  if (!value) return false;
-  return !['0', 'false', 'off', 'no'].includes(value.trim().toLowerCase());
-}
 
 /** Mount the two memory routes on the supplied Express app. */
 export function mountWorkspaceMemoryRoutes(
@@ -233,19 +219,45 @@ export function mountWorkspaceMemoryRoutes(
         // file size apart from generic file errors. The helper
         // refuses to pull >16 MB into memory on append; clients
         // either trim the file or switch to mode=replace.
+        if (err instanceof WorkspaceMemoryWriteTimeoutError) {
+          writeStderrLine(
+            `qwen serve: POST /workspace/memory timeout — file lock at ` +
+              `${err.filePath} did not acquire within ${err.timeoutMs}ms ` +
+              `(stalled FS / OneDrive / NFS)`,
+          );
+          const debug = isServeDebugMode();
+          res.status(500).json({
+            error: debug
+              ? err.message
+              : 'Workspace memory write timed out waiting for the per-file lock. Retry or restart the daemon.',
+            code: 'memory_write_timeout',
+            scope,
+            mode,
+            timeoutMs: err.timeoutMs,
+            ...(debug ? { filePath: err.filePath } : {}),
+          });
+          return;
+        }
         if (err instanceof WorkspaceMemoryFileTooLargeError) {
           writeStderrLine(
             `qwen serve: POST /workspace/memory refused — existing file ` +
               `${err.filePath} is ${err.bytes} bytes (cap ${err.limit})`,
           );
-          // Path disclosure: `filePath` is gated behind QWEN_SERVE_DEBUG
-          // so production responses don't include `/Users/<x>/.qwen/...`
-          // in the body. Operators triaging an issue locally enable the
-          // debug toggle to get the path back; in default mode SDK
-          // callers branch on `code` + `bytes` / `limit` instead.
-          const debug = debugMode();
+          // Path disclosure: both `error` (which embeds the absolute
+          // file path in the constructor message — see
+          // `WorkspaceMemoryFileTooLargeError`) and `filePath` are
+          // gated behind QWEN_SERVE_DEBUG so production responses
+          // don't include `/Users/<x>/.qwen/...` in the body.
+          // Operators triaging an issue locally enable the debug
+          // toggle to get the full text; in default mode SDK
+          // callers branch on `code` + `bytes` / `limit` instead
+          // (the structured discriminator survives without the
+          // disclosure).
+          const debug = isServeDebugMode();
           res.status(413).json({
-            error: err.message,
+            error: debug
+              ? err.message
+              : 'Existing memory file exceeds the safe-append cap. Trim the file or POST with mode=replace.',
             code: 'memory_file_too_large',
             scope,
             mode,
@@ -273,7 +285,7 @@ export function mountWorkspaceMemoryRoutes(
           err && typeof err === 'object' && 'code' in err
             ? (err as { code?: unknown }).code
             : undefined;
-        const debug = debugMode();
+        const debug = isServeDebugMode();
         res.status(500).json({
           error: 'Failed to write workspace memory',
           code: 'file_error',

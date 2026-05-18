@@ -17,6 +17,7 @@ import {
   type SubagentLevel,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { isServeDebugMode } from './debugMode.js';
 import { InvalidClientIdError, type HttpAcpBridge } from './httpAcpBridge.js';
 
 /**
@@ -39,6 +40,28 @@ const AGENT_TYPE_PATTERN = /^[\p{L}\p{N}_-]+$/u;
  * to GET / DELETE through the URL.
  */
 const AGENT_TYPE_MAX_LENGTH = 64;
+
+/**
+ * Minimum agent-name length. Matches `SubagentValidator.validateName`
+ * (which requires `trimmedName.length >= 2`). Keeping the same lower
+ * bound at the route layer surfaces the constraint as a 422 instead
+ * of letting core throw `VALIDATION_ERROR` (which the route also
+ * 422s, but with a less specific message).
+ */
+const AGENT_TYPE_MIN_LENGTH = 2;
+
+/**
+ * Per-field size caps for create + update payloads. The Express body
+ * parser caps the whole request at 10 MB but no per-field guard
+ * existed, so a single payload could land a multi-megabyte
+ * `systemPrompt` on disk and balloon every `GET /workspace/agents`
+ * snapshot in memory. 256 KB is far above any realistic
+ * user-authored prompt while keeping list-response cost bounded.
+ */
+const MAX_DESCRIPTION_BYTES = 256 * 1024;
+const MAX_SYSTEM_PROMPT_BYTES = 256 * 1024;
+const MAX_TOOLS_ENTRIES = 256;
+const MAX_TOOL_ID_LENGTH = 256;
 import {
   STATUS_SCHEMA_VERSION,
   type ServeAgentLevel,
@@ -194,8 +217,21 @@ export function mountWorkspaceAgentsRoutes(
             return;
           }
           if (err.code === SubagentErrorCode.FILE_ERROR) {
+            // `SubagentError(FILE_ERROR)` wraps Node fs error
+            // messages like `"ENOENT: no such file or directory, open
+            // '/Users/<x>/.qwen/agents/foo.md'"` — leaking the
+            // operator's absolute filesystem layout through an
+            // authenticated route response. Gate the message behind
+            // `QWEN_SERVE_DEBUG` so default production responses
+            // carry only the generic envelope; operators triaging
+            // locally enable the toggle to get the path back.
+            // Mirrors the workspaceMemory route's `file_error`
+            // disclosure posture.
+            const debug = isServeDebugMode();
             res.status(500).json({
-              error: err.message,
+              error: debug
+                ? err.message
+                : 'Failed to write workspace agent file',
               code: 'file_error',
               name: err.subagentName ?? config.name,
             });
@@ -365,8 +401,15 @@ export function mountWorkspaceAgentsRoutes(
             return;
           }
           if (err.code === SubagentErrorCode.FILE_ERROR) {
+            // Same path-disclosure gating as the create-path
+            // FILE_ERROR handler above. Default response is the
+            // generic envelope; `QWEN_SERVE_DEBUG` re-enables the
+            // raw `err.message` for local triage.
+            const debug = isServeDebugMode();
             res.status(500).json({
-              error: err.message,
+              error: debug
+                ? err.message
+                : 'Failed to write workspace agent file',
               code: 'file_error',
               name: err.subagentName ?? agentType,
             });
@@ -744,6 +787,26 @@ function parseAgentConfig(
   // Better to normalize at the boundary than carry untrimmed names
   // through validation + serialization.
   const name = rawName.trim();
+  // Apply the same regex + length contract `validateAgentType` uses
+  // for `:agentType` URL parameters. Without this, a client could
+  // `POST /workspace/agents` with `name: "my/agent"` or
+  // `name: "a".repeat(100)` — names that the route's regex would
+  // reject if echoed back through GET / DELETE, plus the core's
+  // `SubagentValidator` would reject with a different error shape.
+  // Failing at the body-validation boundary keeps the round-trip
+  // (POST → GET → DELETE) coherent under one error shape.
+  if (
+    name.length < AGENT_TYPE_MIN_LENGTH ||
+    name.length > AGENT_TYPE_MAX_LENGTH ||
+    !AGENT_TYPE_PATTERN.test(name)
+  ) {
+    res.status(422).json({
+      error: `\`name\` must be ${AGENT_TYPE_MIN_LENGTH}-${AGENT_TYPE_MAX_LENGTH} characters of letters, numbers, hyphens, or underscores`,
+      code: 'invalid_config',
+      name,
+    });
+    return undefined;
+  }
   // Reject names that shadow a built-in subagent. Without this check a
   // client could `POST /workspace/agents { name: "general-purpose" }`
   // and write a project-level file at `<workspace>/.qwen/agents/
@@ -770,6 +833,13 @@ function parseAgentConfig(
     });
     return undefined;
   }
+  if (Buffer.byteLength(description, 'utf8') > MAX_DESCRIPTION_BYTES) {
+    res.status(422).json({
+      error: `\`description\` exceeds the ${MAX_DESCRIPTION_BYTES}-byte limit`,
+      code: 'invalid_config',
+    });
+    return undefined;
+  }
   const systemPrompt = body['systemPrompt'];
   if (typeof systemPrompt !== 'string' || systemPrompt.trim().length === 0) {
     // Reject whitespace-only systemPrompts to match the description
@@ -781,6 +851,13 @@ function parseAgentConfig(
     res.status(422).json({
       error:
         '`systemPrompt` is required and must be a non-empty string (whitespace only is rejected)',
+      code: 'invalid_config',
+    });
+    return undefined;
+  }
+  if (Buffer.byteLength(systemPrompt, 'utf8') > MAX_SYSTEM_PROMPT_BYTES) {
+    res.status(422).json({
+      error: `\`systemPrompt\` exceeds the ${MAX_SYSTEM_PROMPT_BYTES}-byte limit`,
       code: 'invalid_config',
     });
     return undefined;
@@ -864,6 +941,13 @@ function parseAgentUpdates(
       });
       return undefined;
     }
+    if (Buffer.byteLength(value, 'utf8') > MAX_DESCRIPTION_BYTES) {
+      res.status(422).json({
+        error: `\`description\` exceeds the ${MAX_DESCRIPTION_BYTES}-byte limit`,
+        code: 'invalid_config',
+      });
+      return undefined;
+    }
     updates.description = value;
   }
   if ('systemPrompt' in body) {
@@ -876,6 +960,13 @@ function parseAgentUpdates(
       res.status(422).json({
         error:
           '`systemPrompt` must be a non-empty string (whitespace only is rejected) when provided',
+        code: 'invalid_config',
+      });
+      return undefined;
+    }
+    if (Buffer.byteLength(value, 'utf8') > MAX_SYSTEM_PROMPT_BYTES) {
+      res.status(422).json({
+        error: `\`systemPrompt\` exceeds the ${MAX_SYSTEM_PROMPT_BYTES}-byte limit`,
         code: 'invalid_config',
       });
       return undefined;
@@ -945,6 +1036,20 @@ function parseStringArray(
   if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
     res.status(422).json({
       error: `\`${field}\` must be an array of strings when provided`,
+      code: 'invalid_config',
+    });
+    return null;
+  }
+  if (value.length > MAX_TOOLS_ENTRIES) {
+    res.status(422).json({
+      error: `\`${field}\` exceeds the ${MAX_TOOLS_ENTRIES}-entry limit`,
+      code: 'invalid_config',
+    });
+    return null;
+  }
+  if ((value as string[]).some((v) => v.length > MAX_TOOL_ID_LENGTH)) {
+    res.status(422).json({
+      error: `\`${field}\` entries must be at most ${MAX_TOOL_ID_LENGTH} characters`,
       code: 'invalid_config',
     });
     return null;

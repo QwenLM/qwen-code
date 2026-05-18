@@ -6,7 +6,12 @@
 
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
-import { Mutex } from 'async-mutex';
+import {
+  E_TIMEOUT,
+  Mutex,
+  withTimeout,
+  type MutexInterface,
+} from 'async-mutex';
 import { Storage } from '../config/storage.js';
 import { DEFAULT_CONTEXT_FILENAME, MEMORY_SECTION_HEADER } from './const.js';
 
@@ -24,15 +29,52 @@ import { DEFAULT_CONTEXT_FILENAME, MEMORY_SECTION_HEADER } from './const.js';
  * keeps inert entries between tests but each entry is a single Mutex
  * that acquires no resources when idle.
  */
-const fileLocks = new Map<string, Mutex>();
+const fileLocks = new Map<string, MutexInterface>();
 
-function getFileLock(filePath: string): Mutex {
+/**
+ * Per-file-mutex acquire deadline. A wedged filesystem (NFS hiccup,
+ * disk I/O stall, locked OneDrive sync target) would otherwise let
+ * `runExclusive` hold indefinitely — every subsequent `POST
+ * /workspace/memory` for the same path queues up with no deadline,
+ * no abort path, and no diagnostic. 30 s is generous for any sane
+ * filesystem op while bounded enough that a single stalled write
+ * doesn't silently consume the daemon's request budget.
+ *
+ * On timeout `withTimeout` rejects with the sentinel `E_TIMEOUT`,
+ * which `writeWorkspaceContextFile` catches and rethrows as the
+ * typed `WorkspaceMemoryWriteTimeoutError` for the route to map to
+ * a 500 `memory_write_timeout`.
+ */
+const FILE_LOCK_TIMEOUT_MS = 30_000;
+
+function getFileLock(filePath: string): MutexInterface {
   let lock = fileLocks.get(filePath);
   if (!lock) {
-    lock = new Mutex();
+    lock = withTimeout(new Mutex(), FILE_LOCK_TIMEOUT_MS);
     fileLocks.set(filePath, lock);
   }
   return lock;
+}
+
+/**
+ * Thrown when the per-file mutex acquire times out. The route maps
+ * this to a 500 with `code: 'memory_write_timeout'` so SDK callers
+ * can branch on a stalled-fs / hung-write condition without parsing
+ * a generic 500.
+ */
+export class WorkspaceMemoryWriteTimeoutError extends Error {
+  readonly filePath: string;
+  readonly timeoutMs: number;
+  constructor(filePath: string, timeoutMs: number) {
+    super(
+      `Workspace memory write at ${filePath} did not acquire the per-file ` +
+        `lock within ${timeoutMs}ms — another write may be stalled (NFS / ` +
+        `OneDrive / locked file). Retry or restart the daemon.`,
+    );
+    this.name = 'WorkspaceMemoryWriteTimeoutError';
+    this.filePath = filePath;
+    this.timeoutMs = timeoutMs;
+  }
 }
 
 export type WriteContextFileScope = 'workspace' | 'global';
@@ -108,44 +150,66 @@ export async function writeWorkspaceContextFile(
   // the lock so a concurrent `replace` + `append` against the same
   // file produces a deterministic last-write rather than a partial
   // composite.
-  return await getFileLock(filePath).runExclusive(async () => {
-    if (options.mode === 'append' && isWhitespaceOnly(options.content)) {
-      // No-op short-circuit. Skip the mkdir + writeFile path entirely
-      // so the parent dir mtime isn't bumped on a request that
-      // changed nothing — the whitespace-only `\n\n` case from a
-      // flaky pipeline must not reach the filesystem at all.
-      let bytes = 0;
-      try {
-        const stat = await fs.stat(filePath);
-        bytes = stat.size;
-      } catch (err) {
-        if (!isEnoent(err)) throw err;
-      }
-      return { filePath, bytesWritten: bytes, changed: false };
-    }
-
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-
-    if (options.mode === 'replace') {
-      await fs.writeFile(filePath, options.content, {
-        encoding: 'utf8',
-        mode: 0o644,
-      });
-      return {
+  try {
+    return await getFileLock(filePath).runExclusive(
+      async () => await runWrite(filePath, options),
+    );
+  } catch (err) {
+    // `withTimeout` rejects with the `E_TIMEOUT` sentinel when the
+    // mutex acquire deadline elapses — typically a wedged write on
+    // a stalled FS (NFS hiccup, locked OneDrive sync, kernel I/O
+    // hang). Translate to a typed error so the route can map to a
+    // structured 500 instead of a generic catch-all.
+    if (err === E_TIMEOUT) {
+      throw new WorkspaceMemoryWriteTimeoutError(
         filePath,
-        bytesWritten: Buffer.byteLength(options.content, 'utf8'),
-        changed: true,
-      };
+        FILE_LOCK_TIMEOUT_MS,
+      );
     }
+    throw err;
+  }
+}
 
-    const next = await composeAppendedContent(filePath, options.content);
-    await fs.writeFile(filePath, next, { encoding: 'utf8', mode: 0o644 });
+async function runWrite(
+  filePath: string,
+  options: WriteContextFileOptions,
+): Promise<WriteContextFileResult> {
+  if (options.mode === 'append' && isWhitespaceOnly(options.content)) {
+    // No-op short-circuit. Skip the mkdir + writeFile path entirely
+    // so the parent dir mtime isn't bumped on a request that
+    // changed nothing — the whitespace-only `\n\n` case from a
+    // flaky pipeline must not reach the filesystem at all.
+    let bytes = 0;
+    try {
+      const stat = await fs.stat(filePath);
+      bytes = stat.size;
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+    }
+    return { filePath, bytesWritten: bytes, changed: false };
+  }
+
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+  if (options.mode === 'replace') {
+    await fs.writeFile(filePath, options.content, {
+      encoding: 'utf8',
+      mode: 0o644,
+    });
     return {
       filePath,
-      bytesWritten: Buffer.byteLength(next, 'utf8'),
+      bytesWritten: Buffer.byteLength(options.content, 'utf8'),
       changed: true,
     };
-  });
+  }
+
+  const next = await composeAppendedContent(filePath, options.content);
+  await fs.writeFile(filePath, next, { encoding: 'utf8', mode: 0o644 });
+  return {
+    filePath,
+    bytesWritten: Buffer.byteLength(next, 'utf8'),
+    changed: true,
+  };
 }
 
 function resolveContextFilePath(
@@ -276,8 +340,14 @@ function findNextTopLevelHeading(text: string, start: number): number {
     // Toggle fence state if the JUST-FINISHED line opens/closes a
     // fence. Strict prefix check — leading whitespace is intentional
     // because a 4-space-indented "```" is markdown code-block content,
-    // not a fence marker.
-    if (text.startsWith('```', lineStart)) {
+    // not a fence marker. CommonMark allows both ` ``` ` and `~~~` as
+    // fence delimiters; both must toggle the inside-fence state so a
+    // `## heading` inside a `~~~` block isn't treated as a section
+    // boundary.
+    if (
+      text.startsWith('```', lineStart) ||
+      text.startsWith('~~~', lineStart)
+    ) {
       inFence = !inFence;
     }
     // Heading match runs against the boundary `\n## ` (the four chars
