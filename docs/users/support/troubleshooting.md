@@ -11,7 +11,7 @@ This guide provides solutions to common issues and debugging tips, including top
 
 - **Error: `Qwen OAuth free tier was discontinued on 2026-04-15`**
   - **Cause:** Qwen OAuth is no longer available as of April 15, 2026.
-  - **Solution:** Switch to a different authentication method. Run `qwen` → `/auth` and choose one of:
+  - **Solution:** Switch to a different authentication method. Run `qwen` -> `/auth` and choose one of:
     - **API Key**: Use an API key from Alibaba Cloud Model Studio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)). See the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)).
     - **Alibaba Cloud Coding Plan**: Subscribe for a fixed monthly fee with higher quotas. See the Coding Plan guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) / [intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)).
 
@@ -50,6 +50,16 @@ This guide provides solutions to common issues and debugging tips, including top
   - A: Cached token information is only displayed when cached tokens are being used. This feature is available for API key users (e.g., Alibaba Cloud Model Studio API key or Google Cloud Vertex AI). You can still view your total token usage using the `/stats` command.
 
 ## Common error messages and solutions
+
+- **Error: `[API Error: Connection error. (cause: fetch failed)]` on every API call with Node.js v26.**
+  - **Cause:** Node.js v26 can be incompatible with the HTTP client path used by Qwen Code 0.15.11. In this case, Qwen Code may fail before it opens a network connection even when the same endpoint, model, and API key work with `curl` or a direct `node` `fetch()` request.
+  - **Solution:** Use a supported Node.js LTS release. For example, downgrade from Node.js v26.0.0 to Node.js v22.22.3 LTS and retry the same Qwen Code configuration.
+    ```bash
+    nvm install 22.22.3
+    nvm use 22.22.3
+    qwen -p "hi"
+    ```
+  - **How to verify:** If the request works after switching Node.js versions, your base URL, model IDs, and API key were likely already correct; the Node.js runtime version was the blocker.
 
 - **Error: `EADDRINUSE` (Address already in use) when starting an MCP server.**
   - **Cause:** Another process is already using the port that the MCP server is trying to bind to.
