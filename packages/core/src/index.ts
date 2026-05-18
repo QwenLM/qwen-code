@@ -134,6 +134,7 @@ export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
 export * from './services/fileDiscoveryService.js';
+export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
@@ -269,6 +270,7 @@ export * from './followup/index.js';
 // ============================================================================
 
 export * from './utils/browser.js';
+export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';
 export * from './utils/editor.js';
@@ -285,7 +287,9 @@ export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/jsonl-utils.js';
+export * from './utils/memoryDiagnostics.js';
 export * from './utils/memoryDiscovery.js';
+export * from './utils/modelId.js';
 export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
 export type { RuleFile } from './utils/rulesDiscovery.js';
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
@@ -306,6 +310,7 @@ export * from './utils/ripgrepUtils.js';
 export {
   detectRuntime,
   getOrCreateSharedDispatcher,
+  redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
 export * from './utils/schemaValidator.js';
@@ -354,7 +359,20 @@ export * from './test-utils/index.js';
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export {
+  DEFAULT_STOP_HOOK_BLOCK_CAP,
+  STOP_HOOK_BLOCK_CAP_ENV,
+  normalizeStopHookBlockingCap,
+  resolveStopHookBlockingCap,
+  formatStopHookBlockingCapWarning,
+} from './hooks/stopHookCap.js';
 export { type StopFailureErrorType } from './hooks/types.js';
+
+// ============================================================================
+// Goals (/goal command runtime)
+// ============================================================================
+
+export * from './goals/index.js';
 
 // Export hook triggers for all hook events
 export {
@@ -370,3 +388,14 @@ export {
   type PostToolUseFailureHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+
+// ============================================================================
+// Startup profiler — cross-package event sink (first-screen perf observability)
+// ============================================================================
+
+export {
+  setStartupEventSink,
+  recordStartupEvent,
+  type StartupEventSink,
+  type StartupEventAttrs,
+} from './utils/startupEventSink.js';

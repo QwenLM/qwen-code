@@ -11,6 +11,20 @@ import {
   abortTimeout,
   composeAbortSignals,
 } from '../../src/daemon/DaemonClient.js';
+import {
+  DaemonCapabilityMissingError,
+  requireWorkspaceCwd,
+} from '../../src/daemon/types.js';
+import type {
+  DaemonCapabilities,
+  DaemonSessionContextStatus,
+  DaemonSessionSupportedCommandsStatus,
+  DaemonWorkspaceEnvStatus,
+  DaemonWorkspaceMcpStatus,
+  DaemonWorkspacePreflightStatus,
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
+} from '../../src/daemon/types.js';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -93,14 +107,219 @@ describe('DaemonClient', () => {
     it('GETs /capabilities and returns the v1 envelope', async () => {
       const envelope = {
         v: 1 as const,
+        protocolVersions: {
+          current: 'v1',
+          supported: ['v1'],
+        },
         mode: 'http-bridge' as const,
         features: ['health', 'capabilities'],
         modelServices: [],
+        workspaceCwd: '/work/bound',
       };
       const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const caps = await client.capabilities();
       expect(caps).toEqual(envelope);
+      // #3803 §02: clients use `workspaceCwd` to pre-flight check +
+      // omit `cwd` from `POST /session` (route falls back).
+      expect(caps.workspaceCwd).toBe('/work/bound');
+    });
+
+    it('accepts old v1 envelopes without protocolVersions', async () => {
+      const envelope: DaemonCapabilities = {
+        v: 1,
+        mode: 'http-bridge',
+        features: ['health', 'capabilities'],
+        modelServices: [],
+        workspaceCwd: '/work/bound',
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(200, envelope));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.capabilities()).resolves.toEqual(envelope);
+    });
+  });
+
+  describe('read-only status routes', () => {
+    it('GETs workspace status routes and returns payloads unchanged', async () => {
+      const mcp: DaemonWorkspaceMcpStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'docs',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+        ],
+      };
+      const skills: DaemonWorkspaceSkillsStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review code',
+            level: 'project',
+            modelInvocable: true,
+          },
+        ],
+      };
+      const providers: DaemonWorkspaceProvidersStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        current: { authType: 'qwen', modelId: 'qwen3(qwen)' },
+        providers: [
+          {
+            kind: 'model_provider',
+            status: 'ok',
+            authType: 'qwen',
+            current: true,
+            models: [
+              {
+                modelId: 'qwen3(qwen)',
+                baseModelId: 'qwen3',
+                name: 'Qwen 3',
+                description: null,
+                contextLimit: 4096,
+                isCurrent: true,
+                isRuntime: false,
+              },
+            ],
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/workspace/mcp')) return jsonResponse(200, mcp);
+        if (req.url.endsWith('/workspace/skills')) {
+          return jsonResponse(200, skills);
+        }
+        if (req.url.endsWith('/workspace/providers')) {
+          return jsonResponse(200, providers);
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcp()).resolves.toEqual(mcp);
+      await expect(client.workspaceSkills()).resolves.toEqual(skills);
+      await expect(client.workspaceProviders()).resolves.toEqual(providers);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp'],
+        ['GET', 'http://daemon/workspace/skills'],
+        ['GET', 'http://daemon/workspace/providers'],
+      ]);
+    });
+
+    it('GETs /workspace/preflight and returns the preflight envelope unchanged', async () => {
+      const preflight: DaemonWorkspacePreflightStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          {
+            kind: 'node_version',
+            status: 'ok',
+            locality: 'daemon',
+            detail: { version: '22.4.0', required: '>=22' },
+          },
+          {
+            kind: 'auth',
+            status: 'not_started',
+            locality: 'acp',
+            hint: 'spawn a session to populate',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, preflight),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspacePreflight()).resolves.toEqual(preflight);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/preflight'],
+      ]);
+    });
+
+    it('GETs /workspace/env and returns the env envelope unchanged', async () => {
+      const env: DaemonWorkspaceEnvStatus = {
+        v: 1,
+        workspaceCwd: '/work/a',
+        initialized: true,
+        acpChannelLive: false,
+        cells: [
+          { kind: 'runtime', name: 'node', status: 'ok', value: '22.4.0' },
+          {
+            kind: 'env_var',
+            name: 'OPENAI_API_KEY',
+            status: 'ok',
+            present: true,
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, env));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceEnv()).resolves.toEqual(env);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/env'],
+      ]);
+    });
+
+    it('GETs session status routes with encoded session ids', async () => {
+      const context: DaemonSessionContextStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        workspaceCwd: '/work/a',
+        state: { models: { currentModelId: 'qwen3' } },
+      };
+      const supportedCommands: DaemonSessionSupportedCommandsStatus = {
+        v: 1,
+        sessionId: 'with/slash',
+        availableCommands: [
+          {
+            name: 'init',
+            description: 'Initialize',
+            input: null,
+          },
+        ],
+        availableSkills: ['review'],
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/with%2Fslash/context')) {
+          return jsonResponse(200, context);
+        }
+        if (req.url.endsWith('/session/with%2Fslash/supported-commands')) {
+          return jsonResponse(200, supportedCommands);
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.sessionContext('with/slash', 'client-1'),
+      ).resolves.toEqual(context);
+      await expect(
+        client.sessionSupportedCommands('with/slash', 'client-1'),
+      ).resolves.toEqual(supportedCommands);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/session/with%2Fslash/context'],
+        ['GET', 'http://daemon/session/with%2Fslash/supported-commands'],
+      ]);
+      expect(calls.map((c) => c.headers['x-qwen-client-id'])).toEqual([
+        'client-1',
+        'client-1',
+      ]);
     });
   });
 
@@ -147,6 +366,40 @@ describe('DaemonClient', () => {
       expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
     });
 
+    it('omits cwd when workspaceCwd is not provided (#3803 §02)', async () => {
+      // Per #3803 §02 the daemon route falls back to its bound
+      // workspace when `cwd` is absent. The SDK relies on
+      // JSON.stringify stripping `undefined` values, so an
+      // omitted `workspaceCwd` ends up as "no `cwd` key" on the
+      // wire — exactly the fallback shape the server expects.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/bound',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.createOrAttachSession({});
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('forwards empty-string workspaceCwd verbatim so the server can 400 it', async () => {
+      // `workspaceCwd: ""` is a likely client-side bug shape. A
+      // truthy-guard SDK would silently drop the field and let the
+      // server's fallback bind the session — masking the bug. We
+      // forward it verbatim so the server's
+      // `cwd must be an absolute path when provided` 400 surfaces.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(400, { error: 'bad cwd' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.createOrAttachSession({ workspaceCwd: '' }),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '' });
+    });
+
     it('forwards modelServiceId when supplied', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
@@ -164,6 +417,69 @@ describe('DaemonClient', () => {
         cwd: '/work/a',
         modelServiceId: 'qwen-prod',
       });
+    });
+
+    it('sends client identity in a header, not the request body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const session = await client.createOrAttachSession(
+        { workspaceCwd: '/work/a' },
+        'client-1',
+      );
+      expect(session.clientId).toBe('client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+    });
+
+    it('forwards sessionScope when supplied (#4175 PR 5)', async () => {
+      // Per-request scope override: clients pre-flight
+      // `caps.features.session_scope_override` and pass `'single'` /
+      // `'thread'` here when they want to override the daemon-wide
+      // default. Symmetric SDK shape with `modelServiceId`.
+      for (const sessionScope of ['single', 'thread'] as const) {
+        const { fetch, calls } = recordingFetch(() =>
+          jsonResponse(200, {
+            sessionId: 's-1',
+            workspaceCwd: '/work/a',
+            attached: false,
+          }),
+        );
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await client.createOrAttachSession({
+          workspaceCwd: '/work/a',
+          sessionScope,
+        });
+        expect(JSON.parse(calls[0]!.body!)).toEqual({
+          cwd: '/work/a',
+          sessionScope,
+        });
+      }
+    });
+
+    it('omits sessionScope from the body when the field is absent', async () => {
+      // Backward-compat: a caller that doesn't set the field must not
+      // surface a `sessionScope` key on the wire — old daemons reading
+      // an unknown body key is fine, but the omitted-key shape is what
+      // we tested before #4175 PR 5 and what every existing caller
+      // observes.
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.createOrAttachSession({ workspaceCwd: '/work/a' });
+      const body = JSON.parse(calls[0]!.body!) as Record<string, unknown>;
+      expect(body).not.toHaveProperty('sessionScope');
     });
 
     it('throws on 400', async () => {
@@ -204,6 +520,20 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe('http://daemon/session/with%2Fslash/prompt');
     });
 
+    it('sends client identity header on prompts', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { stopReason: 'end_turn' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.prompt(
+        's-1',
+        { prompt: [{ type: 'text', text: 'hi' }] },
+        undefined,
+        'client-1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('forwards a caller AbortSignal through to fetch (A-UsQ)', async () => {
       // The bridge already supports per-prompt cancellation via the
       // signal arg on `sendPrompt`; the SDK had the parameter wired
@@ -230,6 +560,72 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('loadSession / resumeSession', () => {
+    it('POSTs /session/:id/load with optional cwd', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          state: { configOptions: [] },
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const session = await client.loadSession('s-1', {
+        workspaceCwd: '/work/a',
+      });
+
+      expect(session.state).toEqual({ configOptions: [] });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/load');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ cwd: '/work/a' });
+    });
+
+    it('sends client identity headers on restore requests', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.loadSession('s-1', {}, 'client-1');
+      await client.resumeSession('s-1', {}, 'client-1');
+
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('POSTs /session/:id/resume and omits cwd when absent', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/bound',
+          attached: false,
+          state: {},
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.resumeSession('with/slash');
+
+      expect(calls[0]?.url).toBe('http://daemon/session/with%2Fslash/resume');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('throws DaemonHttpError on restore failures', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'missing' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.loadSession('missing')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
   describe('cancel', () => {
     it('POSTs /cancel and tolerates 204', async () => {
       const { fetch, calls } = recordingFetch(
@@ -239,6 +635,15 @@ describe('DaemonClient', () => {
       await client.cancel('s-1');
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/cancel');
       expect(calls[0]?.method).toBe('POST');
+    });
+
+    it('sends client identity header on cancel', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.cancel('s-1', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
     it('throws on 404', async () => {
@@ -252,6 +657,63 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('heartbeat', () => {
+    it('POSTs /heartbeat with an empty JSON body and returns the result', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          lastSeenAt: 1_700_000_000_000,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.heartbeat('s-1');
+      expect(result).toEqual({
+        sessionId: 's-1',
+        lastSeenAt: 1_700_000_000_000,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/heartbeat');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('sends the client identity header when provided', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          clientId: 'client-1',
+          lastSeenAt: 1_700_000_000_001,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.heartbeat('s-1', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(result.clientId).toBe('client-1');
+    });
+
+    it('throws DaemonHttpError on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.heartbeat('s-1')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+
+    it('throws DaemonHttpError on 400 invalid_client_id', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: 'unknown client',
+          code: 'invalid_client_id',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.heartbeat('s-1', 'forged')).rejects.toMatchObject({
+        status: 400,
+      });
+    });
+  });
+
   describe('respondToPermission', () => {
     it('returns true on 200', async () => {
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
@@ -261,6 +723,17 @@ describe('DaemonClient', () => {
       });
       expect(accepted).toBe(true);
       expect(calls[0]?.url).toBe('http://daemon/permission/req-1');
+    });
+
+    it('sends client identity header on permission votes', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.respondToPermission(
+        'req-1',
+        { outcome: { outcome: 'cancelled' } },
+        'client-1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
     it('returns false on 404 (lost the race)', async () => {
@@ -284,6 +757,133 @@ describe('DaemonClient', () => {
           outcome: { outcome: 'cancelled' },
         }),
       ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it('POSTs session-scoped permission votes', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const accepted = await client.respondToSessionPermission(
+        's-1',
+        'req/1',
+        { outcome: { outcome: 'cancelled' } },
+        'client-1',
+      );
+      expect(accepted).toBe(true);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s-1/permission/req%2F1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('returns false on session-scoped permission 404', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'missing' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.respondToSessionPermission('s-1', 'missing', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      ).resolves.toBe(false);
+    });
+
+    it('respondToSessionPermission throws on non-200/non-404 responses', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: 'bad option',
+          code: 'invalid_option_id',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.respondToSessionPermission('s-1', 'req-1', {
+          outcome: { outcome: 'cancelled' },
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        body: { error: 'bad option', code: 'invalid_option_id' },
+      });
+    });
+  });
+
+  describe('closeSession', () => {
+    it('sends DELETE to /session/:id and returns void on 204', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.closeSession('s-1');
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1');
+      expect(calls[0]?.method).toBe('DELETE');
+    });
+
+    it('returns void on 404 (idempotent — session already gone)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.closeSession('s-1')).resolves.toBeUndefined();
+    });
+
+    it('sends client identity header', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.closeSession('s-1', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 500', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'boom' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.closeSession('s-1')).rejects.toMatchObject({
+        status: 500,
+      });
+    });
+  });
+
+  describe('updateSessionMetadata', () => {
+    it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          displayName: 'My Session',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.updateSessionMetadata('s-1', {
+        displayName: 'My Session',
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/metadata');
+      expect(calls[0]?.method).toBe('PATCH');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        displayName: 'My Session',
+      });
+      expect(result).toEqual({ displayName: 'My Session' });
+    });
+
+    it('sends client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.updateSessionMetadata(
+        's-1',
+        { displayName: 'test' },
+        'client-1',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 404', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'not found' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.updateSessionMetadata('s-1', { displayName: 'test' }),
+      ).rejects.toMatchObject({ status: 404 });
     });
   });
 
@@ -322,6 +922,47 @@ describe('DaemonClient', () => {
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const iter = client.subscribeEvents('missing');
       await expect(iter.next()).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('appends ?maxQueued=N when SubscribeOptions.maxQueued is set', async () => {
+      const { fetch, calls } = recordingFetch(() => sseResponse(''));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      for await (const _ of client.subscribeEvents('s-1', {
+        maxQueued: 512,
+      })) {
+        /* unreachable */
+      }
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s-1/events?maxQueued=512',
+      );
+    });
+
+    it('omits the query string when maxQueued is undefined', async () => {
+      const { fetch, calls } = recordingFetch(() => sseResponse(''));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      for await (const _ of client.subscribeEvents('s-1', {
+        lastEventId: 7,
+      })) {
+        /* unreachable */
+      }
+      // Bare events URL — no `?` introduced when the caller didn't ask.
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/events');
+      expect(calls[0]?.headers['last-event-id']).toBe('7');
+    });
+
+    it('propagates a server 400 invalid_max_queued unchanged', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: '`maxQueued` must be in [16, 2048]',
+          code: 'invalid_max_queued',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const iter = client.subscribeEvents('s-1', { maxQueued: 9999 });
+      await expect(iter.next()).rejects.toMatchObject({
+        status: 400,
+        body: { code: 'invalid_max_queued' },
+      });
     });
   });
 
@@ -365,6 +1006,13 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/model');
       expect(calls[0]?.method).toBe('POST');
       expect(JSON.parse(calls[0]!.body!)).toEqual({ modelId: 'qwen3-coder' });
+    });
+
+    it('sends client identity header on model switches', async () => {
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionModel('s-1', 'qwen3-coder', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
     it('throws on 404 (unknown session)', async () => {
@@ -633,6 +1281,59 @@ describe('DaemonClient', () => {
       // Generous tolerance — just checking the timer fires.
       expect(elapsed).toBeGreaterThanOrEqual(30);
       expect(elapsed).toBeLessThan(2000);
+    });
+  });
+
+  describe('requireWorkspaceCwd', () => {
+    // Helper: build a `DaemonCapabilities`-shaped envelope without
+    // having to spell out the unrelated fields on every call.
+    const caps = (overrides: Partial<DaemonCapabilities>): DaemonCapabilities =>
+      ({
+        v: 1,
+        mode: 'http-bridge',
+        features: [],
+        modelServices: [],
+        ...overrides,
+      }) as DaemonCapabilities;
+
+    it('returns the workspaceCwd when populated', () => {
+      expect(requireWorkspaceCwd(caps({ workspaceCwd: '/work/bound' }))).toBe(
+        '/work/bound',
+      );
+    });
+
+    it('throws DaemonCapabilityMissingError when the field is undefined (pre-§02 daemon)', () => {
+      // Pre-§02 daemons emit v=1 envelopes without `workspaceCwd`.
+      // The helper exists so SDK consumers get an actionable error
+      // instead of a downstream `Cannot read properties of undefined`.
+      expect(() => requireWorkspaceCwd(caps({}))).toThrow(
+        DaemonCapabilityMissingError,
+      );
+      const err = (() => {
+        try {
+          requireWorkspaceCwd(caps({}));
+          return null;
+        } catch (e) {
+          return e;
+        }
+      })();
+      expect(err).toBeInstanceOf(DaemonCapabilityMissingError);
+      expect((err as DaemonCapabilityMissingError).capability).toBe(
+        'workspaceCwd',
+      );
+      expect((err as DaemonCapabilityMissingError).message).toMatch(
+        /predates the feature|workspaceCwd/,
+      );
+    });
+
+    it('treats empty-string as missing (defensive)', () => {
+      // A daemon that erroneously sends `workspaceCwd: ""` would
+      // otherwise satisfy `typeof === 'string'` while still being
+      // useless to consumers. Treat it like a missing field so the
+      // call site lands in the same error branch.
+      expect(() => requireWorkspaceCwd(caps({ workspaceCwd: '' }))).toThrow(
+        DaemonCapabilityMissingError,
+      );
     });
   });
 });

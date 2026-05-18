@@ -8,12 +8,22 @@ import { parseSseStream } from './sse.js';
 import type {
   DaemonCapabilities,
   DaemonEvent,
+  DaemonSessionContextStatus,
+  DaemonRestoredSession,
   DaemonSession,
   DaemonSessionSummary,
+  DaemonSessionSupportedCommandsStatus,
+  DaemonWorkspaceEnvStatus,
+  DaemonWorkspaceMcpStatus,
+  DaemonWorkspacePreflightStatus,
+  DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
+  HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
   SetModelResult,
+  SessionMetadataResult,
 } from './types.js';
 
 /**
@@ -43,8 +53,8 @@ export interface DaemonClientOptions {
   /**
    * Per-call request timeout in milliseconds. Applied to short-lived
    * methods (`health`, `capabilities`, `createOrAttachSession`,
-   * `listWorkspaceSessions`, `setSessionModel`, `cancel`,
-   * `respondToPermission`) so an unresponsive daemon doesn't block
+   * `listWorkspaceSessions`, read-only status routes, `setSessionModel`,
+   * `cancel`, `respondToPermission`) so an unresponsive daemon doesn't block
    * callers indefinitely. **NOT** applied to `prompt()` — model + tool
    * turns can take minutes, so prompt explicitly bypasses
    * `fetchTimeoutMs`; cancellation is via the optional `signal` arg.
@@ -57,6 +67,7 @@ export interface DaemonClientOptions {
 }
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const CLIENT_ID_HEADER = 'X-Qwen-Client-Id';
 
 /**
  * Strip any trailing slashes from a base URL via plain string ops. The
@@ -88,8 +99,41 @@ export class DaemonHttpError extends Error {
 }
 
 export interface CreateSessionRequest {
-  workspaceCwd: string;
+  /**
+   * Workspace path the daemon must be bound to (per #3803 §02). When
+   * omitted, the SDK sends no `cwd` field and the daemon route falls
+   * back to its boot-time `boundWorkspace`. Pass `caps.workspaceCwd`
+   * to be explicit, or omit it for the daemon-knows-best path. A
+   * non-empty `workspaceCwd` that doesn't canonicalize to the
+   * daemon's bound path yields a `400 workspace_mismatch`
+   * `DaemonHttpError`.
+   */
+  workspaceCwd?: string;
   modelServiceId?: string;
+  /**
+   * Per-request session-scope override. The production daemon defaults
+   * to `'single'`, which coalesces same-workspace `POST /session` calls
+   * into one shared session; passing `sessionScope: 'thread'` here
+   * forces a distinct session for this call. The reverse override
+   * (per-request `'single'` against a daemon defaulting to `'thread'`)
+   * is also supported, though the daemon's default is hardcoded to
+   * `'single'` today (#4175 may add a CLI flag in a follow-up). Omit
+   * to inherit the daemon-wide default.
+   *
+   * Only `'single'` and `'thread'` are accepted; anything else yields
+   * `400 invalid_session_scope`. Old daemons (pre-#4175 PR 5) silently
+   * ignore the field — clients should pre-flight
+   * `caps.features.session_scope_override` before sending.
+   */
+  sessionScope?: 'single' | 'thread';
+}
+
+export interface RestoreSessionRequest {
+  /**
+   * Workspace path the daemon must be bound to. Omit to let the daemon use
+   * its advertised bound workspace, mirroring `createOrAttachSession`.
+   */
+  workspaceCwd?: string;
 }
 
 export interface PromptRequest {
@@ -104,6 +148,18 @@ export interface SubscribeOptions {
   lastEventId?: number;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
+  /**
+   * Per-subscriber backlog cap requested from the daemon. Forwarded as
+   * `?maxQueued=N` on `GET /session/:id/events`. Daemon-side range is
+   * `[16, 2048]` (default 256); out-of-range or non-decimal values get
+   * a `400 invalid_max_queued` response. Old daemons without the
+   * `slow_client_warning` capability silently ignore the param — SDK
+   * clients should pre-flight `caps.features.slow_client_warning`
+   * before opting in. Useful for cold reconnects with a large
+   * `Last-Event-ID: 0` replay backlog so the force-pushed replay
+   * frames don't trip the warn / eviction path on the first publish.
+   */
+  maxQueued?: number;
 }
 
 export class DaemonClient {
@@ -187,9 +243,13 @@ export class DaemonClient {
 
   // -- Plumbing -----------------------------------------------------------
 
-  private headers(extra: Record<string, string> = {}): Record<string, string> {
+  private headers(
+    extra: Record<string, string> = {},
+    clientId?: string,
+  ): Record<string, string> {
     const out: Record<string, string> = { ...extra };
     if (this.token) out['Authorization'] = `Bearer ${this.token}`;
+    if (clientId) out[CLIENT_ID_HEADER] = clientId;
     return out;
   }
 
@@ -245,19 +305,102 @@ export class DaemonClient {
     );
   }
 
+  async workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /workspace/mcp');
+        return (await res.json()) as DaemonWorkspaceMcpStatus;
+      },
+    );
+  }
+
+  async workspaceSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/skills`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/skills');
+        }
+        return (await res.json()) as DaemonWorkspaceSkillsStatus;
+      },
+    );
+  }
+
+  async workspaceProviders(): Promise<DaemonWorkspaceProvidersStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/providers`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/providers');
+        }
+        return (await res.json()) as DaemonWorkspaceProvidersStatus;
+      },
+    );
+  }
+
+  async workspaceEnv(): Promise<DaemonWorkspaceEnvStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/env`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /workspace/env');
+        return (await res.json()) as DaemonWorkspaceEnvStatus;
+      },
+    );
+  }
+
+  async workspacePreflight(): Promise<DaemonWorkspacePreflightStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/preflight`,
+      { headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /workspace/preflight');
+        }
+        return (await res.json()) as DaemonWorkspacePreflightStatus;
+      },
+    );
+  }
+
   // -- Sessions ----------------------------------------------------------
 
   async createOrAttachSession(
     req: CreateSessionRequest,
+    clientId?: string,
   ): Promise<DaemonSession> {
+    // Per #3803 §02: omitting `cwd` lets the daemon fall back to its
+    // bound workspace. JSON.stringify strips `undefined` values, so
+    // `cwd: undefined` becomes "no `cwd` key" on the wire — and the
+    // server then takes the documented fallback path.
+    //
+    // Send EVERY defined `workspaceCwd` value through as-is, including
+    // the empty string. A truthy guard would silently swallow
+    // `workspaceCwd: ""` (a likely client-side bug) and let the server
+    // fall back instead of returning a clear 400 for the malformed
+    // input. The SDK should be a transparent layer here: passing the
+    // caller's value verbatim lets the server's validation surface
+    // bugs that would otherwise hide as "wrong workspace bound".
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({
           cwd: req.workspaceCwd,
           ...(req.modelServiceId ? { modelServiceId: req.modelServiceId } : {}),
+          // `!== undefined` (not truthy) so a buggy caller passing
+          // `sessionScope: '' | null` doesn't get the field silently
+          // erased on the wire — let the daemon's `400
+          // invalid_session_scope` surface the bug. Same shape the
+          // bridge's own validation uses (`httpAcpBridge.ts:
+          // spawnOrAttach`); SDK should be a transparent layer here.
+          ...(req.sessionScope !== undefined
+            ? { sessionScope: req.sessionScope }
+            : {}),
         }),
       },
       async (res) => {
@@ -289,6 +432,86 @@ export class DaemonClient {
     );
   }
 
+  async loadSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('load', sessionId, req, clientId);
+  }
+
+  async resumeSession(
+    sessionId: string,
+    req: RestoreSessionRequest = {},
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    return this.restoreSession('resume', sessionId, req, clientId);
+  }
+
+  async sessionContext(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionContextStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/context`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/context');
+        }
+        return (await res.json()) as DaemonSessionContextStatus;
+      },
+    );
+  }
+
+  async sessionSupportedCommands(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionSupportedCommandsStatus> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/supported-commands`,
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /session/:id/supported-commands',
+          );
+        }
+        return (await res.json()) as DaemonSessionSupportedCommandsStatus;
+      },
+    );
+  }
+
+  /**
+   * Shared transport for `loadSession` / `resumeSession`. Both routes
+   * share an identical wire shape (POST /session/:id/{load|resume}
+   * with optional `cwd` body) and identical error envelopes from the
+   * daemon, so they collapse into a single fetch path that only
+   * differs in the URL suffix and the route name reported on errors.
+   */
+  private async restoreSession(
+    action: 'load' | 'resume',
+    sessionId: string,
+    req: RestoreSessionRequest,
+    clientId?: string,
+  ): Promise<DaemonRestoredSession> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/${action}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ cwd: req.workspaceCwd }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, `POST /session/:id/${action}`);
+        }
+        return (await res.json()) as DaemonRestoredSession;
+      },
+    );
+  }
+
   /**
    * Switch the active model for a session. Backed by ACP's currently-unstable
    * `unstable_setSessionModel`; the daemon also publishes a `model_switched`
@@ -297,12 +520,13 @@ export class DaemonClient {
   async setSessionModel(
     sessionId: string,
     modelId: string,
+    clientId?: string,
   ): Promise<SetModelResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/model`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify({ modelId }),
       },
       async (res) => {
@@ -328,12 +552,13 @@ export class DaemonClient {
     sessionId: string,
     req: PromptRequest,
     signal?: AbortSignal,
+    clientId?: string,
   ): Promise<PromptResult> {
     const res = await this._fetch(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/prompt`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify(req),
         signal,
       },
@@ -342,12 +567,40 @@ export class DaemonClient {
     return (await res.json()) as PromptResult;
   }
 
-  async cancel(sessionId: string): Promise<void> {
+  /**
+   * Bump the daemon's last-seen bookkeeping for this session. The
+   * route is short-lived — drives diagnostics and future revocation
+   * policy (Wave 5 PR 24) — so it goes through the standard
+   * `fetchTimeoutMs`. Older daemons (pre-PR 9) return 404 for
+   * `/heartbeat`; clients should pre-flight
+   * `caps.features.client_heartbeat` before calling.
+   */
+  async heartbeat(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<HeartbeatResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/heartbeat`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/heartbeat');
+        }
+        return (await res.json()) as HeartbeatResult;
+      },
+    );
+  }
+
+  async cancel(sessionId: string, clientId?: string): Promise<void> {
     await this.fetchWithTimeout(
       `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/cancel`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: '{}',
       },
       async (res) => {
@@ -402,12 +655,19 @@ export class DaemonClient {
     const fetchSignal = opts.signal
       ? composeAbortSignals([opts.signal, connectCtrl.signal])
       : connectCtrl.signal;
+    // Build the SSE URL, optionally with `?maxQueued=N`. We don't
+    // validate the value client-side — the daemon's
+    // `parseMaxQueuedQuery` is the source of truth on the range
+    // `[16, 2048]` and returns a structured `400 invalid_max_queued`
+    // for anything outside, so duplicating the bounds here would
+    // diverge if the daemon's range ever shifts.
+    let url = `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`;
+    if (opts.maxQueued !== undefined) {
+      url += `?maxQueued=${encodeURIComponent(String(opts.maxQueued))}`;
+    }
     let res: Response;
     try {
-      res = await this._fetch(
-        `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/events`,
-        { headers, signal: fetchSignal },
-      );
+      res = await this._fetch(url, { headers, signal: fetchSignal });
     } finally {
       if (connectTimer !== undefined) clearTimeout(connectTimer);
     }
@@ -457,12 +717,13 @@ export class DaemonClient {
   async respondToPermission(
     requestId: string,
     response: PermissionResponse,
+    clientId?: string,
   ): Promise<boolean> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/permission/${encodeURIComponent(requestId)}`,
       {
         method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
         body: JSON.stringify(response),
       },
       async (res) => {
@@ -489,6 +750,109 @@ export class DaemonClient {
           return false;
         }
         throw await this.failOnError(res, 'POST /permission/:requestId');
+      },
+    );
+  }
+
+  /**
+   * Cast a permission vote against an explicit daemon session. New clients
+   * should prefer this once `capabilities.features` includes
+   * `session_permission_vote`; the legacy request-id-only route remains for
+   * older daemons.
+   */
+  async respondToSessionPermission(
+    sessionId: string,
+    requestId: string,
+    response: PermissionResponse,
+    clientId?: string,
+  ): Promise<boolean> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/permission/${encodeURIComponent(requestId)}`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(response),
+      },
+      async (res) => {
+        if (res.status === 200) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return true;
+        }
+        if (res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return false;
+        }
+        throw await this.failOnError(
+          res,
+          'POST /session/:id/permission/:requestId',
+        );
+      },
+    );
+  }
+
+  // -- Session lifecycle ---------------------------------------------------
+
+  /**
+   * Close a daemon session. The daemon treats DELETE as idempotent for SDK
+   * callers: both 204 (closed) and 404 (already gone) resolve successfully.
+   */
+  async closeSession(sessionId: string, clientId?: string): Promise<void> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'DELETE /session/:id');
+      },
+    );
+  }
+
+  // -- Session metadata ----------------------------------------------------
+
+  /**
+   * Patch mutable session metadata and return the effective stored metadata
+   * reported by the daemon.
+   */
+  async updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string },
+    clientId?: string,
+  ): Promise<SessionMetadataResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/metadata`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(metadata),
+      },
+      async (res) => {
+        if (res.status === 200) {
+          const body = (await res.json()) as {
+            displayName?: unknown;
+          };
+          return typeof body.displayName === 'string'
+            ? { displayName: body.displayName }
+            : {};
+        }
+        throw await this.failOnError(res, 'PATCH /session/:id/metadata');
       },
     );
   }

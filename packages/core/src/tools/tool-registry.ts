@@ -406,6 +406,16 @@ export class ToolRegistry {
   }
 
   /**
+   * Returns the manager that owns MCP client lifecycles. Exposed so
+   * `Config.initialize()`'s background discovery path can call
+   * `discoverAllMcpToolsIncremental` directly without going through
+   * `discoverMcpTools` (which would wipe already-registered tools).
+   */
+  getMcpClientManager(): McpClientManager {
+    return this.mcpClientManager;
+  }
+
+  /**
    * Discovers tools from project (if available and configured).
    * Can be called multiple times to update discovered tools.
    * This will discover tools from the command line and from MCP servers.

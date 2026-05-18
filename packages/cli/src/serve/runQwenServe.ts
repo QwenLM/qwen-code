@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import { type Server } from 'node:http';
+import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import { createHttpAcpBridge, type HttpAcpBridge } from './httpAcpBridge.js';
+import {
+  canonicalizeWorkspace,
+  createHttpAcpBridge,
+  type HttpAcpBridge,
+} from './httpAcpBridge.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
@@ -99,11 +105,99 @@ export async function runQwenServe(
         `(127.0.0.1, localhost, ::1, or [::1]).`,
     );
   }
+  // Issue #4175 PR 15. `--require-auth` extends the "must have a token"
+  // rule to loopback as well. Boot-loud, like the non-loopback check
+  // above: silently dropping the flag when no token is configured
+  // would leave the operator believing the deployment is hardened
+  // when it isn't. Mention both the env var and the flag so log
+  // readers don't have to read the source to learn the fix.
+  if (opts.requireAuth && !token) {
+    throw new Error(
+      `Refusing to start with --require-auth set but no bearer token ` +
+        `configured. Set ${QWEN_SERVER_TOKEN_ENV} or pass --token, or omit ` +
+        `--require-auth to keep the loopback developer default.`,
+    );
+  }
 
+  // Resolve the bound workspace per #3803 §02 (1 daemon = 1 workspace).
+  // Explicit `--workspace` wins; otherwise default to process.cwd().
+  // `POST /session` with a mismatched `cwd` is rejected by the bridge
+  // with `WorkspaceMismatchError`. Multi-workspace deployments use
+  // multiple daemon processes, not intra-daemon routing.
+  //
+  // Boot-loud validation: absolute path, exists, is a directory.
+  // Without the stat() check, `canonicalizeWorkspace`'s ENOENT fallback
+  // to `path.resolve` would let the daemon boot pointed at a
+  // non-existent directory; every `POST /session` would then spawn a
+  // `qwen --acp` child with that cwd and the agent would fail with an
+  // opaque ENOENT — operator pain we can avoid by failing at boot.
+  const rawWorkspace = opts.workspace ?? process.cwd();
+  if (!path.isAbsolute(rawWorkspace)) {
+    throw new Error(
+      `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
+    );
+  }
+  try {
+    const stats = fs.statSync(rawWorkspace);
+    if (!stats.isDirectory()) {
+      throw new Error(
+        `Invalid --workspace "${rawWorkspace}": exists but is not a directory.`,
+      );
+    }
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err) {
+      const code = (err as { code?: unknown }).code;
+      if (code === 'ENOENT') {
+        throw new Error(
+          `Invalid --workspace "${rawWorkspace}": directory does not exist.`,
+        );
+      }
+      // EACCES / EPERM: the path exists but the current user can't
+      // stat it (typical for SIP-protected paths on macOS, root-owned
+      // dirs the daemon's user can't traverse, etc.). The raw Node
+      // SystemError has the path AND the syscall but no operator-
+      // facing breadcrumb that this came from `--workspace`. Wrap
+      // both codes so the boot failure points at the flag the
+      // operator actually set.
+      if (code === 'EACCES' || code === 'EPERM') {
+        throw new Error(
+          `Invalid --workspace "${rawWorkspace}": permission denied ` +
+            `(${String(code)}). The path exists but cannot be stat'd ` +
+            `by the current user.`,
+        );
+      }
+    }
+    throw err;
+  }
+  // Canonicalize ONCE here so `/capabilities` and the POST /session
+  // fallback (both via server.ts) AND the bridge agree on the same
+  // path. Without this, server.ts and the bridge each compute
+  // `boundWorkspace` independently; on symlinks or case-insensitive
+  // filesystems the bridge's `realpathSync.native` form diverges from
+  // server.ts's raw `opts.workspace` and clients see one path on
+  // `/capabilities` but another on `POST /session` responses.
+  const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
   const bridge =
-    deps.bridge ?? createHttpAcpBridge({ maxSessions: opts.maxSessions });
+    deps.bridge ??
+    createHttpAcpBridge({
+      maxSessions: opts.maxSessions,
+      ...(opts.eventRingSize !== undefined
+        ? { eventRingSize: opts.eventRingSize }
+        : {}),
+      boundWorkspace,
+    });
   let actualPort = opts.port;
-  const app = createServeApp(opts, () => actualPort, { bridge });
+  // Pass the already-canonical `boundWorkspace` into `createServeApp`
+  // via `deps.boundWorkspace`. That field is the pre-canonicalized
+  // fast-path: createServeApp skips its own `canonicalizeWorkspace`
+  // call (which would issue a redundant `realpathSync.native`
+  // syscall — idempotent but unnecessary I/O at boot). Direct
+  // callers of createServeApp (tests / embeds) omit it and the
+  // server canonicalizes itself.
+  const app = createServeApp(opts, () => actualPort, {
+    bridge,
+    boundWorkspace,
+  });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
@@ -188,10 +282,39 @@ export async function runQwenServe(
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
       const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
-      writeStdoutLine(`qwen serve listening on ${url} (mode=${opts.mode})`);
+      writeStdoutLine(
+        `qwen serve listening on ${url} (mode=${opts.mode}, ` +
+          `workspace=${boundWorkspace})`,
+      );
+      // Operator log on stderr too (systemd/docker/k8s default
+      // captures only stderr for service diagnostics, and the
+      // workspace= breadcrumb is the single piece of information
+      // operators need most when triaging §02 migration issues —
+      // "did the daemon bind to the right workspace?"). The stdout
+      // line above stays put so integration tests + scripts that
+      // parse stdout for the listening URL keep working;
+      // `JSON.stringify(boundWorkspace)` quotes the value
+      // symmetrically with the workspace_mismatch log (defends
+      // against control-char log injection if `boundWorkspace`
+      // somehow contained one — operator-controlled today, but
+      // cheap defense-in-depth).
+      writeStderrLine(
+        `qwen serve: bound to workspace ${JSON.stringify(boundWorkspace)}`,
+      );
       if (!token) {
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
+        );
+      } else if (opts.requireAuth) {
+        // The boot check above guarantees `token` is set whenever
+        // `--require-auth` is on, so this branch only fires alongside
+        // a successfully-authenticated daemon. The log line lets
+        // operators confirm the hardening is active without parsing
+        // `/capabilities` (and is a useful breadcrumb when triaging
+        // "why is loopback returning 401" tickets).
+        writeStderrLine(
+          'qwen serve: --require-auth enabled (bearer token mandatory ' +
+            'on every route, including loopback /health).',
         );
       }
 

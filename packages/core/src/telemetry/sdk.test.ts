@@ -544,9 +544,10 @@ describe('refreshSessionContext', () => {
     refreshSessionContext('new-session-id');
 
     expect(createSessionRootContext).toHaveBeenCalledWith('new-session-id');
-    expect(setSessionContext).toHaveBeenCalledWith({
-      __sessionId: 'new-session-id',
-    });
+    expect(setSessionContext).toHaveBeenCalledWith(
+      { __sessionId: 'new-session-id' },
+      'new-session-id',
+    );
   });
 
   it('should be a no-op when telemetry is not initialized', () => {

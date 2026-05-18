@@ -11,6 +11,7 @@ import type { Argv, CommandModule } from 'yargs';
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
 
 /**
  * Pause the current async function indefinitely. Used after the daemon
@@ -30,6 +31,9 @@ interface ServeArgs {
   token?: string;
   'max-sessions': number;
   'max-connections': number;
+  'event-ring-size': number;
+  workspace?: string;
+  'require-auth': boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
   // synthesizes is convenient for handlers but type-confusing here. The
   // handler reads `argv['http-bridge']` directly.
@@ -66,6 +70,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
           'attach to existing sessions still works. Set to 0 to disable.',
       })
+      .option('workspace', {
+        type: 'string',
+        description:
+          'Absolute workspace path this daemon binds to. ' +
+          'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
+          'Defaults to process.cwd() when omitted. ' +
+          'For multi-workspace deployments, run one `qwen serve` per workspace ' +
+          'on separate ports (or behind an external orchestrator).',
+      })
       .option('max-connections', {
         type: 'number',
         default: 256,
@@ -74,14 +87,39 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'sockets — slow/phantom SSE clients get rejected at accept time once full. ' +
           'Set to 0 to disable.',
       })
+      .option('require-auth', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Refuse to start without a bearer token, even on loopback. ' +
+          'Hardens the loopback developer default for shared dev hosts / CI ' +
+          'runners / multi-tenant workstations where any local user can hit ' +
+          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          'requires Authorization when enabled (no loopback exemption — ' +
+          'k8s/Compose probes must pass the bearer too).',
+      })
+      .option('event-ring-size', {
+        type: 'number',
+        // Single source of truth — `DEFAULT_RING_SIZE` (currently 8000,
+        // #3803 §02) is also what the bridge falls back to when the
+        // option is undefined. Importing here keeps a future bump in
+        // one place rather than drifting between CLI and bus.
+        default: DEFAULT_RING_SIZE,
+        description:
+          'Per-session SSE replay ring depth (#3803 §02 target). Sets the ' +
+          'replay backlog available to `GET /session/:id/events` reconnects ' +
+          'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
+          'headroom at the cost of a few hundred KB extra RAM per session. ' +
+          'Must be a positive finite integer.',
+      })
       .option('http-bridge', {
         type: 'boolean',
         default: true,
         description:
-          'Stage 1 mode: one `qwen --acp` child per workspace behind the HTTP routes, ' +
-          "with multiple sessions multiplexed onto each child via the agent's native " +
-          '`newSession()`. Stage 2 native in-process mode is not yet implemented; ' +
-          'this flag will become opt-in then.',
+          'Stage 1 mode: one `qwen --acp` child per daemon (the daemon binds to ' +
+          'one workspace at boot, multiplexing N sessions onto that child via ' +
+          "the agent's native `newSession()`). Stage 2 native in-process mode " +
+          'is not yet implemented; this flag will become opt-in then.',
       }) as unknown as Argv<ServeArgs>,
   handler: async (argv) => {
     if (!argv['http-bridge']) {
@@ -112,6 +150,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         mode: 'http-bridge',
         maxSessions: argv['max-sessions'],
         maxConnections: argv['max-connections'],
+        eventRingSize: argv['event-ring-size'],
+        workspace: argv.workspace,
+        requireAuth: argv['require-auth'],
       });
     } catch (err) {
       writeStderrLine(

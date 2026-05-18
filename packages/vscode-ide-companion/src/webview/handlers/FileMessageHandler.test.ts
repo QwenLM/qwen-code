@@ -32,10 +32,12 @@ const vscodeMock = vi.hoisted(() => {
 
   return {
     Uri,
+    ViewColumn: { One: 1, Two: 2, Three: 3, Beside: -2 },
     workspace: {
       findFiles: vi.fn(),
       getWorkspaceFolder: vi.fn(),
       asRelativePath: vi.fn(),
+      openTextDocument: vi.fn(),
       workspaceFolders: [] as vscode.WorkspaceFolder[],
       createFileSystemWatcher: vi.fn(() => ({
         onDidCreate: vi.fn(),
@@ -47,8 +49,12 @@ const vscodeMock = vi.hoisted(() => {
     },
     window: {
       activeTextEditor: undefined,
+      showTextDocument: vi.fn(),
       tabGroups: {
-        all: [],
+        all: [] as Array<{
+          tabs: Array<{ input: unknown }>;
+          viewColumn: number;
+        }>,
       },
     },
   };
@@ -72,6 +78,15 @@ vi.mock('@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js', () => ({
 }));
 vi.mock('@qwen-code/qwen-code-core/src/utils/filesearch/crawlCache.js', () => ({
   clear: vi.fn(),
+}));
+
+const readonlyProviderMock = vi.hoisted(() => ({
+  createUri: vi.fn(),
+  setContent: vi.fn(),
+  getInstance: vi.fn(),
+}));
+vi.mock('../../services/readonlyFileSystemProvider.js', () => ({
+  ReadonlyFileSystemProvider: readonlyProviderMock,
 }));
 
 describe('FileMessageHandler', () => {
@@ -182,5 +197,107 @@ describe('FileMessageHandler', () => {
 
     expect(payload.type).toBe('workspaceFiles');
     expect(payload.data.requestId).toBe(7);
+  });
+
+  describe('createAndOpenTempFile viewColumn selection', () => {
+    const chatViewType = 'mainThreadWebview-qwenCode.chat';
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      readonlyProviderMock.getInstance.mockReturnValue(readonlyProviderMock);
+      readonlyProviderMock.createUri.mockReturnValue(
+        vscodeMock.Uri.file('/tmp/temp.txt'),
+      );
+      readonlyProviderMock.setContent.mockReturnValue(undefined);
+      vscodeMock.workspace.openTextDocument.mockResolvedValue({
+        uri: vscodeMock.Uri.file('/tmp/temp.txt'),
+      });
+      vscodeMock.window.showTextDocument.mockResolvedValue(undefined);
+      // ensure the existing-tab search finds nothing
+      vscodeMock.window.tabGroups.all = [];
+    });
+
+    function chatTab() {
+      return { input: { viewType: chatViewType as unknown } };
+    }
+
+    function regularTab() {
+      return { input: { viewType: 'default' as unknown } };
+    }
+
+    it('opens in left group when chat webview has a left neighbor', async () => {
+      vscodeMock.window.tabGroups.all = [
+        { tabs: [regularTab()], viewColumn: 1 },
+        { tabs: [chatTab()], viewColumn: 2 },
+      ];
+
+      const sendToWebView = vi.fn();
+      const handler = new FileMessageHandler(
+        {} as QwenAgentManager,
+        {} as ConversationStore,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'createAndOpenTempFile' as never,
+        data: { content: 'hello', fileName: 'test.txt' },
+      });
+
+      expect(vscodeMock.window.showTextDocument).toHaveBeenCalledTimes(1);
+      const options = vscodeMock.window.showTextDocument.mock.calls[0]?.[1] as {
+        viewColumn: number;
+      };
+      expect(options.viewColumn).toBe(1);
+    });
+
+    it('opens in right group when no left neighbor but right exists', async () => {
+      vscodeMock.window.tabGroups.all = [
+        { tabs: [chatTab()], viewColumn: 1 },
+        { tabs: [regularTab()], viewColumn: 2 },
+      ];
+
+      const sendToWebView = vi.fn();
+      const handler = new FileMessageHandler(
+        {} as QwenAgentManager,
+        {} as ConversationStore,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'createAndOpenTempFile' as never,
+        data: { content: 'hello', fileName: 'test.txt' },
+      });
+
+      expect(vscodeMock.window.showTextDocument).toHaveBeenCalledTimes(1);
+      const options = vscodeMock.window.showTextDocument.mock.calls[0]?.[1] as {
+        viewColumn: number;
+      };
+      expect(options.viewColumn).toBe(2);
+    });
+
+    it('falls back to ViewColumn.Beside when neither left nor right neighbor exists', async () => {
+      vscodeMock.window.tabGroups.all = [{ tabs: [chatTab()], viewColumn: 1 }];
+
+      const sendToWebView = vi.fn();
+      const handler = new FileMessageHandler(
+        {} as QwenAgentManager,
+        {} as ConversationStore,
+        null,
+        sendToWebView,
+      );
+
+      await handler.handle({
+        type: 'createAndOpenTempFile' as never,
+        data: { content: 'hello', fileName: 'test.txt' },
+      });
+
+      expect(vscodeMock.window.showTextDocument).toHaveBeenCalledTimes(1);
+      const options = vscodeMock.window.showTextDocument.mock.calls[0]?.[1] as {
+        viewColumn: number;
+      };
+      expect(options.viewColumn).toBe(vscodeMock.ViewColumn.Beside);
+    });
   });
 });

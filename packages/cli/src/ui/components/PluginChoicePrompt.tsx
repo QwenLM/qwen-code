@@ -9,6 +9,7 @@ import { useState, useCallback, useMemo } from 'react';
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import { useKeypress, type Key } from '../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 
 interface PluginChoice {
   name: string;
@@ -51,13 +52,13 @@ export const PluginChoicePrompt = (props: PluginChoicePromptProps) => {
       }
 
       // Navigate up
-      if (name === 'up' || sequence === 'k') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex((prev) => (prev > 0 ? prev - 1 : plugins.length - 1));
         return;
       }
 
       // Navigate down
-      if (name === 'down' || sequence === 'j') {
+      if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex((prev) => (prev < plugins.length - 1 ? prev + 1 : 0));
         return;
       }

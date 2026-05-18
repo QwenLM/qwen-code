@@ -89,7 +89,8 @@ export interface GenerateToolUseSummaryParams {
    */
   lastAssistantText?: string;
   /**
-   * Fast model to use. If omitted, falls back to `config.getFastModel()`;
+   * Fast model to use. If omitted, falls back to
+   * `config.getFastModelForSideQuery()`;
    * if that also returns undefined, the call is skipped (returns null).
    * Unlike `sessionRecap`, this does not fall back to the main model —
    * summary generation is a nice-to-have and must not incur main-model cost.
@@ -112,7 +113,10 @@ export async function generateToolUseSummary(
     return null;
   }
 
-  const model = params.model ?? config.getFastModel();
+  const model =
+    params.model ??
+    config.getFastModelForSideQuery?.() ??
+    config.getFastModel();
   if (!model) {
     debugLogger.debug('No fast model configured — skipping summary generation');
     return null;
@@ -151,7 +155,7 @@ export async function generateToolUseSummary(
         temperature: 0.3,
       },
       abortSignal: signal,
-      model,
+      ...(params.model !== undefined ? { model: params.model } : {}),
       // Tool-use labels are best-effort cosmetic; firing once per turn means
       // 7 retries on a transient outage would spike traffic for no benefit.
       maxAttempts: 1,

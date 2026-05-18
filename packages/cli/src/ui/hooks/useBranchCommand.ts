@@ -12,9 +12,9 @@ import {
   type ChatRecord,
   type ResumedSessionData,
   SessionStartSource,
-  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
 
@@ -178,7 +178,7 @@ export function useBranchCommand(
         //    the parent, silently recording user input into an orphan.
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
-        await config.getGeminiClient()?.initialize?.();
+        await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 
         // 6. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the branch but recorder writing into
@@ -191,6 +191,22 @@ export function useBranchCommand(
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
         uiSwapped = true;
+
+        // Re-arm /goal under the fork's new sessionId. The branched JSONL
+        // is a verbatim copy of the parent's, so an active goal sentinel
+        // carries over — but `config.startNewSession` rebuilt the hook
+        // system under `newSessionId`, leaving the parent's `activeGoal`
+        // store entry stale and the Stop hook unregistered. Same rationale
+        // as the /resume path; see [[useResumeCommand]] for details.
+        try {
+          restoreGoalFromHistory(
+            uiHistoryItems,
+            config,
+            historyManager.addItem,
+          );
+        } catch {
+          // Best-effort — branch must not fail on goal restoration.
+        }
 
         // 7. Compute and apply the branch customTitle.
         //    The forked transcript is identical to the parent's, so reading
@@ -205,23 +221,7 @@ export function useBranchCommand(
         config.getChatRecordingService()?.recordCustomTitle(effectiveTitle);
         setSessionName?.(effectiveTitle);
 
-        // 8. Fire SessionStart for the new session. A fork is semantically
-        //    distinct from a resume — the sessionId is new and the transcript
-        //    is a derivative — so we use the dedicated `Branch` source value
-        //    to let hook consumers distinguish the two.
-        try {
-          await config
-            .getHookSystem()
-            ?.fireSessionStartEvent(
-              SessionStartSource.Branch,
-              config.getModel() ?? '',
-              String(config.getApprovalMode()) as PermissionMode,
-            );
-        } catch (err) {
-          config.getDebugLogger().warn(`SessionStart hook failed: ${err}`);
-        }
-
-        // 9. Refresh terminal UI.
+        // 8. Refresh terminal UI.
         remount?.();
 
         // 10. Announce. Two history items mirror Claude's success message

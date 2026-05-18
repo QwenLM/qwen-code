@@ -4,10 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import fs from 'node:fs/promises';
 import os from 'node:os';
 import * as path from 'node:path';
 import { globSync } from 'glob';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
 import {
   iconvEncode,
@@ -241,12 +241,12 @@ export class StandardFileSystemService implements FileSystemService {
       const encoded = iconvEncode(content, encoding);
       if (bom) {
         const bomBytes = getBOMBytesForEncoding(encoding);
-        await fs.writeFile(
+        await atomicWriteFile(
           filePath,
           bomBytes ? Buffer.concat([bomBytes, encoded]) : encoded,
         );
       } else {
-        await fs.writeFile(filePath, encoded);
+        await atomicWriteFile(filePath, encoded);
       }
     } else if (bom) {
       // UTF-8 BOM: prepend EF BB BF
@@ -255,9 +255,12 @@ export class StandardFileSystemService implements FileSystemService {
         content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
       const bomBuffer = Buffer.from([0xef, 0xbb, 0xbf]);
       const contentBuffer = Buffer.from(normalizedContent, 'utf-8');
-      await fs.writeFile(filePath, Buffer.concat([bomBuffer, contentBuffer]));
+      await atomicWriteFile(
+        filePath,
+        Buffer.concat([bomBuffer, contentBuffer]),
+      );
     } else {
-      await fs.writeFile(filePath, content, 'utf-8');
+      await atomicWriteFile(filePath, content, { encoding: 'utf-8' });
     }
     return { _meta };
   }

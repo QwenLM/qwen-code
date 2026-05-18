@@ -61,7 +61,10 @@ export async function generateSessionRecap(
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) return null;
 
-    const model = config.getFastModel() ?? config.getModel();
+    const model =
+      config.getFastModelForSideQuery?.() ??
+      config.getFastModel() ??
+      config.getModel();
 
     const result = await runSideQuery(config, {
       purpose: 'session-recap',
@@ -75,7 +78,6 @@ export async function generateSessionRecap(
         temperature: 0.3,
       },
       abortSignal,
-      model,
       // Recap is best-effort cosmetic — don't burn the default 7 retries.
       maxAttempts: 1,
     });

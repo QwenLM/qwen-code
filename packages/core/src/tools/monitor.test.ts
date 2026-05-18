@@ -194,10 +194,12 @@ describe('MonitorTool', () => {
       getWorkspaceContext: vi.fn().mockReturnValue({
         isPathWithinWorkspace: mockIsPathWithinWorkspace,
       }),
+      getSessionId: vi.fn().mockReturnValue('test-session-id'),
       storage: {
         getUserSkillsDirs: vi
           .fn()
           .mockReturnValue(['/home/user/.claude/skills']),
+        getProjectDir: vi.fn().mockReturnValue('/test/project/.qwen'),
       },
     } as unknown as Config;
 
@@ -836,7 +838,10 @@ describe('MonitorTool', () => {
         .spyOn(monitorRegistry, 'register')
         .mockImplementation((entry) => {
           entry.abortController.abort();
-          MonitorRegistry.prototype.register.call(monitorRegistry, entry);
+          return MonitorRegistry.prototype.register.call(
+            monitorRegistry,
+            entry,
+          );
         });
 
       try {
