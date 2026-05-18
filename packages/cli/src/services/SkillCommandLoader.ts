@@ -8,7 +8,9 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
   appendToLastTextPart,
+  buildSkillLlmContent,
 } from '@qwen-code/qwen-code-core';
+import { dirname } from 'node:path';
 import type { ICommandLoader } from './types.js';
 import type {
   SlashCommand,
@@ -16,6 +18,7 @@ import type {
   CommandSource,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('SKILL_COMMAND_LOADER');
 
@@ -70,19 +73,25 @@ export class SkillCommandLoader implements ICommandLoader {
             : true;
 
         const sourceLabel = isExtension
-          ? `Extension: ${skill.extensionName ?? 'unknown'}`
+          ? `${t('Extension:')} ${skill.extensionName ?? 'unknown'}`
           : skill.level === 'project'
-            ? 'Project'
-            : 'User';
+            ? t('Project')
+            : t('User');
 
         return {
           name: skill.name,
           description: skill.description,
+          modelDescription: skill.description,
           kind: CommandKind.SKILL,
           source: (isExtension
             ? 'plugin-command'
             : 'skill-dir-command') as CommandSource,
           sourceLabel,
+          sourceDetail: isExtension
+            ? 'extension'
+            : skill.level === 'project'
+              ? 'project'
+              : 'user',
           modelInvocable,
           argumentHint: skill.argumentHint,
           whenToUse: skill.whenToUse,
@@ -94,7 +103,10 @@ export class SkillCommandLoader implements ICommandLoader {
             level: skill.level,
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
-            const body = skill.body;
+            const body = buildSkillLlmContent(
+              dirname(skill.filePath),
+              skill.body,
+            );
 
             const content = context.invocation?.args
               ? appendToLastTextPart([{ text: body }], context.invocation.raw)

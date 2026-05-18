@@ -1,0 +1,165 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type { Argv, CommandModule } from 'yargs';
+// Type-only imports — no runtime cost. The serve module pulls in express +
+// body-parser + qs + the daemon transport stack; static-importing it from
+// here would tax every `qwen` invocation (interactive, mcp, channel, etc.)
+// with ~50ms of cold ESM resolution. The runtime import is deferred to the
+// handler below so it only loads when the user actually runs `qwen serve`.
+import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { DEFAULT_RING_SIZE } from '../serve/eventBus.js';
+
+/**
+ * Pause the current async function indefinitely. Used after the daemon
+ * listener is up so yargs `parse()` never resolves — if it did, the
+ * top-level CLI would fall through to the interactive (TUI) entry point
+ * in `gemini.tsx`. SIGINT / SIGTERM in `runQwenServe` is the sole exit
+ * route. Named so a future maintainer doesn't read the bare
+ * `new Promise<never>(() => {})` as a bug (BRQQZ).
+ */
+function blockForever(): Promise<never> {
+  return new Promise<never>(() => {});
+}
+
+interface ServeArgs {
+  port: number;
+  hostname: string;
+  token?: string;
+  'max-sessions': number;
+  'max-connections': number;
+  'event-ring-size': number;
+  workspace?: string;
+  'require-auth': boolean;
+  // Read from the kebab-case key only — the camelCase mirror that yargs
+  // synthesizes is convenient for handlers but type-confusing here. The
+  // handler reads `argv['http-bridge']` directly.
+  'http-bridge': boolean;
+}
+
+export const serveCommand: CommandModule<unknown, ServeArgs> = {
+  command: 'serve',
+  describe:
+    'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
+  builder: (yargs: Argv) =>
+    yargs
+      .option('port', {
+        type: 'number',
+        default: 4170,
+        description:
+          'TCP port to bind (use 0 for an OS-assigned ephemeral port)',
+      })
+      .option('hostname', {
+        type: 'string',
+        default: '127.0.0.1',
+        description:
+          'Interface to bind. Loopback (127.0.0.1, localhost, ::1, [::1]) is auth-free; anything else requires a token.',
+      })
+      .option('token', {
+        type: 'string',
+        description:
+          'Bearer token required on every request. Falls back to the QWEN_SERVER_TOKEN env var.',
+      })
+      .option('max-sessions', {
+        type: 'number',
+        default: 20,
+        description:
+          'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
+          'attach to existing sessions still works. Set to 0 to disable.',
+      })
+      .option('workspace', {
+        type: 'string',
+        description:
+          'Absolute workspace path this daemon binds to. ' +
+          'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
+          'Defaults to process.cwd() when omitted. ' +
+          'For multi-workspace deployments, run one `qwen serve` per workspace ' +
+          'on separate ports (or behind an external orchestrator).',
+      })
+      .option('max-connections', {
+        type: 'number',
+        default: 256,
+        description:
+          'Listener-level TCP connection cap (server.maxConnections). Bounds raw ' +
+          'sockets — slow/phantom SSE clients get rejected at accept time once full. ' +
+          'Set to 0 to disable.',
+      })
+      .option('require-auth', {
+        type: 'boolean',
+        default: false,
+        description:
+          'Refuse to start without a bearer token, even on loopback. ' +
+          'Hardens the loopback developer default for shared dev hosts / CI ' +
+          'runners / multi-tenant workstations where any local user can hit ' +
+          '127.0.0.1. Requires --token or QWEN_SERVER_TOKEN. /health also ' +
+          'requires Authorization when enabled (no loopback exemption — ' +
+          'k8s/Compose probes must pass the bearer too).',
+      })
+      .option('event-ring-size', {
+        type: 'number',
+        // Single source of truth — `DEFAULT_RING_SIZE` (currently 8000,
+        // #3803 §02) is also what the bridge falls back to when the
+        // option is undefined. Importing here keeps a future bump in
+        // one place rather than drifting between CLI and bus.
+        default: DEFAULT_RING_SIZE,
+        description:
+          'Per-session SSE replay ring depth (#3803 §02 target). Sets the ' +
+          'replay backlog available to `GET /session/:id/events` reconnects ' +
+          'that send a `Last-Event-ID: N` header. Larger = more reconnect ' +
+          'headroom at the cost of a few hundred KB extra RAM per session. ' +
+          'Must be a positive finite integer.',
+      })
+      .option('http-bridge', {
+        type: 'boolean',
+        default: true,
+        description:
+          'Stage 1 mode: one `qwen --acp` child per daemon (the daemon binds to ' +
+          'one workspace at boot, multiplexing N sessions onto that child via ' +
+          "the agent's native `newSession()`). Stage 2 native in-process mode " +
+          'is not yet implemented; this flag will become opt-in then.',
+      }) as unknown as Argv<ServeArgs>,
+  handler: async (argv) => {
+    if (!argv['http-bridge']) {
+      writeStderrLine(
+        'qwen serve: --no-http-bridge (native mode) is not yet implemented; ' +
+          'falling back to http-bridge.',
+      );
+    }
+    if (argv.token) {
+      // `--token` is visible to any local user via `/proc/<pid>/cmdline`
+      // (Linux default; only suppressed under `hidepid=2`). Steer
+      // operators toward the env-var path which uses
+      // `/proc/<pid>/environ` (owner-only).
+      writeStderrLine(
+        'qwen serve: --token is visible in the process command line; ' +
+          'prefer the QWEN_SERVER_TOKEN env var for any non-trivial ' +
+          'deployment.',
+      );
+    }
+    // Lazy-load the serve module so non-serve invocations don't pay for
+    // express + body-parser + qs in their startup path.
+    const { runQwenServe } = await import('../serve/index.js');
+    try {
+      await runQwenServe({
+        port: argv.port,
+        hostname: argv.hostname,
+        token: argv.token,
+        mode: 'http-bridge',
+        maxSessions: argv['max-sessions'],
+        maxConnections: argv['max-connections'],
+        eventRingSize: argv['event-ring-size'],
+        workspace: argv.workspace,
+        requireAuth: argv['require-auth'],
+      });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
+    await blockForever();
+  },
+};

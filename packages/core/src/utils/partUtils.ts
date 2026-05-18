@@ -167,3 +167,45 @@ export function appendToLastTextPart(
 
   return newPrompt;
 }
+
+/**
+ * Prepends text to the first text part of a prompt, or inserts a new text part
+ * before non-text content when the prompt has no text parts.
+ */
+export function prependToFirstTextPart(
+  prompt: PartUnion[],
+  textToPrepend: string,
+  separator = '\n\n',
+): PartUnion[] {
+  if (!textToPrepend) {
+    return prompt;
+  }
+
+  if (prompt.length === 0) {
+    return [{ text: textToPrepend }];
+  }
+
+  const textPartIndex = prompt.findIndex(
+    (part) =>
+      typeof part === 'string' ||
+      (typeof part === 'object' && part !== null && 'text' in part),
+  );
+
+  if (textPartIndex === -1) {
+    return [{ text: textToPrepend }, ...prompt];
+  }
+
+  const newPrompt = [...prompt];
+  const textPart = newPrompt[textPartIndex];
+
+  if (typeof textPart === 'string') {
+    newPrompt[textPartIndex] = `${textToPrepend}${separator}${textPart}`;
+  } else {
+    newPrompt[textPartIndex] = {
+      ...textPart,
+      text: `${textToPrepend}${separator}${textPart.text ?? ''}`,
+    };
+  }
+
+  return newPrompt;
+}

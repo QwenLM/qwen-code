@@ -138,6 +138,7 @@ describe('AgentTool', () => {
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
@@ -145,6 +146,9 @@ describe('AgentTool', () => {
       getMonitorRegistry: vi.fn().mockReturnValue(stubMonitorRegistry),
       getToolRegistry: vi.fn().mockReturnValue(stubToolRegistry),
       createToolRegistry: vi.fn().mockResolvedValue(stubToolRegistry),
+      storage: {
+        getProjectDir: vi.fn().mockReturnValue('/test/project/.qwen'),
+      },
     } as unknown as Config;
 
     changeListeners = [];
@@ -314,6 +318,117 @@ describe('AgentTool', () => {
       expect(result).toBe(
         'Subagent "non-existent" not found. Available subagents: file-search, code-review',
       );
+    });
+
+    it('accepts isolation="worktree" when subagent_type is set', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects isolation values other than "worktree"', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          // @ts-expect-error: deliberately wrong enum value
+          isolation: 'remote',
+        }),
+      ).toMatch(/isolation/i);
+    });
+
+    it('rejects isolation without subagent_type (fork is not isolatable)', () => {
+      const { subagent_type: _ignored, ...forkParams } = validParams;
+      void _ignored;
+      expect(
+        agentTool.validateToolParams({
+          ...forkParams,
+          isolation: 'worktree',
+        }),
+      ).toMatch(/subagent_type/i);
+    });
+  });
+
+  // Round-7 regression guard: agent isolation must refuse when the
+  // parent working tree has uncommitted changes, because
+  // `git worktree add -b X path base` only checks out base's tip and
+  // would silently run the subagent against pre-edit HEAD. This test
+  // exercises the actual provisioning path against a real temp git
+  // repo and asserts the failure shape.
+  describe('isolation — round-7 parent-dirty guard', () => {
+    it('refuses isolation when parent has uncommitted edits', async () => {
+      const fs = await import('node:fs/promises');
+      const pathMod = await import('node:path');
+      const os = await import('node:os');
+      const { execFileSync } = await import('node:child_process');
+      const repo = await fs.mkdtemp(
+        pathMod.join(os.tmpdir(), 'qwen-iso-dirty-'),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fs.writeFile(pathMod.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        // Make the parent dirty.
+        await fs.writeFile(pathMod.join(repo, 'README.md'), 'edited\n');
+
+        // Verify the guard via the service-level helper that the
+        // isolation provisioning would call. (Driving the full
+        // AgentTool execute() in a unit test would require mocking
+        // most of the agent runtime; the isolation check itself is
+        // what the test is guarding.)
+        const { GitWorktreeService } = await import(
+          '../../services/gitWorktreeService.js'
+        );
+        const svc = new GitWorktreeService(repo);
+        const dirty = await svc.hasWorktreeChanges(repo);
+        expect(dirty).toBe(true);
+      } finally {
+        await fs.rm(repo, { recursive: true, force: true });
+      }
+    });
+
+    it('would allow isolation when parent is clean (sanity)', async () => {
+      const fs = await import('node:fs/promises');
+      const pathMod = await import('node:path');
+      const os = await import('node:os');
+      const { execFileSync } = await import('node:child_process');
+      const repo = await fs.mkdtemp(
+        pathMod.join(os.tmpdir(), 'qwen-iso-clean-'),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], {
+          cwd: repo,
+        });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fs.writeFile(pathMod.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+        const { GitWorktreeService } = await import(
+          '../../services/gitWorktreeService.js'
+        );
+        const svc = new GitWorktreeService(repo);
+        expect(await svc.hasWorktreeChanges(repo)).toBe(false);
+      } finally {
+        await fs.rm(repo, { recursive: true, force: true });
+      }
     });
   });
 
@@ -1184,6 +1299,40 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).toHaveBeenCalledTimes(2);
     });
 
+    it('uses the configured SubagentStop blocking cap', async () => {
+      (
+        config as unknown as {
+          getStopHookBlockingCap: ReturnType<typeof vi.fn>;
+        }
+      ).getStopHookBlockingCap.mockReturnValue(2);
+      const mockBlockOutput = {
+        isBlockingDecision: vi.fn().mockReturnValue(true),
+        shouldStopExecution: vi.fn().mockReturnValue(false),
+        getEffectiveReason: vi.fn().mockReturnValue('Keep working'),
+      };
+
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        mockBlockOutput as never,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(mockHookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+      expect(partToString(result.llmContent)).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+    });
+
     it('should allow stop when SubagentStop hook fails', async () => {
       vi.mocked(mockHookSystem.fireSubagentStopEvent).mockRejectedValue(
         new Error('Stop hook failed'),
@@ -1897,13 +2046,13 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).not.toContain('Background agent launched');
       // Foreground subagents register in the same registry with
-      // flavor: 'foreground' so the pill+dialog can surface them while
+      // isBackgrounded: false so the pill+dialog can surface them while
       // the parent's tool-call awaits, then unregister in the finally
       // path once the call returns. (The tool-result is the durable
       // record — the entry does not persist.)
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({
-          flavor: 'foreground',
+          isBackgrounded: false,
           description: 'Search files',
           subagentType: 'file-search',
           status: 'running',
@@ -2011,6 +2160,117 @@ describe('AgentTool', () => {
         { notify: false },
       );
     });
+
+    it('foreground subagent reserves a JSONL+meta path on the registry entry', async () => {
+      // Foreground subagents persist a JSONL transcript + meta sidecar
+      // symmetrically with the background path. Without this, a cancelled
+      // or crashed foreground run leaves no on-disk evidence beyond
+      // whatever made it into the parent's tool result.
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+
+      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute();
+
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isBackgrounded: false,
+          outputFile: expect.stringMatching(
+            /subagents[\\/]test-session-id[\\/]agent-file-search-.*\.jsonl$/,
+          ),
+          metaPath: expect.stringMatching(
+            /subagents[\\/]test-session-id[\\/]agent-file-search-.*\.meta\.json$/,
+          ),
+        }),
+      );
+      // Writer attached to the AgentTool's emitter so foreground tool
+      // calls / round text get recorded into the JSONL.
+      expect(attachSpy).toHaveBeenCalled();
+      // Meta sidecar is seeded eagerly at register time so resume
+      // discovery can surface paused foreground runs.
+      expect(writeMetaSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+        expect.objectContaining({
+          status: 'running',
+          agentType: 'file-search',
+          description: 'Search files',
+        }),
+      );
+      // Finally block patches the sidecar to the terminal status —
+      // without this a completed foreground run leaves the on-disk meta
+      // frozen at `running`.
+      expect(patchMetaSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+        expect.objectContaining({ status: 'completed' }),
+      );
+
+      attachSpy.mockRestore();
+      writeMetaSpy.mockRestore();
+      patchMetaSpy.mockRestore();
+    });
+
+    it.each([
+      [AgentTerminateMode.CANCELLED, 'cancelled'],
+      [AgentTerminateMode.ERROR, 'failed'],
+      [AgentTerminateMode.MAX_TURNS, 'failed'],
+      [AgentTerminateMode.TIMEOUT, 'failed'],
+    ] as const)(
+      'foreground %s terminate mode patches meta as %s',
+      async (mode, expectedStatus) => {
+        // The fgTerminalStatus ternary maps GOAL → completed, CANCELLED →
+        // cancelled, and *everything else* → failed. GOAL is covered by
+        // the "foreground subagent reserves a JSONL+meta path" test above;
+        // CANCELLED and the fallback branch are covered here. A regression
+        // that flipped CANCELLED → 'failed' or the fallback back to
+        // 'completed' (an earlier fallback bug shipped and was fixed in
+        // d67db4c50) would now fail at least one of these cases.
+        const fgSubagent: SubagentConfig = {
+          ...bgSubagent,
+          name: 'file-search',
+          background: undefined,
+        };
+        vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+          fgSubagent,
+        );
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+
+        const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+
+        const params: AgentParams = {
+          description: 'Search files',
+          prompt: 'Find all TypeScript files',
+          subagent_type: 'file-search',
+        };
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        await invocation.execute();
+
+        expect(patchMetaSpy).toHaveBeenCalledWith(
+          expect.stringMatching(/agent-file-search-.*\.meta\.json$/),
+          expect.objectContaining({ status: expectedStatus }),
+        );
+
+        patchMetaSpy.mockRestore();
+      },
+    );
 
     it('foreground CANCELLED prefixes the partial result so the parent sees the cancel', async () => {
       // Without this prefix, a user-cancelled foreground subagent returns

@@ -105,6 +105,40 @@ describe('HookPlanner', () => {
 
       expect(result!.hookConfigs).toHaveLength(1);
     });
+
+    it('should not deduplicate prompt hooks that only share the first 50 characters', () => {
+      const sharedPrefix = 'a'.repeat(50);
+      const entry1: HookRegistryEntry = {
+        config: {
+          type: HookType.Prompt,
+          prompt: `${sharedPrefix}-first prompt`,
+        },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptSubmit,
+        enabled: true,
+      };
+      const entry2: HookRegistryEntry = {
+        config: {
+          type: HookType.Prompt,
+          prompt: `${sharedPrefix}-second prompt`,
+        },
+        source: HooksConfigSource.Project,
+        eventName: HookEventName.UserPromptSubmit,
+        enabled: true,
+      };
+      vi.mocked(mockRegistry.getHooksForEvent).mockReturnValue([
+        entry1,
+        entry2,
+      ]);
+
+      const result = planner.createExecutionPlan(
+        HookEventName.UserPromptSubmit,
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.hookConfigs).toHaveLength(2);
+      expect(result!.hookConfigs).toEqual([entry1.config, entry2.config]);
+    });
   });
 
   describe('matchesContext', () => {

@@ -8,6 +8,7 @@ import { useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
 import type { ToolListStepProps, MCPToolDisplayInfo } from '../types.js';
 import { VISIBLE_TOOLS_COUNT } from '../constants.js';
@@ -52,9 +53,9 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
     (key) => {
       if (key.name === 'escape') {
         onBack();
-      } else if (key.name === 'up') {
+      } else if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex((prev) => Math.max(0, prev - 1));
-      } else if (key.name === 'down') {
+      } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex((prev) => Math.min(tools.length - 1, prev + 1));
       } else if (key.name === 'return') {
         if (tools[selectedIndex]) {
@@ -77,10 +78,10 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
 
   const getToolAnnotations = (tool: MCPToolDisplayInfo): string => {
     const hints: string[] = [];
-    if (tool.annotations?.destructiveHint) hints.push('destructive');
-    if (tool.annotations?.readOnlyHint) hints.push('read-only');
-    if (tool.annotations?.openWorldHint) hints.push('open-world');
-    if (tool.annotations?.idempotentHint) hints.push('idempotent');
+    if (tool.annotations?.destructiveHint) hints.push(t('destructive'));
+    if (tool.annotations?.readOnlyHint) hints.push(t('read-only'));
+    if (tool.annotations?.openWorldHint) hints.push(t('open-world'));
+    if (tool.annotations?.idempotentHint) hints.push(t('idempotent'));
     return hints.join(', ');
   };
 

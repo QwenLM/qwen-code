@@ -43,18 +43,42 @@ describe('getCommandSourceBadge', () => {
     );
   });
 
-  it('returns [User] for skill-dir-command with User label', () => {
+  it('returns [Custom] for skill-dir-command with User label but no source detail', () => {
     expect(
       getCommandSourceBadge(
         makeCmd({ source: 'skill-dir-command', sourceLabel: 'User' }),
       ),
+    ).toBe('[Custom]');
+  });
+
+  it('returns [User] for localized skill-dir-command with user source detail', () => {
+    expect(
+      getCommandSourceBadge(
+        makeCmd({
+          source: 'skill-dir-command',
+          sourceLabel: '用户',
+          sourceDetail: 'user',
+        }),
+      ),
     ).toBe('[User]');
   });
 
-  it('returns [Project] for skill-dir-command with Project label', () => {
+  it('returns [Custom] for skill-dir-command with Project label but no source detail', () => {
     expect(
       getCommandSourceBadge(
         makeCmd({ source: 'skill-dir-command', sourceLabel: 'Project' }),
+      ),
+    ).toBe('[Custom]');
+  });
+
+  it('returns [Project] for localized skill-dir-command with project source detail', () => {
+    expect(
+      getCommandSourceBadge(
+        makeCmd({
+          source: 'skill-dir-command',
+          sourceLabel: '项目',
+          sourceDetail: 'project',
+        }),
       ),
     ).toBe('[Project]');
   });
@@ -67,10 +91,22 @@ describe('getCommandSourceBadge', () => {
     ).toBe('[Custom]');
   });
 
-  it('returns [Extension] for plugin-command with Extension: prefix', () => {
+  it('returns [Plugin] for plugin-command with Extension: prefix but no source detail', () => {
     expect(
       getCommandSourceBadge(
         makeCmd({ source: 'plugin-command', sourceLabel: 'Extension: my-ext' }),
+      ),
+    ).toBe('[Plugin]');
+  });
+
+  it('returns [Extension] for localized plugin-command with extension source detail', () => {
+    expect(
+      getCommandSourceBadge(
+        makeCmd({
+          source: 'plugin-command',
+          sourceLabel: '扩展：my-ext',
+          sourceDetail: 'extension',
+        }),
       ),
     ).toBe('[Extension]');
   });

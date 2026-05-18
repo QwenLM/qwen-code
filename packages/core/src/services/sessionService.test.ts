@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import {
   afterEach,
   beforeEach,
@@ -189,6 +190,28 @@ describe('SessionService', () => {
 
       expect(result.items[0].prompt).toBe('hello session a');
       expect(result.items[0].gitBranch).toBe('main');
+    });
+
+    it('should NOT populate messageCount during listing', async () => {
+      // Listing must avoid the full-file readline that counting requires
+      // — message counts are now lazy and provided by
+      // `countSessionMessages(sessionId)` only when a UI surface (e.g.
+      // a session preview) is about to display them. Pinning this
+      // contract here so future refactors can't quietly re-introduce
+      // the per-file scan that used to dominate /resume open time.
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].messageCount).toBeUndefined();
     });
 
     it('should truncate long prompts', async () => {
@@ -557,6 +580,193 @@ describe('SessionService', () => {
     });
   });
 
+  describe('removeSessions', () => {
+    it('should remove multiple sessions and report each outcome', async () => {
+      // recordA1 belongs to current project; recordB1 also; the third id
+      // never has a backing record (notFound).
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdB,
+        sessionIdC,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdA, sessionIdB]);
+      expect(result.notFound).toEqual([sessionIdC]);
+      expect(result.errors).toEqual([]);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+    });
+
+    it('should de-duplicate input ids', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdA,
+        sessionIdA,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdA]);
+      expect(result.notFound).toEqual([]);
+      expect(unlinkSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should keep going when one removal fails', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const failure = new Error('boom');
+      unlinkSyncSpy.mockImplementation((p: fs.PathLike) => {
+        if (p.toString().includes(sessionIdA)) {
+          throw failure;
+        }
+      });
+
+      const result = await sessionService.removeSessions([
+        sessionIdA,
+        sessionIdB,
+      ]);
+
+      expect(result.removed).toEqual([sessionIdB]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([
+        { sessionId: sessionIdA, error: failure },
+      ]);
+    });
+
+    it('should return empty results when given an empty list', async () => {
+      const result = await sessionService.removeSessions([]);
+
+      expect(result.removed).toEqual([]);
+      expect(result.notFound).toEqual([]);
+      expect(result.errors).toEqual([]);
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('countSessionMessages', () => {
+    // The lazy counter that replaces the per-file readline scan from
+    // listSessions. Four contracts to pin: it actually counts what it
+    // promises, it short-circuits on bad input without touching the disk,
+    // it returns 0 on any read failure (caller must not see an exception
+    // bubble up — the picker treats 0 as "unknown"), and it scopes to
+    // the current project (mirroring deleteSession/renameSession's
+    // first-record cwd check).
+
+    const stubCreateReadStream = (
+      lines: string[],
+    ): MockInstance<typeof fs.createReadStream> =>
+      vi
+        .spyOn(fs, 'createReadStream')
+        .mockImplementation(
+          () => Readable.from([lines.join('\n')]) as unknown as fs.ReadStream,
+        );
+
+    it('should count unique user/assistant uuids and ignore other record types', async () => {
+      // Project scoping reads the first record before the count stream;
+      // give it a record from this project so the count proceeds.
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      // Real countSessionMessagesFromPath routes each line through
+      // parseLineTolerant. The default mock is a no-op; for this test we
+      // need it to actually decode the JSON so the uuid set is populated.
+      vi.mocked(jsonl.parseLineTolerant).mockImplementation((line) => {
+        try {
+          const parsed = JSON.parse(line);
+          return Array.isArray(parsed) ? parsed : [parsed];
+        } catch {
+          return [];
+        }
+      });
+      const lines = [
+        // Two user records sharing a uuid — should be counted once
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'u1', type: 'user' }),
+        JSON.stringify({ uuid: 'a1', type: 'assistant' }),
+        // System / summary records aren't messages
+        JSON.stringify({ uuid: 's1', type: 'system' }),
+        JSON.stringify({ uuid: 'sum1', type: 'summary' }),
+        // Empty and malformed lines must not throw
+        '',
+        '   ',
+        'not-json',
+        JSON.stringify({ uuid: 'u2', type: 'user' }),
+      ];
+      const createReadStreamSpy = stubCreateReadStream(lines);
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(3); // u1, a1, u2
+      expect(createReadStreamSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('should return 0 for invalid sessionId without touching the filesystem', async () => {
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages('not-a-uuid');
+
+      expect(count).toBe(0);
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 when the session file is missing (ENOENT)', async () => {
+      // The first-record read fires before the count stream, so simulate
+      // ENOENT there too — readLines surfaces it as a thrown error.
+      vi.mocked(jsonl.readLines).mockRejectedValue(
+        Object.assign(new Error('ENOENT'), { code: 'ENOENT' }),
+      );
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+    });
+
+    it('should return 0 when the session belongs to a different project', async () => {
+      // A valid session ID can exist in the shared chats directory while
+      // its first-record cwd hashes to a different project. Lazy-count
+      // callers must not bypass project scoping.
+      const otherProjectRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/some/other/project',
+      };
+      vi.mocked(jsonl.readLines).mockResolvedValue([otherProjectRecord]);
+      // Make the projectHash mock context-sensitive so the cwd check
+      // actually distinguishes projects.
+      vi.mocked(getProjectHash).mockImplementation((cwd) =>
+        cwd === '/test/project/root' ? 'test-project-hash' : 'other-hash',
+      );
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+      // No streaming pass should have started — the project check
+      // short-circuits before the expensive part.
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+
+    it('should return 0 when the session file has no records (empty file)', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([]);
+      const createReadStreamSpy = vi.spyOn(fs, 'createReadStream');
+
+      const count = await sessionService.countSessionMessages(sessionIdA);
+
+      expect(count).toBe(0);
+      expect(createReadStreamSpy).not.toHaveBeenCalled();
+    });
+  });
+
   describe('loadLastSession', () => {
     it('should return the most recent session (same as getLatestSession)', async () => {
       const now = Date.now();
@@ -685,6 +895,21 @@ describe('SessionService', () => {
       ).toBe(450);
     });
 
+    it('should prefer promptTokenCount over totalTokenCount when both are present', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: { promptTokenCount: 200, totalTokenCount: 450 },
+      };
+      expect(
+        getResumePromptTokenCount(
+          makeConversation([compressionRecord, assistant]),
+        ),
+      ).toBe(200);
+    });
+
     it('should fall back to compression when latest assistant has zero usage', () => {
       const assistant: ChatRecord = {
         ...baseRecord,
@@ -720,6 +945,95 @@ describe('SessionService', () => {
       const history = buildApiHistoryFromConversation(conversation);
 
       expect(history).toEqual([recordA1.message, assistantA1.message]);
+    });
+
+    it('merges mid-turn user messages into the preceding tool result on resume', () => {
+      const assistantWithToolCall: ChatRecord = {
+        uuid: 'a2',
+        parentUuid: recordA1.uuid,
+        sessionId: sessionIdA,
+        timestamp: '2024-01-01T00:01:00Z',
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-1',
+                name: 'read_file',
+                args: { path: 'foo.txt' },
+              },
+            },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+      const toolResult: ChatRecord = {
+        uuid: 'a3',
+        parentUuid: assistantWithToolCall.uuid,
+        sessionId: sessionIdA,
+        timestamp: '2024-01-01T00:02:00Z',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+      const midTurnUserMessage: ChatRecord = {
+        uuid: 'a4',
+        parentUuid: toolResult.uuid,
+        sessionId: sessionIdA,
+        timestamp: '2024-01-01T00:03:00Z',
+        type: 'user',
+        subtype: 'mid_turn_user_message',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: '\n[User message received during tool execution]: save the logs',
+            },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:03:00Z',
+        messages: [
+          recordA1,
+          assistantWithToolCall,
+          toolResult,
+          midTurnUserMessage,
+        ],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([
+        recordA1.message,
+        assistantWithToolCall.message,
+        {
+          role: 'user',
+          parts: [
+            ...toolResult.message!.parts!,
+            ...midTurnUserMessage.message!.parts!,
+          ],
+        },
+      ]);
     });
 
     it('should use compressedHistory snapshot and append subsequent records after compression', () => {
@@ -785,6 +1099,99 @@ describe('SessionService', () => {
         },
         recordB2.message,
         postCompressionRecord.message,
+      ]);
+    });
+
+    it('merges post-compression mid-turn user messages into preceding tool results', () => {
+      const compressionRecord: ChatRecord = {
+        uuid: 'c1',
+        parentUuid: 'b2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'chat_compression',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+        systemPayload: {
+          info: {
+            originalTokenCount: 100,
+            newTokenCount: 50,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'continue' }] },
+          ],
+        },
+      };
+      const toolResult: ChatRecord = {
+        uuid: 'c2',
+        parentUuid: 'c1',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T04:00:00Z',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'shell',
+                response: { output: 'ok' },
+              },
+            },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+      };
+      const midTurnUserMessage: ChatRecord = {
+        uuid: 'c3',
+        parentUuid: 'c2',
+        sessionId: sessionIdA,
+        timestamp: '2024-01-02T04:01:00Z',
+        type: 'user',
+        subtype: 'mid_turn_user_message',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              text: '\n[User message received during tool execution]: stop after this',
+            },
+          ],
+        },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+      };
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-02T04:01:00Z',
+        messages: [
+          recordA1,
+          recordB2,
+          compressionRecord,
+          toolResult,
+          midTurnUserMessage,
+        ],
+      };
+
+      const history = buildApiHistoryFromConversation(conversation);
+
+      expect(history).toEqual([
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'continue' }] },
+        {
+          role: 'user',
+          parts: [
+            ...toolResult.message!.parts!,
+            ...midTurnUserMessage.message!.parts!,
+          ],
+        },
       ]);
     });
 

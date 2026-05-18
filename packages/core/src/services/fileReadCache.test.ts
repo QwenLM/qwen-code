@@ -505,4 +505,67 @@ describe('FileReadCache', () => {
       expect(cache.check(fs.statSync(file)).state).toBe('stale');
     });
   });
+
+  describe('eviction', () => {
+    it('evicts the oldest entry when the cache exceeds MAX_ENTRIES', () => {
+      // Fill cache to capacity (MAX_ENTRIES = 4096).
+      const cache = new FileReadCache();
+      for (let i = 0; i < 4096; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+      expect(cache.size()).toBe(4096);
+
+      // The 4097th write triggers eviction of the oldest (ino=0).
+      cache.recordWrite('/x/file-new.ts', makeStats({ ino: 4096 }));
+      expect(cache.size()).toBeLessThanOrEqual(4096);
+      expect(cache.check(makeStats({ ino: 0 })).state).toBe('unknown');
+      expect(cache.check(makeStats({ ino: 4096 })).state).toBe('fresh');
+    });
+
+    it('keeps size at MAX_ENTRIES after multiple overflows', () => {
+      const cache = new FileReadCache();
+      // Add MAX_ENTRIES + 100 distinct inodes.
+      for (let i = 0; i < 4196; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+      expect(cache.size()).toBeLessThanOrEqual(4096);
+    });
+
+    it('should have bumped entries survive eviction', () => {
+      const cache = new FileReadCache();
+      // Fill to capacity.
+      for (let i = 0; i < 4096; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Frequently update ino=0 — after bump lands this moves it to the
+      // back of the eviction queue.
+      for (let i = 0; i < 10; i++) {
+        cache.recordRead('/x/file-0.ts', makeStats({ ino: 0 }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      // Add 50 new entries — they push the *least* recently bumped out.
+      for (let i = 4096; i < 4146; i++) {
+        cache.recordRead(`/x/file-${i}.ts`, makeStats({ ino: i }), {
+          full: true,
+          cacheable: true,
+        });
+      }
+
+      expect(cache.size()).toBeLessThanOrEqual(4096);
+      expect(cache.check(makeStats({ ino: 0 })).state).not.toBe('unknown');
+    });
+  });
 });

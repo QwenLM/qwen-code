@@ -94,6 +94,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
+  // Worktree management belongs to the parent session — a subagent must
+  // never enter or exit the user's worktree state independently.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
 ]);
 
 /**
@@ -401,9 +405,14 @@ export class AgentCore {
         hasWildcard ||
         (asStrings.length === 0 && onlyInlineDecls.length === 0)
       ) {
+        // Subagents inherit the full tool surface — including deferred tools
+        // (MCP, low-frequency built-ins). Subagents are one-shot and don't
+        // have the same "save tokens" lifecycle as the main chat, and they
+        // don't see the "Deferred Tools" section of the system prompt, so
+        // hiding schemas would silently break existing `tools: ['*']` configs.
         toolsList.push(
           ...toolRegistry
-            .getFunctionDeclarations()
+            .getFunctionDeclarations({ includeDeferred: true })
             .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
         );
       } else {
@@ -424,10 +433,11 @@ export class AgentCore {
         ),
       );
     } else {
-      // Inherit all available tools by default when not specified.
+      // Inherit all available tools by default when not specified — see the
+      // wildcard branch above for why deferred tools are included.
       toolsList.push(
         ...toolRegistry
-          .getFunctionDeclarations()
+          .getFunctionDeclarations({ includeDeferred: true })
           .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
       );
     }
@@ -1631,10 +1641,11 @@ Important Rules:
     const thoughtTok = Number(usage.thoughtsTokenCount || 0);
     const cachedTok = Number(usage.cachedContentTokenCount || 0);
     const totalTok = Number(usage.totalTokenCount || 0);
-    // Prefer totalTokenCount (prompt + output) for context usage — the
-    // output from this round becomes history for the next, matching
-    // the approach in geminiChat.ts.
-    const contextTok = isFinite(totalTok) && totalTok > 0 ? totalTok : inTok;
+    // Context usage tracks prompt size; output isn't in history yet.
+    // Guard against malformed provider values (`Infinity`/`NaN`) so the
+    // downstream compaction math doesn't get poisoned — `Infinity` is
+    // truthy and would otherwise overwrite a valid prior reading.
+    const contextTok = inTok || totalTok;
     if (isFinite(contextTok) && contextTok > 0) {
       this.lastPromptTokenCount = contextTok;
     }

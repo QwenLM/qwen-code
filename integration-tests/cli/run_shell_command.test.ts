@@ -110,7 +110,8 @@ describe('run_shell_command', () => {
     const fileName = `test-file-${Math.random().toString(36).substring(7)}.txt`;
     rig.createFile(fileName, 'test content');
 
-    const prompt = `Run a shell command to list the files in the current directory and tell me what they are.`;
+    const lsCmd = process.platform === 'win32' ? 'dir' : 'ls';
+    const prompt = `Use the run_shell_command tool to run "${lsCmd}" in the current directory. You must use run_shell_command, not list_directory. Tell me what files you see.`;
     const result = await rig.run(prompt);
 
     const foundToolCall = await rig.waitForToolCall('run_shell_command');

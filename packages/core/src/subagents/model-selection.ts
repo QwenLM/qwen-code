@@ -10,6 +10,12 @@ export interface ParsedSubagentModelSelection {
   authType?: AuthType;
   modelId?: string;
   inherits: boolean;
+  /**
+   * True when the selector was `fast` — the runtime resolves this to
+   * `Config.getFastModel()` if a valid fast model is configured, and
+   * falls back to inheriting the parent model otherwise.
+   */
+  usesFastModel?: boolean;
 }
 
 const AUTH_TYPES = new Set<AuthType>(Object.values(AuthType));
@@ -19,6 +25,7 @@ const AUTH_TYPES = new Set<AuthType>(Object.values(AuthType));
  *
  * Supported forms:
  * - omitted / inherit -> use parent conversation model
+ * - fast -> use Config.getFastModel() if available, else inherit parent model
  * - modelId -> use parent authType with the provided modelId
  * - authType:modelId -> use explicit authType and modelId
  */
@@ -28,6 +35,10 @@ export function parseSubagentModelSelection(
   const trimmed = model?.trim();
   if (!trimmed || trimmed === 'inherit') {
     return { inherits: true };
+  }
+
+  if (trimmed === 'fast') {
+    return { inherits: false, usesFastModel: true };
   }
 
   const colonIndex = trimmed.indexOf(':');

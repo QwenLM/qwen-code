@@ -288,6 +288,108 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('stores authType-qualified selectors in fast model mode', async () => {
+    const setFastModel = vi.fn();
+    const { props, mockSettings } = renderComponent({ isFastModelMode: true }, {
+      getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+      getModel: vi.fn(() => 'claude-opus-4-7'),
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'deepseek-v4-flash',
+          label: 'deepseek-v4-flash',
+          authType: AuthType.USE_OPENAI,
+        },
+        {
+          id: 'claude-opus-4-7',
+          label: 'claude-opus-4-7',
+          authType: AuthType.USE_ANTHROPIC,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_ANTHROPIC,
+        model: 'claude-opus-4-7',
+      })),
+      setFastModel,
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::deepseek-v4-flash`);
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'fastModel',
+      'openai:deepseek-v4-flash',
+    );
+    expect(setFastModel).toHaveBeenCalledWith('openai:deepseek-v4-flash');
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('highlights the cross-auth row for a bare fast-model setting', () => {
+    // `/model --fast deepseek-v4-flash` validates across all providers and
+    // persists the bare model id. When the dialog re-opens, it must locate
+    // the right row even though the setting carries no authType prefix —
+    // otherwise the highlight falls back to the current auth's first row
+    // and Enter would silently overwrite the setting.
+    const mockSettings = {
+      isTrusted: true,
+      user: { settings: {} },
+      workspace: { settings: {} },
+      merged: { fastModel: 'deepseek-v4-flash' },
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+
+    const allModels = [
+      {
+        id: 'claude-opus-4-7',
+        label: 'claude-opus-4-7',
+        description: '',
+        authType: AuthType.USE_ANTHROPIC,
+      },
+      {
+        id: 'deepseek-v4-flash',
+        label: 'deepseek-v4-flash',
+        description: '',
+        authType: AuthType.USE_OPENAI,
+      },
+    ];
+
+    render(
+      <SettingsContext.Provider value={mockSettings}>
+        <ConfigContext.Provider
+          value={
+            {
+              getModel: vi.fn(() => 'claude-opus-4-7'),
+              getAuthType: vi.fn(() => AuthType.USE_ANTHROPIC),
+              getAllConfiguredModels: vi.fn(() => allModels),
+              getContentGeneratorConfig: vi.fn(() => ({
+                authType: AuthType.USE_ANTHROPIC,
+                model: 'claude-opus-4-7',
+              })),
+              getModelsConfig: vi.fn(() => ({
+                getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
+              })),
+              getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+              getUsageStatisticsEnabled: vi.fn(() => false),
+              getSessionId: vi.fn(() => 'session'),
+              getDebugMode: vi.fn(() => false),
+              getUseModelRouter: vi.fn(() => false),
+              getProxy: vi.fn(() => undefined),
+            } as unknown as Config
+          }
+        >
+          <ModelDialog onClose={vi.fn()} isFastModelMode={true} />
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+    );
+
+    const items = mockedSelect.mock.calls[0][0].items;
+    const deepseekIndex = items.findIndex((item) =>
+      String(item.value).includes('deepseek-v4-flash'),
+    );
+    expect(deepseekIndex).toBeGreaterThanOrEqual(0);
+    expect(mockedSelect.mock.calls[0][0].initialIndex).toBe(deepseekIndex);
+  });
+
   it('blocks switching to qwen-oauth from another authType (discontinued)', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const getAuthType = vi.fn(() => AuthType.USE_OPENAI);

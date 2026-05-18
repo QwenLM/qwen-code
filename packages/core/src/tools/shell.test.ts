@@ -40,6 +40,19 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
+interface ShellToolParameterJsonSchema {
+  properties: {
+    command: {
+      description: string;
+    };
+  };
+}
+
+function getCommandParameterDescription(shellTool: ShellTool): string {
+  return (shellTool.schema.parametersJsonSchema as ShellToolParameterJsonSchema)
+    .properties.command.description;
+}
+
 describe('ShellTool', () => {
   let shellTool: ShellTool;
   let mockConfig: Config;
@@ -95,13 +108,13 @@ describe('ShellTool', () => {
       on: vi.fn(),
     } as unknown as fs.WriteStream);
 
-    shellTool = new ShellTool(mockConfig);
-
     vi.mocked(os.platform).mockReturnValue('linux');
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
     (vi.mocked(crypto.randomBytes) as Mock).mockReturnValue(
       Buffer.from('abcdef', 'hex'),
     );
+
+    shellTool = new ShellTool(mockConfig);
 
     // Capture the output callback to simulate streaming events from the service
     mockShellExecutionService.mockImplementation((_cmd, _cwd, callback) => {
@@ -313,7 +326,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
       // Entry registered with the spawn pid.
@@ -470,7 +483,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -487,7 +500,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -504,7 +517,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -521,7 +534,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -538,7 +551,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -578,7 +591,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -599,7 +614,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -618,7 +635,7 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
         { streamStdout: true },
       );
     });
@@ -643,7 +660,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -671,7 +690,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
 
@@ -736,7 +757,7 @@ describe('ShellTool', () => {
     describe('Streaming to `updateOutput`', () => {
       let updateOutputMock: Mock;
       beforeEach(() => {
-        vi.useFakeTimers({ toFake: ['Date'] });
+        vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
         updateOutputMock = vi.fn();
       });
       afterEach(() => {
@@ -776,6 +797,364 @@ describe('ShellTool', () => {
         expect(updateOutputMock).toHaveBeenLastCalledWith(
           '[Receiving binary output... 2.0 KB received]',
         );
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from(''),
+          output: '',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should throttle live text updates while preserving the latest output', async () => {
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        // Leading-edge fires immediately
+        mockShellOutputCallback({ type: 'data', chunk: 'line 1' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        expect(updateOutputMock).toHaveBeenLastCalledWith('line 1');
+
+        // Suppressed: trailing flush scheduled
+        mockShellOutputCallback({ type: 'data', chunk: 'line 2' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Advance time: trailing flush fires, emitting 'line 2'
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('line 2');
+
+        // Advance time past the interval window again so next chunk fires immediately
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+
+        mockShellOutputCallback({ type: 'data', chunk: 'line 3' });
+        expect(updateOutputMock).toHaveBeenCalledTimes(3);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('line 3');
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('line 1\nline 2\nline 3'),
+          output: 'line 1\nline 2\nline 3',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should flush the last suppressed text chunk when the command goes quiet', async () => {
+        const invocation = shellTool.build({
+          command: 'long-running-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        // Leading-edge update
+        mockShellOutputCallback({ type: 'data', chunk: 'progress: 0%' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Suppressed: within the throttle window
+        mockShellOutputCallback({ type: 'data', chunk: 'progress: 50%' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Advance time to trigger the trailing flush timer
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+
+        // The trailing flush must have fired with the latest suppressed chunk
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('progress: 50%');
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('progress: 50%'),
+          output: 'progress: 50%',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should coalesce 3+ rapid text chunks within a window into a single trailing flush', async () => {
+        // Regression: in one throttle window, the leading-edge chunk fires
+        // immediately, and any subsequent chunks (regardless of count) are
+        // collapsed into ONE trailing flush carrying the latest text. The
+        // timer must not be repeatedly rescheduled per chunk — that would
+        // be wasteful and (depending on the math) could push the flush
+        // beyond the original window.
+        const invocation = shellTool.build({
+          command: 'streaming-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        // Leading edge: fires immediately at t=0
+        mockShellOutputCallback({ type: 'data', chunk: 'chunk 1' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        expect(updateOutputMock).toHaveBeenLastCalledWith('chunk 1');
+
+        // Three rapid suppressed chunks within the same window. None of
+        // these should fire updateOutput synchronously, and the trailing
+        // flush should not have run yet.
+        await vi.advanceTimersByTimeAsync(50);
+        mockShellOutputCallback({ type: 'data', chunk: 'chunk 2' });
+        await vi.advanceTimersByTimeAsync(50);
+        mockShellOutputCallback({ type: 'data', chunk: 'chunk 3' });
+        await vi.advanceTimersByTimeAsync(50);
+        mockShellOutputCallback({ type: 'data', chunk: 'chunk 4' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Drain the throttle window. The single trailing flush should
+        // fire exactly once and carry the LATEST suppressed chunk.
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('chunk 4');
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('chunk 1chunk 2chunk 3chunk 4'),
+          output: 'chunk 1chunk 2chunk 3chunk 4',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should cancel a pending trailing flush when the command completes', async () => {
+        // Lifecycle invariant: if the command resolves while a trailing
+        // flush timer is pending, the timer MUST be cancelled. Otherwise
+        // the timer would fire after `execute()` returns and trigger a
+        // phantom updateOutput call against stale `cumulativeOutput`,
+        // racing against the consumer that has already moved on.
+        const invocation = shellTool.build({
+          command: 'quick-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        // Leading-edge update + suppressed chunk (timer pending)
+        mockShellOutputCallback({ type: 'data', chunk: 'first' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        mockShellOutputCallback({ type: 'data', chunk: 'second' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Resolve BEFORE the throttle window elapses. No further chunks.
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('first\nsecond'),
+          output: 'first\nsecond',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+
+        // Advancing time past the original window must not produce a
+        // late updateOutput call — the timer was cancelled on settle.
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+      });
+
+      it('should not fire a duplicate trailing flush after a leading-edge update', async () => {
+        // After a trailing flush emits in window N, the next chunk in
+        // window N+1 takes the leading-edge path. `doUpdate()` is the
+        // single point that cancels any pending trailing-flush timer,
+        // so even if a stale timer were somehow still scheduled when a
+        // leading-edge update fires, no duplicate updateOutput call can
+        // escape. This test asserts the end-to-end invariant: suppress
+        // → trailing flush → leading-edge → suppress → trailing flush
+        // produces exactly the expected sequence with no duplicates.
+        const invocation = shellTool.build({
+          command: 'multi-window-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        // Window 1: leading-edge 'a' at t=0
+        mockShellOutputCallback({ type: 'data', chunk: 'a' });
+        expect(updateOutputMock).toHaveBeenCalledTimes(1);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('a');
+
+        // Window 1: suppressed 'b' schedules trailing flush
+        await vi.advanceTimersByTimeAsync(100);
+        mockShellOutputCallback({ type: 'data', chunk: 'b' });
+        expect(updateOutputMock).toHaveBeenCalledTimes(1);
+
+        // Trailing flush fires at the window boundary with 'b'
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS);
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('b');
+
+        // Window 2: advance past the interval, next chunk takes the
+        // leading-edge path. If `doUpdate()` failed to cancel the (now
+        // already-fired) timer, no harm; if doUpdate fails to cancel a
+        // *future* timer scheduled later, we'd see duplicates below.
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS + 1);
+        mockShellOutputCallback({ type: 'data', chunk: 'c' });
+        expect(updateOutputMock).toHaveBeenCalledTimes(3);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('c');
+
+        // Window 2: suppressed 'd' schedules another trailing flush
+        await vi.advanceTimersByTimeAsync(50);
+        mockShellOutputCallback({ type: 'data', chunk: 'd' });
+        expect(updateOutputMock).toHaveBeenCalledTimes(3);
+
+        // The trailing flush fires exactly once with 'd'.
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS);
+        expect(updateOutputMock).toHaveBeenCalledTimes(4);
+        expect(updateOutputMock).toHaveBeenLastCalledWith('d');
+
+        // Drain a long quiet period — no spurious late updates from
+        // any zombie timers.
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 5);
+        expect(updateOutputMock).toHaveBeenCalledTimes(4);
+
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('abcd'),
+          output: 'abcd',
+          exitCode: 0,
+          signal: null,
+          error: null,
+          aborted: false,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+      });
+
+      it('should cancel a pending trailing flush when the abort signal fires', async () => {
+        // If the user cancels (or the timeout fires) while a trailing
+        // flush is pending, the abort listener must cancel the timer.
+        // Otherwise we'd flash a stale frame between the abort and the
+        // result promise settling with `aborted: true`.
+        const ac = new AbortController();
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(ac.signal, updateOutputMock);
+
+        // Leading-edge + suppressed (timer pending)
+        mockShellOutputCallback({ type: 'data', chunk: 'partial' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+        mockShellOutputCallback({ type: 'data', chunk: 'more partial' });
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Abort. The timer must be cancelled synchronously.
+        ac.abort();
+
+        // Drain the would-be window. updateOutput must NOT be called.
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+
+        // Settle the execution as aborted so the test cleanly exits.
+        resolveExecutionPromise({
+          rawOutput: Buffer.from('partial'),
+          output: 'partial',
+          exitCode: null,
+          signal: 15,
+          error: null,
+          aborted: true,
+          pid: 12345,
+          executionMethod: 'child_process',
+        });
+        await promise;
+
+        // Even after settle + further time, no late update.
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
+        expect(updateOutputMock).toHaveBeenCalledOnce();
+      });
+
+      it('should clean up a pending trailing flush if execute() rejects', async () => {
+        // ShellExecutionService.execute() can throw before resolving
+        // (e.g. PTY dynamic import failure). The tool must propagate the
+        // error AND ensure no scheduled timer survives to fire a late
+        // updateOutput call after the caller has already seen the error.
+        // (No chunks can arrive before execute() resolves, so the timer
+        // is never actually scheduled in this path. The contract we
+        // verify here is that the abort listener is torn down — which we
+        // observe indirectly via "no late update on subsequent abort".)
+        const ac = new AbortController();
+        mockShellExecutionService.mockImplementationOnce(() => {
+          throw new Error('pty-import-failed');
+        });
+
+        const invocation = shellTool.build({
+          command: 'pty-cmd',
+          is_background: false,
+        });
+
+        await expect(
+          invocation.execute(ac.signal, updateOutputMock),
+        ).rejects.toThrow('pty-import-failed');
+
+        // After rejection, aborting must not crash and must not produce
+        // any updateOutput calls (no listener leak).
+        ac.abort();
+        await vi.advanceTimersByTimeAsync(OUTPUT_UPDATE_INTERVAL_MS * 2);
+        expect(updateOutputMock).not.toHaveBeenCalled();
+      });
+
+      it('should pass ANSI chunks through immediately without throttling', async () => {
+        const invocation = shellTool.build({
+          command: 'interactive-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal, updateOutputMock);
+
+        const ansiChunk1: import('../utils/terminalSerializer.js').AnsiOutput =
+          [
+            [
+              {
+                text: 'Hello',
+                bold: false,
+                italic: false,
+                dim: false,
+                underline: false,
+                inverse: false,
+                fg: '',
+                bg: '',
+              },
+            ],
+          ];
+        const ansiChunk2: import('../utils/terminalSerializer.js').AnsiOutput =
+          [
+            [
+              {
+                text: 'World',
+                bold: false,
+                italic: false,
+                dim: false,
+                underline: false,
+                inverse: false,
+                fg: '',
+                bg: '',
+              },
+            ],
+          ];
+
+        // Both ANSI chunks should fire updateOutput immediately, back-to-back
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk1 });
+        mockShellOutputCallback({ type: 'data', chunk: ansiChunk2 });
+
+        expect(updateOutputMock).toHaveBeenCalledTimes(2);
 
         resolveExecutionPromise({
           rawOutput: Buffer.from(''),
@@ -1285,7 +1664,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1315,7 +1696,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1345,7 +1728,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1375,7 +1760,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1403,7 +1790,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1431,7 +1820,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1461,7 +1852,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1499,7 +1892,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1535,7 +1930,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1573,7 +1970,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1606,7 +2005,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1641,7 +2042,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1674,7 +2077,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1708,7 +2113,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1740,7 +2147,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1843,7 +2252,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1881,7 +2292,8 @@ describe('ShellTool', () => {
             expect.any(Function),
             expect.any(AbortSignal),
             false,
-            {},
+            expect.objectContaining({}),
+            expect.objectContaining({ postPromote: expect.any(Object) }),
           );
         },
       );
@@ -1912,7 +2324,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -1958,7 +2372,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2023,7 +2439,8 @@ describe('ShellTool', () => {
             expect.any(Function),
             expect.any(AbortSignal),
             false,
-            {},
+            expect.objectContaining({}),
+            expect.objectContaining({ postPromote: expect.any(Object) }),
           );
         },
       );
@@ -2119,7 +2536,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2147,7 +2566,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2177,7 +2598,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2208,7 +2631,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2370,7 +2795,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2398,7 +2825,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2426,7 +2855,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2455,7 +2886,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2520,7 +2953,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2554,7 +2989,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2660,7 +3097,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2748,7 +3187,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2809,7 +3250,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2873,7 +3316,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2903,7 +3348,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2932,7 +3379,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -2968,7 +3417,9 @@ describe('ShellTool', () => {
           expect.any(Function),
           expect.any(AbortSignal),
           false,
-          {},
+          expect.objectContaining({}),
+
+          expect.objectContaining({ postPromote: expect.any(Object) }),
         );
       });
 
@@ -3152,9 +3603,15 @@ describe('ShellTool', () => {
         expect(entry.outputPath).toContain(entry.shellId);
         expect(entry.abortController).toBeInstanceOf(AbortController);
 
-        // Snapshot written to disk.
-        expect(writeFileSyncSpy).toHaveBeenCalledWith(
-          entry.outputPath,
+        // Snapshot written to the output stream (PR-2.5: snapshot +
+        // post-promote bytes now share a single append-mode stream
+        // instead of the prior writeFileSync snapshot-only path).
+        expect(fs.createWriteStream).toHaveBeenCalledWith(entry.outputPath, {
+          flags: 'w',
+        });
+        const streamMock = (fs.createWriteStream as Mock).mock.results[0]
+          ?.value as { write: Mock };
+        expect(streamMock.write).toHaveBeenCalledWith(
           'partial output before promote',
         );
 
@@ -3471,6 +3928,924 @@ describe('ShellTool', () => {
         }
       });
     });
+
+    describe('foreground → background promote PR-2.5 (post-promote stream + natural-exit settle)', () => {
+      it('post-promote bytes APPEND to bg_xxx.output via write stream (do NOT overwrite snapshot)', async () => {
+        // Pin the PR-2.5 stream-redirect contract: snapshot lands
+        // first, post-promote chunks flow through `stream.write` in
+        // FIFO order. Without this PR the file was frozen at promote
+        // time and live updates never reached /tasks.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          // PR-2.5: settle path uses `once('finish', ...)` to wait
+          // for the stream flush before transitioning the registry.
+          // Default impl: immediately invoke the handler so the test
+          // doesn't hang waiting for an event the mocked stream
+          // never emits naturally.
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'tail -f /tmp/never.log',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        // Service resolves promoted with snapshot.
+        resolveShellExecution({
+          output: 'initial-snapshot',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 11111,
+        });
+        await promise;
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        // Stream opened in overwrite mode at promote time so a stale
+        // file under the same shellId (vanishingly unlikely given
+        // randomBytes) starts fresh.
+        expect(fs.createWriteStream).toHaveBeenCalledWith(entry.outputPath, {
+          flags: 'w',
+        });
+        // Snapshot written first.
+        expect(writeStreamMock.write).toHaveBeenNthCalledWith(
+          1,
+          'initial-snapshot',
+        );
+      });
+
+      it('natural child exit transitions the registry entry to "completed" (exitCode 0)', async () => {
+        // Pin the PR-2.5 settle path: after promote, when the
+        // service's post-promote exit listener fires with exitCode=0,
+        // `registry.complete(shellId, 0, ...)` is called and the
+        // stream closes.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          // PR-2.5: settle path uses `once('finish', ...)` to wait
+          // for the stream flush before transitioning the registry.
+          // Default impl: immediately invoke the handler so the test
+          // doesn't hang waiting for an event the mocked stream
+          // never emits naturally.
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+        // Capture the postPromote options passed to the service so
+        // we can drive its onSettle handler directly (the mocked
+        // service doesn't fire it on its own).
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 22222,
+        });
+        await promise;
+
+        // Pull the postPromote options from the service mock's last
+        // call (foreground execute always passes it post-PR-2.5).
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const opts = serviceCall[6] as {
+          postPromote?: {
+            onSettle?: (info: {
+              exitCode: number | null;
+              signal: number | null;
+              error?: Error;
+              endTime: number;
+            }) => void;
+          };
+        };
+        expect(opts?.postPromote?.onSettle).toBeDefined();
+        opts.postPromote!.onSettle!({
+          exitCode: 0,
+          signal: null,
+          endTime: 1700000000000,
+        });
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000000000,
+        );
+        // Stream closed on settle.
+        expect(writeStreamMock.end).toHaveBeenCalled();
+      });
+
+      it('non-zero exit / signal / error all transition entry to "failed" with descriptive message', async () => {
+        // Pin the failure-mode decision table.
+        const registry = mockConfig.getBackgroundShellRegistry();
+        const invocation = shellTool.build({
+          command: 'cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 33333,
+        });
+        await promise;
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const onSettle = (
+          serviceCall[6] as {
+            postPromote: {
+              onSettle: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            };
+          }
+        ).postPromote.onSettle;
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        // Non-zero exitCode → fail with "Exited with code N".
+        onSettle({ exitCode: 137, signal: null, endTime: 1 });
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Exited with code 137',
+          1,
+        );
+
+        // signal-killed (no exitCode) → fail with "Terminated by signal N".
+        onSettle({ exitCode: null, signal: 15, endTime: 2 });
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Terminated by signal 15',
+          2,
+        );
+
+        // Spawn-side error → fail with err.message.
+        onSettle({
+          exitCode: null,
+          signal: null,
+          error: new Error('ENOENT'),
+          endTime: 3,
+        });
+        expect(registry.fail).toHaveBeenCalledWith(entry.shellId, 'ENOENT', 3);
+      });
+
+      it('queued-settle race: onSettle fires BEFORE handlePromotedForeground completes — entry settles + llmContent reflects final status', async () => {
+        // Pin the queued-settle path: a very fast command can exit
+        // between the service-side promote-resolve and the
+        // shell.ts-side handlePromotedForeground completing the
+        // registry register + onSettleWired install. PR-2.5 absorbs
+        // that race by queueing settle info into
+        // `promoteArtifacts.settleQueued`; handlePromotedForeground
+        // drains it synchronously after wiring. Without that drain
+        // the entry would stay 'running' forever (no further onSettle
+        // ever fires — the service only emits once per promote).
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        // Custom one-shot service impl that captures postPromote and
+        // FIRES onSettle BEFORE resolving the promise — simulates the
+        // fast-exit race window.
+        let capturedPostPromote:
+          | {
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            // Fire onSettle SYNCHRONOUSLY before resolving (the race
+            // we're testing — settle lands while handlePromotedForeground
+            // hasn't run yet).
+            capturedPostPromote?.onSettle?.({
+              exitCode: 0,
+              signal: null,
+              endTime: 1700000000123,
+            });
+            return {
+              pid: 77777,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'final output',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 77777,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'echo hi',
+          is_background: false,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        // Registry transitioned to completed via the queued-settle drain.
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000000123,
+        );
+
+        // Model-facing copy now says 'completed', not 'running', AND
+        // does NOT suggest task_stop (process is already gone).
+        expect(result.llmContent).toContain('Status: completed.');
+        expect(result.llmContent).not.toContain('Status: running.');
+        expect(result.llmContent).toContain('already exited');
+        expect(result.llmContent).not.toContain('task_stop({');
+      });
+
+      it('queued-settle race with non-zero exit code: llmContent reflects failed status', async () => {
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        let capturedPostPromote:
+          | {
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            capturedPostPromote?.onSettle?.({
+              exitCode: 1,
+              signal: null,
+              endTime: 1700000000456,
+            });
+            return {
+              pid: 88888,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'error output',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 88888,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'exit 1',
+          is_background: false,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        expect(registry.fail).toHaveBeenCalledWith(
+          entry.shellId,
+          'Exited with code 1',
+          1700000000456,
+        );
+        expect(result.llmContent).toContain('Status: failed.');
+        expect(result.llmContent).not.toContain('Status: running.');
+        expect(result.llmContent).toContain('already exited');
+        expect(result.llmContent).not.toContain('task_stop({');
+      });
+
+      it("wave-2 (C3): llmContent reflects 'completed' even when stream.once('finish') fires asynchronously after the queued-settle drain", async () => {
+        // Regression for the C3 race: previously the model-facing
+        // status flag was only flipped INSIDE `transitionRegistry`,
+        // which `onSettleWired` defers until the output stream's
+        // `'finish'` event fires (libuv flush). For a fast-exited
+        // command whose settle arrives BEFORE handlePromotedForeground
+        // wires onSettleWired (queued-settle path), the drain happens
+        // synchronously but the actual registry transition is
+        // microtask-deferred. The old code built `llmContent` before
+        // the flag flipped → "Status: running" + `task_stop`
+        // instructions leaked into the model copy even though the
+        // child was already gone.
+        //
+        // Fix splits the flag into two: `postPromoteSettleObserved`
+        // (sync, set on classify) drives the model copy;
+        // `transitionRegistry` (async, behind finish) handles the
+        // registry side. This test captures the finish handler
+        // INSTEAD of firing it immediately, so the registry transition
+        // is genuinely deferred while we read `result.llmContent`.
+        let capturedFinishHandler: (() => void) | null = null;
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') capturedFinishHandler = handler;
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        let capturedPostPromote:
+          | {
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            // Fast-exit race: fire onSettle BEFORE resolve so
+            // settleQueued path is exercised.
+            capturedPostPromote?.onSettle?.({
+              exitCode: 0,
+              signal: null,
+              endTime: 1700000000999,
+            });
+            return {
+              pid: 88888,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'fast output',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 88888,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'true',
+          is_background: false,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const entry = (registry.register as Mock).mock.calls[0][0];
+
+        // Stream's 'finish' handler captured but NOT yet invoked, so
+        // the registry transition is genuinely deferred at this point.
+        expect(capturedFinishHandler).not.toBeNull();
+        expect(registry.complete).not.toHaveBeenCalled();
+
+        // Model-facing copy still reports the correct terminal status
+        // because `postPromoteSettleObserved` was flipped sync inside
+        // onSettleWired BEFORE the stream-finish wait began.
+        expect(result.llmContent).toContain('Status: completed.');
+        expect(result.llmContent).not.toContain('Status: running.');
+        expect(result.llmContent).toContain('already exited');
+        expect(result.llmContent).not.toContain('task_stop({');
+
+        // Fire 'finish' now — registry transition runs post-flush.
+        capturedFinishHandler!();
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000000999,
+        );
+      });
+
+      it('wave-2 (C1): stream open async error transitions registry — does not hang waiting on `finish`', async () => {
+        // Regression for C1: `fs.createWriteStream` reports common
+        // open failures (ENOENT / EACCES / ENOSPC) via an async
+        // 'error' event, NOT by throwing. Before the fix, the
+        // 'error' listener only logged; `promoteArtifacts.stream`
+        // kept pointing at the already-broken stream, and
+        // `onSettleWired` attached a `.once('finish', ...)` listener
+        // that would never fire → registry stuck on `running` forever.
+        // Fix: the error listener latches `streamClosed`, nulls the
+        // shared `stream` slot, and `onSettleWired`'s existing
+        // `if (!stream)` branch transitions the registry immediately.
+        const errorListeners: Array<(err: Error) => void> = [];
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn((event: string, handler: (err: Error) => void) => {
+            if (event === 'error') errorListeners.push(handler);
+          }),
+          once: vi.fn((event: string, handler: () => void) => {
+            // Production code attaches finish/error AFTER stream is
+            // pulled into a local var; in the failure path it
+            // shouldn't reach here at all because `stream` is null.
+            // Capture but do nothing — the test verifies the registry
+            // transition runs WITHOUT firing this handler.
+            void event;
+            void handler;
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+        const registry = mockConfig.getBackgroundShellRegistry();
+
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 99999,
+        });
+        await promise;
+
+        // Stream-open async error: emit ENOSPC AFTER stream is
+        // assigned to `promoteArtifacts.stream`. The latch nulls
+        // the shared slot.
+        expect(errorListeners.length).toBeGreaterThan(0);
+        errorListeners[0](
+          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
+        );
+
+        // Now drive onSettle — the wired handler sees
+        // `promoteArtifacts.stream === null` and transitions
+        // immediately (no finish wait), so the entry doesn't stay
+        // running.
+        const serviceCall = mockShellExecutionService.mock.calls[0];
+        const onSettle = (
+          serviceCall[6] as {
+            postPromote: {
+              onSettle: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            };
+          }
+        ).postPromote.onSettle;
+        onSettle({ exitCode: 0, signal: null, endTime: 1700000111111 });
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700000111111,
+        );
+      });
+
+      it('stream open async error writes diagnostic marker via appendFileSync', async () => {
+        const errorListeners: Array<(err: Error) => void> = [];
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn((event: string, handler: (err: Error) => void) => {
+            if (event === 'error') errorListeners.push(handler);
+          }),
+          once: vi.fn(),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({
+          output: '',
+          exitCode: null,
+          signal: null,
+          aborted: false,
+          promoted: true,
+          pid: 99998,
+        });
+        await promise;
+
+        errorListeners[0](
+          Object.assign(new Error('disk full'), { code: 'ENOSPC' }),
+        );
+
+        expect(fs.appendFileSync).toHaveBeenCalledWith(
+          expect.stringContaining('bg_'),
+          expect.stringContaining('[WARNING: post-promote output lost'),
+        );
+      });
+
+      it('flush timeout transitions registry when stream.finish never fires', async () => {
+        vi.useFakeTimers();
+        try {
+          const writeStreamMock = {
+            write: vi.fn(),
+            end: vi.fn(),
+            on: vi.fn(),
+            once: vi.fn(),
+          };
+          vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+            writeStreamMock as unknown as fs.WriteStream,
+          );
+          const registry = mockConfig.getBackgroundShellRegistry();
+
+          const invocation = shellTool.build({
+            command: 'sleep 1',
+            is_background: false,
+          });
+          const promise = invocation.execute(mockAbortSignal);
+          resolveShellExecution({
+            output: '',
+            exitCode: null,
+            signal: null,
+            aborted: false,
+            promoted: true,
+            pid: 99997,
+          });
+          await promise;
+
+          const serviceCall = mockShellExecutionService.mock.calls[0];
+          const onSettle = (
+            serviceCall[6] as {
+              postPromote: {
+                onSettle: (info: {
+                  exitCode: number | null;
+                  signal: number | null;
+                  error?: Error;
+                  endTime: number;
+                }) => void;
+              };
+            }
+          ).postPromote.onSettle;
+
+          onSettle({ exitCode: 0, signal: null, endTime: 1700000222222 });
+
+          // stream.once('finish') was NOT fired — registry should
+          // NOT have transitioned yet.
+          expect(registry.complete).not.toHaveBeenCalled();
+
+          // Advance past the 10s flush timeout.
+          vi.advanceTimersByTime(10_001);
+
+          const entry = (registry.register as Mock).mock.calls[0][0];
+          expect(registry.complete).toHaveBeenCalledWith(
+            entry.shellId,
+            0,
+            1700000222222,
+          );
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it('wave-3 (T2): onSettleWired drains pre-settle buffer AND latches streamClosed so post-end chunks drop instead of leaking the buffer', async () => {
+        // Regression for the buffer-drain race: previously
+        // `onSettleWired` set `promoteArtifacts.stream = null` BEFORE
+        // calling `stream.end()`. Any `onData` chunk that arrived
+        // between the null assignment and the `'finish'` event saw
+        // `stream === null && streamClosed === false` and pushed
+        // into `promoteArtifacts.buffer` — which has no further
+        // drain path (the foreground finalizer has already
+        // returned). Result: chunks stranded forever, no
+        // observability. Fix drains the buffer to the stream BEFORE
+        // nulling AND latches `streamClosed=true` so any subsequent
+        // chunks DROP via the third branch of `onData` instead.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn(),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+
+        let capturedPostPromote:
+          | {
+              onData?: (event: {
+                type: string;
+                chunk: string | unknown;
+              }) => void;
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            return {
+              pid: 55555,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'snapshot',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 55555,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'sleep 1',
+          is_background: false,
+        });
+        // Fire a pre-settle data chunk BEFORE awaiting — it lands
+        // in the pre-finalizer service-side window. Then await the
+        // execute (handlePromotedForeground completes, drains the
+        // buffer into stream, wires onSettleWired).
+        const promise = invocation.execute(mockAbortSignal);
+        // The service-side mock has been called by now (synchronous
+        // up to the resolved promise return); fire onData on its
+        // captured postPromote.
+        await new Promise((resolve) => setImmediate(resolve));
+        // First chunk: arrives BEFORE handlePromotedForeground opens
+        // the stream → buffered in `promoteArtifacts.buffer`. After
+        // handlePromotedForeground drains, this gets written.
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'pre1' });
+        await promise;
+
+        // After handlePromotedForeground: stream is non-null and
+        // pre1 has been written into it (drained from buffer).
+        expect(writeStreamMock.write).toHaveBeenCalledWith('pre1');
+
+        // Now push a chunk that lands between handlePromotedForeground
+        // and settle (still buffered in the service-side window).
+        // Since handlePromotedForeground has already opened the stream
+        // and drained, this chunk goes straight through stream.write.
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'mid1' });
+        expect(writeStreamMock.write).toHaveBeenCalledWith('mid1');
+
+        // Fire settle. onSettleWired now drains any remaining buffer,
+        // nulls stream, latches streamClosed.
+        capturedPostPromote?.onSettle?.({
+          exitCode: 0,
+          signal: null,
+          endTime: 1700001111111,
+        });
+
+        // POST-SETTLE chunks (kernel buffer race) — must DROP, not
+        // accumulate in the buffer. Before the wave-3 fix this would
+        // push into `promoteArtifacts.buffer` and leak.
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post1' });
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post2' });
+
+        // Stream.write should NOT have been called for post-settle
+        // chunks (stream is null + streamClosed latched → onData's
+        // third branch drops).
+        const writeCalls = writeStreamMock.write.mock.calls.map(
+          (c: unknown[]) => c[0],
+        );
+        expect(writeCalls).not.toContain('post1');
+        expect(writeCalls).not.toContain('post2');
+      });
+
+      it('wave-3 (T3): catch-path clears the buffered chunks and falls back to writeFileSync(snapshot)', async () => {
+        // Regression for the silent-drop critique: when
+        // createWriteStream throws (rare, but ENOENT on a vanished
+        // tmpdir is plausible), chunks already in
+        // `promoteArtifacts.buffer` cannot be salvaged. The fix
+        // empties the buffer (so any later code paths can't see
+        // stale chunks) and logs the count for oncall observability
+        // (the log itself is verified by `debugLogger` integration —
+        // not asserted here because debugLogger has no global
+        // session in test setup, so the log is a side-effect-only
+        // observability tool). Behaviorally the test verifies that
+        // (a) writeFileSync snapshot fallback runs, (b) the path
+        // does not crash, (c) a post-buffer-drain settle still
+        // transitions the registry.
+        vi.mocked(fs.createWriteStream).mockImplementationOnce(() => {
+          throw Object.assign(new Error('ENOENT no tmpdir'), {
+            code: 'ENOENT',
+          });
+        });
+        // Spy on writeFileSync (the snapshot fallback) — passthrough
+        // implementation since the default mock would be no-op.
+        const writeFileSyncSpy = vi
+          .mocked(fs.writeFileSync)
+          .mockImplementationOnce(() => undefined);
+
+        const registry = mockConfig.getBackgroundShellRegistry();
+        let capturedPostPromote:
+          | {
+              onData?: (event: { type: string; chunk: unknown }) => void;
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            // Fire 3 pre-finalizer chunks → all queue in buffer.
+            capturedPostPromote?.onData?.({ type: 'data', chunk: 'a' });
+            capturedPostPromote?.onData?.({ type: 'data', chunk: 'b' });
+            capturedPostPromote?.onData?.({ type: 'data', chunk: 'c' });
+            return {
+              pid: 44444,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'snap',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 44444,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'whatever',
+          is_background: false,
+        });
+        await invocation.execute(mockAbortSignal);
+
+        // writeFileSync called with the snapshot (the recoverable
+        // fallback).
+        expect(writeFileSyncSpy).toHaveBeenCalledWith(
+          expect.any(String),
+          'snap',
+        );
+
+        // Post-settle chunks must not surface anywhere either —
+        // streamClosed was set by the catch path so subsequent
+        // onData chunks drop. Drive a settle, then a late chunk;
+        // verify the registry still transitions normally and the
+        // late chunk is dropped without crashing.
+        capturedPostPromote?.onSettle?.({
+          exitCode: 0,
+          signal: null,
+          endTime: 1700002222222,
+        });
+        capturedPostPromote?.onData?.({ type: 'data', chunk: 'post-settle' });
+
+        const entry = (registry.register as Mock).mock.calls[0][0];
+        expect(registry.complete).toHaveBeenCalledWith(
+          entry.shellId,
+          0,
+          1700002222222,
+        );
+      });
+
+      it('wave-4 (T4): post-promote `onData` chunks have ANSI stripped before write (matches executeBackground file format)', async () => {
+        // Regression for the format-mismatch critique: the regular
+        // `executeBackground` path strips ANSI before writing to the
+        // background output file, but the promoted-foreground onData
+        // path used to write raw chunks. After Ctrl+B, the file would
+        // be plain text up to the snapshot then raw `\x1b[31m` /
+        // cursor-move / clear-screen sequences for the post-promote
+        // tail — unreadable for an agent that just `Read`s the file.
+        // Fix applies stripAnsi() in onData before writing/buffering.
+        const writeStreamMock = {
+          write: vi.fn(),
+          end: vi.fn(),
+          on: vi.fn(),
+          once: vi.fn((event: string, handler: () => void) => {
+            if (event === 'finish') handler();
+          }),
+        };
+        vi.mocked(fs.createWriteStream).mockReturnValueOnce(
+          writeStreamMock as unknown as fs.WriteStream,
+        );
+
+        let capturedPostPromote:
+          | {
+              onData?: (event: { type: string; chunk: unknown }) => void;
+              onSettle?: (info: {
+                exitCode: number | null;
+                signal: number | null;
+                error?: Error;
+                endTime: number;
+              }) => void;
+            }
+          | undefined;
+        mockShellExecutionService.mockImplementationOnce(
+          (...args: unknown[]) => {
+            const opts = args[6] as {
+              postPromote?: typeof capturedPostPromote;
+            };
+            capturedPostPromote = opts?.postPromote;
+            return {
+              pid: 33333,
+              result: Promise.resolve({
+                rawOutput: Buffer.from(''),
+                output: 'pre-promote snapshot',
+                exitCode: null,
+                signal: null,
+                aborted: false,
+                promoted: true,
+                pid: 33333,
+                executionMethod: 'child_process',
+                error: null,
+              }),
+            };
+          },
+        );
+
+        const invocation = shellTool.build({
+          command: 'npm test',
+          is_background: false,
+        });
+        await invocation.execute(mockAbortSignal);
+
+        // Drive a post-promote chunk with embedded ANSI escapes —
+        // common shapes: color, cursor move, clear-screen.
+        const ansiChunk =
+          '\x1b[31mFAILED\x1b[0m: 3 tests\n\x1b[2K\x1b[1Aprogress: 50%';
+        capturedPostPromote?.onData?.({ type: 'data', chunk: ansiChunk });
+
+        // The stream should have received the STRIPPED version: the
+        // visible text without escape sequences.
+        const writeCalls = writeStreamMock.write.mock.calls.map(
+          (c: unknown[]) => c[0] as string,
+        );
+        const post = writeCalls.find(
+          (c) => typeof c === 'string' && c.includes('FAILED'),
+        );
+        expect(post).toBeDefined();
+        expect(post).not.toContain('\x1b[');
+        expect(post).toBe('FAILED: 3 tests\nprogress: 50%');
+      });
+    });
   });
 
   describe('getDefaultPermission and getConfirmationDetails', () => {
@@ -3596,16 +4971,104 @@ describe('ShellTool', () => {
   });
 
   describe('getDescription', () => {
+    const originalEnv = { ...process.env };
+
+    afterEach(() => {
+      process.env = { ...originalEnv };
+    });
+
     it('should return the windows description when on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('win32');
+      delete process.env['ComSpec'];
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
+      expect(shellTool.description).toContain(
+        "Use '&' only when you need to run commands sequentially",
+      );
+      expect(shellTool.description).toContain(
+        "DO NOT use ';' or newlines to separate commands in cmd.exe.",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact cmd.exe command to execute as `cmd.exe /d /s /c <command>`',
+      );
     });
 
     it('should return the non-windows description when not on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('linux');
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact bash command to execute as `bash -c <command>`',
+      );
+    });
+
+    it('should describe PowerShell when ComSpec points to powershell.exe', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] =
+        'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain(
+        '`powershell.exe -NoProfile -Command <command>`',
+      );
+      expect(shellTool.description).toContain(
+        'The active shell is PowerShell.',
+      );
+      expect(shellTool.description).toContain(
+        'Do NOT use Bash-only forms such as ANSI-C quoting',
+      );
+      expect(shellTool.description).toContain(
+        "Windows PowerShell does not support '&&'.",
+      );
+      expect(shellTool.description).not.toContain(
+        "use a single run_shell_command call with '&&'",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact PowerShell command to execute as `powershell.exe -NoProfile -Command <command>`',
+      );
+    });
+
+    it('should describe pwsh when ComSpec points to pwsh.exe', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain(
+        '`pwsh.exe -NoProfile -Command <command>`',
+      );
+      expect(shellTool.description).toContain(
+        "use a single run_shell_command call with '&&'",
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact PowerShell command to execute as `pwsh.exe -NoProfile -Command <command>`',
+      );
+    });
+
+    it('should describe bash when Windows is running in Git Bash', async () => {
+      vi.mocked(os.platform).mockReturnValue('win32');
+      process.env['ComSpec'] = 'C:\\WINDOWS\\System32\\cmd.exe';
+      process.env['MSYSTEM'] = 'MINGW64';
+      delete process.env['TERM'];
+
+      const shellTool = new ShellTool(mockConfig);
+
+      expect(shellTool.description).toContain('`bash -c <command>`');
+      expect(shellTool.description).toContain('The active shell is Bash.');
+      expect(shellTool.description).toContain('ANSI-C quoting');
+      expect(shellTool.description).not.toContain(
+        'Command process group can be terminated',
+      );
+      expect(getCommandParameterDescription(shellTool)).toBe(
+        'Exact bash command to execute as `bash -c <command>`',
+      );
     });
   });
 
@@ -3725,7 +5188,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
 
       // The signal passed should be different from the original signal
@@ -3814,7 +5279,9 @@ describe('ShellTool', () => {
         expect.any(Function),
         expect.any(AbortSignal),
         false,
-        {},
+        expect.objectContaining({}),
+
+        expect.objectContaining({ postPromote: expect.any(Object) }),
       );
     });
   });

@@ -19,6 +19,7 @@ import {
   t,
 } from '../../i18n/index.js';
 import {
+  resolveSupportedLanguage,
   SUPPORTED_LANGUAGES,
   getSupportedLanguageIds,
 } from '../../i18n/languages.js';
@@ -52,19 +53,7 @@ function getCurrentOutputLanguage(context?: CommandContext): {
  * Accepts locale codes (e.g., "zh"), IDs (e.g., "zh-CN"), or full names (e.g., "Chinese").
  */
 function parseUiLanguageArg(input: string): SupportedLanguage | null {
-  const lowered = input.trim().toLowerCase();
-  if (!lowered) return null;
-
-  for (const lang of SUPPORTED_LANGUAGES) {
-    if (
-      lowered === lang.code ||
-      lowered === lang.id.toLowerCase() ||
-      lowered === lang.fullName.toLowerCase()
-    ) {
-      return lang.code;
-    }
-  }
-  return null;
+  return resolveSupportedLanguage(input) ?? null;
 }
 
 /**
@@ -107,7 +96,7 @@ async function setUiLanguage(
     }
   }
 
-  // Reload commands to update localized descriptions
+  // Reload commands so `t()` lookups in their metadata re-resolve under the new language.
   context.ui.reloadCommands();
 
   return {
@@ -122,6 +111,11 @@ async function setUiLanguage(
 /**
  * Handles the /language output command, updating both the setting and the rule file.
  * 'auto' is preserved in settings but resolved to the detected language for the rule file.
+ *
+ * After persisting the change, hierarchical memory is reloaded so `output-language.md`
+ * flows back into `userMemory`, and the live chat's system instruction is rebuilt
+ * in place. The new language therefore takes effect on the next turn without
+ * restarting the session and without losing conversation history.
  */
 async function setOutputLanguage(
   context: CommandContext,
@@ -149,6 +143,22 @@ async function setOutputLanguage(
       }
     }
 
+    // Apply the new rule to the running session: refresh hierarchical memory
+    // so output-language.md is re-read into userMemory, then rebuild and
+    // re-bind the system instruction on the live chat.
+    const config = context.services.config;
+    if (config) {
+      try {
+        await config.refreshHierarchicalMemory();
+        await config.getGeminiClient().refreshSystemInstruction();
+      } catch (error) {
+        debugLogger.warn(
+          'Failed to apply output language to running session:',
+          error,
+        );
+      }
+    }
+
     // Format display message
     const displayLang = isAuto
       ? `${t('Auto (detect from system)')} → ${resolved}`
@@ -157,11 +167,7 @@ async function setOutputLanguage(
     return {
       type: 'message',
       messageType: 'info',
-      content: [
-        t('LLM output language set to {{lang}}', { lang: displayLang }),
-        '',
-        t('Please restart the application for the changes to take effect.'),
-      ].join('\n'),
+      content: t('LLM output language set to {{lang}}', { lang: displayLang }),
     };
   } catch (error) {
     return {

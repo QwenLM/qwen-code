@@ -23,10 +23,12 @@ import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
 import { doctorCommand } from '../ui/commands/doctorCommand.js';
+import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
+import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
@@ -60,6 +62,7 @@ import { vimCommand } from '../ui/commands/vimCommand.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
+import { lspCommand } from '../ui/commands/lspCommand.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -105,6 +108,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       compressCommand,
       contextCommand,
       copyCommand,
+      diffCommand,
       deleteCommand,
       docsCommand,
       doctorCommand,
@@ -121,6 +125,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       ...(this.config?.getManagedAutoMemoryEnabled()
         ? [dreamCommand, forgetCommand]
         : []),
+      goalCommand,
       memoryCommand,
       modelCommand,
       manageModelsCommand,
@@ -145,6 +150,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       terminalSetupCommand,
       insightCommand,
       statuslineCommand,
+      ...(this.config?.isLspEnabled() ? [lspCommand] : []),
     ];
 
     return allDefinitions
