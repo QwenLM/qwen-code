@@ -72,6 +72,18 @@ export const DEVICE_FLOW_MAX_EXPIRES_IN_SEC = 60 * 60;
  * thread #3.
  */
 export const DEVICE_FLOW_MAX_INTERVAL_MS = 60_000;
+/**
+ * Cap on the SSE-broadcast `hint` from `runPollTick`'s defensive
+ * catch. PR #4255 fold-in 8 review thread #1: the
+ * `DeviceFlowProvider.poll()` `@remarks` contract requires throwers
+ * to sanitize `err.message` before it leaves the provider, but a
+ * non-conforming future provider could throw raw IdP detail (HTML
+ * error page, multi-KB stack trace). Truncating the hint here is
+ * defense-in-depth — the SSE event payload stays bounded even if
+ * the contract is violated; the full raw detail is preserved on the
+ * audit trail (audit's backing impl writes to stderr).
+ */
+export const DEVICE_FLOW_POLL_HINT_MAX_LEN = 256;
 
 // PR #4255 fold-in 6 review thread #2: derive the type from the
 // supported-providers tuple so adding/removing a provider id
@@ -915,6 +927,7 @@ export class DeviceFlowRegistry {
     }
     entry.lastPolledAt = now;
     let result: DeviceFlowPollResult;
+    let rawProviderError: string | undefined;
     try {
       result = await provider.poll(
         {
@@ -924,10 +937,19 @@ export class DeviceFlowRegistry {
         { signal: entry.cancelController.signal },
       );
     } catch (err: unknown) {
+      // PR #4255 fold-in 8 review thread #1: the provider's
+      // `@remarks` contract requires throwers to sanitize, but if
+      // violated the unbounded `err.message` would otherwise flow
+      // verbatim to every SSE subscriber via `hint`. Truncate
+      // defensively; preserve the full raw detail on the audit
+      // trail (`rawProviderError` is threaded into the case 'error'
+      // branch's audit emission below) so operators retain
+      // visibility for incident response.
+      rawProviderError = err instanceof Error ? err.message : String(err);
       result = {
         kind: 'error',
         errorKind: 'upstream_error',
-        hint: err instanceof Error ? err.message : String(err),
+        hint: truncatePollHint(rawProviderError),
       };
     }
     if (entry.status !== 'pending') return;
@@ -1119,6 +1141,16 @@ export class DeviceFlowRegistry {
             clientId: entry.initiatorClientId,
             status: 'failed',
             errorKind: result.errorKind,
+            // PR #4255 fold-in 8 #1: when the catch above fired (a
+            // misbehaving provider threw), include the FULL raw
+            // err.message in the audit hint so operators can debug
+            // the contract violation. The SSE-broadcast hint stays
+            // truncated to DEVICE_FLOW_POLL_HINT_MAX_LEN.
+            ...(rawProviderError !== undefined
+              ? {
+                  hint: `provider.poll() threw (raw): ${rawProviderError}`,
+                }
+              : {}),
           });
         }
         return;
@@ -1294,6 +1326,18 @@ export class DeviceFlowRegistry {
     this.byId.clear();
     this.byProvider.clear();
   }
+}
+
+/**
+ * Bound `runPollTick`'s defensive-catch hint to
+ * `DEVICE_FLOW_POLL_HINT_MAX_LEN`. The full raw detail is preserved
+ * on the audit trail; this helper only shapes the SSE-visible
+ * surface. PR #4255 fold-in 8 review thread #1.
+ */
+function truncatePollHint(raw: string): string {
+  if (raw.length <= DEVICE_FLOW_POLL_HINT_MAX_LEN) return raw;
+  const dropped = raw.length - DEVICE_FLOW_POLL_HINT_MAX_LEN;
+  return `${raw.slice(0, DEVICE_FLOW_POLL_HINT_MAX_LEN)}…[+${dropped} bytes truncated]`;
 }
 
 function toPublicView(entry: DeviceFlowEntry): DeviceFlowPublicView {

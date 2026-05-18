@@ -763,15 +763,31 @@ export function reduceDaemonAuthEvent(
   if (!event) return state;
   switch (event.type) {
     case 'auth_device_flow_started': {
+      // PR #4255 fold-in 8 review thread #2: gate stale `started`
+      // frames the same way as the matching-flow handlers. SSE
+      // reconnect with `Last-Event-ID < started.id` would otherwise
+      // replay an old started for the SAME deviceFlowId after the
+      // SDK reducer already advanced to a terminal state, resetting
+      // the visible status to 'pending'. A stale started for an
+      // OLDER flow (different deviceFlowId, lower id than the
+      // current flow's lastSeenEventId) similarly gets ignored.
       const providerId = event.data.providerId;
+      const existing = state.flows[providerId];
+      if (
+        existing !== undefined &&
+        rawEvent.id !== undefined &&
+        existing.lastSeenEventId !== undefined &&
+        rawEvent.id <= existing.lastSeenEventId
+      ) {
+        return state;
+      }
       return {
         flows: {
           ...state.flows,
           [providerId]: {
             deviceFlowId: event.data.deviceFlowId,
             status: 'pending',
-            lastSeenEventId:
-              rawEvent.id ?? state.flows[providerId]?.lastSeenEventId ?? 0,
+            lastSeenEventId: rawEvent.id ?? existing?.lastSeenEventId ?? 0,
           },
         },
       };
@@ -780,6 +796,7 @@ export function reduceDaemonAuthEvent(
       const updated = updateMatchingFlow(
         state,
         event.data.deviceFlowId,
+        rawEvent.id,
         (flow) => ({
           ...flow,
           intervalMs: event.data.intervalMs,
@@ -792,6 +809,20 @@ export function reduceDaemonAuthEvent(
       const providerId = event.data.providerId;
       const existing = state.flows[providerId];
       if (!existing || existing.deviceFlowId !== event.data.deviceFlowId) {
+        return state;
+      }
+      // PR #4255 fold-in 8 review thread #2: enforce monotonicity
+      // here too. The deviceFlowId equality check above narrows to
+      // "this frame is for the current flow"; the id gate then
+      // refuses out-of-order replay (e.g. a delayed `authorized`
+      // arriving after a more recent `failed` for the same flow,
+      // which the daemon's transitionTerminal would never produce
+      // but a malformed/synthetic stream could).
+      if (
+        rawEvent.id !== undefined &&
+        existing.lastSeenEventId !== undefined &&
+        rawEvent.id <= existing.lastSeenEventId
+      ) {
         return state;
       }
       const next: DaemonDeviceFlowReducerState = {
@@ -816,6 +847,7 @@ export function reduceDaemonAuthEvent(
       const updated = updateMatchingFlow(
         state,
         event.data.deviceFlowId,
+        rawEvent.id,
         (flow) => ({
           ...flow,
           status: 'error',
@@ -830,6 +862,7 @@ export function reduceDaemonAuthEvent(
       const updated = updateMatchingFlow(
         state,
         event.data.deviceFlowId,
+        rawEvent.id,
         (flow) => ({
           ...flow,
           status: 'cancelled',
@@ -855,6 +888,7 @@ export function reduceDaemonAuthEvents(
 function updateMatchingFlow(
   state: DaemonAuthState,
   deviceFlowId: string,
+  rawEventId: number | undefined,
   patch: (flow: DaemonDeviceFlowReducerState) => DaemonDeviceFlowReducerState,
 ): DaemonAuthState | undefined {
   const entries = Object.entries(state.flows) as Array<
@@ -862,6 +896,22 @@ function updateMatchingFlow(
   >;
   for (const [providerId, flow] of entries) {
     if (flow && flow.deviceFlowId === deviceFlowId) {
+      // PR #4255 fold-in 8 review thread #2: enforce the
+      // monotonicity guarantee that `lastSeenEventId`'s JSDoc
+      // documents. Out-of-order delivery (SSE replay-then-live
+      // mixing) could otherwise let a stale frame overwrite a
+      // newer terminal state. Synthetic frames without an
+      // envelope `id` (rawEventId === undefined) bypass the
+      // gate — they originate inside the SDK reducer machinery
+      // (e.g. fallback paths) and aren't subject to replay
+      // ordering.
+      if (
+        rawEventId !== undefined &&
+        flow.lastSeenEventId !== undefined &&
+        rawEventId <= flow.lastSeenEventId
+      ) {
+        return state;
+      }
       return {
         flows: { ...state.flows, [providerId]: patch(flow) },
       };

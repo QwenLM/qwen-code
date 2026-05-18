@@ -1095,6 +1095,90 @@ describe('PR 21 — auth device-flow events', () => {
     expect(stale.flows['qwen-oauth']?.status).toBe('pending');
   });
 
+  it('reduceDaemonAuthEvent rejects out-of-order frames (fold-in 8 #2 monotonicity)', () => {
+    // Live: started(id=5) → authorized(id=10). Replay then injects a
+    // stale `failed` (id=7) for the same flow — without monotonicity
+    // it would overwrite `authorized` back to `error`/`upstream_error`.
+    let state = reduceDaemonAuthEvent(createDaemonAuthState(), {
+      id: 5,
+      v: 1,
+      type: 'auth_device_flow_started',
+      data: {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        expiresAt: 1_700_000_900_000,
+      },
+    });
+    state = reduceDaemonAuthEvent(state, {
+      id: 10,
+      v: 1,
+      type: 'auth_device_flow_authorized',
+      data: {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        expiresAt: 1_700_001_000_000,
+      },
+    });
+    expect(state.flows['qwen-oauth']?.status).toBe('authorized');
+    expect(state.flows['qwen-oauth']?.lastSeenEventId).toBe(10);
+
+    const replayedStale = reduceDaemonAuthEvent(state, {
+      id: 7, // stale: less than the current lastSeenEventId (10)
+      v: 1,
+      type: 'auth_device_flow_failed',
+      data: {
+        deviceFlowId: 'flow-A',
+        errorKind: 'upstream_error',
+      },
+    });
+    // Stale frame must NOT overwrite the authorized terminal.
+    expect(replayedStale.flows['qwen-oauth']?.status).toBe('authorized');
+    expect(replayedStale.flows['qwen-oauth']?.lastSeenEventId).toBe(10);
+    expect(replayedStale.flows['qwen-oauth']?.errorKind).toBeUndefined();
+
+    // A fresh `started` (id=4 < 10) for a NEW flow under the same
+    // providerId is also rejected as stale — the SDK has already
+    // observed the newer flow's authorized state and the lower-id
+    // started must be a replay of an old flow that gave way.
+    const replayedStartedStale = reduceDaemonAuthEvent(state, {
+      id: 4,
+      v: 1,
+      type: 'auth_device_flow_started',
+      data: {
+        deviceFlowId: 'flow-OLD',
+        providerId: 'qwen-oauth',
+        expiresAt: 1_700_000_500_000,
+      },
+    });
+    expect(replayedStartedStale.flows['qwen-oauth']?.deviceFlowId).toBe(
+      'flow-A',
+    );
+    expect(replayedStartedStale.flows['qwen-oauth']?.status).toBe('authorized');
+  });
+
+  it('reduceDaemonAuthEvent passes synthetic frames (no envelope id) through the gate', () => {
+    // Synthetic frames originate inside SDK reducer machinery and
+    // aren't subject to replay ordering — gate must let them
+    // through even when state's lastSeenEventId is set.
+    let state = reduceDaemonAuthEvent(createDaemonAuthState(), {
+      id: 5,
+      v: 1,
+      type: 'auth_device_flow_started',
+      data: {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        expiresAt: 1_700_000_900_000,
+      },
+    });
+    state = reduceDaemonAuthEvent(state, {
+      // No `id`: synthetic / fallback path.
+      v: 1,
+      type: 'auth_device_flow_cancelled',
+      data: { deviceFlowId: 'flow-A' },
+    });
+    expect(state.flows['qwen-oauth']?.status).toBe('cancelled');
+  });
+
   it('reduceDaemonSessionEvent no-ops on auth events (workspace-scoped)', () => {
     const initial = createDaemonSessionViewState();
     const next = reduceDaemonSessionEvent(initial, {

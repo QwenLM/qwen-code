@@ -117,6 +117,11 @@ class FakeProvider implements DeviceFlowProvider {
    *  registry's authoritative timeout (Promise.race) is the only
    *  thing that can rescue the await. PR #4255 fold-in 7 #1. */
   startHangs = false;
+  /** Test hook: when set, `poll()` throws this Error on the next call.
+   *  Models a non-conforming provider that violates the
+   *  `DeviceFlowProvider.poll()` `@remarks` sanitization contract by
+   *  throwing raw IdP detail. PR #4255 fold-in 8 #1. */
+  pollThrowsWith: Error | undefined;
   /** Most recent `opts.signal` observed by `poll`. Test hook for the
    *  abort-mid-poll assertion: after `registry.cancel(...)`, this
    *  signal MUST report `.aborted === true` so the upstream HTTP
@@ -158,6 +163,11 @@ class FakeProvider implements DeviceFlowProvider {
   ): Promise<DeviceFlowPollResult> {
     this.pollCount += 1;
     this.lastPollSignal = opts.signal;
+    if (this.pollThrowsWith !== undefined) {
+      const err = this.pollThrowsWith;
+      this.pollThrowsWith = undefined;
+      throw err;
+    }
     if (opts.signal.aborted) return { kind: 'pending' };
     if (this.pollScript.length === 0) {
       return { kind: 'pending' };
@@ -669,6 +679,51 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
     try {
       const { view } = await registry.start({ providerId: 'qwen-oauth' });
       expect(view.intervalMs).toBeLessThanOrEqual(DEVICE_FLOW_MAX_INTERVAL_MS);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('runPollTick catch truncates the SSE hint and preserves raw on the audit (fold-in 8 #1)', async () => {
+    // Models a non-conforming provider that violates the @remarks
+    // sanitization contract by throwing a multi-KB raw payload (here,
+    // an HTML-error-page-shaped string).
+    const provider = new FakeProvider();
+    const longRaw = 'X'.repeat(4_000); // > 256 char hint cap
+    provider.pollThrowsWith = new Error(longRaw);
+    const built = buildRegistry(provider);
+    const { registry, env, events, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      const failedEvent = events.find(
+        (e) =>
+          e.emission.type === 'failed' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(failedEvent).toBeDefined();
+      const sseHint =
+        failedEvent && failedEvent.emission.type === 'failed'
+          ? failedEvent.emission.data.hint
+          : undefined;
+      // SSE-broadcast hint must be bounded — the raw 4_000-char body
+      // would otherwise reach every subscriber.
+      expect(sseHint).toBeDefined();
+      expect(sseHint!.length).toBeLessThan(longRaw.length);
+      expect(sseHint!.length).toBeLessThan(400);
+      expect(sseHint).toContain('truncated');
+      // Audit line must retain the FULL raw detail for operator
+      // incident response.
+      const failedAudit = auditLines.find(
+        (line) =>
+          line['status'] === 'failed' &&
+          line['errorKind'] === 'upstream_error' &&
+          typeof line['hint'] === 'string',
+      );
+      expect(failedAudit).toBeDefined();
+      expect(failedAudit?.['hint']).toContain(longRaw);
     } finally {
       registry.dispose();
     }
