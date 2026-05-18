@@ -53,6 +53,7 @@ import {
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
   getActiveGoal,
+  activeGoalEquals,
   setActiveGoal,
   clearActiveGoal,
 } from '@qwen-code/qwen-code-core';
@@ -1345,8 +1346,15 @@ export const useGeminiStream = (
   const handleActiveGoalEvent = useCallback(
     (activeGoal: ActiveGoal | null) => {
       const sessionId = config.getSessionId();
+      const currentActiveGoal = getActiveGoal(sessionId);
       if (activeGoal) {
+        if (activeGoalEquals(currentActiveGoal, activeGoal)) {
+          return;
+        }
         setActiveGoal(sessionId, activeGoal);
+        return;
+      }
+      if (!currentActiveGoal) {
         return;
       }
       clearActiveGoal(sessionId);

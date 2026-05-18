@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   __resetActiveGoalStoreForTests,
+  activeGoalEquals,
   clearActiveGoal,
   getActiveGoal,
   recordGoalIteration,
@@ -59,5 +60,20 @@ describe('activeGoalStore', () => {
 
   it('recordGoalIteration is a no-op when no goal exists', () => {
     expect(recordGoalIteration('sess-missing', 'noop')).toBeUndefined();
+  });
+
+  it('compares active goal snapshots by value', () => {
+    expect(activeGoalEquals(undefined, undefined)).toBe(true);
+    expect(activeGoalEquals(makeGoal(), makeGoal())).toBe(true);
+    expect(
+      activeGoalEquals(makeGoal(), makeGoal({ lastReason: undefined })),
+    ).toBe(true);
+    expect(
+      activeGoalEquals(
+        makeGoal({ iterations: 1 }),
+        makeGoal({ iterations: 2 }),
+      ),
+    ).toBe(false);
+    expect(activeGoalEquals(makeGoal(), undefined)).toBe(false);
   });
 });

@@ -18,27 +18,15 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
-import { getActiveGoal, type ActiveGoal } from '../goals/activeGoalStore.js';
+import {
+  activeGoalEquals,
+  getActiveGoal,
+  type ActiveGoal,
+} from '../goals/activeGoalStore.js';
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 
 const debugLogger = createDebugLogger('CLIENT');
-
-function activeGoalEquals(
-  left: ActiveGoal | undefined,
-  right: ActiveGoal | undefined,
-): boolean {
-  if (left === right) return true;
-  if (!left || !right) return false;
-  return (
-    left.condition === right.condition &&
-    left.iterations === right.iterations &&
-    left.setAt === right.setAt &&
-    left.tokensAtStart === right.tokensAtStart &&
-    left.hookId === right.hookId &&
-    left.lastReason === right.lastReason
-  );
-}
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
@@ -1477,6 +1465,19 @@ export class GeminiClient {
           value: activeGoalAtTurnStart,
         };
       }
+      let lastEmittedActiveGoal: ActiveGoal | undefined = activeGoalAtTurnStart;
+      const createActiveGoalChangeEvent = (
+        nextActiveGoal: ActiveGoal | undefined,
+      ): ServerGeminiStreamEvent | undefined => {
+        if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
+          return undefined;
+        }
+        lastEmittedActiveGoal = nextActiveGoal;
+        return {
+          type: GeminiEventType.ActiveGoal,
+          value: nextActiveGoal ?? null,
+        };
+      };
 
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
@@ -1660,11 +1661,13 @@ export class GeminiClient {
               this.config.getSessionId(),
               warning,
             );
-            if (activeGoalBeforeStopHook || activeGoalAfterStopHook) {
-              yield {
-                type: GeminiEventType.ActiveGoal,
-                value: null,
-              };
+            const activeGoalAfterCap = getActiveGoal(
+              this.config.getSessionId(),
+            );
+            const activeGoalEvent =
+              createActiveGoalChangeEvent(activeGoalAfterCap);
+            if (activeGoalEvent) {
+              yield activeGoalEvent;
             }
             yield {
               type: GeminiEventType.HookSystemMessage,
@@ -1676,10 +1679,12 @@ export class GeminiClient {
           }
 
           if (didActiveGoalChange) {
-            yield {
-              type: GeminiEventType.ActiveGoal,
-              value: activeGoalAfterStopHook ?? null,
-            };
+            const activeGoalEvent = createActiveGoalChangeEvent(
+              activeGoalAfterStopHook,
+            );
+            if (activeGoalEvent) {
+              yield activeGoalEvent;
+            }
           }
 
           yield {
@@ -1714,10 +1719,12 @@ export class GeminiClient {
         }
 
         if (didActiveGoalChange) {
-          yield {
-            type: GeminiEventType.ActiveGoal,
-            value: activeGoalAfterStopHook ?? null,
-          };
+          const activeGoalEvent = createActiveGoalChangeEvent(
+            activeGoalAfterStopHook,
+          );
+          if (activeGoalEvent) {
+            yield activeGoalEvent;
+          }
         }
       }
 
