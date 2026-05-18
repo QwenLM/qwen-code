@@ -1422,8 +1422,9 @@ export class CoreToolScheduler {
                     reqInfo,
                     new Error(
                       decision.unavailable
-                        ? `Auto mode classifier unavailable; action blocked for safety` +
-                          (decision.reason ? ` (${decision.reason})` : '')
+                        ? decision.reason
+                          ? `Auto mode classifier unavailable (${decision.reason}); action blocked for safety`
+                          : `Auto mode classifier unavailable; action blocked for safety`
                         : `Blocked by auto mode policy: ${decision.reason}`,
                     ),
                     ToolErrorType.EXECUTION_DENIED,
