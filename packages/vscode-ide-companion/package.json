@@ -34,7 +34,8 @@
     "onCommand:qwen-code.openChat",
     "onCommand:qwen-code.focusChat",
     "onCommand:qwen-code.newConversation",
-    "onCommand:qwen-code.showLogs"
+    "onCommand:qwen-code.showLogs",
+    "onCommand:qwen-code.daemonSmoke"
   ],
   "contributes": {
     "jsonValidation": [
@@ -127,6 +128,10 @@
         "title": "Qwen Code: Show Logs"
       },
       {
+        "command": "qwen-code.daemonSmoke",
+        "title": "Qwen Code: Daemon Smoke Test"
+      },
+      {
         "command": "qwen-code.copyMessage",
         "title": "%qwen-code.copyMessage.title%"
       },
@@ -151,6 +156,9 @@
         },
         {
           "command": "qwen-code.auth"
+        },
+        {
+          "command": "qwen-code.daemonSmoke"
         },
         {
           "command": "qwen-code.copyMessage",
@@ -247,6 +255,18 @@
           "type": "boolean",
           "default": true,
           "description": "Show notifications with sound when a task completes (at least 20 seconds) or needs your attention, while you are not actively viewing the Qwen Code panel."
+        },
+        "qwen-code.daemonUrl": {
+          "order": 5,
+          "type": "string",
+          "default": "",
+          "description": "Experimental qwen serve URL used by the Daemon Smoke Test command."
+        },
+        "qwen-code.daemonToken": {
+          "order": 6,
+          "type": "string",
+          "default": "",
+          "description": "Optional bearer token used by the Daemon Smoke Test command."
         }
       }
     },

@@ -12,6 +12,10 @@ import {
   CHAT_VIEW_ID_SIDEBAR,
   CHAT_VIEW_ID_SECONDARY,
 } from '../constants/viewIds.js';
+import {
+  daemonSmokeCommand,
+  registerDaemonSmokeCommand,
+} from './daemonSmoke.js';
 
 type Logger = (message: string) => void;
 
@@ -23,6 +27,7 @@ export const authCommand = 'qwen-code.auth';
 export const focusChatCommand = 'qwen-code.focusChat';
 export const newConversationCommand = 'qwen-code.newConversation';
 export const showLogsCommand = 'qwen-code.showLogs';
+export { daemonSmokeCommand };
 
 /**
  * Register all Qwen Code chat-related commands.
@@ -147,4 +152,5 @@ export function registerNewCommands(
   );
 
   context.subscriptions.push(...disposables);
+  registerDaemonSmokeCommand(context, log, outputChannel);
 }
