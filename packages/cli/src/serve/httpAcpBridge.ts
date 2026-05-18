@@ -65,7 +65,6 @@ import type {
   SessionNotification,
   SetSessionModelRequest,
   SetSessionModelResponse,
-  Stream,
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
@@ -762,58 +761,29 @@ export class InvalidClientIdError extends Error {
  */
 export const MAX_WORKSPACE_PATH_LENGTH = 4096;
 
-/**
- * One ACP NDJSON channel to a single agent. Tests inject a fake by replacing
- * the channel factory; production uses `defaultSpawnChannelFactory`.
- */
-export interface AcpChannel {
-  stream: Stream;
-  /** Best-effort terminate; resolves when teardown is complete. */
-  kill(): Promise<void>;
-  /**
-   * Bd1y6: synchronous force-kill for the second-signal force-exit
-   * path. Fires SIGKILL on the underlying child (or equivalent
-   * in-process tear-down) and returns immediately — no Promise. The
-   * daemon's signal handler can call this before `process.exit(1)`
-   * so that double-Ctrl+C doesn't leave the agent child running
-   * after the daemon vanishes.
-   */
-  killSync(): void;
-  /**
-   * Resolves when the channel has terminated for any reason — planned
-   * (`kill()` called) OR unexpected (child process crashed, stream closed).
-   * The bridge subscribes to this so a SessionEntry whose underlying
-   * channel dies between requests is removed from `byId` /
-   * `defaultEntry` instead of lingering as a stuck session.
-   *
-   * Resolves to `{ exitCode, signalCode }` when the spawn factory can
-   * capture them (the standard `child.on('exit', code, signal)` path),
-   * or `undefined` when termination didn't go through the OS exit path
-   * (programmatic kill via the in-process channel, channel-factory
-   * error path, etc.). The bridge threads this through the
-   * `session_died` event so an operator triaging a crash doesn't need
-   * to grep stderr for the pid (BX9_P).
-   */
-  exited: Promise<AcpChannelExitInfo | undefined>;
-}
-
-export interface AcpChannelExitInfo {
-  exitCode: number | null;
-  signalCode: NodeJS.Signals | null;
-}
-
-export type ChannelFactory = (
-  workspaceCwd: string,
-  childEnvOverrides?: Readonly<Record<string, string | undefined>>,
-) => Promise<AcpChannel>;
+// `AcpChannel` / `AcpChannelExitInfo` / `ChannelFactory` were lifted to
+// `@qwen-code/acp-bridge` in #4175 PR 22a so `channels/base/AcpBridge.ts`
+// and the VSCode IDE companion can share one channel contract instead of
+// re-implementing the lifecycle each. Re-exported here for backward
+// compatibility — every existing import of these from `httpAcpBridge.ts`
+// keeps resolving.
+import type {
+  AcpChannel,
+  AcpChannelExitInfo,
+  ChannelFactory,
+} from '@qwen-code/acp-bridge';
+export type { AcpChannel, AcpChannelExitInfo, ChannelFactory };
 
 // FIXME(stage-1.5, chiga0 finding 1 + 4):
 // Stage 1.5 should split this file's responsibilities into:
 //   - `AcpChannel` interface (sendPrompt/cancel/setModel/sessionUpdate)
 //     with `SpawnedAcpChannel` (Stage 1) + `InProcessAcpChannel`
-//     (Stage 2) implementations — lifted to `@qwen-code/acp-bridge`
-//     so `channels/base/AcpBridge.ts` can consume the same primitive
-//     (today both reimplement the child lifecycle independently).
+//     (Stage 2) implementations — partially landed in PR 22a (channel
+//     contract lifted); `SpawnedAcpChannel` and `InProcessAcpChannel`
+//     impls follow in PR 22b once `defaultSpawnChannelFactory` moves
+//     out so `channels/base/AcpBridge.ts` can consume the same
+//     primitive (today both reimplement the child lifecycle
+//     independently).
 //   - `Transport` interface (`SseTransport` (Stage 1) +
 //     `WebSocketTransport` / `InProcessTransport` seams visible) so
 //     adding wire formats doesn't require rewriting the bridge.
