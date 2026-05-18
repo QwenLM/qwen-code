@@ -186,7 +186,10 @@ describe('Help Component', () => {
     expect(output).not.toContain('/test');
   });
 
-  it('orders help commands by completionPriority before name', () => {
+  it('orders help commands alphabetically regardless of completionPriority', () => {
+    // Skill priority is scoped to the /skills listing; /help intentionally
+    // stays alphabetical so a high-priority skill can't push a built-in
+    // command around in the help view.
     const commands: SlashCommand[] = [
       {
         name: 'alpha',
@@ -217,8 +220,8 @@ describe('Help Component', () => {
     );
     const output = lastFrame() ?? '';
 
-    expect(output.indexOf('/zeta')).toBeLessThan(output.indexOf('/alpha'));
     expect(output.indexOf('/alpha')).toBeLessThan(output.indexOf('/beta'));
+    expect(output.indexOf('/beta')).toBeLessThan(output.indexOf('/zeta'));
   });
 
   it('switches tabs with Tab and Shift+Tab when interactive', () => {

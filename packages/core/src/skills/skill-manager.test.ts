@@ -828,6 +828,10 @@ Body`);
         'high-priority',
         'bad-priority',
       ]);
+      // The non-number priority should also be normalized on the skill itself,
+      // not just at sort time, so downstream consumers see a clean value.
+      const badSkill = skills.find((s) => s.name === 'bad-priority');
+      expect(badSkill?.priority).toBe(0);
     });
 
     it('should deduplicate same-name skills across provider dirs within a level', async () => {

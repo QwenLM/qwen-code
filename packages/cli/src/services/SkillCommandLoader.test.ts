@@ -84,7 +84,7 @@ describe('SkillCommandLoader', () => {
   });
 
   it('should load user skill as slash command with correct properties', async () => {
-    const skill = makeSkill({ level: 'user', priority: 42 });
+    const skill = makeSkill({ level: 'user' });
     mockSkillManager.listSkills.mockImplementation(
       ({ level }: { level: string }) =>
         Promise.resolve(level === 'user' ? [skill] : []),
@@ -102,7 +102,21 @@ describe('SkillCommandLoader', () => {
     expect(cmd.sourceLabel).toBe('User');
     expect(cmd.sourceDetail).toBe('user');
     expect(cmd.modelInvocable).toBe(true);
-    expect(cmd.completionPriority).toBe(42);
+  });
+
+  it('does not propagate skill.priority to completionPriority', async () => {
+    // Priority is scoped to the `/skills` listing only; slash-completion /
+    // `/help` ordering should be independent of any skill's priority value.
+    const skill = makeSkill({ level: 'user', priority: 42 });
+    mockSkillManager.listSkills.mockImplementation(
+      ({ level }: { level: string }) =>
+        Promise.resolve(level === 'user' ? [skill] : []),
+    );
+
+    const loader = new SkillCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0].completionPriority).toBeUndefined();
   });
 
   it('should load project skill with sourceLabel "Project"', async () => {

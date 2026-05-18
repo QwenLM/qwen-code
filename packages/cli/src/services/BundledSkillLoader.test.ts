@@ -80,7 +80,7 @@ describe('BundledSkillLoader', () => {
   });
 
   it('should load bundled skills as slash commands', async () => {
-    const skill = makeSkill({ priority: 42 });
+    const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);
 
     const loader = new BundledSkillLoader(mockConfig);
@@ -90,10 +90,23 @@ describe('BundledSkillLoader', () => {
     expect(commands[0].name).toBe('review');
     expect(commands[0].description).toBe('Review code changes');
     expect(commands[0].kind).toBe(CommandKind.SKILL);
-    expect(commands[0].completionPriority).toBe(42);
     expect(mockSkillManager.listSkills).toHaveBeenCalledWith({
       level: 'bundled',
     });
+  });
+
+  it('does not propagate skill.priority to completionPriority', async () => {
+    // Priority is intentionally scoped to the `/skills` listing (sorted in
+    // SkillManager.listSkills) and must NOT leak into the slash-completion
+    // menu / `/help` ordering — typing `/` should keep its prior behavior
+    // regardless of any skill's priority value.
+    const skill = makeSkill({ priority: 42 });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0].completionPriority).toBeUndefined();
   });
 
   it('should submit skill body as prompt without args', async () => {

@@ -898,16 +898,25 @@ export class SkillManager {
           // non-number `priority` would silently sort at the bottom (via
           // normalizeSkillPriority) with no diagnostic. Warn here so the
           // extension author sees the same signal a SKILL.md author would.
-          if (
+          const hasInvalidPriority =
             skill.priority !== undefined &&
             (typeof skill.priority !== 'number' ||
-              !Number.isFinite(skill.priority))
-          ) {
+              !Number.isFinite(skill.priority));
+          if (hasInvalidPriority) {
             debugLogger.warn(
               `Extension "${extension.name}" skill "${skill.name}" has invalid priority (${typeof skill.priority}: ${String(skill.priority)}); treating as 0.`,
             );
           }
-          skills.push({ ...skill, extensionName: extension.name });
+          skills.push({
+            ...skill,
+            extensionName: extension.name,
+            // Normalize so downstream consumers reading `skill.priority`
+            // observe the same value reflected by the warning above and by
+            // sort-time normalization.
+            priority: hasInvalidPriority
+              ? 0
+              : (skill.priority as number | undefined),
+          });
         });
       }
       debugLogger.debug(
