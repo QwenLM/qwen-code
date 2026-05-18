@@ -28,6 +28,7 @@ import {
   type DeviceFlowPublicView,
 } from './auth/deviceFlow.js';
 import { QwenOAuthDeviceFlowProvider } from './auth/qwenDeviceFlowProvider.js';
+import { isServeDebugMode } from './debugMode.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
@@ -765,18 +766,13 @@ export function createServeApp(
       // would otherwise flood production logs. Operators who hit
       // the symptom can flip QWEN_SERVE_DEBUG=1 and get the
       // breadcrumb on the next reproduction.
-      const callerIsInitiator =
-        (view.initiatorClientId === undefined && clientId === undefined) ||
-        (view.initiatorClientId !== undefined &&
-          clientId !== undefined &&
-          clientId === view.initiatorClientId);
-      if (
-        !callerIsInitiator &&
-        process.env['QWEN_SERVE_DEBUG'] &&
-        !['0', 'false', 'off', 'no'].includes(
-          (process.env['QWEN_SERVE_DEBUG'] ?? '').trim().toLowerCase(),
-        )
-      ) {
+      //
+      // PR #4291 follow-up review (qwen-latest, round-4 #6): the
+      // QWEN_SERVE_DEBUG check is centralized in `isServeDebugMode()`
+      // (./debugMode.js) — already used by workspaceAgents.ts and
+      // workspaceMemory.ts. Inlining a verbatim copy here was a DRY
+      // violation that could drift from the canonical falsy list.
+      if (!callerIsDeviceFlowInitiator(view, clientId) && isServeDebugMode()) {
         writeStderrLine(
           `qwen serve debug: GET /workspace/auth/device-flow/${id} redacted verification fields — caller-clientId mismatch (initiator=${view.initiatorClientId ?? 'anonymous'}, caller=${clientId ?? 'anonymous'})`,
         );
@@ -1969,6 +1965,41 @@ function parseOptionalWorkspaceCwd(
 }
 
 /**
+ * Returns true iff the GET / POST caller is the same client that
+ * originally started the device flow. Both-undefined is treated as a
+ * match (anonymous-start → anonymous-reattach is the legitimate case).
+ *
+ * **Threat model (consolidated from PR #4291 follow-up reviews):** this
+ * is BEST-EFFORT ATTRIBUTION, not authentication. `X-Qwen-Client-Id`
+ * is a syntactic header, not bound to a server-validated identity —
+ * anyone holding the bearer token can spoof it. The bearer token IS
+ * the auth boundary; this gate exists to prevent ACCIDENTAL cross-
+ * client reads in well-behaved multi-SDK setups, and to keep the POST
+ * take-over and GET state shapes consistent. A determined attacker
+ * who has compromised the daemon bearer token already wins; locking
+ * down further would require binding identity into bearer-token
+ * issuance, which is a separate architectural change.
+ *
+ * PR #4291 follow-up review (qwen-latest, round-4 #2): extracted from
+ * three duplicated copies in the route handler, `toDeviceFlowStart-
+ * ResponseBody`, and `toDeviceFlowStateBody`. The exact bug class
+ * #4291 was fixing was "POST and GET diverged on the same redaction
+ * policy" — duplicating the gate recreated the preconditions for
+ * silent divergence. Single source of truth.
+ */
+function callerIsDeviceFlowInitiator(
+  view: Pick<DeviceFlowPublicView, 'initiatorClientId'>,
+  callerClientId: string | undefined,
+): boolean {
+  return (
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId)
+  );
+}
+
+/**
  * PR 21 — translate the registry's redacted `DeviceFlowPublicView` into
  * the wire shape declared by `DaemonDeviceFlowStartResult`. Splitting
  * "start response" from "state body" preserves the `attached` field
@@ -1994,18 +2025,14 @@ function toDeviceFlowStartResponseBody(
   // every POST, including the `attached: true` take-over case, so any
   // bearer-token holder that POSTed `providerId: <existing>` got the
   // verification code another client started. That bypassed the
-  // closed-out GET redaction completely. Apply the same gate here.
-  // Fresh starts naturally pass the gate because `view.initiatorClientId`
-  // was set from the same `callerClientId` on this very request.
-  // Take-over callers that don't match the initiator now see the
-  // public envelope only. The both-undefined branch preserves the
-  // anonymous-start → anonymous-reattach use case.
-  const callerIsInitiator =
-    (view.initiatorClientId === undefined && callerClientId === undefined) ||
-    (view.initiatorClientId !== undefined &&
-      callerClientId !== undefined &&
-      callerClientId === view.initiatorClientId);
-  if (callerIsInitiator) {
+  // closed-out GET redaction completely. Apply the shared gate
+  // (`callerIsDeviceFlowInitiator`) here. Fresh starts naturally
+  // pass the gate because `view.initiatorClientId` was set from the
+  // same `callerClientId` on this very request. Take-over callers
+  // that don't match the initiator see the public envelope only;
+  // anonymous-start → anonymous-reattach also passes via the
+  // both-undefined branch.
+  if (callerIsDeviceFlowInitiator(view, callerClientId)) {
     body['userCode'] = view.userCode ?? '';
     body['verificationUri'] = view.verificationUri ?? '';
     if (view.verificationUriComplete) {
@@ -2047,44 +2074,16 @@ function toDeviceFlowStateBody(
   if (view.expiresAt !== undefined) body['expiresAt'] = view.expiresAt;
   if (view.intervalMs !== undefined) body['intervalMs'] = view.intervalMs;
   if (view.lastPolledAt !== undefined) body['lastPolledAt'] = view.lastPolledAt;
-  // PR #4255 follow-up review thread (deepseek-v4-pro): symmetrize with
-  // the POST take-over response shape — only echo `userCode` /
+  // PR #4255 follow-up review thread (deepseek-v4-pro): symmetrize
+  // with the POST take-over response shape — only echo `userCode` /
   // `verificationUri` / `verificationUriComplete` / `initiatorClientId`
-  // back to the original starter (matched by `X-Qwen-Client-Id`). An
-  // anonymous GET caller, or a caller identifying as a different client,
-  // sees only the public envelope (`status` / `errorKind` / `hint` /
-  // timestamps). Bearer-token gated already (the route uses
-  // `mutate({ strict: true })`), so the blast radius was small, but
-  // multi-client setups sharing a single daemon token could otherwise
-  // enumerate other clients' verification codes.
-  //
-  // **Threat model (PR #4291 follow-up review by Copilot):** this gate
-  // is BEST-EFFORT ATTRIBUTION, not authentication. `X-Qwen-Client-Id`
-  // is a syntactic header, not bound to a server-validated identity —
-  // anyone holding the bearer token can spoof it. The bearer token IS
-  // the auth boundary; this gate exists to prevent ACCIDENTAL
-  // cross-client reads in well-behaved multi-SDK setups (and to keep
-  // GET symmetric with the POST take-over shape closed out in
-  // round-12 #6 of #4255). A determined attacker who has compromised
-  // the daemon bearer token already wins; locking down GET further
-  // would require binding identity into bearer-token issuance, which
-  // is a separate architectural change.
-  // PR #4291 follow-up review (qwen-latest, #3): the gate must accept
-  // the both-undefined case too, otherwise an anonymously-started flow
-  // (POST without `X-Qwen-Client-Id` → `initiatorClientId === undefined`)
-  // becomes silently unreadable: even the same anonymous caller GETting
-  // the same id can no longer retrieve `userCode`/`verificationUri` —
-  // the body switches from "what they got from POST" to a redacted
-  // public envelope, with HTTP 200, no error. Pre-PR-4291 GET returned
-  // these fields to anyone with the bearer; this gate's purpose is to
-  // prevent CROSS-client reads, not to lock anonymous flows out of
-  // their own data.
-  const callerIsInitiator =
-    (view.initiatorClientId === undefined && callerClientId === undefined) ||
-    (view.initiatorClientId !== undefined &&
-      callerClientId !== undefined &&
-      callerClientId === view.initiatorClientId);
-  if (callerIsInitiator) {
+  // back to the original starter (matched by `X-Qwen-Client-Id`).
+  // Bearer-token gated already (the route uses `mutate({ strict: true })`),
+  // but multi-client setups sharing a single daemon token could
+  // otherwise enumerate other clients' verification codes. See
+  // `callerIsDeviceFlowInitiator` JSDoc above for the consolidated
+  // threat-model note (best-effort attribution, NOT auth boundary).
+  if (callerIsDeviceFlowInitiator(view, callerClientId)) {
     if (view.userCode) body['userCode'] = view.userCode;
     if (view.verificationUri) body['verificationUri'] = view.verificationUri;
     if (view.verificationUriComplete) {

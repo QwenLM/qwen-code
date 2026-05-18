@@ -270,7 +270,14 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
           // unexpected AbortError). The constructor name + length is
           // enough for triage; the raw message MAY contain WAF-echoed
           // request body fields.
-          safeDetail = `${err.name} (message ${err.message.length} bytes; raw suppressed to avoid echoing device_code/PKCE)`;
+          // PR #4291 follow-up review (qwen-latest, round-4 #4):
+          // `Error.name` is a freely assignable string property —
+          // a hostile provider or fetch wrapper could set it to
+          // `'X\n[serve] FAKE LINE\x1b[31m'` to forge log lines
+          // or inject ANSI sequences. The same `sanitizeForStderr`
+          // we apply to `oauthError` must apply here too. Length
+          // is a number and safe to interpolate raw.
+          safeDetail = `${sanitizeForStderr(err.name)} (message ${err.message.length} bytes; raw suppressed to avoid echoing device_code/PKCE)`;
         } else {
           safeDetail = `<non-Error throw: ${typeof err}>`;
         }

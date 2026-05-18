@@ -733,20 +733,31 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
           'see daemon audit log for details',
         );
       }
-      // Audit captures the timeout for the operator. Critically, the
-      // audit hint MUST NOT route through the `provider.poll() threw
-      // (raw)` template — that's reserved for actual provider throws
-      // and would mis-direct triage. On the timeout path the hint
-      // field is omitted entirely (rawProviderError stays undefined).
+      // Audit captures the timeout for the operator. The hint must
+      // NOT route through the misleading `provider.poll() threw (raw)`
+      // template (that's reserved for real provider throws), and —
+      // PR #4291 follow-up review (qwen-latest, round-4 #5) — the hint
+      // MUST be present so operators reading the durable audit trail
+      // can distinguish timeout from generic upstream_error. Audit
+      // hint must match the SSE hint exactly.
       const auditFailure = auditLines.find(
         (line) =>
           line['status'] === 'failed' && line['errorKind'] === 'upstream_error',
       );
       expect(auditFailure).toBeDefined();
       const auditHint = auditFailure?.['hint'] as string | undefined;
-      if (auditHint !== undefined) {
-        expect(auditHint).not.toContain('provider.poll() threw (raw)');
-      }
+      expect(auditHint).toBeDefined();
+      expect(auditHint).not.toContain('provider.poll() threw (raw)');
+      expect(auditHint).toContain('timed out after');
+      expect(auditHint).toContain('check IdP connectivity');
+      // PR #4291 follow-up review (qwen-latest, round-4 #3): the
+      // timeout sentinel built ONCE per timer-fire — `signal.reason`
+      // and the rejection should be the SAME instance. Pin: the
+      // signal we observed is aborted with a DeviceFlowPollTimeoutError
+      // reason.
+      expect(provider.lastPollSignal?.aborted).toBe(true);
+      const reason = provider.lastPollSignal?.reason as unknown;
+      expect(reason).toBeInstanceOf(DeviceFlowPollTimeoutError);
       // PR #4291 follow-up review (Qwen Code review summary):
       // poll-tick must NOT reschedule itself after a timeout-driven
       // upstream_error (the entry has already transitioned to error
@@ -913,8 +924,15 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
       env.scheduler.flushDue(env.clock.now);
       await flushAsync();
       // Late upstream failure (NOT our own DeviceFlowPollTimeoutError).
-      // Use a long-enough message to exercise the truncation tail.
-      const longDetail = `connection reset by peer ${'x'.repeat(400)}`;
+      // Use a long message that, in the pre-round-4 code, would have
+      // been truncated to its first 256 bytes — and those 256 bytes
+      // can carry a full RFC 8628 `device_code` (≤80 chars) verbatim
+      // if the upstream wrapper templates it into the response. The
+      // round-4 #7 fix switches to the same `name + length` pattern
+      // the provider catch uses, so the raw detail never reaches
+      // stderr / audit even when settled late.
+      const seededDeviceCode = 'device-code-secret-AAAA1111';
+      const longDetail = `connection reset by peer ${seededDeviceCode} ${'x'.repeat(400)}`;
       rejectLate(new Error(longDetail));
       await flushAsync();
       const lateAudit = auditLines.find((line) =>
@@ -924,13 +942,18 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
       );
       expect(lateAudit).toBeDefined();
       expect(lateAudit?.['errorKind']).toBe('upstream_error');
-      expect(lateAudit?.['hint']).toContain('rejected after');
-      expect(lateAudit?.['hint']).toContain(
-        `${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling`,
-      );
-      expect(lateAudit?.['hint']).toContain('connection reset by peer');
-      // Truncation tail must appear (long detail > 256 bytes).
-      expect(lateAudit?.['hint']).toContain('bytes]');
+      const auditHint = lateAudit?.['hint'] as string;
+      expect(auditHint).toContain('rejected after');
+      expect(auditHint).toContain(`${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling`);
+      // PR #4291 follow-up review (qwen-latest, round-4 #7): the
+      // late-rejection observer must use the `name + length` pattern,
+      // NOT the raw message slice. Hard-negate the seeded device_code
+      // to pin the security regression — a future change that goes
+      // back to slicing `lateErr.message` would fail CI immediately.
+      expect(auditHint).toContain('Error (message');
+      expect(auditHint).toContain('bytes; raw suppressed)');
+      expect(auditHint).not.toContain(seededDeviceCode);
+      expect(auditHint).not.toContain('connection reset by peer');
     } finally {
       registry.dispose();
     }

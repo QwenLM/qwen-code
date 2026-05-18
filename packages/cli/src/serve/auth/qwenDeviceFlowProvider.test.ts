@@ -342,4 +342,41 @@ describe('QwenOAuthDeviceFlowProvider.poll() — stderr audit branches', () => {
     expect(line).toContain('FORGED LOG ENTRY');
     expect(line).toContain('RED');
   });
+
+  it('sanitizes control characters in attacker-controlled err.name on the non-OAuth path (round-4 #4)', async () => {
+    // PR #4291 follow-up review (qwen-latest, round-4 #4):
+    // `Error.name` is a freely assignable string property. A hostile
+    // provider or fetch wrapper could set `e.name` to inject newlines
+    // or ANSI sequences into stderr through the same vector we
+    // already closed for `oauthError`. Pin the equivalent
+    // sanitization on the non-OAuth path.
+    const err = new Error('upstream HTTP 500');
+    err.name = 'Hostile\n[serve] FORGED LINE 2026-01-01\x1b[31mRED\x1b[0m';
+    const provider = new QwenOAuthDeviceFlowProvider(
+      fakeClient({
+        pollDeviceToken: async () => {
+          throw err;
+        },
+      }),
+    );
+    const result = await provider.poll(makeState(), {
+      signal: new AbortController().signal,
+    });
+    expect(result.kind).toBe('error');
+    expect(stderrLines).toHaveLength(1);
+    const line = stderrLines[0];
+    // Single content line — no forged second log entry.
+    expect(line.split('\n').length).toBe(2);
+    // Hostile bytes from name are gone.
+    expect(line).not.toContain('\x1b[31m');
+    expect(line).not.toContain('\x1b[0m');
+    expect(line).not.toMatch(/\n\[serve\] FORGED/);
+    // Substantive parts of the name are still preserved (length-
+    // preserving sanitizer replaces controls with `?`).
+    expect(line).toContain('Hostile');
+    expect(line).toContain('FORGED LINE');
+    expect(line).toContain('RED');
+    // Length field is the message length, not name length.
+    expect(line).toContain(`message ${err.message.length} bytes`);
+  });
 });

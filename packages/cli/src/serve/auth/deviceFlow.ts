@@ -1105,14 +1105,21 @@ export class DeviceFlowRegistry {
       result = await new Promise<DeviceFlowPollResult>((resolve, reject) => {
         pollTimer = this.schedule(DEVICE_FLOW_POLL_TIMEOUT_MS, () => {
           pollTimedOut = true;
+          // PR #4291 follow-up review (qwen-latest, round-4 #3): build the
+          // sentinel ONCE so `signal.reason.stack` and the caught
+          // rejection's stack point to the same throw site (operators
+          // grepping the audit see one timeout, not two with divergent
+          // stacks). Each `new Error(...)` triggers V8 stack-trace
+          // capture; reusing avoids the duplicate cost too.
+          const timeoutError = new DeviceFlowPollTimeoutError(
+            DEVICE_FLOW_POLL_TIMEOUT_MS,
+          );
           try {
-            entry.cancelController.abort(
-              new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS),
-            );
+            entry.cancelController.abort(timeoutError);
           } catch {
             // best-effort
           }
-          reject(new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS));
+          reject(timeoutError);
         });
         providerPollPromise = provider.poll(
           {
@@ -1172,16 +1179,28 @@ export class DeviceFlowRegistry {
     // `lost_success_after_timeout` pattern on the persist path.
     if (pollTimedOut && providerPollPromise !== undefined) {
       const tracked = providerPollPromise;
+      // PR #4291 follow-up review (qwen-latest, round-4 #1): destructure
+      // the few entry fields we actually need so the observer closure
+      // does NOT capture `entry` by reference. Otherwise, if the
+      // tracked promise never settles (the exact scenario this audit
+      // exists to catch), the closure would retain the entire entry
+      // — including `deviceCode` / `pkceVerifier` BrandedSecrets and
+      // the live `cancelController` — for the lifetime of the daemon.
+      // Memory leak + indefinite secret retention.
+      const auditDeviceFlowId = entry.deviceFlowId;
+      const auditProviderId = entry.providerId;
+      const auditClientId = entry.initiatorClientId;
+      const audit = this.deps.audit;
       // Detached on purpose; the catch on the ORIGINAL promise has
       // already happened (via the wrapper) — the observer below
       // sees the eventual settlement of the same promise. Both
       // success and error branches go through audit only.
       void tracked.then(
         (latePollResult) => {
-          this.deps.audit?.record({
-            deviceFlowId: entry.deviceFlowId,
-            providerId: entry.providerId,
-            clientId: entry.initiatorClientId,
+          audit?.record({
+            deviceFlowId: auditDeviceFlowId,
+            providerId: auditProviderId,
+            clientId: auditClientId,
             status: 'failed',
             errorKind: 'upstream_error',
             // PR #4291 follow-up review (qwen-latest, N1): the late-
@@ -1206,15 +1225,27 @@ export class DeviceFlowRegistry {
           // double-audit if the wrapper already saw this same error
           // (we'd be double-counting the same I/O failure).
           if (lateErr instanceof DeviceFlowPollTimeoutError) return;
-          const detail =
-            lateErr instanceof Error ? lateErr.message : String(lateErr);
-          this.deps.audit?.record({
-            deviceFlowId: entry.deviceFlowId,
-            providerId: entry.providerId,
-            clientId: entry.initiatorClientId,
+          // PR #4291 follow-up review (qwen-latest, round-4 #7): use
+          // the `name + length` redaction pattern (the same one the
+          // provider catch uses) instead of interpolating the raw
+          // `lateErr.message`. The provider's catch was carefully
+          // shaped to suppress raw upstream bodies that may contain
+          // WAF-echoed `device_code` / PKCE; the registry layer must
+          // not undo that hardening just because the same failure
+          // settled late. The 256-byte truncation we used previously
+          // was insufficient — the first 256 bytes of a WAF error
+          // page can carry a full `device_code` value.
+          const safeDetail =
+            lateErr instanceof Error
+              ? `${lateErr.name} (message ${lateErr.message.length} bytes; raw suppressed)`
+              : `<non-Error throw: ${typeof lateErr}>`;
+          audit?.record({
+            deviceFlowId: auditDeviceFlowId,
+            providerId: auditProviderId,
+            clientId: auditClientId,
             status: 'failed',
             errorKind: 'upstream_error',
-            hint: `lost_late_poll_after_timeout: provider.poll() rejected after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling: ${detail.length > 256 ? `${detail.slice(0, 256)}…[+${detail.length - 256} bytes]` : detail}`,
+            hint: `lost_late_poll_after_timeout: provider.poll() rejected after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling: ${safeDetail}`,
           });
         },
       );
@@ -1512,11 +1543,25 @@ export class DeviceFlowRegistry {
             // err.message in the audit hint so operators can debug
             // the contract violation. The SSE-broadcast hint stays
             // truncated to DEVICE_FLOW_POLL_HINT_MAX_LEN.
+            //
+            // PR #4291 follow-up review (qwen-latest, round-4 #5): when
+            // `rawProviderError` is undefined the timeout branch
+            // settled the wrapper (a registry-side timeout, NOT a
+            // provider throw). The earlier shape omitted `hint`
+            // entirely, leaving operators reading the durable audit
+            // trail with no signal whether the upstream_error was a
+            // hung IdP or a generic provider failure. Use the
+            // structured `result.hint` (which already contains the
+            // timeout-specific `provider.poll() timed out after Nms;
+            // check IdP connectivity` text built in the catch block)
+            // so the audit trail matches the SSE event.
             ...(rawProviderError !== undefined
               ? {
                   hint: `provider.poll() threw (raw): ${rawProviderError}`,
                 }
-              : {}),
+              : result.hint !== undefined
+                ? { hint: result.hint }
+                : {}),
           });
         }
         return;
