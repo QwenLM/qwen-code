@@ -100,7 +100,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'session_permission_vote', 'permission_vote', 'workspace_mcp', 'workspace_skills',
  'workspace_providers', 'session_context', 'session_supported_commands',
  'session_close', 'session_metadata', 'mcp_guardrails',
- 'mcp_guardrail_events']
+ 'mcp_guardrail_events',
+ 'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write']
 ```
 
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
@@ -118,6 +119,15 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `mcp_guardrails` (issue [#4175](https://github.com/QwenLM/qwen-code/issues/4175) PR 14) covers the MCP budget surface: the `clientCount` / `clientBudget` / `budgetMode` / `budgets[]` fields on `GET /workspace/mcp`, the `disabledReason` field on per-server cells, and the `--mcp-client-budget` / `--mcp-budget-mode` CLI flags. Older daemons omit the new fields entirely; SDK clients pre-flight this tag before relying on `budgets[]` semantics. The registry descriptor also carries `modes: ['warn', 'enforce']` for future feature-modes exposure — for now, clients infer mode from the snapshot's `budgetMode` field. Server refusal under `enforce` mode is deterministic by `Object.entries(mcpServers)` declaration order; a future scope-precedence layer (if qwen-code adopts one) would shift this to "lowest-precedence first" to mirror claude-code's `plugin < user < project < local` convention.
 
 > ⚠️ **PR 14 v1 scope: per-session, not per-workspace.** Each ACP session inside the daemon constructs its own `Config` + `McpClientManager` (via `acpAgent.newSessionConfig`). The budget caps live MCP clients **per session**; each session independently reads `QWEN_SERVE_MCP_CLIENT_BUDGET` from the forwarded env. With `--mcp-client-budget=10` and 5 concurrent ACP sessions, the actual live MCP client count can reach 5 × 10 = 50 across the daemon. The `GET /workspace/mcp` snapshot reads the **bootstrap session's** `McpClientManager` accounting only — the `budgets[0].scope: 'session'` value is the honest signal that this is per-session, not aggregated. **Wave 5 PR 23 (shared MCP pool)** will introduce a workspace-scoped manager and add a `scope: 'workspace'` cell alongside the per-session cell for true cross-session aggregation. v1 is the in-process counter + soft enforcement foundation that PR 23 builds on.
+
+`workspace_file_read` covers the text/list/stat/glob workspace file routes
+(`GET /file`, `GET /list`, `GET /glob`, `GET /stat`). `workspace_file_bytes`
+covers `GET /file/bytes`, which was added later so clients can pre-flight raw
+byte-window support against PR19-era daemons. `workspace_file_write` covers
+the hash-aware text mutation routes (`POST /file/write`, `POST /file/edit`).
+The write tag means the route contract exists; it does not mean the current
+deployment is open for anonymous mutation. Write/edit are strict mutation
+routes and require a configured bearer token even on loopback.
 
 **Conditional tags.** A small number of feature tags are advertised only when the matching deployment toggle is on. Tag presence = behavior is on; absence = either an older daemon predating the tag, OR a current daemon where the operator did not opt in. Currently:
 
@@ -615,6 +625,173 @@ request (e.g. a mid-request channel close), the envelope's `errors` array
 carries a single `ServeStatusCell` describing the failure and the cells
 fall back to `not_started` ACP placeholders. Daemon-level cells are still
 returned.
+
+### Workspace file routes
+
+All file paths are resolved through the daemon's bound workspace. Responses use
+workspace-relative paths and never return absolute filesystem paths for normal
+success cases. Successful file responses include:
+
+```http
+Cache-Control: no-store
+X-Content-Type-Options: nosniff
+```
+
+Filesystem errors use this JSON shape:
+
+```json
+{
+  "errorKind": "hash_mismatch",
+  "error": "expected sha256:..., found sha256:...",
+  "hint": "re-read the file and retry with the latest hash",
+  "status": 409
+}
+```
+
+`errorKind` values include `path_outside_workspace`, `symlink_escape`,
+`path_not_found`, `binary_file`, `file_too_large`, `untrusted_workspace`,
+`permission_denied`, `parse_error`, `hash_mismatch`,
+`file_already_exists`, `text_not_found`, and `ambiguous_text_match`.
+
+#### `GET /file`
+
+Reads a text file. Query params: `path` (required), `maxBytes`, `line`, and
+`limit`. The daemon rejects binary files and files above the text read cap.
+The response includes `hash`, a SHA-256 digest over the raw on-disk bytes for
+the whole file, even when `line`, `limit`, or `maxBytes` returned a slice.
+
+```json
+{
+  "kind": "file",
+  "path": "src/index.ts",
+  "content": "export {};\n",
+  "encoding": "utf-8",
+  "bom": false,
+  "lineEnding": "lf",
+  "sizeBytes": 11,
+  "returnedBytes": 11,
+  "truncated": false,
+  "hash": "sha256:...",
+  "matchedIgnore": null,
+  "originalLineCount": null
+}
+```
+
+#### `GET /file/bytes`
+
+Reads raw bytes from a file without decoding. Query params: `path` (required),
+`offset` (default `0`), and `maxBytes` (default `65536`, max `262144`). This
+route supports bounded windows on large binary files without slurping the whole
+file. The response includes `hash` only when the returned window covers the
+entire file.
+
+```json
+{
+  "kind": "file_bytes",
+  "path": "assets/logo.png",
+  "offset": 0,
+  "sizeBytes": 3912,
+  "returnedBytes": 3912,
+  "truncated": false,
+  "contentBase64": "...",
+  "hash": "sha256:..."
+}
+```
+
+#### `POST /file/write`
+
+Creates or replaces a text file. This is a strict mutation route: on loopback
+without a configured token it returns `401 { "code": "token_required" }`.
+With `--require-auth`, the global bearer middleware rejects unauthenticated
+requests before the route runs.
+
+Body:
+
+```json
+{
+  "path": "src/new.ts",
+  "content": "export const value = 1;\n",
+  "mode": "create"
+}
+```
+
+```json
+{
+  "path": "src/existing.ts",
+  "content": "export const value = 2;\n",
+  "mode": "replace",
+  "expectedHash": "sha256:..."
+}
+```
+
+`mode` must be `create` or `replace`. `create` never overwrites an existing
+file (`409 file_already_exists`). `replace` requires `expectedHash`; missing or
+malformed hashes are `400 parse_error`, and stale hashes are
+`409 hash_mismatch`. `expectedHash` is `sha256:` plus 64 lowercase hex
+characters, computed over raw on-disk bytes.
+
+`bom`, `encoding`, and `lineEnding` may be supplied. Replacement preserves the
+existing file's encoding profile by default; explicit fields override it.
+Binary writes are out of scope.
+
+The daemon writes to a random temp file in the target directory, fsyncs where
+supported, re-checks the current hash immediately before `rename()`, then
+renames into place. This prevents partial-file observation and serializes
+daemon-originated writes to the same file, but it is not a cross-process
+kernel compare-and-swap: an external editor can still race in the tiny window
+between final hash check and rename.
+
+```json
+{
+  "kind": "file_write",
+  "path": "src/existing.ts",
+  "mode": "replace",
+  "created": false,
+  "sizeBytes": 24,
+  "hash": "sha256:...",
+  "encoding": "utf-8",
+  "bom": false,
+  "lineEnding": "lf",
+  "matchedIgnore": null
+}
+```
+
+#### `POST /file/edit`
+
+Applies one exact text replacement to an existing text file. This is also a
+strict mutation route and requires `expectedHash`.
+
+```json
+{
+  "path": "src/config.ts",
+  "oldText": "timeout: 30000",
+  "newText": "timeout: 60000",
+  "expectedHash": "sha256:..."
+}
+```
+
+`oldText` must be non-empty and occur exactly once. No match returns
+`422 text_not_found`; multiple matches return `422 ambiguous_text_match`.
+The route preserves encoding, BOM, and line endings, and re-checks
+`expectedHash` immediately before the atomic rename.
+
+Explicit writes/edits to ignored paths are allowed because the authenticated
+caller named the path. Success responses and audit events include
+`matchedIgnore: "file" | "directory" | null`.
+
+```json
+{
+  "kind": "file_edit",
+  "path": "src/config.ts",
+  "replacements": 1,
+  "sizeBytes": 128,
+  "hash": "sha256:...",
+  "encoding": "utf-8",
+  "bom": false,
+  "lineEnding": "lf",
+  "matchedIgnore": null
+}
+```
 
 ### `GET /session/:id/context`
 

@@ -39,6 +39,7 @@ export { parseSseStream, SseFramingError } from './sse.js';
 export {
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
+  isDaemonContentHash,
   requireWorkspaceCwd,
 } from './types.js';
 export type {
@@ -140,10 +141,17 @@ export type {
   DaemonStatus,
   DaemonStatusCell,
   DaemonUpdateAgentRequest,
+  DaemonContentHash,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentSummary,
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
+  DaemonWorkspaceFile,
+  DaemonWorkspaceFileBytes,
+  DaemonWorkspaceFileEditRequest,
+  DaemonWorkspaceFileEditResult,
+  DaemonWorkspaceFileWriteRequest,
+  DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMemoryFile,

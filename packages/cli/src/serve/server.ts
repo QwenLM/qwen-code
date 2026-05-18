@@ -59,6 +59,7 @@ import {
   type WorkspaceFileSystemFactory,
 } from './fs/index.js';
 import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
+import { registerWorkspaceFileWriteRoutes } from './routes/workspaceFileWrite.js';
 
 /**
  * Build a no-op fs-audit emitter that logs a warning every
@@ -618,6 +619,12 @@ export function createServeApp(
   // in PR 20.
   registerWorkspaceFileReadRoutes(app, {
     parseClientId: parseClientIdHeader,
+  });
+  registerWorkspaceFileWriteRoutes(app, {
+    bridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
   });
 
   // -- Issue #4175 PR 21 — auth device-flow routes ------------------------

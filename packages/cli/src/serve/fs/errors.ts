@@ -20,6 +20,10 @@ export type FsErrorKind =
   | 'path_not_found'
   | 'binary_file'
   | 'file_too_large'
+  | 'hash_mismatch'
+  | 'file_already_exists'
+  | 'text_not_found'
+  | 'ambiguous_text_match'
   | 'untrusted_workspace'
   | 'permission_denied'
   /**
@@ -56,7 +60,7 @@ export type FsErrorKind =
  * boundary is being asked to model a transport-level concern that
  * doesn't belong here (5xx, 401/403 from auth, etc.).
  */
-export type FsErrorStatus = 400 | 403 | 404 | 413 | 422 | 500 | 503;
+export type FsErrorStatus = 400 | 403 | 404 | 409 | 413 | 422 | 500 | 503;
 
 /**
  * Default HTTP status mapping. Centralized here so callers can throw
@@ -72,6 +76,10 @@ const DEFAULT_STATUS_BY_KIND: Record<FsErrorKind, FsErrorStatus> = {
   path_not_found: 404,
   binary_file: 422,
   file_too_large: 413,
+  hash_mismatch: 409,
+  file_already_exists: 409,
+  text_not_found: 422,
+  ambiguous_text_match: 422,
   untrusted_workspace: 403,
   permission_denied: 403,
   io_error: 503,
