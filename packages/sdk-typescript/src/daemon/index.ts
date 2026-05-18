@@ -27,7 +27,11 @@ export {
   reduceDaemonSessionEvents,
 } from './events.js';
 export { parseSseStream, SseFramingError } from './sse.js';
-export { DaemonCapabilityMissingError, requireWorkspaceCwd } from './types.js';
+export {
+  DAEMON_ERROR_KINDS,
+  DaemonCapabilityMissingError,
+  requireWorkspaceCwd,
+} from './types.js';
 export type {
   DaemonAgentChangedData,
   DaemonAgentChangedEvent,
@@ -75,6 +79,9 @@ export type {
   DaemonCapabilities,
   DaemonContextFileScope,
   DaemonCreateAgentRequest,
+  DaemonEnvCell,
+  DaemonEnvKind,
+  DaemonErrorKind,
   DaemonEvent,
   DaemonMcpDiscoveryState,
   DaemonMcpServerRuntimeStatus,
@@ -88,16 +95,20 @@ export type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSkillLevel,
+  DaemonPreflightCell,
+  DaemonPreflightKind,
   DaemonStatus,
   DaemonStatusCell,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentSummary,
   DaemonWorkspaceAgentsStatus,
+  DaemonWorkspaceEnvStatus,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProviderCurrent,
   DaemonWorkspaceProviderModel,
   DaemonWorkspaceProviderStatus,
