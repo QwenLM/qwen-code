@@ -467,6 +467,9 @@ describe('DaemonChannelBridge', () => {
       true,
     );
     expect(session.respondToPermission).toHaveBeenCalledWith('req-1', response);
+    await expect(bridge.respondToPermission('req-1', response)).resolves.toBe(
+      false,
+    );
 
     const resolved = vi.fn();
     bridge.on('permissionResolved', resolved);
@@ -505,6 +508,65 @@ describe('DaemonChannelBridge', () => {
     });
     await waitFor(() => expect(staleResponse).toBeDefined());
     await expect(staleResponse).resolves.toBe(false);
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('rejects malformed permission resolution outcomes', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    const errors = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+    bridge.on('error', errors);
+
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    events.push({
+      id: 10,
+      v: 1,
+      type: 'permission_request',
+      data: {
+        requestId: 'req-bad-outcome',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'edit',
+          title: 'Edit file',
+          rawInput: {},
+        },
+        options: [
+          { optionId: 'proceed_once', kind: 'allow_once', name: 'Allow' },
+        ],
+      },
+    });
+    await waitFor(() => expect(permissionRequest).toHaveBeenCalledOnce());
+
+    events.push({
+      id: 11,
+      v: 1,
+      type: 'permission_resolved',
+      data: {
+        requestId: 'req-bad-outcome',
+        outcome: { outcome: 'selected' },
+      },
+    });
+
+    await waitFor(() =>
+      expect(errors).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Malformed daemon permission_resolved outcome',
+        }),
+      ),
+    );
+    expect(permissionResolved).not.toHaveBeenCalled();
 
     events.close();
     bridge.stop();

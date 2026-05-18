@@ -6,6 +6,8 @@ import type {
 import type { AvailableCommand, ToolCallEvent } from './AcpBridge.js';
 import type { SessionScope } from './types.js';
 
+const MAX_RESPONDED_PERMISSION_REQUESTS = 256;
+
 export interface DaemonChannelEvent {
   id?: number;
   v: 1;
@@ -63,7 +65,7 @@ export interface DaemonPermissionRequestEvent {
 
 export interface DaemonPermissionResolvedEvent {
   requestId: string;
-  outcome?: unknown;
+  outcome?: DaemonPermissionOutcome;
 }
 
 export interface DaemonPromptCompleteEvent {
@@ -116,6 +118,28 @@ function isPermissionRequestData(
   );
 }
 
+type DaemonPermissionOutcome =
+  | { outcome: 'cancelled' }
+  | { outcome: 'selected'; optionId: string };
+
+function parsePermissionOutcome(
+  value: unknown,
+): DaemonPermissionOutcome | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (value['outcome'] === 'cancelled') {
+    return { outcome: 'cancelled' };
+  }
+  if (
+    value['outcome'] === 'selected' &&
+    typeof value['optionId'] === 'string'
+  ) {
+    return { outcome: 'selected', optionId: value['optionId'] };
+  }
+  return undefined;
+}
+
 function summarizeProtocolDetails(details: unknown): unknown {
   if (!isRecord(details)) {
     return { type: typeof details };
@@ -139,6 +163,8 @@ function summarizeProtocolDetails(details: unknown): unknown {
 }
 
 async function drainDaemonEventLoop(): Promise<void> {
+  // TODO(daemon-roadmap): replace this bounded client-side drain with a daemon
+  // terminal turn event / SSE waterline once the typed event schema defines it.
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
 
@@ -147,6 +173,7 @@ export class DaemonChannelBridge extends EventEmitter {
   private readonly sessions = new Map<string, DaemonChannelSessionClient>();
   private readonly eventControllers = new Map<string, AbortController>();
   private readonly requestToSession = new Map<string, string>();
+  private readonly respondedRequestToSession = new Map<string, string>();
   private readonly activePrompts = new Set<string>();
   private readonly activePromptControllers = new Map<
     string,
@@ -311,12 +338,21 @@ export class DaemonChannelBridge extends EventEmitter {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.requestToSession.delete(requestId);
+      this.respondedRequestToSession.delete(requestId);
       return false;
     }
     try {
-      return await session.respondToPermission(requestId, response);
+      const accepted = await session.respondToPermission(requestId, response);
+      this.requestToSession.delete(requestId);
+      if (accepted) {
+        this.rememberRespondedPermissionRequest(requestId, sessionId);
+      } else {
+        this.respondedRequestToSession.delete(requestId);
+      }
+      return accepted;
     } catch (error) {
       this.requestToSession.delete(requestId);
+      this.respondedRequestToSession.delete(requestId);
       throw error;
     }
   }
@@ -516,6 +552,24 @@ export class DaemonChannelBridge extends EventEmitter {
     } satisfies DaemonPermissionRequestEvent);
   }
 
+  private rememberRespondedPermissionRequest(
+    requestId: string,
+    sessionId: string,
+  ): void {
+    this.respondedRequestToSession.set(requestId, sessionId);
+    while (
+      this.respondedRequestToSession.size > MAX_RESPONDED_PERMISSION_REQUESTS
+    ) {
+      const oldestRequestId = this.respondedRequestToSession
+        .keys()
+        .next().value;
+      if (oldestRequestId === undefined) {
+        return;
+      }
+      this.respondedRequestToSession.delete(oldestRequestId);
+    }
+  }
+
   private handlePermissionResolved(sessionId: string, data: unknown): void {
     if (!isRecord(data) || typeof data['requestId'] !== 'string') {
       this.emitProtocolError(
@@ -525,7 +579,9 @@ export class DaemonChannelBridge extends EventEmitter {
       return;
     }
     const requestId = data['requestId'];
-    const mappedSessionId = this.requestToSession.get(requestId);
+    const mappedSessionId =
+      this.requestToSession.get(requestId) ??
+      this.respondedRequestToSession.get(requestId);
     if (!mappedSessionId) {
       this.emitProtocolError(
         `Ignoring daemon permission_resolved for unknown request ${requestId}`,
@@ -535,16 +591,28 @@ export class DaemonChannelBridge extends EventEmitter {
     }
     if (mappedSessionId !== sessionId) {
       this.requestToSession.delete(requestId);
+      this.respondedRequestToSession.delete(requestId);
       this.emitProtocolError(
         `Ignoring daemon permission_resolved for request ${requestId} from non-owning session ${sessionId}`,
         data,
       );
       return;
     }
+    const outcome = parsePermissionOutcome(data['outcome']);
+    if (!outcome) {
+      this.requestToSession.delete(requestId);
+      this.respondedRequestToSession.delete(requestId);
+      this.emitProtocolError(
+        'Malformed daemon permission_resolved outcome',
+        data,
+      );
+      return;
+    }
     this.requestToSession.delete(requestId);
+    this.respondedRequestToSession.delete(requestId);
     this.emit('permissionResolved', {
       requestId,
-      outcome: data['outcome'],
+      outcome,
     } satisfies DaemonPermissionResolvedEvent);
   }
 
@@ -596,6 +664,11 @@ export class DaemonChannelBridge extends EventEmitter {
     for (const [requestId, mappedSessionId] of this.requestToSession) {
       if (mappedSessionId === sessionId) {
         this.requestToSession.delete(requestId);
+      }
+    }
+    for (const [requestId, mappedSessionId] of this.respondedRequestToSession) {
+      if (mappedSessionId === sessionId) {
+        this.respondedRequestToSession.delete(requestId);
       }
     }
     this.emit('sessionDied', { sessionId, reason });
