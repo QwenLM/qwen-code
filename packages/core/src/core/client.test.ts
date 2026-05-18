@@ -2602,7 +2602,7 @@ hello
       // Force LoopDetector to trip on the first event.
       const loopDetector = client['loopDetector'];
       vi.spyOn(loopDetector, 'addAndCheck').mockReturnValue(true);
-      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(undefined);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
 
       mockTurnRunFn.mockReturnValue(
         (async function* () {
