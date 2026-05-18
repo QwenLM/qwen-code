@@ -51,6 +51,7 @@ import {
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
   generateToolUseSummary,
+  getActiveGoal,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -796,7 +797,11 @@ export const useGeminiStream = (
         // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
         if (submitType !== SendMessageType.Cron) {
           const insertedId = addItem(
-            { type: MessageType.USER, text: trimmedQuery },
+            {
+              type: MessageType.USER,
+              text: trimmedQuery,
+              promptId: prompt_id,
+            } as HistoryItemWithoutId,
             userMessageTimestamp,
           );
           // Capture id+text so the cancel handler can verify identity,
@@ -1302,6 +1307,25 @@ export const useGeminiStream = (
         addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
+      // When the active loop is driven by `/goal`, replace the generic
+      // "Ran N stop hooks" chip with a goal-aware `goal_status`
+      // `kind:'checking'` item. A not-met judge is the expected outcome of a
+      // continuation, not a hook failure.
+      const activeGoal = getActiveGoal(config.getSessionId());
+      if (activeGoal && activeGoal.condition) {
+        addItem(
+          {
+            type: MessageType.GOAL_STATUS,
+            kind: 'checking',
+            condition: activeGoal.condition,
+            iterations: value.iterationCount,
+            lastReason:
+              activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
+          } as HistoryItemWithoutId,
+          userMessageTimestamp,
+        );
+        return;
+      }
       addItem(
         {
           type: 'stop_hook_loop',
@@ -1312,7 +1336,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [addItem, config, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const processGeminiStreamEvents = useCallback(
@@ -1427,8 +1451,7 @@ export const useGeminiStream = (
             case ServerGeminiEventType.ToolCallRequest:
               flushBufferedStreamEvents();
               toolCallRequests.push(event.value);
-              // Count tool call args JSON toward token estimation (matches
-              // Claude Code's input_json_delta handling).
+              // Count tool call args JSON toward token estimation.
               try {
                 const argsJson = JSON.stringify(event.value.args);
                 streamingResponseLengthRef.current += argsJson.length;
@@ -1466,6 +1489,20 @@ export const useGeminiStream = (
                 event as ServerGeminiFinishedEvent,
                 userMessageTimestamp,
               );
+              // Seal off this turn's UI state before the parent re-enters
+              // sendMessageStream for a continuation (Stop-hook block at
+              // client.ts:1378 or next-speaker auto-continue at 1444). Both
+              // paths yield* a fresh Turn through this same stream processor,
+              // so without this seal the next turn's first content/thought
+              // chunk appends to this turn's pending item — visible in the UI
+              // as "t" → "te" → "tes" cumulative rendering even though each
+              // turn is persisted as a clean, separate assistant message.
+              if (pendingHistoryItemRef.current) {
+                addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+                setPendingHistoryItem(null);
+              }
+              geminiMessageBuffer = '';
+              thoughtBuffer = '';
               break;
             case ServerGeminiEventType.Citation:
               flushBufferedStreamEvents();
@@ -2092,9 +2129,8 @@ export const useGeminiStream = (
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Fire tool-use summary generation in parallel with the next API call.
-      // The fast-model Haiku-equivalent latency (~1s) is hidden behind the
-      // main-model streaming (5-30s). Mirrors Claude Code's query.ts:1411-1482
-      // behavior. Fire-and-forget: failures are silent and never block the turn.
+      // The fast-model latency is hidden behind the main-model streaming.
+      // Fire-and-forget: failures are silent and never block the turn.
       // Subagent exclusion is implicit — useGeminiStream only drives the
       // main session; subagents run through agents/runtime/ with their own loop.
       if (config.getEmitToolUseSummaries()) {
@@ -2196,9 +2232,13 @@ export const useGeminiStream = (
           : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
         for (const msg of drained) {
-          responsesToSend.push({
+          const midTurnUserMessage = {
             text: `\n[User message received during tool execution]: ${msg}`,
-          });
+          };
+          responsesToSend.push(midTurnUserMessage);
+          config
+            .getChatRecordingService()
+            ?.recordMidTurnUserMessage(midTurnUserMessage, msg);
           // Record in UI history so the transcript stays complete.
           addItem({ type: MessageType.USER, text: msg }, Date.now());
         }

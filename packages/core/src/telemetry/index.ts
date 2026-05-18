@@ -143,9 +143,10 @@ export {
   endLLMRequestSpan,
   startToolSpan,
   endToolSpan,
+  runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
-  clearSessionTracingForTesting,
+  getActiveInteractionSpan,
 } from './session-tracing.js';
 export type {
   StartInteractionOptions,
@@ -153,3 +154,12 @@ export type {
   LLMRequestMetadata,
   ToolSpanMetadata,
 } from './session-tracing.js';
+export {
+  addUserPromptAttributes,
+  addSystemPromptAttributes,
+  addToolSchemaAttributes,
+  addModelOutputAttributes,
+  addToolInputAttributes,
+  addToolResultAttributes,
+  truncateContent,
+} from './detailed-span-attributes.js';

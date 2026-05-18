@@ -91,6 +91,45 @@ export default {
   'Rename the current conversation. --auto lets the fast model pick a title.':
     '現在の会話の名前を変更する。--auto を使うと高速モデルがタイトルを決めます。',
   'Rewind conversation to a previous turn': '会話を前のターンまで巻き戻す',
+  'Rewind Conversation': '会話を巻き戻す',
+  'No user turns to rewind to.': '巻き戻せるユーザーターンがありません。',
+  'Rewind to: ': '巻き戻し先：',
+  'Restore code and conversation': 'コードと会話を復元',
+  'Restore conversation only': '会話のみ復元',
+  'Restore code only': 'コードのみ復元',
+  'Never mind': 'やめる',
+  'Computing file changes...': 'ファイルの変更を計算中...',
+  'Restoring...': '復元中...',
+  'Restored {{count}} file(s).': '{{count}} 個のファイルを復元しました。',
+  'Failed to restore files: {{error}}':
+    'ファイルの復元に失敗しました：{{error}}',
+  'Rewind failed: {{error}}': '巻き戻しに失敗しました：{{error}}',
+  'Cannot rewind conversation: no active model client.':
+    '会話を巻き戻せません：アクティブなモデルクライアントがありません。',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'コードは復元されましたが、会話は巻き戻せませんでした（モデルクライアントがアクティブではありません）。',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    '会話を巻き戻しました。プロンプトを編集して Enter キーで続行してください。',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    '巻き戻しは、手動で編集されたファイルや shell コマンドで変更されたファイルには影響しません。',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    '圧縮されたターンへは巻き戻せません。より最近のターンをお試しください。',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'このターンではファイル復元できません（捕捉されたファイル変更がないか、現在のセッションより前のターンです）。',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}}、{{count}} 個のファイル)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}}、{{count}} 個のファイル)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    '{{count}} 個のファイルの復元に失敗しました：{{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    'ファイルを復元できません：このターンはファイルチェックポイントが有効になる前に作成されました。',
+  'No files needed to be restored.': '復元が必要なファイルはありません。',
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ 移動 · Enter 選択 · Esc 戻る',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ 移動 · Enter 選択 · Esc キャンセル',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y 確認 · Esc/N 戻る',
   'change the theme': 'テーマを変更',
   'Select Theme': 'テーマを選択',
   Preview: 'プレビュー',

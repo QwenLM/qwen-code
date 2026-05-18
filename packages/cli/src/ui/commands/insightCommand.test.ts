@@ -120,7 +120,7 @@ describe('insightCommand', () => {
 
     const messagesPromise = (async () => {
       const messages: Array<{
-        messageType: 'info' | 'error';
+        messageType: 'info' | 'warning' | 'error';
         content: string;
       }> = [];
       for await (const message of result.messages) {

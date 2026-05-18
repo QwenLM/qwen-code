@@ -38,6 +38,7 @@ import { type HelpTab } from './UIActionsContext.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type ProviderUpdateRequest } from '../hooks/useProviderUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 
 export interface UIState {
   history: HistoryItem[];
@@ -51,6 +52,9 @@ export interface UIState {
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isStatusLineDialogOpen: boolean;
+  statusLineSettingsVersion?: number;
+  statusLineConfigOverride?: StatusLinePresetConfig;
   isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;

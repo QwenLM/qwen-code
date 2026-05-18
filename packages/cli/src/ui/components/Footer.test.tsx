@@ -51,6 +51,7 @@ const createMockConfig = (overrides = {}) => ({
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
   getProjectRoot: vi.fn(() => '/test/project'),
+  getSessionId: vi.fn(() => 'test-session'),
   getMemoryManager: vi.fn(createMockMemoryManager),
   ...overrides,
 });

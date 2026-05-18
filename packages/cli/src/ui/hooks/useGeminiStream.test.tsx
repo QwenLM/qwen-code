@@ -77,6 +77,7 @@ const mockParseAndFormatApiError = vi.hoisted(() =>
   ),
 );
 const mockLogApiCancel = vi.hoisted(() => vi.fn());
+const mockGetActiveGoal = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -88,6 +89,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ApiCancelEvent: MockedApiCancelEvent,
     parseAndFormatApiError: mockParseAndFormatApiError,
     logApiCancel: mockLogApiCancel,
+    getActiveGoal: mockGetActiveGoal,
   };
 });
 
@@ -150,6 +152,7 @@ describe('useGeminiStream', () => {
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
+    mockGetActiveGoal.mockReturnValue(undefined);
     vi.mocked(findLastSafeSplitPoint).mockImplementation(
       (s: string) => s.length,
     );
@@ -507,6 +510,221 @@ describe('useGeminiStream', () => {
       expectedMergedResponse,
       expect.any(AbortSignal),
       'prompt-id-2',
+      { type: SendMessageType.ToolResult },
+    );
+  });
+
+  it('records mid-turn queued user messages before submitting tool results', async () => {
+    const queuedPrompt = 'save the logs locally first';
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    const expectedMidTurnMessage = {
+      text: `\n[User message received during tool execution]: ${queuedPrompt}`,
+    };
+    expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
+      expectedMidTurnMessage,
+      queuedPrompt,
+    );
+    const queuedPromptAddItemIndex = mockAddItem.mock.calls.findIndex(
+      ([item]) => item.type === MessageType.USER && item.text === queuedPrompt,
+    );
+    expect(queuedPromptAddItemIndex).toBeGreaterThanOrEqual(0);
+    expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      mockAddItem.mock.invocationCallOrder[queuedPromptAddItemIndex],
+    );
+    expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
+      mockSendMessageStream.mock.invocationCallOrder[0],
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.USER, text: queuedPrompt },
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, expectedMidTurnMessage],
+      expect.any(AbortSignal),
+      'prompt-id-midturn',
+      { type: SendMessageType.ToolResult },
+    );
+  });
+
+  it('handles mid-turn drain when chat recording is not configured', async () => {
+    const queuedPrompt = 'save the logs locally first';
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'MockTool',
+        },
+        invocation: {
+          getDescription: () => `Mock description`,
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi.fn().mockReturnValue([queuedPrompt]),
+    };
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.USER, text: queuedPrompt },
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [
+        ...toolCallResponseParts,
+        {
+          text: `\n[User message received during tool execution]: ${queuedPrompt}`,
+        },
+      ],
+      expect.any(AbortSignal),
+      'prompt-id-midturn',
       { type: SendMessageType.ToolResult },
     );
   });
@@ -3140,6 +3358,7 @@ describe('useGeminiStream', () => {
       {
         type: MessageType.USER,
         text: rawQuery,
+        promptId: expect.any(String),
       },
       userMessageTimestamp,
     );
@@ -4460,6 +4679,52 @@ describe('useGeminiStream', () => {
 
       // Verify streaming state transitions correctly
       expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('renders active goal StopHookLoop as a goal_status checking card', async () => {
+      mockGetActiveGoal.mockReturnValue({
+        condition: 'finish the refactor',
+        iterations: 2,
+        setAt: 100,
+        tokensAtStart: 0,
+        hookId: 'goal-hook',
+        lastReason: 'not enough evidence yet',
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 2,
+              reasons: ['controlled continuation prompt'],
+              stopHookCount: 1,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('continue goal');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'goal_status',
+            kind: 'checking',
+            condition: 'finish the refactor',
+            iterations: 2,
+            lastReason: 'not enough evidence yet',
+          }),
+          expect.any(Number),
+        );
+      });
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'stop_hook_loop' }),
+        expect.any(Number),
+      );
     });
 
     it('should move pending history item before adding StopHookLoop event', async () => {

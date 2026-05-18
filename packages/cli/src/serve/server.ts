@@ -8,22 +8,34 @@ import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { bearerAuth, denyBrowserOriginCors, hostAllowlist } from './auth.js';
+import {
+  bearerAuth,
+  createMutationGate,
+  denyBrowserOriginCors,
+  hostAllowlist,
+} from './auth.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
+  InvalidClientIdError,
   InvalidPermissionOptionError,
+  InvalidSessionMetadataError,
+  InvalidSessionScopeError,
   MAX_WORKSPACE_PATH_LENGTH,
+  RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import {
+  getAdvertisedServeFeatures,
+  getServeProtocolVersions,
+} from './capabilities.js';
 import { SubscriberLimitExceededError, type BridgeEvent } from './eventBus.js';
 import {
   CAPABILITIES_SCHEMA_VERSION,
-  STAGE1_FEATURES,
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from './types.js';
@@ -58,12 +70,23 @@ export interface ServeAppDeps {
  * Stage 1 routes shipped (matches §04 of issue #3803):
  *   - `GET  /health`
  *   - `GET  /capabilities`
+ *   - `GET  /workspace/mcp`
+ *   - `GET  /workspace/skills`
+ *   - `GET  /workspace/providers`
+ *   - `GET  /workspace/env`
+ *   - `GET  /workspace/preflight`
  *   - `POST /session`
+ *   - `POST /session/:id/load`
+ *   - `POST /session/:id/resume`
  *   - `GET  /workspace/:id/sessions`
+ *   - `GET  /session/:id/context`
+ *   - `GET  /session/:id/supported-commands`
  *   - `POST /session/:id/prompt`
  *   - `POST /session/:id/cancel`
+ *   - `POST /session/:id/heartbeat`
  *   - `POST /session/:id/model`
  *   - `GET  /session/:id/events` (SSE)
+ *   - `POST /session/:id/permission/:requestId`
  *   - `POST /permission/:requestId`
  *
  * **Workspace validation contract.** `createServeApp` itself does NOT
@@ -119,6 +142,13 @@ export function createServeApp(
     deps.bridge ??
     createHttpAcpBridge({
       maxSessions: opts.maxSessions,
+      // Symmetric with `runQwenServe.ts` — direct embeds / tests that
+      // call `createServeApp` without supplying their own bridge and
+      // pass `ServeOptions.eventRingSize` would otherwise silently
+      // get the default 8000 ring instead of their configured value.
+      ...(opts.eventRingSize !== undefined
+        ? { eventRingSize: opts.eventRingSize }
+        : {}),
       boundWorkspace,
     });
 
@@ -180,25 +210,54 @@ export function createServeApp(
   };
 
   const loopback = isLoopbackBind(opts.hostname);
-  if (loopback) {
+  // Issue #4175 PR 15. `--require-auth` extends the non-loopback "gate
+  // /health behind bearer too" rule to loopback. Without this, an
+  // operator who set the flag specifically to harden the loopback
+  // default would still see `/health` answering 200 to unauthenticated
+  // probes — defeating the flag's purpose. The boot check in
+  // `runQwenServe` guarantees `token` is set whenever `requireAuth`
+  // is true, so the post-`bearerAuth` registration always has a token
+  // to compare against.
+  const exposeHealthPreAuth = loopback && !opts.requireAuth;
+  if (exposeHealthPreAuth) {
     app.get('/health', healthHandler);
   }
 
   app.use(bearerAuth(opts.token));
   app.use(express.json({ limit: '10mb' }));
 
-  if (!loopback) {
-    // Non-loopback: register `/health` AFTER `bearerAuth` so probes
-    // must carry the token. Otherwise unauthenticated callers can
-    // ping any reachable address:port to confirm a daemon exists.
+  if (!exposeHealthPreAuth) {
+    // Non-loopback OR loopback with `--require-auth`: register
+    // `/health` AFTER `bearerAuth` so probes must carry the token.
+    // Otherwise unauthenticated callers can ping any reachable
+    // address:port to confirm a daemon exists.
     app.get('/health', healthHandler);
   }
+
+  // Issue #4175 PR 15. Mutation-route gate factory. Today's existing
+  // mutation routes (`POST /session*`, `/permission/:requestId`) opt
+  // into the default non-strict mode, which is a passthrough — so
+  // backward compatibility is bit-for-bit. Wave 4 PRs will pass
+  // `{ strict: true }` for routes (memory CRUD / file edit / tool
+  // enable / MCP restart / device-flow auth) that should require a
+  // token even when the daemon is on loopback no-token defaults.
+  const mutate = createMutationGate({
+    tokenConfigured: opts.token !== undefined,
+    requireAuth: opts.requireAuth === true,
+  });
 
   app.get('/capabilities', (_req, res) => {
     const envelope: CapabilitiesEnvelope = {
       v: CAPABILITIES_SCHEMA_VERSION,
+      protocolVersions: getServeProtocolVersions(),
       mode: opts.mode,
-      features: [...STAGE1_FEATURES],
+      // PR 15. Pass `requireAuth` so the `require_auth` tag appears
+      // ONLY when the operator opted in. Tag presence = behavior is
+      // on; older daemons without this PR omit the tag and SDKs that
+      // post-PR feature-detect on it stay backward compatible.
+      features: getAdvertisedServeFeatures(undefined, {
+        requireAuth: opts.requireAuth === true,
+      }),
       modelServices: [],
       // #3803 §02: surface the bound workspace so clients can detect
       // mismatch pre-flight and omit `cwd` on `POST /session`.
@@ -207,7 +266,56 @@ export function createServeApp(
     res.status(200).json(envelope);
   });
 
-  app.post('/session', async (req, res) => {
+  app.get('/workspace/mcp', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceMcpStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/mcp' });
+    }
+  });
+
+  app.get('/workspace/skills', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceSkillsStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/skills' });
+    }
+  });
+
+  app.get('/workspace/providers', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceProvidersStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/providers' });
+    }
+  });
+
+  // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
+  // `audit.diagnostic_read` event from these two routes so a security
+  // operator can correlate "who read what when". Read-only diagnostic
+  // surfaces are reconnaissance vectors (env: secret-var presence;
+  // preflight: workspace path + CLI entry + Node version) and the absence
+  // of audit emission here is a deliberate scope deferral, not an
+  // oversight — the audit topic does not yet exist; PR 24 lands the
+  // shared `bridge.emitAudit` infrastructure that this and PR 18's
+  // `fs.access` events will both use.
+  app.get('/workspace/env', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspaceEnvStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/env' });
+    }
+  });
+
+  app.get('/workspace/preflight', async (_req, res) => {
+    try {
+      res.status(200).json(await bridge.getWorkspacePreflightStatus());
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
+    }
+  });
+
+  app.post('/session', mutate(), async (req, res) => {
     const body = safeBody(req);
     // #3803 §02: 1 daemon = 1 workspace. Three input shapes:
     //   - `cwd` ABSENT from body → fall back to the daemon's bound
@@ -264,10 +372,35 @@ export function createServeApp(
       typeof body['modelServiceId'] === 'string'
         ? (body['modelServiceId'] as string)
         : undefined;
+    // Per-request `sessionScope` override (#4175 PR 5). Validate at the
+    // route boundary so a 400 surfaces a clear `code: invalid_session_scope`
+    // before we touch the bridge — the bridge revalidates as a defense
+    // against direct callers, but a typed 4xx is the right shape for HTTP
+    // clients. The field is OPTIONAL: omitting it preserves pre-PR
+    // behavior bit-for-bit (the daemon-wide `BridgeOptions.sessionScope`
+    // takes effect). New clients can pre-flight `caps.features` for
+    // `session_scope_override` before sending — see
+    // `packages/cli/src/serve/capabilities.ts`.
+    const rawSessionScope = body['sessionScope'];
+    let sessionScope: 'single' | 'thread' | undefined;
+    if (rawSessionScope !== undefined) {
+      if (rawSessionScope !== 'single' && rawSessionScope !== 'thread') {
+        res.status(400).json({
+          error: '`sessionScope` must be "single" or "thread" when provided',
+          code: 'invalid_session_scope',
+        });
+        return;
+      }
+      sessionScope = rawSessionScope;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
       const session = await bridge.spawnOrAttach({
         workspaceCwd: cwd,
         modelServiceId,
+        ...(clientId !== undefined ? { clientId } : {}),
+        ...(sessionScope !== undefined ? { sessionScope } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -314,7 +447,7 @@ export function createServeApp(
           // subscribers). Without this, both-coalesced-callers-
           // disconnect leaves an orphan agent child no client knows
           // the id of.
-          bridge.detachClient(session.sessionId).catch(() => {
+          bridge.detachClient(session.sessionId, session.clientId).catch(() => {
             // Best-effort cleanup; channel.exited will eventually reap.
           });
         }
@@ -326,7 +459,109 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/prompt', async (req, res) => {
+  const restoreSessionHandler =
+    (action: 'load' | 'resume') =>
+    async (req: express.Request, res: express.Response) => {
+      const sessionId = req.params['id'];
+      if (!sessionId) {
+        res
+          .status(400)
+          .json({ error: '`sessionId` route parameter is required' });
+        return;
+      }
+      const body = safeBody(req);
+      const cwd = parseOptionalWorkspaceCwd(body, boundWorkspace, res);
+      if (cwd === undefined) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const session =
+          action === 'load'
+            ? await bridge.loadSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              })
+            : await bridge.resumeSession({
+                sessionId,
+                workspaceCwd: cwd,
+                ...(clientId !== undefined ? { clientId } : {}),
+              });
+        // Mirror the `POST /session` disconnect-cleanup path (see the
+        // long comment above the matching `if (!res.writable)` there
+        // for the rationale around `res.writable` vs `req.aborted` /
+        // `req.destroyed`, plus the BQ9tV `requireZeroAttaches` race
+        // and the tanzhenxin attach-rollback case). Restore needs the
+        // same cleanup because a client that disconnects during a
+        // multi-second `session/load` would otherwise leave a freshly
+        // restored session in `byId` with no client holding its id.
+        if (!res.writable) {
+          if (!session.attached) {
+            bridge
+              .killSession(session.sessionId, { requireZeroAttaches: true })
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
+          } else {
+            bridge
+              .detachClient(session.sessionId, session.clientId)
+              .catch(() => {
+                // Best-effort cleanup; channel.exited will eventually reap.
+              });
+          }
+          return;
+        }
+        res.status(200).json(session);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: `POST /session/:id/${action}`,
+          sessionId,
+        });
+      }
+    };
+
+  app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
+  app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
+
+  app.get('/session/:id/context', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res.status(200).json(await bridge.getSessionContextStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/context',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/supported-commands', async (req, res) => {
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    try {
+      res
+        .status(200)
+        .json(await bridge.getSessionSupportedCommandsStatus(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/supported-commands',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/prompt', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const prompt = body['prompt'];
@@ -371,6 +606,11 @@ export function createServeApp(
       if (!res.writableEnded) abort.abort();
     };
     res.once('close', onResClose);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) {
+      res.off('close', onResClose);
+      return;
+    }
     try {
       // SECURITY NOTE: this `...(body as object)` passthrough is
       // intentional — the bridge / ACP SDK ignores fields it
@@ -391,6 +631,7 @@ export function createServeApp(
           prompt,
         } as Parameters<HttpAcpBridge['sendPrompt']>[1],
         abort.signal,
+        clientId !== undefined ? { clientId } : undefined,
       );
       res.status(200).json(result);
     } catch (err) {
@@ -426,18 +667,102 @@ export function createServeApp(
     }
   });
 
-  app.post('/session/:id/cancel', async (req, res) => {
+  app.post('/session/:id/heartbeat', mutate(), (req, res) => {
+    // #4175 PR 9: clients ping the daemon to update last-seen
+    // bookkeeping. Bridge throws `SessionNotFoundError` for unknown
+    // ids and `InvalidClientIdError` when an `X-Qwen-Client-Id`
+    // header is supplied but not registered for this session — both
+    // are routed through `sendBridgeError` so they share the same
+    // typed shape (`404` and `400 invalid_client_id`) the rest of
+    // the routes use.
+    const sessionId = req.params['id'];
+    if (!sessionId) {
+      res
+        .status(400)
+        .json({ error: '`sessionId` route parameter is required' });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = bridge.recordHeartbeat(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'POST /session/:id/heartbeat',
+        sessionId,
+      });
+    }
+  });
+
+  app.post('/session/:id/cancel', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      await bridge.cancelSession(sessionId, {
-        ...(body as object),
+      await bridge.cancelSession(
         sessionId,
-      } as Parameters<HttpAcpBridge['cancelSession']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+        } as Parameters<HttpAcpBridge['cancelSession']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'POST /session/:id/cancel',
+        sessionId,
+      });
+    }
+  });
+
+  app.delete('/session/:id', async (req, res) => {
+    const sessionId = req.params['id'];
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      await bridge.closeSession(
+        sessionId,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(204).end();
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'DELETE /session/:id',
+        sessionId,
+      });
+    }
+  });
+
+  app.patch('/session/:id/metadata', (req, res) => {
+    const sessionId = req.params['id'];
+    const body = safeBody(req);
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    const displayName = body['displayName'];
+    if (displayName !== undefined && typeof displayName !== 'string') {
+      res.status(400).json({
+        error: '`displayName` must be a string',
+        code: 'invalid_metadata',
+        field: 'displayName',
+      });
+      return;
+    }
+    try {
+      const effective = bridge.updateSessionMetadata(
+        sessionId,
+        { displayName },
+        clientId !== undefined ? { clientId } : undefined,
+      );
+      res.status(200).json({ sessionId, ...effective });
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'PATCH /session/:id/metadata',
         sessionId,
       });
     }
@@ -470,7 +795,7 @@ export function createServeApp(
     res.status(200).json({ sessions });
   });
 
-  app.post('/session/:id/model', async (req, res) => {
+  app.post('/session/:id/model', mutate(), async (req, res) => {
     const sessionId = req.params['id'];
     const body = safeBody(req);
     const modelId = body['modelId'];
@@ -480,12 +805,18 @@ export function createServeApp(
       });
       return;
     }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      const response = await bridge.setSessionModel(sessionId, {
-        ...(body as object),
+      const response = await bridge.setSessionModel(
         sessionId,
-        modelId,
-      } as Parameters<HttpAcpBridge['setSessionModel']>[1]);
+        {
+          ...(body as object),
+          sessionId,
+          modelId,
+        } as Parameters<HttpAcpBridge['setSessionModel']>[1],
+        clientId !== undefined ? { clientId } : undefined,
+      );
       res.status(200).json(response);
     } catch (err) {
       sendBridgeError(res, err, {
@@ -495,38 +826,57 @@ export function createServeApp(
     }
   });
 
-  app.post('/permission/:requestId', (req, res) => {
+  app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
+    const sessionId = req.params['id'];
     const requestId = req.params['requestId'];
-    const body = safeBody(req);
-    const outcome = body['outcome'];
-    if (!isValidOutcome(outcome)) {
-      res.status(400).json({
-        error:
-          '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`',
+    const response = parsePermissionVoteBody(req, res);
+    if (response === undefined) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    let accepted: boolean;
+    try {
+      accepted = bridge.respondToSessionPermission(
+        sessionId,
+        requestId,
+        response,
+        clientId !== undefined ? { clientId } : undefined,
+      );
+    } catch (err) {
+      sendPermissionVoteError(res, err, {
+        route: 'POST /session/:id/permission/:requestId',
+        sessionId,
       });
       return;
     }
+    if (!accepted) {
+      res.status(404).json({
+        error: 'No pending permission request for session',
+        sessionId,
+        requestId,
+      });
+      return;
+    }
+    res.status(200).json({});
+  });
+
+  app.post('/permission/:requestId', mutate(), (req, res) => {
+    const requestId = req.params['requestId'];
+    const response = parsePermissionVoteBody(req, res);
+    if (response === undefined) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     let accepted: boolean;
     try {
-      accepted = bridge.respondToPermission(requestId, {
-        ...(body as object),
-        outcome,
-      } as Parameters<HttpAcpBridge['respondToPermission']>[1]);
+      accepted = bridge.respondToPermission(
+        requestId,
+        response,
+        clientId !== undefined ? { clientId } : undefined,
+      );
     } catch (err) {
-      // BkwQI: voter's `optionId` wasn't in the option set the agent
-      // originally offered (e.g. forging `ProceedAlways*` when the
-      // prompt's `hideAlwaysAllow` policy suppressed it). 400, not
-      // 404 — the requestId IS known, but the chosen option isn't.
-      if (err instanceof InvalidPermissionOptionError) {
-        res.status(400).json({
-          error: err.message,
-          code: 'invalid_option_id',
-          requestId: err.requestId,
-          optionId: err.optionId,
-        });
-        return;
-      }
-      throw err;
+      sendPermissionVoteError(res, err, {
+        route: 'POST /permission/:requestId',
+      });
+      return;
     }
     if (!accepted) {
       // Either the requestId never existed or another client already won
@@ -542,6 +892,12 @@ export function createServeApp(
   app.get('/session/:id/events', (req, res) => {
     const sessionId = req.params['id'];
     const lastEventId = parseLastEventId(req.headers['last-event-id']);
+    const maxQueued = parseMaxQueuedQuery(req.query['maxQueued'], res);
+    // `parseMaxQueuedQuery` sends its own 400 + JSON body on rejection
+    // (returns `null`) so the SSE handshake doesn't get half-written.
+    // `undefined` means "client didn't ask for an override; use bus
+    // default 256" — proceed as before.
+    if (maxQueued === null) return;
 
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
@@ -549,6 +905,7 @@ export function createServeApp(
       const iterable = bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
+        ...(maxQueued !== undefined ? { maxQueued } : {}),
       });
       iter = iterable[Symbol.asyncIterator]();
     } catch (err) {
@@ -822,6 +1179,16 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
   'prototype',
 ]);
 
+const CLIENT_ID_HEADER = 'x-qwen-client-id';
+const MAX_CLIENT_ID_LENGTH = 128;
+const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
+const INVALID_PERMISSION_OUTCOME_ERROR =
+  '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
+
+type PermissionVoteResponse = Parameters<
+  HttpAcpBridge['respondToPermission']
+>[1];
+
 /**
  * Coerce `req.body` into a safe `Record<string, unknown>` for route
  * handlers. Replaces the 5-site copy-pasted preamble
@@ -846,6 +1213,67 @@ function safeBody(req: import('express').Request): Record<string, unknown> {
   return out;
 }
 
+function parseOptionalWorkspaceCwd(
+  body: Record<string, unknown>,
+  boundWorkspace: string,
+  res: import('express').Response,
+): string | undefined {
+  const hasCwd = 'cwd' in body;
+  if (hasCwd && typeof body['cwd'] !== 'string') {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be a string absolute path when provided' });
+    return undefined;
+  }
+  if (hasCwd && (body['cwd'] as string).length > MAX_WORKSPACE_PATH_LENGTH) {
+    res.status(400).json({
+      error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+    });
+    return undefined;
+  }
+  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
+  if (!path.isAbsolute(cwd)) {
+    res
+      .status(400)
+      .json({ error: '`cwd` must be an absolute path when provided' });
+    return undefined;
+  }
+  return cwd;
+}
+
+function parseClientIdHeader(
+  req: import('express').Request,
+  res: import('express').Response,
+): string | undefined | null {
+  const raw = req.get(CLIENT_ID_HEADER);
+  if (raw === undefined || raw === '') return undefined;
+  if (raw.length > MAX_CLIENT_ID_LENGTH || !CLIENT_ID_RE.test(raw)) {
+    res.status(400).json({
+      error:
+        '`X-Qwen-Client-Id` must be a non-empty token of 128 characters or fewer',
+      code: 'invalid_client_id',
+    });
+    return null;
+  }
+  return raw;
+}
+
+function parsePermissionVoteBody(
+  req: import('express').Request,
+  res: import('express').Response,
+): PermissionVoteResponse | undefined {
+  const body = safeBody(req);
+  const outcome = body['outcome'];
+  if (!isValidOutcome(outcome)) {
+    res.status(400).json({ error: INVALID_PERMISSION_OUTCOME_ERROR });
+    return undefined;
+  }
+  return {
+    ...(body as object),
+    outcome,
+  } as PermissionVoteResponse;
+}
+
 function isValidOutcome(
   raw: unknown,
 ): raw is { outcome: 'cancelled' } | { outcome: 'selected'; optionId: string } {
@@ -863,6 +1291,83 @@ function isValidOutcome(
   );
 }
 
+/** Range bounds for the `?maxQueued=N` query param on `/session/:id/events`. */
+const MIN_QUERY_MAX_QUEUED = 16;
+const MAX_QUERY_MAX_QUEUED = 2048;
+
+/**
+ * Parse the optional `?maxQueued=N` query param on
+ * `GET /session/:id/events`. Returns:
+ *   - `undefined` — param absent, EventBus uses its default cap (256).
+ *   - a positive integer in `[16, 2048]` — caller wants a custom cap.
+ *   - `null` — malformed value; the function ALREADY sent a 400 JSON
+ *     response and the route must short-circuit. (Pre-handshake 400
+ *     is safer than half-opening an SSE stream and emitting a
+ *     `stream_error` frame the client has to parse — `EventSource`
+ *     auto-reconnects on the latter.)
+ *
+ * Cap range rationale: lower bound 16 (smaller is useless for any
+ * replay backlog); upper bound 2048 (so a single subscriber can't
+ * pin ~1 MB of queue memory just by asking).
+ */
+function parseMaxQueuedQuery(
+  raw: unknown,
+  res: import('express').Response,
+): number | undefined | null {
+  // Absent param → undefined (use bus default). Present-but-empty
+  // (`?maxQueued=` typed explicitly) → fail-CLOSED 400 — the API
+  // documents fail-closed for any malformed value before opening
+  // SSE, and an empty string is unambiguously malformed (real values
+  // are positive integers in [16, 2048]).
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    // Sanitize via JSON.stringify so an attacker-controlled value
+    // containing `\n` / `\r` / other control chars can't inject extra
+    // log lines into stderr (line-based shipper like
+    // journald/Loki/Splunk would otherwise treat the injected line as
+    // a fresh entry). Matches the `workspace_mismatch` log style in
+    // `sendBridgeError`.
+    writeStderrLine(
+      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
+        `(not a decimal integer)`,
+    );
+    res.status(400).json({
+      error: '`maxQueued` must be a decimal integer',
+      code: 'invalid_max_queued',
+    });
+    return null;
+  }
+  const n = Number.parseInt(raw, 10);
+  if (
+    !Number.isFinite(n) ||
+    n < MIN_QUERY_MAX_QUEUED ||
+    n > MAX_QUERY_MAX_QUEUED
+  ) {
+    writeStderrLine(
+      `qwen serve: rejected ?maxQueued ${safeLogValue(raw)} ` +
+        `(outside [${MIN_QUERY_MAX_QUEUED}, ${MAX_QUERY_MAX_QUEUED}])`,
+    );
+    res.status(400).json({
+      error: `\`maxQueued\` must be in [${MIN_QUERY_MAX_QUEUED}, ${MAX_QUERY_MAX_QUEUED}]`,
+      code: 'invalid_max_queued',
+    });
+    return null;
+  }
+  return n;
+}
+
+/**
+ * Wrap an attacker-controllable string for safe interpolation into a
+ * stderr log line. `JSON.stringify` escapes control characters
+ * (`\n`, `\r`, etc.) and wraps the result in quotes — any injection
+ * attempt surfaces as visible-as-quoted-noise rather than a
+ * forged log line. Truncated AFTER stringify to keep the budget
+ * predictable even for control-heavy inputs.
+ */
+function safeLogValue(raw: unknown): string {
+  return JSON.stringify(String(raw)).slice(0, 82);
+}
+
 function parseLastEventId(raw: unknown): number | undefined {
   // Stricter than Number.parseInt: only accept pure decimal digits to avoid
   // values like "1abc" or "1.5e10z" silently parsing to 1.
@@ -875,7 +1380,7 @@ function parseLastEventId(raw: unknown): number | undefined {
     // "first connect, no resume").
     if (typeof raw === 'string' && raw.length > 0) {
       writeStderrLine(
-        `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+        `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
           `(not a decimal integer)`,
       );
     }
@@ -887,12 +1392,33 @@ function parseLastEventId(raw: unknown): number | undefined {
   // tries to resume from beyond that is either malicious or broken.
   if (!Number.isFinite(n) || n > Number.MAX_SAFE_INTEGER) {
     writeStderrLine(
-      `qwen serve: rejected Last-Event-ID "${raw.slice(0, 80)}" ` +
+      `qwen serve: rejected Last-Event-ID ${safeLogValue(raw)} ` +
         `(exceeds Number.MAX_SAFE_INTEGER)`,
     );
     return undefined;
   }
   return n;
+}
+
+function sendPermissionVoteError(
+  res: import('express').Response,
+  err: unknown,
+  ctx: { route: string; sessionId?: string },
+): void {
+  // BkwQI: voter's `optionId` wasn't in the option set the agent
+  // originally offered (e.g. forging `ProceedAlways*` when the
+  // prompt's `hideAlwaysAllow` policy suppressed it). 400, not
+  // 404 — the requestId IS known, but the chosen option isn't.
+  if (err instanceof InvalidPermissionOptionError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_option_id',
+      requestId: err.requestId,
+      optionId: err.optionId,
+    });
+    return;
+  }
+  sendBridgeError(res, err, ctx);
 }
 
 function formatSseFrame(event: BridgeEvent | OmitId<BridgeEvent>): string {
@@ -937,6 +1463,15 @@ function sendBridgeError(
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;
   }
+  if (err instanceof InvalidClientIdError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_client_id',
+      sessionId: err.sessionId,
+      clientId: err.clientId,
+    });
+    return;
+  }
   if (err instanceof WorkspaceMismatchError) {
     // #3803 §02 single-workspace mode: the daemon binds to one
     // workspace at boot; cross-workspace POSTs are rejected here.
@@ -979,6 +1514,27 @@ function sendBridgeError(
     });
     return;
   }
+  if (err instanceof InvalidSessionScopeError) {
+    // Same wire shape as the route-layer 400 (`server.ts` validates
+    // body['sessionScope'] before calling the bridge). A direct embed
+    // / test caller bypassing the route would otherwise see a generic
+    // 500 — the typed translation keeps both layers in agreement so
+    // SDK clients can branch on `code` regardless of which layer
+    // surfaced the rejection.
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_session_scope',
+    });
+    return;
+  }
+  if (err instanceof InvalidSessionMetadataError) {
+    res.status(400).json({
+      error: err.message,
+      code: 'invalid_metadata',
+      field: err.field,
+    });
+    return;
+  }
   if (err instanceof SessionLimitExceededError) {
     // 503 Service Unavailable + `Retry-After` is the canonical
     // "we'd serve you, but we're full right now" shape. The hint
@@ -990,6 +1546,21 @@ function sendBridgeError(
       error: err.message,
       code: 'session_limit_exceeded',
       limit: err.limit,
+    });
+    return;
+  }
+  if (err instanceof RestoreInProgressError) {
+    // Match `SessionLimitExceededError`'s 5s hint (above) — the
+    // underlying restore can take up to `initTimeoutMs` (default
+    // 10s) on the agent side, so a 1s retry hint pushed clients
+    // into tight loops that kept hitting the same 409.
+    res.set('Retry-After', '5');
+    res.status(409).json({
+      error: err.message,
+      code: 'restore_in_progress',
+      sessionId: err.sessionId,
+      activeAction: err.activeAction,
+      requestedAction: err.requestedAction,
     });
     return;
   }

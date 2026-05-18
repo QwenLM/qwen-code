@@ -15,7 +15,6 @@ import {
 } from 'vitest';
 
 import type { Content, GenerateContentResponse, Part } from '@google/genai';
-import { SpanStatusCode } from '@opentelemetry/api';
 import { GeminiClient, SendMessageType } from './client.js';
 import { findCompressSplitPoint } from '../services/chatCompressionService.js';
 import {
@@ -167,29 +166,9 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   reset: vi.fn(),
   addEvent: vi.fn(),
 }));
-const clientSpanCalls = vi.hoisted(
-  (): Array<{
-    name: string;
-    attributes: Record<string, string | number | boolean>;
-    statuses: Array<{ code: number; message?: string }>;
-  }> => [],
-);
-const mockWithSpan = vi.hoisted(() => vi.fn());
-
 vi.mock('../telemetry/tracer.js', () => ({
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
   API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
-  safeSetStatus: (
-    span: { setStatus: (status: { code: number; message?: string }) => void },
-    status: { code: number; message?: string },
-  ) => {
-    try {
-      span.setStatus(status);
-    } catch {
-      // Match production best-effort telemetry behavior.
-    }
-  },
-  withSpan: mockWithSpan,
 }));
 
 vi.mock('../telemetry/index.js', async (importOriginal) => {
@@ -356,32 +335,6 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
-    clientSpanCalls.length = 0;
-    mockWithSpan.mockImplementation(
-      async (
-        name: string,
-        attributes: Record<string, string | number | boolean>,
-        fn: (span: {
-          setStatus: ReturnType<typeof vi.fn>;
-          setAttribute: ReturnType<typeof vi.fn>;
-          end: ReturnType<typeof vi.fn>;
-        }) => Promise<unknown>,
-      ) => {
-        const spanCall = {
-          name,
-          attributes,
-          statuses: [] as Array<{ code: number; message?: string }>,
-        };
-        clientSpanCalls.push(spanCall);
-        return fn({
-          setStatus: vi.fn((status: { code: number; message?: string }) => {
-            spanCall.statuses.push(status);
-          }),
-          setAttribute: vi.fn(),
-          end: vi.fn(),
-        });
-      },
-    );
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
     // Default: createContentGenerator rejects (simulates test env without auth).
@@ -510,6 +463,7 @@ describe('Gemini Client (client.ts)', () => {
         getResolvedModel: vi.fn().mockReturnValue(undefined),
       }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getStopHookBlockingCap: vi.fn().mockReturnValue(8),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -4332,6 +4286,62 @@ Other open files:
         expect(mockMessageBus.request).not.toHaveBeenCalled();
       });
 
+      it('ends the Stop hook loop when the blocking cap is reached', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({
+            output: {
+              decision: 'block',
+              reason: 'Keep working',
+            },
+            stopHookCount: 1,
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(1);
+
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'not done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'not done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-cap',
+          ),
+        );
+
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(1);
+        expect(events).not.toContainEqual(
+          expect.objectContaining({
+            type: GeminiEventType.StopHookLoop,
+          }),
+        );
+        expect(events).toContainEqual({
+          type: GeminiEventType.HookSystemMessage,
+          value:
+            'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
+        });
+      });
+
       it('should not skip hooks when hasHooksForEvent returns true', async () => {
         const mockMessageBus = {
           request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
@@ -4494,15 +4504,6 @@ Other open files:
         }),
         'btw-prompt-id',
       );
-      expect(clientSpanCalls.at(-1)).toEqual(
-        expect.objectContaining({
-          name: 'client.generateContent',
-          attributes: {
-            model: DEFAULT_QWEN_FLASH_MODEL,
-            prompt_id: 'btw-prompt-id',
-          },
-        }),
-      );
     });
 
     it('should prefer an explicit prompt id override over the current context', async () => {
@@ -4529,15 +4530,6 @@ Other open files:
           contents,
         }),
         'override-prompt-id',
-      );
-      expect(clientSpanCalls.at(-1)).toEqual(
-        expect.objectContaining({
-          name: 'client.generateContent',
-          attributes: {
-            model: DEFAULT_QWEN_FLASH_MODEL,
-            prompt_id: 'override-prompt-id',
-          },
-        }),
       );
     });
 
@@ -4642,7 +4634,7 @@ Other open files:
       );
     });
 
-    it('sets a generic span status when content generation fails', async () => {
+    it('propagates error when content generation fails', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
       mockGenerateContentFn.mockRejectedValueOnce(
@@ -4657,15 +4649,9 @@ Other open files:
           DEFAULT_QWEN_FLASH_MODEL,
         ),
       ).rejects.toThrow('raw upstream 500 with sensitive details');
-
-      const spanCall = clientSpanCalls.at(-1);
-      expect(spanCall?.statuses).toEqual([
-        { code: SpanStatusCode.ERROR, message: 'API call failed' },
-      ]);
-      expect(JSON.stringify(spanCall?.statuses)).not.toContain('raw upstream');
     });
 
-    it('sets a generic aborted span status when content generation is aborted', async () => {
+    it('propagates error when content generation is aborted', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortController = new AbortController();
       abortController.abort();
@@ -4681,12 +4667,6 @@ Other open files:
           DEFAULT_QWEN_FLASH_MODEL,
         ),
       ).rejects.toThrow('raw abort reason with sensitive details');
-
-      const spanCall = clientSpanCalls.at(-1);
-      expect(spanCall?.statuses).toEqual([
-        { code: SpanStatusCode.ERROR, message: 'API call aborted' },
-      ]);
-      expect(JSON.stringify(spanCall?.statuses)).not.toContain('raw abort');
     });
 
     // Note: there is currently no "fallback mode" model routing; the model used

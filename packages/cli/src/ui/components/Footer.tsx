@@ -22,13 +22,14 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
+import { GoalPill, useFooterGoalState } from './GoalPill.js';
 import { t } from '../../i18n/index.js';
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
-  const { lines: statusLineLines } = useStatusLine();
+  const { lines: statusLineLines, useThemeColors } = useStatusLine();
   const configInitMessage = useConfigInitMessage(uiState.isConfigInitialized);
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -124,6 +125,13 @@ export const Footer: React.FC = () => {
       ),
     });
   }
+  // Goal pill: only present in `rightItems` when a goal is active so the
+  // divider chain stays tight; the pill itself does the live elapsed-time
+  // refresh internally.
+  const goalActive = useFooterGoalState() !== undefined;
+  if (goalActive) {
+    rightItems.push({ key: 'goal', node: <GoalPill /> });
+  }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
   // (bottom), right section has indicators. Status line and hints coexist.
@@ -141,7 +149,12 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce &&
           statusLineLines.map((line, i) => (
-            <Text key={`status-line-${i}`} dimColor wrap="truncate">
+            <Text
+              key={`status-line-${i}`}
+              color={useThemeColors ? theme.text.accent : undefined}
+              dimColor={!useThemeColors}
+              wrap="truncate"
+            >
               {line}
             </Text>
           ))}

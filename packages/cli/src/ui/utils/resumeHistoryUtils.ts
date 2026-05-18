@@ -279,6 +279,18 @@ function convertToHistoryItems(
           items.push({ type: 'notification', text });
           break;
         }
+        if (record.subtype === 'mid_turn_user_message') {
+          const payload = record.systemPayload as
+            | { displayText?: string }
+            | undefined;
+          const text =
+            payload?.displayText ||
+            extractTextFromParts(record.message?.parts as Part[]);
+          if (text) {
+            items.push({ type: 'user', text });
+          }
+          break;
+        }
         if (pendingAtCommands.length > 0) {
           // Flush any pending tool group before user message
           if (currentToolGroup.length > 0) {

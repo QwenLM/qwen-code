@@ -58,6 +58,8 @@ import {
   evaluatePermissionFlow,
   needsConfirmation,
   isPlanModeBlocked,
+  abortGoalForStopHookCap,
+  formatStopHookBlockingCapWarning,
 } from '@qwen-code/qwen-code-core';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -118,6 +120,122 @@ const debugLogger = createDebugLogger('SESSION');
 type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
+
+export function computeInitialTurnFromHistory(
+  records: ChatRecord[],
+  sessionId: string,
+): number {
+  let maxPromptTurn = 0;
+  let userMessageCount = 0;
+  const promptIdPrefix = `${sessionId}########`;
+
+  for (const record of records) {
+    if (record.sessionId === sessionId && isUserPromptRecord(record)) {
+      userMessageCount += 1;
+    }
+
+    for (const promptId of getRecordPromptIds(record)) {
+      if (!promptId.startsWith(promptIdPrefix)) {
+        continue;
+      }
+
+      const suffix = promptId.slice(promptIdPrefix.length);
+      if (!/^\d+$/.test(suffix)) {
+        continue;
+      }
+
+      maxPromptTurn = Math.max(maxPromptTurn, Number(suffix));
+    }
+  }
+
+  return maxPromptTurn > 0 ? maxPromptTurn : userMessageCount;
+}
+
+function getRecordPromptIds(record: ChatRecord): string[] {
+  const promptIds: string[] = [];
+  const recordPromptId = (record as { promptId?: unknown }).promptId;
+  if (typeof recordPromptId === 'string') {
+    promptIds.push(recordPromptId);
+  }
+  const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
+  if (telemetryPromptId) {
+    promptIds.push(telemetryPromptId);
+  }
+  return promptIds;
+}
+
+function readTelemetryPromptId(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object' || !('uiEvent' in payload)) {
+    return undefined;
+  }
+  const uiEvent = (payload as { uiEvent?: unknown }).uiEvent;
+  if (!uiEvent || typeof uiEvent !== 'object' || !('prompt_id' in uiEvent)) {
+    return undefined;
+  }
+  const promptId = (uiEvent as { prompt_id?: unknown }).prompt_id;
+  return typeof promptId === 'string' ? promptId : undefined;
+}
+
+function isUserPromptRecord(record: ChatRecord): boolean {
+  if (record.type !== 'user') {
+    return false;
+  }
+  return (
+    record.message?.parts?.some(
+      (part) => typeof part.text === 'string' && part.text.trim().length > 0,
+    ) ?? false
+  );
+}
+
+export interface AvailableCommandsSnapshot {
+  availableCommands: AvailableCommand[];
+  availableSkills?: string[];
+}
+
+export async function buildAvailableCommandsSnapshot(
+  config: Config,
+  abortSignal: AbortSignal = AbortSignal.timeout(10_000),
+): Promise<AvailableCommandsSnapshot> {
+  const slashCommands = await getAvailableCommands(config, abortSignal, 'acp');
+
+  const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
+    const acceptsInput =
+      cmd.acceptsInput ??
+      (cmd.kind !== CommandKind.BUILT_IN ||
+        cmd.completion != null ||
+        cmd.argumentHint != null ||
+        (cmd.subCommands != null && cmd.subCommands.length > 0));
+    return {
+      name: cmd.name,
+      description: cmd.description,
+      input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+      _meta: {
+        argumentHint: cmd.argumentHint,
+        source: cmd.source,
+        sourceLabel: cmd.sourceLabel,
+        supportedModes: getEffectiveSupportedModes(cmd),
+        subcommands: getCommandSubcommandNames(cmd),
+        modelInvocable: cmd.modelInvocable === true,
+      },
+    };
+  });
+
+  let availableSkills: string[] | undefined;
+  try {
+    const skillManager = config.getSkillManager();
+    if (skillManager) {
+      const skills = await skillManager.listSkills();
+      availableSkills = skills.map((skill) => skill.name);
+    }
+  } catch (error) {
+    debugLogger.error('Error loading available skills:', error);
+  }
+
+  return {
+    availableCommands,
+    ...(availableSkills !== undefined ? { availableSkills } : {}),
+  };
+}
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -221,6 +339,10 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   async replayHistory(records: ChatRecord[]): Promise<void> {
+    this.turn = Math.max(
+      this.turn,
+      computeInitialTurnFromHistory(records, this.config.getSessionId()),
+    );
     await this.historyReplayer.replay(records);
   }
 
@@ -722,11 +844,11 @@ export class Session implements SessionContext {
     hooksEnabled: boolean,
     messageBus: MessageBus | undefined,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
-    const MAX_STOP_HOOK_ITERATIONS = 100;
+    const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
 
-    while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
+    while (stopHookIterationCount < stopHookBlockingCap) {
       if (
         !hooksEnabled ||
         !messageBus ||
@@ -790,7 +912,21 @@ export class Session implements SessionContext {
         stopHookIterationCount++;
         stopHookReasons = [...stopHookReasons, continueReason];
 
-        // Emit StopHookLoop event for iterations after the first one
+        if (stopHookIterationCount >= stopHookBlockingCap) {
+          const warning = formatStopHookBlockingCapWarning(
+            'Stop',
+            stopHookBlockingCap,
+          );
+          abortGoalForStopHookCap(
+            this.config,
+            this.config.getSessionId(),
+            warning,
+          );
+          await this.messageEmitter.emitAgentMessage(warning);
+          debugLogger.warn(warning);
+          return { stopReason: 'end_turn' };
+        }
+
         if (stopHookIterationCount > 1) {
           await this.messageEmitter.emitStopHookLoop(
             stopHookIterationCount,
@@ -931,13 +1067,6 @@ export class Session implements SessionContext {
 
       // Stop hook allowed stopping, exit the loop
       break;
-    }
-
-    // If we exceeded max iterations, log a warning but still end gracefully
-    if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
-      debugLogger.warn(
-        `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
-      );
     }
 
     return { stopReason: 'end_turn' };
@@ -1384,61 +1513,14 @@ export class Session implements SessionContext {
   }
 
   async sendAvailableCommandsUpdate(): Promise<void> {
-    const abortController = new AbortController();
     try {
-      // Load commands available in ACP mode
-      const slashCommands = await getAvailableCommands(
-        this.config,
-        abortController.signal,
-        'acp',
-      );
-
-      // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol.
-      // Commands that accept arguments get input: { hint } so the client can
-      // let users type arguments before submitting.  Commands with no argument
-      // support get input: null so the client auto-submits them on selection.
-      //
-      // A command is considered to accept arguments when any of:
-      //   - it is not a BUILT_IN command (skills, file commands, etc.)
-      //   - it has a completion function
-      //   - it declares an argumentHint
-      //   - it has subCommands
-      const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
-        const acceptsInput =
-          cmd.kind !== CommandKind.BUILT_IN ||
-          cmd.completion != null ||
-          cmd.argumentHint != null ||
-          (cmd.subCommands != null && cmd.subCommands.length > 0);
-        return {
-          name: cmd.name,
-          description: cmd.description,
-          input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
-          _meta: {
-            argumentHint: cmd.argumentHint,
-            source: cmd.source,
-            sourceLabel: cmd.sourceLabel,
-            supportedModes: getEffectiveSupportedModes(cmd),
-            subcommands: getCommandSubcommandNames(cmd),
-            modelInvocable: cmd.modelInvocable === true,
-          },
-        };
-      });
-
-      let availableSkills: string[] | undefined;
-      try {
-        const skillManager = this.config.getSkillManager();
-        if (skillManager) {
-          const skills = await skillManager.listSkills();
-          availableSkills = skills.map((skill) => skill.name);
-        }
-      } catch (error) {
-        debugLogger.error('Error loading available skills:', error);
-      }
+      const { availableCommands, availableSkills } =
+        await buildAvailableCommandsSnapshot(this.config);
 
       const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
-        ...(availableSkills
+        ...(availableSkills !== undefined
           ? {
               _meta: {
                 availableSkills,
