@@ -1066,37 +1066,78 @@ export async function cacheQwenCredentials(
     await fs.mkdir(path.dirname(filePath), { recursive: true });
 
     const credString = JSON.stringify(credentials, null, 2);
-    // PR #4255 fold-in 3 (#10): thread `signal` into `fs.writeFile` so
-    // the device-flow registry's persist-timeout + cancelController
-    // can actually abort the in-flight disk write. The earlier C3 fix
-    // armed the timer at the registry boundary but the chain ended
-    // there — `fs.writeFile` itself didn't see the signal, so a
-    // wedged disk (NFS stall, encrypted-volume contention) would
-    // still hang the call until the OS-level timeout. Optional shape
-    // preserves backward compat for non-daemon callers.
-    await fs.writeFile(filePath, credString, {
-      mode: QWEN_CREDENTIAL_FILE_MODE,
-      ...(opts?.signal ? { signal: opts.signal } : {}),
-    });
-    // `fs.writeFile`'s `mode` only applies when the file is CREATED; an
-    // existing `oauth_creds.json` written under a broader umask (or by
-    // earlier code that didn't pass `mode`) keeps its old permissions.
-    // Explicit `chmod` after every write tightens it on existing files
-    // so upgrades actually fix the insecure-permissions case.
+    // PR #4255 round-11 #2 (gpt-5.5 review): atomic write with
+    // permission hardening BEFORE the secret payload becomes
+    // accessible at the canonical filename. The earlier shape was
+    //   1. fs.writeFile(filePath, creds, {mode: 0o600})  ← creates
+    //      with 0o600 OR retains existing broader perms
+    //   2. fs.chmod(filePath, 0o600)                     ← post-hoc
+    //      tightening
+    // which left a window where, if `oauth_creds.json` already
+    // existed with broader perms (operator pre-creation, prior
+    // version's looser write), the freshly-written tokens were
+    // momentarily readable by other principals before the chmod
+    // closed the gap. A chmod failure on POSIX previously degraded
+    // to a warning while the broadly-readable tokens stayed.
+    //
+    // New shape: write to a temp file (created with 0o600 atomically
+    // via the `mode` flag — which DOES apply on creation since the
+    // path didn't exist), verify perms, then `rename` over the
+    // canonical filename. `fs.rename` is atomic on POSIX (within a
+    // filesystem) and on Windows. The canonical filename never
+    // contains the new tokens until they're already at 0o600.
+    //
+    // PR #4255 fold-in 3 (#10): `signal` threading is preserved —
+    // both `writeFile` AND the temp-file path honor the registry's
+    // persist-timeout + cancelController.
+    const tempPath = `${filePath}.tmp.${process.pid}.${randomUUID()}`;
     try {
-      await fs.chmod(filePath, QWEN_CREDENTIAL_FILE_MODE);
-    } catch (chmodErr) {
-      // chmod is a no-op on some Windows file systems and `EPERM`s
-      // otherwise. Surface as a warning rather than silently dropping
-      // the invariant — operators on hardened/exotic FSes need a
-      // breadcrumb if `oauth_creds.json` retains a wider mode.
-      debugLogger.warn(
-        `cacheQwenCredentials: chmod 0o${QWEN_CREDENTIAL_FILE_MODE.toString(
-          8,
-        )} on ${filePath} failed: ${
-          chmodErr instanceof Error ? chmodErr.message : String(chmodErr)
-        }`,
-      );
+      await fs.writeFile(tempPath, credString, {
+        mode: QWEN_CREDENTIAL_FILE_MODE,
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+      });
+      // Defensive: if the platform ignored `mode` on creation
+      // (some Windows FSes), explicit chmod tightens the temp BEFORE
+      // it's renamed into place. Failure here is a HARD ERROR — we
+      // refuse to publish broadly-readable tokens to the canonical
+      // path. A non-cooperative FS that can't tighten a 0o600 file
+      // shouldn't be serving credentials anyway.
+      try {
+        await fs.chmod(tempPath, QWEN_CREDENTIAL_FILE_MODE);
+      } catch (chmodErr) {
+        if (process.platform !== 'win32') {
+          throw new Error(
+            `cacheQwenCredentials: refusing to publish credentials — chmod 0o${QWEN_CREDENTIAL_FILE_MODE.toString(8)} on temp file failed: ${
+              chmodErr instanceof Error ? chmodErr.message : String(chmodErr)
+            }`,
+          );
+        }
+        // Windows: chmod's a no-op on most NTFS volumes; permissions
+        // there go through ACLs which we don't manage from here.
+        // Surface a debug breadcrumb for operators on exotic Windows
+        // filesystems but allow the rename to proceed.
+        debugLogger.warn(
+          `cacheQwenCredentials: chmod 0o${QWEN_CREDENTIAL_FILE_MODE.toString(8)} on Windows temp file ${tempPath} failed; relying on NTFS ACL: ${
+            chmodErr instanceof Error ? chmodErr.message : String(chmodErr)
+          }`,
+        );
+      }
+      // Atomic rename. Replaces any existing file at `filePath` in
+      // a single inode swap; readers either see the old creds or
+      // the new creds, never a partial mix.
+      await fs.rename(tempPath, filePath);
+    } catch (writeErr) {
+      // Best-effort cleanup of the temp file — if rename succeeded
+      // there's nothing to clean (path no longer points anywhere);
+      // if it failed there's a leftover .tmp.<pid>.<uuid> file we
+      // shouldn't leave on disk. Swallow ENOENT (already-renamed)
+      // and any other unlink errors since they're not user-actionable.
+      try {
+        await fs.unlink(tempPath);
+      } catch {
+        /* best-effort */
+      }
+      throw writeErr;
     }
     // SharedTokenManager throttles file checks and serves an in-memory cache;
     // without an explicit invalidation a follow-up `getValidCredentials` in
