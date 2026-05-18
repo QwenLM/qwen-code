@@ -48,6 +48,44 @@ export class BridgeTimeoutError extends Error {
   }
 }
 
+/**
+ * Raised when the bridge observes its ACP child's transport closing while
+ * a request is in flight (workspace status, session/* restore, or
+ * mid-prompt). Replaces three `new Error('agent channel closed …')` sites
+ * so `mapDomainErrorToErrorKind` can recognize the failure via
+ * `instanceof` rather than regex-matching `.message`. The `context` suffix
+ * preserves the legacy message wording so log greps and existing
+ * diagnostic surfaces keep working.
+ */
+export class BridgeChannelClosedError extends Error {
+  readonly context: string;
+  constructor(context: string) {
+    super(`agent channel closed ${context}`);
+    this.name = 'BridgeChannelClosedError';
+    this.context = context;
+  }
+}
+
+/**
+ * Raised by `defaultSpawnChannelFactory` when neither `QWEN_CLI_ENTRY` nor
+ * `process.argv[1]` resolves to a path that can be re-spawned for the ACP
+ * child. Replaces a generic `new Error(...)` so `mapDomainErrorToErrorKind`
+ * can return `'missing_binary'` via `instanceof` rather than regex-matching
+ * `.message`. The constructor message is preserved verbatim so existing
+ * operator-facing diagnostics stay byte-for-byte compatible.
+ */
+export class MissingCliEntryError extends Error {
+  constructor() {
+    super(
+      'Cannot determine CLI entry path for spawning the ACP child: ' +
+        'process.argv[1] is empty and QWEN_CLI_ENTRY is unset. ' +
+        'Set QWEN_CLI_ENTRY to the absolute path of the qwen entry ' +
+        'script (e.g. `export QWEN_CLI_ENTRY=$(which qwen)`) to override.',
+    );
+    this.name = 'MissingCliEntryError';
+  }
+}
+
 export const SERVE_STATUS_EXT_METHODS = {
   workspaceMcp: 'qwen/status/workspace/mcp',
   workspaceSkills: 'qwen/status/workspace/skills',
@@ -558,8 +596,9 @@ const MODEL_CONFIG_ERROR_NAMES: ReadonlySet<string> = new Set([
 /**
  * Map a thrown domain error onto one of the closed `ServeErrorKind` literals
  * so diagnostic cells can render structured remediation. Recognition is
- * `instanceof`-first; message-string heuristics are a last-resort fallback for
- * legacy throw sites that have not yet been retyped.
+ * `instanceof`-based for bridge-owned errors; cross-package classes
+ * (`SkillError`, `TrustGateError`, model-config) are matched by `.code` or
+ * `.name` because bundle duplication can break `instanceof` symmetry.
  *
  * Returns `undefined` when no rule matches; callers should leave `errorKind`
  * unset rather than coercing an unrelated error into a misleading category.
@@ -568,6 +607,8 @@ export function mapDomainErrorToErrorKind(
   err: unknown,
 ): ServeErrorKind | undefined {
   if (err instanceof BridgeTimeoutError) return 'init_timeout';
+  if (err instanceof BridgeChannelClosedError) return 'protocol_error';
+  if (err instanceof MissingCliEntryError) return 'missing_binary';
   if (err instanceof SkillError) {
     if (SKILL_PARSE_CODES.has(err.code)) return 'parse_error';
     if (SKILL_FILE_CODES.has(err.code)) return 'missing_file';
@@ -584,17 +625,5 @@ export function mapDomainErrorToErrorKind(
   if (typeof code === 'string' && FS_MISSING_CODES.has(code)) {
     return 'missing_file';
   }
-  // TODO(follow-up): convert the two throw sites that produce these
-  // messages (`getChannelClosedReject` in `httpAcpBridge.ts` and the
-  // `defaultSpawnChannelFactory` "Cannot determine CLI entry path" Error)
-  // to typed classes (`BridgeChannelClosedError`, `MissingCliEntryError`)
-  // and replace the regex match with `instanceof`. Until then a foreign
-  // error message that happens to contain either phrase will misclassify;
-  // the false-positive surface is small (the phrases are bridge-specific)
-  // but the cleaner fix belongs in the same wave as PR 22's bridge
-  // extraction.
-  const msg = err.message;
-  if (/agent channel closed/i.test(msg)) return 'protocol_error';
-  if (/Cannot determine CLI entry path/i.test(msg)) return 'missing_binary';
   return undefined;
 }
