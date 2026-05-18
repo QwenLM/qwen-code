@@ -51,6 +51,21 @@ export const DEVICE_FLOW_PERSIST_TIMEOUT_MS = 30_000;
  */
 export const DEVICE_FLOW_START_TIMEOUT_MS = 30_000;
 /**
+ * Hard ceiling on a single `provider.poll()` tick. Symmetric with
+ * `DEVICE_FLOW_START_TIMEOUT_MS` and `DEVICE_FLOW_PERSIST_TIMEOUT_MS`,
+ * which already bound their respective phases. PR #4255 follow-up
+ * review thread (deepseek-v4-pro): a hung IdP token endpoint (TCP
+ * established, no response) without this would block the registry's
+ * poll-tick promise indefinitely. The entry's `cancelController.signal`
+ * is the cooperative path; this race makes the timeout authoritative
+ * regardless of provider cooperation. The sweeper would still evict
+ * the entry once `expiresAt` is past, but until then the per-provider
+ * singleton stays occupied with no other recovery short of daemon
+ * restart. 30s is the same generosity the start/persist phases use
+ * and is well over a healthy IdP's polling round-trip.
+ */
+export const DEVICE_FLOW_POLL_TIMEOUT_MS = 30_000;
+/**
  * Operator-safe upper bound on the IdP-provided `expires_in`. RFC
  * 8628 §6.1 calls 5–30 minutes "reasonable"; 1 hour is the practical
  * ceiling for any well-behaved IdP. PR #4255 fold-in 7 review thread
@@ -503,6 +518,18 @@ interface DeviceFlowEntry {
    * 9 review thread #5.
    */
   cancellerClientId?: string;
+  /**
+   * First-writer-wins flag. Set the moment ANY `cancel()` call drives
+   * this entry into `cancelRequestedDuringPersist` — including the
+   * anonymous case where `cancellerClientId` stays `undefined`. The
+   * flag is decoupled from `cancellerClientId` because the latter
+   * being `undefined` is BOTH "no canceller has driven the transition
+   * yet" AND "an anonymous canceller drove the transition" — using it
+   * as the gate would let a later identified canceller silently
+   * overwrite an earlier anonymous one. PR #4255 follow-up review
+   * (Copilot on #4291): closes the anonymous-first canceller bug.
+   */
+  cancellerRecorded?: boolean;
 }
 
 export interface DeviceFlowRegistryDeps {
@@ -580,6 +607,26 @@ export class UpstreamDeviceFlowError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'UpstreamDeviceFlowError';
+  }
+}
+
+/**
+ * Sentinel error raised by `runPollTick`'s own `Promise.race` timer when
+ * `provider.poll()` exceeds `DEVICE_FLOW_POLL_TIMEOUT_MS`. PR #4291
+ * follow-up review (qwen-latest): the catch block previously routed
+ * this through the same `provider.poll() threw (raw): ...` audit path
+ * as a real provider throw, mis-leading on-call into investigating
+ * provider code when the actual issue is a hung IdP / network
+ * partition. The sentinel lets the catch differentiate the two and
+ * emit a timeout-specific audit + hint.
+ */
+export class DeviceFlowPollTimeoutError extends Error {
+  readonly code = 'poll_timeout';
+  readonly timeoutMs: number;
+  constructor(timeoutMs: number) {
+    super(`device-flow poll timeout after ${timeoutMs}ms`);
+    this.name = 'DeviceFlowPollTimeoutError';
+    this.timeoutMs = timeoutMs;
   }
 }
 
@@ -916,8 +963,29 @@ export class DeviceFlowRegistry {
       // `originatorClientId` was always `entry.initiatorClientId`,
       // which broke any SSE consumer that suppresses self-emitted
       // events to avoid double-handling.
-      if (cancellerClientId) {
-        entry.cancellerClientId = cancellerClientId;
+      // PR #4255 follow-up review thread (deepseek-v4-pro): first-writer-
+      // wins. Two SDK clients racing `cancel()` on the same persist-in-
+      // flight entry must NOT silently overwrite attribution — the second
+      // caller's `cancel()` is functionally a no-op (the entry is already
+      // marked `cancelRequestedDuringPersist`), so the persist-resolution
+      // event should be attributed to whoever actually drove the
+      // transition first. Subsequent callers stay in the audit trail
+      // through their own `audit.record(...)` line below.
+      //
+      // PR #4291 follow-up review (Copilot): the gate is `cancellerRecorded`
+      // (a separate flag), NOT `cancellerClientId === undefined`. The earlier
+      // shape silently broke when the first canceller was anonymous: their
+      // `cancel(id, undefined)` left `cancellerClientId` undefined, so the
+      // next identified `cancel(id, 'sdk-B')` saw the gate as still open
+      // and overwrote the attribution. Decoupling the "have we recorded a
+      // canceller" question from the "do we have a clientId" question fixes
+      // it: an anonymous first canceller still flips the flag, blocking
+      // any later writer.
+      if (!entry.cancellerRecorded) {
+        entry.cancellerRecorded = true;
+        if (cancellerClientId) {
+          entry.cancellerClientId = cancellerClientId;
+        }
       }
       try {
         entry.cancelController.abort(new Error('cancel during persist'));
@@ -1011,14 +1079,50 @@ export class DeviceFlowRegistry {
     entry.lastPolledAt = now;
     let result: DeviceFlowPollResult;
     let rawProviderError: string | undefined;
+    let pollTimedOut = false;
+    // PR #4255 follow-up review thread (deepseek-v4-pro): bound
+    // `provider.poll()` with the same `Promise.race` shape used by
+    // `doStart` / persist. The cooperative `entry.cancelController.signal`
+    // path covers well-behaved providers; this race makes the timeout
+    // authoritative even when a provider ignores `signal`. A hung IdP
+    // token endpoint without this would otherwise block the poll-tick
+    // promise indefinitely (occupying the per-provider singleton until
+    // sweeper / daemon restart). The rejecting timer aborts the signal
+    // first so cooperative providers can still tear down cleanly.
+    //
+    // PR #4291 follow-up review (qwen-latest, #5): keep a reference to
+    // the original `provider.poll()` promise so we can detect a LATE
+    // success/error after our race timer already settled the wrapper.
+    // Without this, a flaky IdP that responds 1s past the 30s timeout
+    // would silently no-op (the second `.then(resolve, ...)` lands on
+    // an already-settled outer promise) — operator has no signal that
+    // the IdP is in fact responsive (just slow). Symmetric with the
+    // `lost_success_after_timeout` audit on the persist path (fold-in
+    // 9 #7 of #4255).
+    let pollTimer: ReturnType<typeof setTimeout> | undefined;
+    let providerPollPromise: Promise<DeviceFlowPollResult> | undefined;
     try {
-      result = await provider.poll(
-        {
-          deviceCode: entry.deviceCode,
-          pkceVerifier: entry.pkceVerifier,
-        },
-        { signal: entry.cancelController.signal },
-      );
+      result = await new Promise<DeviceFlowPollResult>((resolve, reject) => {
+        pollTimer = this.schedule(DEVICE_FLOW_POLL_TIMEOUT_MS, () => {
+          pollTimedOut = true;
+          try {
+            entry.cancelController.abort(
+              new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS),
+            );
+          } catch {
+            // best-effort
+          }
+          reject(new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS));
+        });
+        providerPollPromise = provider.poll(
+          {
+            deviceCode: entry.deviceCode!,
+            pkceVerifier: entry.pkceVerifier,
+          },
+          { signal: entry.cancelController.signal },
+        );
+        providerPollPromise.then(resolve, reject);
+      });
     } catch (err: unknown) {
       // PR #4255 fold-in 9 review thread #1 (refines fold-in 8 #1):
       // a non-conforming provider that violates the `@remarks`
@@ -1031,12 +1135,89 @@ export class DeviceFlowRegistry {
       // outermost defense layer; the full raw `err.message` flows
       // through the audit channel (whose backing impl writes to
       // stderr) for operator visibility.
-      rawProviderError = err instanceof Error ? err.message : String(err);
-      result = {
-        kind: 'error',
-        errorKind: 'upstream_error',
-        hint: 'provider.poll() failed; see daemon audit log for details',
-      };
+      //
+      // PR #4291 follow-up review (qwen-latest, #2): the previous
+      // shape routed our own race-timer rejection through the same
+      // `provider.poll() threw (raw): ...` audit path as a real
+      // provider throw — at 3 AM, on-call would mis-triage as
+      // "provider bug" and waste time investigating provider code.
+      // Branch on `DeviceFlowPollTimeoutError` to use a dedicated
+      // hint + suppress the misleading "raw" audit path.
+      if (err instanceof DeviceFlowPollTimeoutError) {
+        result = {
+          kind: 'error',
+          errorKind: 'upstream_error',
+          hint: `provider.poll() timed out after ${err.timeoutMs}ms; check IdP connectivity`,
+        };
+        // rawProviderError stays undefined — the audit branch reads
+        // that to decide whether to emit the misleading "threw (raw)"
+        // line. Timeout is not a provider throw.
+      } else {
+        rawProviderError = err instanceof Error ? err.message : String(err);
+        result = {
+          kind: 'error',
+          errorKind: 'upstream_error',
+          hint: 'provider.poll() failed; see daemon audit log for details',
+        };
+      }
+    } finally {
+      if (pollTimer !== undefined) this.clearScheduled(pollTimer);
+    }
+    // PR #4291 follow-up review (qwen-latest, #5): if our race timer
+    // settled the wrapper as a timeout, attach a passive observer on
+    // the original `provider.poll()` promise so a late resolution
+    // (IdP eventually responded after the 30s ceiling) leaves an
+    // operator audit breadcrumb. Without this, a flaky-but-responsive
+    // IdP looks identical to a fully unresponsive one. Mirrors the
+    // `lost_success_after_timeout` pattern on the persist path.
+    if (pollTimedOut && providerPollPromise !== undefined) {
+      const tracked = providerPollPromise;
+      // Detached on purpose; the catch on the ORIGINAL promise has
+      // already happened (via the wrapper) — the observer below
+      // sees the eventual settlement of the same promise. Both
+      // success and error branches go through audit only.
+      void tracked.then(
+        (latePollResult) => {
+          this.deps.audit?.record({
+            deviceFlowId: entry.deviceFlowId,
+            providerId: entry.providerId,
+            clientId: entry.initiatorClientId,
+            status: 'failed',
+            errorKind: 'upstream_error',
+            // PR #4291 follow-up review (qwen-latest, N1): the late-
+            // poll resolve branch fires when `provider.poll()` returns
+            // a result AFTER our race timer settled the wrapper. For a
+            // cooperative provider whose abort path resolves to
+            // `{kind: 'error', errorKind: 'upstream_error'}` (the Qwen
+            // implementation does this in response to AbortError), the
+            // "response" is just the abort-cooperation path — the IdP
+            // could be completely down. Don't assert "responsive but
+            // slow" on the error kind: route operators correctly by
+            // distinguishing "real late response" (pending / slow_down /
+            // success) from "provider's abort cooperation" (error).
+            hint:
+              latePollResult.kind === 'error'
+                ? `lost_late_poll_after_timeout: provider.poll() resolved kind=error after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — likely abort-driven cooperation; IdP responsiveness unknown`
+                : `lost_late_poll_after_timeout: provider.poll() resolved kind=${latePollResult.kind} after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling — IdP is responsive but slow; consider raising the operator-side IdP latency alert threshold`,
+          });
+        },
+        (lateErr: unknown) => {
+          // Late rejection from the same provider promise. Don't
+          // double-audit if the wrapper already saw this same error
+          // (we'd be double-counting the same I/O failure).
+          if (lateErr instanceof DeviceFlowPollTimeoutError) return;
+          const detail =
+            lateErr instanceof Error ? lateErr.message : String(lateErr);
+          this.deps.audit?.record({
+            deviceFlowId: entry.deviceFlowId,
+            providerId: entry.providerId,
+            clientId: entry.initiatorClientId,
+            status: 'failed',
+            errorKind: 'upstream_error',
+            hint: `lost_late_poll_after_timeout: provider.poll() rejected after ${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling: ${detail.length > 256 ? `${detail.slice(0, 256)}…[+${detail.length - 256} bytes]` : detail}`,
+          });
+        },
+      );
     }
     // PR #4255 round-12 #1 (gpt-5.5 review CzSpN): also re-check
     // `this.disposed` after the await. `dispose()` clears

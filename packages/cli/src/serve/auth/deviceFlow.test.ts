@@ -16,8 +16,10 @@ import {
   DEVICE_FLOW_MAX_EXPIRES_IN_SEC,
   DEVICE_FLOW_MAX_INTERVAL_MS,
   DEVICE_FLOW_PERSIST_TIMEOUT_MS,
+  DEVICE_FLOW_POLL_TIMEOUT_MS,
   DEVICE_FLOW_SLOW_DOWN_BUMP_MS,
   DEVICE_FLOW_START_TIMEOUT_MS,
+  DeviceFlowPollTimeoutError,
   DEVICE_FLOW_TERMINAL_GRACE_MS,
   DeviceFlowRegistry,
   TooManyActiveDeviceFlowsError,
@@ -122,6 +124,13 @@ class FakeProvider implements DeviceFlowProvider {
    *  `DeviceFlowProvider.poll()` `@remarks` sanitization contract by
    *  throwing raw IdP detail. PR #4255 fold-in 8 #1. */
   pollThrowsWith: Error | undefined;
+  /** Test hook: when `true`, `poll()` returns a Promise that NEVER
+   *  resolves and ignores the supplied `signal`. Models a misbehaving
+   *  provider whose underlying I/O isn't abortable — registry's
+   *  authoritative `Promise.race` against `DEVICE_FLOW_POLL_TIMEOUT_MS`
+   *  is the only thing that can rescue the await. PR #4255 follow-up
+   *  review thread (deepseek-v4-pro). */
+  pollHangs = false;
   /** Most recent `opts.signal` observed by `poll`. Test hook for the
    *  abort-mid-poll assertion: after `registry.cancel(...)`, this
    *  signal MUST report `.aborted === true` so the upstream HTTP
@@ -167,6 +176,12 @@ class FakeProvider implements DeviceFlowProvider {
       const err = this.pollThrowsWith;
       this.pollThrowsWith = undefined;
       throw err;
+    }
+    if (this.pollHangs) {
+      // Never resolves, ignores `signal`. Registry's Promise.race
+      // timeout is the only path out.
+      await new Promise<never>(() => {});
+      throw new Error('unreachable');
     }
     if (opts.signal.aborted) return { kind: 'pending' };
     if (this.pollScript.length === 0) {
@@ -667,6 +682,305 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
     }
   });
 
+  it('poll() that hangs past POLL_TIMEOUT_MS surfaces as upstream_error and aborts the entry signal (follow-up review)', async () => {
+    // PR #4255 follow-up review thread (deepseek-v4-pro): runPollTick
+    // now races provider.poll() against DEVICE_FLOW_POLL_TIMEOUT_MS so
+    // a non-abortable provider can no longer pin the per-providerId
+    // singleton waiting for sweeper-level expiry. Aborts the signal
+    // first so cooperative providers tear down cleanly; reject
+    // surfaces in the catch as the bounded `upstream_error` hint.
+    const provider = new FakeProvider();
+    provider.pollHangs = true;
+    const built = buildRegistry(provider);
+    const { registry, env, events, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      // Trigger the first poll tick.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      // Let runPollTick reach the await.
+      await flushAsync();
+      expect(provider.pollCount).toBe(1);
+      // Race timer hasn't fired yet — entry is still pending.
+      expect(registry.get(view.deviceFlowId)?.status).toBe('pending');
+      // Advance clock past POLL_TIMEOUT_MS; race timer fires, aborts
+      // the entry signal, and rejects the wrapper promise.
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Signal must be aborted so cooperative providers can abandon
+      // their in-flight fetch.
+      expect(provider.lastPollSignal?.aborted).toBe(true);
+      // The catch block surfaces a bounded upstream_error to SSE.
+      const failed = events.find(
+        (e) =>
+          e.emission.type === 'failed' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(failed).toBeDefined();
+      if (failed && failed.emission.type === 'failed') {
+        expect(failed.emission.data.errorKind).toBe('upstream_error');
+        // PR #4291 follow-up review (qwen-latest, #2): the SSE/HTTP
+        // hint must distinguish a registry-side timeout from a
+        // provider throw. At 3 AM, on-call reading "provider.poll()
+        // threw" would grep the provider source for a non-existent
+        // throw site — when the actual issue is a hung IdP.
+        expect(failed.emission.data.hint).toContain('timed out after');
+        expect(failed.emission.data.hint).toContain('check IdP connectivity');
+        // Negative assertion: the misleading provider-throw hint
+        // MUST NOT appear on the timeout path.
+        expect(failed.emission.data.hint).not.toContain(
+          'see daemon audit log for details',
+        );
+      }
+      // Audit captures the timeout for the operator. Critically, the
+      // audit hint MUST NOT route through the `provider.poll() threw
+      // (raw)` template — that's reserved for actual provider throws
+      // and would mis-direct triage. On the timeout path the hint
+      // field is omitted entirely (rawProviderError stays undefined).
+      const auditFailure = auditLines.find(
+        (line) =>
+          line['status'] === 'failed' && line['errorKind'] === 'upstream_error',
+      );
+      expect(auditFailure).toBeDefined();
+      const auditHint = auditFailure?.['hint'] as string | undefined;
+      if (auditHint !== undefined) {
+        expect(auditHint).not.toContain('provider.poll() threw (raw)');
+      }
+      // PR #4291 follow-up review (Qwen Code review summary):
+      // poll-tick must NOT reschedule itself after a timeout-driven
+      // upstream_error (the entry has already transitioned to error
+      // state; another poll would be a `entry.status !== 'pending'`
+      // no-op at best, log noise at worst). Pin the invariant.
+      expect(provider.pollCount).toBe(1);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('records lost_late_poll_after_timeout when provider.poll() resolves AFTER the registry race timeout (follow-up review #5)', async () => {
+    // PR #4291 follow-up review (qwen-latest, #5): symmetric with
+    // `lost_success_after_timeout` on the persist path. A flaky IdP
+    // that responds 1s past the 30s ceiling should leave an audit
+    // breadcrumb saying "IdP IS responsive, just slow" — without
+    // this, the daemon and the operator get the same observability
+    // as a fully unresponsive IdP. The fix attaches a passive
+    // observer to the original `provider.poll()` promise.
+    const provider = new FakeProvider();
+    let resolveLate!: (r: DeviceFlowPollResult) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>((resolve) => {
+      resolveLate = resolve;
+    });
+    // Custom hook: poll returns the controllable promise, ignoring signal.
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      expect(provider.pollCount).toBe(1);
+      // Fire the registry race timer.
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Outer wrapper rejected; entry transitioned to error/upstream_error.
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('error');
+      // No `lost_late_poll_after_timeout` line YET — the original
+      // promise hasn't resolved.
+      expect(
+        auditLines.some((line) =>
+          (line['hint'] as string | undefined)?.includes(
+            'lost_late_poll_after_timeout',
+          ),
+        ),
+      ).toBe(false);
+      // Now the IdP belatedly responds.
+      resolveLate({ kind: 'pending' });
+      await flushAsync();
+      // The passive observer must have recorded an audit line.
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      expect(lateAudit?.['errorKind']).toBe('upstream_error');
+      expect(lateAudit?.['hint']).toContain('kind=pending');
+      expect(lateAudit?.['hint']).toContain(
+        `${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling`,
+      );
+      // PR #4291 follow-up review (qwen-latest, N1): kind=pending is a
+      // real late response (the IdP eventually responded), so the
+      // "responsive but slow" hint is appropriate here. The negative
+      // is the kind === 'error' branch (separately tested below).
+      expect(lateAudit?.['hint']).toContain('IdP is responsive but slow');
+      expect(lateAudit?.['hint']).not.toContain('abort-driven');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('records lost_late_poll_after_timeout with abort-driven hint when late resolution is kind=error (qwen-latest review N1)', async () => {
+    // PR #4291 follow-up review (qwen-latest, N1): when the registry
+    // race timer aborts `entry.cancelController.signal`, a cooperative
+    // provider's `pollDeviceToken({signal})` typically throws
+    // AbortError; the provider's catch then resolves to
+    // `{kind: 'error', errorKind: 'upstream_error'}`. This success
+    // handler fires with `latePollResult.kind === 'error'`. Earlier
+    // shape would have audited "IdP is responsive but slow" — but the
+    // IdP could be totally down; the "response" is just the provider's
+    // abort cooperation. Pin the corrected attribution.
+    const provider = new FakeProvider();
+    let resolveLate!: (r: DeviceFlowPollResult) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>((resolve) => {
+      resolveLate = resolve;
+    });
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Cooperative abort path: provider resolves to error AFTER the
+      // race timer fired.
+      resolveLate({
+        kind: 'error',
+        errorKind: 'upstream_error',
+        hint: 'aborted by signal',
+      });
+      await flushAsync();
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      expect(lateAudit?.['hint']).toContain('kind=error');
+      // The corrected hint MUST NOT claim the IdP is responsive.
+      expect(lateAudit?.['hint']).not.toContain('IdP is responsive but slow');
+      expect(lateAudit?.['hint']).toContain('abort-driven cooperation');
+      expect(lateAudit?.['hint']).toContain('IdP responsiveness unknown');
+      // dispose the entry to keep the test isolated.
+      void view;
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('records lost_late_poll_after_timeout when provider.poll() REJECTS after the race timeout (qwen-latest review N2)', async () => {
+    // PR #4291 follow-up review (qwen-latest, N2): the late observer
+    // also has an `onRejected` branch covering three sub-paths that
+    // were previously zero-tested:
+    //   1. `if (lateErr instanceof DeviceFlowPollTimeoutError) return;`
+    //      (don't double-audit our own race-timer rejection)
+    //   2. The `detail.length > 256` truncation tail
+    //   3. The audit record for the rejection itself
+    // Late rejection is realistic: TCP RST or proxy 502 arriving 1s
+    // past the 30s ceiling.
+    const provider = new FakeProvider();
+    let rejectLate!: (e: Error) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>(
+      (_resolve, reject) => {
+        rejectLate = reject;
+      },
+    );
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Late upstream failure (NOT our own DeviceFlowPollTimeoutError).
+      // Use a long-enough message to exercise the truncation tail.
+      const longDetail = `connection reset by peer ${'x'.repeat(400)}`;
+      rejectLate(new Error(longDetail));
+      await flushAsync();
+      const lateAudit = auditLines.find((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudit).toBeDefined();
+      expect(lateAudit?.['errorKind']).toBe('upstream_error');
+      expect(lateAudit?.['hint']).toContain('rejected after');
+      expect(lateAudit?.['hint']).toContain(
+        `${DEVICE_FLOW_POLL_TIMEOUT_MS}ms ceiling`,
+      );
+      expect(lateAudit?.['hint']).toContain('connection reset by peer');
+      // Truncation tail must appear (long detail > 256 bytes).
+      expect(lateAudit?.['hint']).toContain('bytes]');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it("does NOT double-audit when late rejection is the registry's own DeviceFlowPollTimeoutError (qwen-latest review N2 guard)", async () => {
+    // PR #4291 follow-up review (qwen-latest, N2): the late-rejection
+    // observer must filter out our own timer rejection — otherwise a
+    // single timeout would produce two audit lines (one from the
+    // wrapper catch, one from the late-rejection observer). The
+    // guard is `if (lateErr instanceof DeviceFlowPollTimeoutError)
+    // return;`. Pin it.
+    const provider = new FakeProvider();
+    let rejectLate!: (e: Error) => void;
+    const latePollPromise = new Promise<DeviceFlowPollResult>(
+      (_resolve, reject) => {
+        rejectLate = reject;
+      },
+    );
+    provider.poll = async () => {
+      provider.pollCount += 1;
+      return latePollPromise;
+    };
+    const built = buildRegistry(provider);
+    const { registry, env, auditLines } = built;
+    try {
+      await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      env.clock.tick(DEVICE_FLOW_POLL_TIMEOUT_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Reject with the SAME sentinel the registry uses internally.
+      // The original wrapper catch already recorded a failed audit
+      // (the "real" failure for this entry). The late observer must
+      // NOT add a `lost_late_poll_after_timeout` line.
+      rejectLate(new DeviceFlowPollTimeoutError(DEVICE_FLOW_POLL_TIMEOUT_MS));
+      await flushAsync();
+      const lateAudits = auditLines.filter((line) =>
+        (line['hint'] as string | undefined)?.includes(
+          'lost_late_poll_after_timeout',
+        ),
+      );
+      expect(lateAudits).toHaveLength(0);
+    } finally {
+      registry.dispose();
+    }
+  });
+
   it('persist() that hangs past PERSIST_TIMEOUT_MS maps to persist_failed (#2)', async () => {
     const provider = new FakeProvider();
     // Single poll tick returns success whose persist() never resolves.
@@ -935,6 +1249,123 @@ describe('DeviceFlowRegistry — persist failure paths (fold-in 10 #1)', () => {
             e.emission.data.errorKind === 'persist_failed',
         ),
       ).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('cancellerClientId is first-writer-wins across concurrent cancel() calls during persist', async () => {
+    // PR #4255 follow-up review thread (deepseek-v4-pro): two SDK
+    // clients racing `cancel()` on the same persist-in-flight entry
+    // must NOT silently overwrite attribution. The first cancel that
+    // observes `persistInFlight` is the one that drove the transition;
+    // the persist-resolution event should be attributed to it. The
+    // second cancel is functionally a no-op on the entry (it's already
+    // marked `cancelRequestedDuringPersist`); its caller still appears
+    // in the audit trail through the `audit.record(...)` path but
+    // does not overwrite the SSE event's `originatorClientId`.
+    const provider = new FakeProvider();
+    let rejectPersist!: (err: Error) => void;
+    const persistPromise = new Promise<{ expiresAt?: number }>(
+      (_resolve, reject) => {
+        rejectPersist = reject;
+      },
+    );
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: () => persistPromise,
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // First canceller wins.
+      const first = registry.cancel(view.deviceFlowId, 'sdk-A');
+      expect(first).toEqual({ alreadyTerminal: false });
+      // Second canceller observes `persistInFlight` already set; the
+      // entry is still marked `cancelRequestedDuringPersist`. Its id
+      // MUST NOT overwrite the first-writer's attribution.
+      const second = registry.cancel(view.deviceFlowId, 'sdk-B');
+      expect(second).toEqual({ alreadyTerminal: false });
+      // Persist now fails — the registry emits `cancelled` with
+      // `originatorClientId = entry.cancellerClientId` (sdk-A).
+      rejectPersist(new Error('aborted: cancel during persist'));
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('cancelled');
+      const cancelledEvent = events.find(
+        (e) =>
+          e.emission.type === 'cancelled' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(cancelledEvent).toBeDefined();
+      // First-writer-wins: sdk-A drove the transition.
+      expect(cancelledEvent?.clientId).toBe('sdk-A');
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('cancellerClientId is first-writer-wins even when the first canceller is anonymous (no clientId)', async () => {
+    // PR #4291 follow-up review (Copilot): the first version of the
+    // first-writer-wins guard used `entry.cancellerClientId === undefined`
+    // as the gate, which silently broke when the first canceller was
+    // anonymous: `cancel(id, undefined)` left the field undefined, and
+    // a later `cancel(id, 'sdk-B')` saw the gate as still open and
+    // overwrote attribution. The fix decouples the "have we recorded a
+    // canceller" question (`cancellerRecorded` flag) from the "do we
+    // have a clientId" question. An anonymous first canceller still
+    // flips the flag, blocking any later writer.
+    const provider = new FakeProvider();
+    let rejectPersist!: (err: Error) => void;
+    const persistPromise = new Promise<{ expiresAt?: number }>(
+      (_resolve, reject) => {
+        rejectPersist = reject;
+      },
+    );
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: () => persistPromise,
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // First (anonymous) canceller wins. cancellerClientId stays
+      // undefined; cancellerRecorded is now true.
+      const first = registry.cancel(view.deviceFlowId);
+      expect(first).toEqual({ alreadyTerminal: false });
+      // Second canceller IS identified — but the first-writer-wins
+      // gate must reject the overwrite.
+      const second = registry.cancel(view.deviceFlowId, 'sdk-B');
+      expect(second).toEqual({ alreadyTerminal: false });
+      rejectPersist(new Error('aborted: cancel during persist'));
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('cancelled');
+      const cancelledEvent = events.find(
+        (e) =>
+          e.emission.type === 'cancelled' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(cancelledEvent).toBeDefined();
+      // The deferred SSE event must NOT carry sdk-B as originator —
+      // the anonymous first writer wins, so `entry.cancellerClientId`
+      // stays undefined, and the runPollTick deferred-cancel branch
+      // falls back to `entry.initiatorClientId` (which is also
+      // undefined here because `start()` itself was anonymous). The
+      // critical assertion: sdk-B did NOT silently take credit.
+      expect(cancelledEvent?.clientId).not.toBe('sdk-B');
     } finally {
       registry.dispose();
     }

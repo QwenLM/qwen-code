@@ -721,6 +721,16 @@ export function createServeApp(
   // information-disclosure asymmetry (the sibling
   // `GET /workspace/auth/status` stays bearer-only because its
   // pendingDeviceFlows entries intentionally omit `userCode`).
+  //
+  // PR #4291 follow-up review (qwen-latest, #4): GET now also runs
+  // `parseClientIdHeader` to drive the `callerIsInitiator` gate in
+  // `toDeviceFlowStateBody`. INTENTIONAL contract change: a malformed
+  // `X-Qwen-Client-Id` (>128 chars or invalid characters) returns
+  // `400 invalid_client_id` instead of the previous 200, matching the
+  // POST/DELETE behavior. SDK clients that send the header on POST
+  // should send a valid value on GET too. Anonymous callers (header
+  // absent) are unaffected and continue to work as pre-PR-4291 — the
+  // both-undefined branch in `callerIsInitiator` covers them.
   app.get(
     '/workspace/auth/device-flow/:id',
     mutate({ strict: true }),
@@ -741,7 +751,37 @@ export function createServeApp(
         });
         return;
       }
-      res.status(200).json(toDeviceFlowStateBody(view));
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      // PR #4291 follow-up review (qwen-latest, N4): when the
+      // `callerIsInitiator` gate redacts the verification fields,
+      // operators triaging "SDK got HTTP 200 but no userCode" have
+      // zero signal in daemon stderr / audit. The redaction happens
+      // INSIDE the body shaper which doesn't have an audit sink, so
+      // the route handler is the right layer to record it. Use
+      // QWEN_SERVE_DEBUG-gated stderr (rather than unconditional
+      // audit) — multi-SDK setups sharing a bearer token will cause
+      // legitimate "different caller GETs same flow" traffic that
+      // would otherwise flood production logs. Operators who hit
+      // the symptom can flip QWEN_SERVE_DEBUG=1 and get the
+      // breadcrumb on the next reproduction.
+      const callerIsInitiator =
+        (view.initiatorClientId === undefined && clientId === undefined) ||
+        (view.initiatorClientId !== undefined &&
+          clientId !== undefined &&
+          clientId === view.initiatorClientId);
+      if (
+        !callerIsInitiator &&
+        process.env['QWEN_SERVE_DEBUG'] &&
+        !['0', 'false', 'off', 'no'].includes(
+          (process.env['QWEN_SERVE_DEBUG'] ?? '').trim().toLowerCase(),
+        )
+      ) {
+        writeStderrLine(
+          `qwen serve debug: GET /workspace/auth/device-flow/${id} redacted verification fields — caller-clientId mismatch (initiator=${view.initiatorClientId ?? 'anonymous'}, caller=${clientId ?? 'anonymous'})`,
+        );
+      }
+      res.status(200).json(toDeviceFlowStateBody(view, clientId));
     },
   );
 
@@ -1943,14 +1983,34 @@ function toDeviceFlowStartResponseBody(
     deviceFlowId: view.deviceFlowId,
     providerId: view.providerId,
     status: view.status,
-    userCode: view.userCode ?? '',
-    verificationUri: view.verificationUri ?? '',
     expiresAt: view.expiresAt ?? 0,
     intervalMs: view.intervalMs ?? 0,
     attached,
   };
-  if (view.verificationUriComplete) {
-    body['verificationUriComplete'] = view.verificationUriComplete;
+  // PR #4291 follow-up review (gpt-5.5, #3): policy consistency with
+  // `toDeviceFlowStateBody` — only the original starter sees the
+  // verification material. Earlier shape unconditionally returned
+  // `userCode` / `verificationUri` / `verificationUriComplete` on
+  // every POST, including the `attached: true` take-over case, so any
+  // bearer-token holder that POSTed `providerId: <existing>` got the
+  // verification code another client started. That bypassed the
+  // closed-out GET redaction completely. Apply the same gate here.
+  // Fresh starts naturally pass the gate because `view.initiatorClientId`
+  // was set from the same `callerClientId` on this very request.
+  // Take-over callers that don't match the initiator now see the
+  // public envelope only. The both-undefined branch preserves the
+  // anonymous-start → anonymous-reattach use case.
+  const callerIsInitiator =
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId);
+  if (callerIsInitiator) {
+    body['userCode'] = view.userCode ?? '';
+    body['verificationUri'] = view.verificationUri ?? '';
+    if (view.verificationUriComplete) {
+      body['verificationUriComplete'] = view.verificationUriComplete;
+    }
   }
   // PR #4255 round-12 #6 (gpt-5.5 review CzHOK): minor info-leak
   // close-out — only echo `initiatorClientId` back to a take-over
@@ -1974,6 +2034,7 @@ function toDeviceFlowStartResponseBody(
 
 function toDeviceFlowStateBody(
   view: DeviceFlowPublicView,
+  callerClientId?: string,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {
     deviceFlowId: view.deviceFlowId,
@@ -1983,16 +2044,55 @@ function toDeviceFlowStateBody(
   };
   if (view.errorKind) body['errorKind'] = view.errorKind;
   if (view.hint) body['hint'] = view.hint;
-  if (view.userCode) body['userCode'] = view.userCode;
-  if (view.verificationUri) body['verificationUri'] = view.verificationUri;
-  if (view.verificationUriComplete) {
-    body['verificationUriComplete'] = view.verificationUriComplete;
-  }
   if (view.expiresAt !== undefined) body['expiresAt'] = view.expiresAt;
   if (view.intervalMs !== undefined) body['intervalMs'] = view.intervalMs;
   if (view.lastPolledAt !== undefined) body['lastPolledAt'] = view.lastPolledAt;
-  if (view.initiatorClientId) {
-    body['initiatorClientId'] = view.initiatorClientId;
+  // PR #4255 follow-up review thread (deepseek-v4-pro): symmetrize with
+  // the POST take-over response shape — only echo `userCode` /
+  // `verificationUri` / `verificationUriComplete` / `initiatorClientId`
+  // back to the original starter (matched by `X-Qwen-Client-Id`). An
+  // anonymous GET caller, or a caller identifying as a different client,
+  // sees only the public envelope (`status` / `errorKind` / `hint` /
+  // timestamps). Bearer-token gated already (the route uses
+  // `mutate({ strict: true })`), so the blast radius was small, but
+  // multi-client setups sharing a single daemon token could otherwise
+  // enumerate other clients' verification codes.
+  //
+  // **Threat model (PR #4291 follow-up review by Copilot):** this gate
+  // is BEST-EFFORT ATTRIBUTION, not authentication. `X-Qwen-Client-Id`
+  // is a syntactic header, not bound to a server-validated identity —
+  // anyone holding the bearer token can spoof it. The bearer token IS
+  // the auth boundary; this gate exists to prevent ACCIDENTAL
+  // cross-client reads in well-behaved multi-SDK setups (and to keep
+  // GET symmetric with the POST take-over shape closed out in
+  // round-12 #6 of #4255). A determined attacker who has compromised
+  // the daemon bearer token already wins; locking down GET further
+  // would require binding identity into bearer-token issuance, which
+  // is a separate architectural change.
+  // PR #4291 follow-up review (qwen-latest, #3): the gate must accept
+  // the both-undefined case too, otherwise an anonymously-started flow
+  // (POST without `X-Qwen-Client-Id` → `initiatorClientId === undefined`)
+  // becomes silently unreadable: even the same anonymous caller GETting
+  // the same id can no longer retrieve `userCode`/`verificationUri` —
+  // the body switches from "what they got from POST" to a redacted
+  // public envelope, with HTTP 200, no error. Pre-PR-4291 GET returned
+  // these fields to anyone with the bearer; this gate's purpose is to
+  // prevent CROSS-client reads, not to lock anonymous flows out of
+  // their own data.
+  const callerIsInitiator =
+    (view.initiatorClientId === undefined && callerClientId === undefined) ||
+    (view.initiatorClientId !== undefined &&
+      callerClientId !== undefined &&
+      callerClientId === view.initiatorClientId);
+  if (callerIsInitiator) {
+    if (view.userCode) body['userCode'] = view.userCode;
+    if (view.verificationUri) body['verificationUri'] = view.verificationUri;
+    if (view.verificationUriComplete) {
+      body['verificationUriComplete'] = view.verificationUriComplete;
+    }
+    if (view.initiatorClientId) {
+      body['initiatorClientId'] = view.initiatorClientId;
+    }
   }
   return body;
 }
