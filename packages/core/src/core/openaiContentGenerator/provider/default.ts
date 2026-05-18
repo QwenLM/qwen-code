@@ -11,6 +11,8 @@ import {
   hasExplicitOutputLimit,
 } from '../../tokenLimits.js';
 
+const QWEN_MODEL_MARKER = 'qwen';
+
 /**
  * Default provider for standard OpenAI-compatible APIs
  */
@@ -76,10 +78,11 @@ export class DefaultOpenAICompatibleProvider
     // This prevents occupying too much context window with output reservation
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
-    return {
+    const builtRequest = {
       ...requestWithTokenLimits,
       ...(extraBody ? extraBody : {}),
     };
+    return this.mirrorQwenReasoningContent(builtRequest);
   }
 
   getDefaultGenerationConfig(): GenerateContentConfig {
@@ -165,6 +168,47 @@ export class DefaultOpenAICompatibleProvider
     return {
       ...request,
       max_tokens: effectiveMaxTokens,
+    };
+  }
+
+  private mirrorQwenReasoningContent(
+    request: OpenAI.Chat.ChatCompletionCreateParams,
+  ): OpenAI.Chat.ChatCompletionCreateParams {
+    const model = request.model.toLowerCase();
+    if (!model.includes(QWEN_MODEL_MARKER)) {
+      return request;
+    }
+
+    let changed = false;
+    const messages = request.messages.map((message) => {
+      if (message.role !== 'assistant') {
+        return message;
+      }
+
+      const extended = message as unknown as Record<string, unknown>;
+      const reasoningContent = extended['reasoning_content'];
+      if (
+        typeof reasoningContent !== 'string' ||
+        reasoningContent.length === 0 ||
+        typeof extended['reasoning'] === 'string'
+      ) {
+        return message;
+      }
+
+      changed = true;
+      return {
+        ...extended,
+        reasoning: reasoningContent,
+      } as unknown as OpenAI.Chat.ChatCompletionMessageParam;
+    });
+
+    if (!changed) {
+      return request;
+    }
+
+    return {
+      ...request,
+      messages,
     };
   }
 }

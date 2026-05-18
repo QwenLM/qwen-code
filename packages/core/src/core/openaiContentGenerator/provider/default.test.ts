@@ -409,6 +409,44 @@ describe('DefaultOpenAICompatibleProvider', () => {
       });
     });
 
+    it('should mirror reasoning_content to reasoning for Qwen model history', () => {
+      const qwenProvider = new DefaultOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'Qwen/Qwen3.6-35B-A3B',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'Qwen/Qwen3.6-35B-A3B',
+        messages: [
+          {
+            role: 'assistant',
+            content: 'The answer.',
+            reasoning_content: 'Prior reasoning.',
+          } as OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+            reasoning_content: string;
+          },
+        ],
+      };
+
+      const result = qwenProvider.buildRequest(originalRequest, 'prompt-id');
+      const assistant = result.messages[0] as
+        | OpenAI.Chat.ChatCompletionAssistantMessageParam
+        | (OpenAI.Chat.ChatCompletionAssistantMessageParam & {
+            reasoning_content?: string;
+            reasoning?: string;
+          });
+
+      expect(assistant).toEqual(
+        expect.objectContaining({
+          reasoning_content: 'Prior reasoning.',
+          reasoning: 'Prior reasoning.',
+        }),
+      );
+      expect(originalRequest.messages[0]).not.toHaveProperty('reasoning');
+    });
+
     it('should not include extra_body when not configured', () => {
       const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'gpt-4',
