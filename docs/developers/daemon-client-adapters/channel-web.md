@@ -1,10 +1,14 @@
-# Channel And Web Backend Daemon Adapter Draft
+# Channel And Web Backend Daemon Adapter Spike
 
 ## Goal
 
-Let channel adapters and web chat backends consume `qwen serve` through
-`DaemonSessionClient` while keeping existing channel ACP subprocess behavior as
-the default.
+Document the default-off `DaemonChannelBridge` spike for server-side channel
+and web backends.
+
+As of the 2026-05-19 architecture decision, web chat / web terminal are the
+first daemon-native client targets. Channel adapters should continue to use the
+existing ACP subprocess behavior by default; daemon channel integration remains
+future / behind-flag evaluation.
 
 This draft covers server-side clients only:
 
@@ -16,13 +20,13 @@ The daemon currently rejects browser `Origin` requests by design.
 
 ## Proposed Entry Points
 
-Channel backend:
+Proposed historical channel backend experiment, not a wired command today:
 
 ```bash
 QWEN_CHANNEL_DAEMON_URL=http://127.0.0.1:4170 qwen channel start telegram
 ```
 
-Web backend:
+Web backend / BFF target:
 
 ```bash
 QWEN_WEB_DAEMON_URL=http://127.0.0.1:4170 qwen web-chat-backend
@@ -46,7 +50,9 @@ default and owns daemon session state inside the backend process.
 3. Submit inbound user text with `session.prompt()`.
 4. Subscribe to `session.events()` and collect assistant text chunks.
 5. Send final text back through the platform adapter.
-6. Cast permission votes through `session.respondToPermission()`.
+6. Cast permission votes through `session.respondToSessionPermission()` when
+   `caps.features.session_permission_vote` is advertised; use the legacy
+   request-id route only for explicitly single-user or older-daemon fallback.
 7. Cancel active work through `session.cancel()`.
 
 ## Minimal Web Backend Flow
@@ -61,9 +67,9 @@ Browser clients must not receive daemon bearer tokens.
 
 ## Session Isolation Constraint
 
-Current daemon Stage 1 behavior is effectively `sessionScope: single` at the
-daemon setting level. Until per-request `sessionScope` lands, multi-user channel
-or web deployments must choose one of these safe shapes:
+Multi-user channel or web deployments must explicitly isolate sessions. Use
+per-request `sessionScope: 'thread'` when supported; otherwise choose one of
+these safe shapes:
 
 - one daemon per channel thread / web room
 - one daemon per user workspace
@@ -85,7 +91,7 @@ Do not silently multiplex unrelated channel threads into one daemon session.
 
 Unknown daemon events must be ignored or forwarded as debug metadata, not fatal.
 
-The bridge is not wired into `qwen channel start` yet. Existing Telegram,
+The bridge is not wired into `qwen channel start` by default. Existing Telegram,
 Weixin, Dingtalk, plugin channel, and browser behavior remains unchanged.
 
 ## Explicit Non-Goals
@@ -111,10 +117,11 @@ Weixin, Dingtalk, plugin channel, and browser behavior remains unchanged.
 - Smoke-test one single-user channel backend against local `qwen serve`.
 - Smoke-test browser -> BFF -> daemon without exposing daemon token.
 
-## Blockers Before Default Migration
+## Current Follow-Up Direction
 
-- Per-request `sessionScope`.
-- Session metadata + close/delete lifecycle.
-- Daemon-stamped client identity.
-- Session-scoped permission route.
-- Read-only diagnostics for MCP, skills, providers, and environment.
+- Prioritize web chat / web terminal daemon integration first.
+- Keep channel adapters on the existing ACP bridge by default.
+- Revisit daemon channel integration only after web contract, runtime
+  diagnostics, identity, permission, and session lifecycle semantics are stable.
+- Treat this spike as a server-side bridge reference, not a default migration
+  checklist.

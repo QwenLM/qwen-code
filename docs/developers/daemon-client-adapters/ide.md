@@ -1,15 +1,19 @@
-# IDE Daemon Adapter Draft
+# IDE Daemon Adapter Spike
 
 ## Goal
 
-Let the VS Code companion extension dogfood Mode B by connecting from the
-extension host to `qwen serve` through `DaemonSessionClient`.
+Document the default-off IDE daemon adapter spike.
+
+As of the 2026-05-19 architecture decision, the VS Code companion should keep
+the existing `--acp` child path as its default integration. A daemon-backed IDE
+adapter remains future / behind-flag evaluation after the web chat / web
+terminal contract and daemon control-plane parity are stable.
 
 The webview must not call the daemon directly. The extension host owns daemon
 URL, token, session id, and SSE replay state, then forwards sanitized app events
 to the webview.
 
-## Proposed Entry Point
+## Historical Experimental Entry Point
 
 VS Code settings:
 
@@ -37,7 +41,9 @@ QWEN_IDE_DAEMON_URL=http://127.0.0.1:4170 code .
 6. Send user prompts through `session.prompt()`.
 7. Route cancel/model switch through `session.cancel()` and
    `session.setModel()`.
-8. Route permission decisions through `session.respondToPermission()`.
+8. Route permission decisions through `session.respondToSessionPermission()`
+   when advertised; fall back to the legacy permission route only for older
+   daemons.
 
 ## Relationship To Existing ACP Connection
 
@@ -55,8 +61,8 @@ If an event cannot be faithfully mapped yet, the daemon path should surface a
 clear unsupported-state warning rather than silently pretending parity.
 
 This PR adds `DaemonIdeConnection` as the locally verifiable extension-host
-adapter spike. It is not wired into the default `QwenAgentManager` path yet, so
-existing VS Code behavior remains ACP subprocess based.
+adapter spike. It is not wired into the default `QwenAgentManager` path.
+Existing VS Code behavior remains ACP subprocess based.
 
 ## Event Mapping Contract
 
@@ -112,11 +118,12 @@ the daemon.
   - permission UI can resolve a request
   - SSE reconnect uses tracked `Last-Event-ID`
 
-## Blockers Before Default Migration
+## Current Follow-Up Direction
 
-- Typed daemon event schema.
-- Daemon-stamped client identity.
-- Session-scoped permission route.
-- Read-only runtime diagnostics.
-- FileSystemService boundary and safe file read routes.
-- Output sink refactor for CLI/TUI parity.
+- Keep the existing ACP subprocess path as the default IDE path.
+- Revisit daemon IDE integration later in phases:
+  1. web contract plus workspace/path identity checks
+  2. editor-context routing plus auth/status UI
+  3. control-plane parity
+- Treat this spike as future-migration reference, not an active default
+  migration checklist.

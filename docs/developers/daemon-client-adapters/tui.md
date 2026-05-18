@@ -1,16 +1,20 @@
-# TUI Daemon Adapter Draft
+# TUI Daemon Adapter Spike
 
 ## Goal
 
-Add a flag-gated TUI transport that talks to `qwen serve` through
-`DaemonSessionClient` instead of creating an in-process `Config` + agent
-runtime.
+Document the default-off `DaemonTuiAdapter` spike that was added while
+evaluating Mode B client integration.
 
-This is a dogfood path for Mode B client migration. It must not replace the
-default TUI path until output sinks, typed daemon events, session-scoped
-permission, and lifecycle diagnostics are stable.
+As of the 2026-05-19 architecture decision, native local TUI is not planned to
+default-migrate to daemon HTTP/SSE. The normal `qwen` terminal path remains a
+long-term direct runtime / streamJson / Ink path because it avoids an extra
+localhost HTTP server hop and keeps the local UX simpler and more reliable.
 
-## Proposed Entry Point
+The useful follow-up from this spike is source-adapter / reducer / terminal
+render-core extraction so native TUI and web terminal can share view-model and
+rendering logic without forcing native TUI through daemon transport.
+
+## Historical Experimental Entry Point
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 qwen --experimental-daemon-tui
@@ -37,9 +41,10 @@ The CLI should refuse this mode unless both are true:
 5. Submit user prompts through `session.prompt()`.
 6. Route cancel through `session.cancel()`.
 7. Route model switch through `session.setModel()`.
-8. Route permission votes through `session.respondToPermission()`.
+8. Route permission votes through `session.respondToSessionPermission()` when
+   advertised; fall back to the legacy permission route only for older daemons.
 
-## Rendering Contract
+## Rendering Contract Reference
 
 The first implementation adds `DaemonTuiAdapter`, a locally verifiable reducer
 and transport spike. It maps only these daemon events:
@@ -54,15 +59,17 @@ and transport spike. It maps only these daemon events:
 | `model_switched`                         | Update footer/model display                  |
 | `session_died`                           | Show disconnected state and stop streaming   |
 
-Unknown events must be ignored, not fatal. Typed event reducers will land in a
-later protocol PR.
+Unknown events must be ignored, not fatal. Typed event reducers should stay in
+the daemon client/protocol layer, not in server internals, so server transport
+code does not grow UI-specific state machines.
 
-The adapter is not wired into the default Ink app yet. Existing interactive TUI,
+The adapter is not wired into the default Ink app. Existing interactive TUI,
 JSONL, stream-json, and dual-output behavior remains unchanged.
 
 ## Explicit Non-Goals
 
 - Do not remove the current TUI in-process runtime.
+- Do not make daemon transport the default native TUI path.
 - Do not change JSONL, stream-json, or dual-output behavior in this PR.
 - Do not expose file CRUD, MCP management, memory CRUD, or provider/auth
   mutation through TUI yet.
@@ -87,10 +94,11 @@ JSONL, stream-json, and dual-output behavior remains unchanged.
   - permission request can be accepted or rejected
   - reconnect sends the tracked `Last-Event-ID`
 
-## Blockers Before Default Migration
+## Current Follow-Up Direction
 
-- Typed daemon event schema.
-- Session-scoped permission route.
-- Output sink refactor for JSONL / stream-json / dual-output parity.
-- Session lifecycle close/delete semantics.
-- Runtime diagnostics for MCP, skills, providers, and workspace env.
+- Keep native TUI direct by default.
+- Extract source adapters and a shared terminal render core that can be reused
+  by native TUI and web terminal.
+- Prioritize web terminal as the daemon-native terminal surface.
+- Treat this spike as future-migration reference, not an active default
+  migration checklist.
