@@ -554,7 +554,7 @@ describe('useSlashCommandProcessor', () => {
       expect(settled).toBe(true);
     });
 
-    it('does not insert /history info feedback into canonical history', async () => {
+    it('shows info feedback for collapse-on-resume command', async () => {
       const historyCmd = createTestCommand({
         name: 'history',
         action: vi.fn().mockResolvedValue({
@@ -571,11 +571,50 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/history collapse-on-resume');
       });
 
+      // Should have 2 calls: user message + info feedback
+      expect(mockAddItem).toHaveBeenCalledTimes(2);
+      expect(mockAddItem).toHaveBeenNthCalledWith(
+        1,
+        {
+          type: MessageType.USER,
+          text: '/history collapse-on-resume',
+        },
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenNthCalledWith(2, {
+        type: MessageType.INFO,
+        content:
+          'History will be collapsed by default for future resumed sessions.',
+        timestamp: expect.any(Date),
+      });
+    });
+
+    it('suppresses info feedback for expand-now command (self-managed UI)', async () => {
+      const historyCmd = createTestCommand({
+        name: 'history',
+        subcommands: [
+          {
+            name: 'expand-now',
+            action: vi.fn().mockResolvedValue({
+              type: 'load_history',
+              items: [],
+            }),
+          },
+        ],
+      });
+      const result = setupProcessorHook([historyCmd]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/history expand-now');
+      });
+
+      // Only user message, no info feedback (self-managed)
       expect(mockAddItem).toHaveBeenCalledTimes(1);
       expect(mockAddItem).toHaveBeenCalledWith(
         {
           type: MessageType.USER,
-          text: '/history collapse-on-resume',
+          text: '/history expand-now',
         },
         expect.any(Number),
       );
