@@ -201,12 +201,24 @@ export function getDemoHtml(_port: number): string {
   function ts() {
     return new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
+  const MAX_LOG_ENTRIES = 500;
   function addLog(container, tag, tagClass, msg) {
     const el = document.createElement('div');
     el.className = 'log-entry';
     const text = typeof msg === 'object' ? JSON.stringify(msg, null, 2) : msg;
-    el.innerHTML = '<span class="ts">' + ts() + '</span><span class="tag ' + tagClass + '">' + tag + '</span>' + escHtml(text);
+    const tsSpan = document.createElement('span');
+    tsSpan.className = 'ts';
+    tsSpan.textContent = ts();
+    const tagSpan = document.createElement('span');
+    tagSpan.className = 'tag ' + tagClass;
+    tagSpan.textContent = tag;
+    el.appendChild(tsSpan);
+    el.appendChild(tagSpan);
+    el.appendChild(document.createTextNode(text));
     container.appendChild(el);
+    while (container.children.length > MAX_LOG_ENTRIES) {
+      container.removeChild(container.firstChild);
+    }
     container.scrollTop = container.scrollHeight;
   }
   function logEvent(tag, msg) { addLog(eventLog, tag, 'tag-event', msg); }
@@ -306,6 +318,10 @@ export function getDemoHtml(_port: number): string {
         addChatMeta('New session created');
       }
       connectSSE();
+    } else {
+      const msg = r.data.error || 'session creation failed (' + r.status + ')';
+      addChatMeta('Error: ' + msg);
+      if (r.status === 401) highlightTokenInput('Token required or invalid');
     }
   }
 
@@ -333,6 +349,9 @@ export function getDemoHtml(_port: number): string {
         const res = await fetch(url, { signal: abort.signal, headers: hdrs });
         if (!res.ok) {
           logEvent('SSE-ERR', 'HTTP ' + res.status);
+          statusDot.classList.remove('ok');
+          statusText.textContent = 'SSE failed (' + res.status + ')';
+          enablePrompt(false);
           if (res.status === 401) {
             highlightTokenInput('SSE returned 401 — enter your bearer token and recreate the session');
           }
@@ -377,6 +396,7 @@ export function getDemoHtml(_port: number): string {
           logEvent('SSE-ERR', err.message);
           statusDot.classList.remove('ok');
           statusText.textContent = 'SSE error';
+          enablePrompt(false);
         }
       }
     })();
@@ -464,16 +484,26 @@ export function getDemoHtml(_port: number): string {
   }
 
   // --- Prompt ---
+  let promptInFlight = false;
   async function sendPrompt(text) {
-    if (!sessionId || !text.trim()) return;
+    if (!sessionId || !text.trim() || promptInFlight) return;
+    promptInFlight = true;
+    enablePrompt(false);
     addUserMessage(text.trim());
     promptInput.value = '';
     chatInput.value = '';
-    const r = await api('POST', '/session/' + sessionId + '/prompt', {
-      prompt: [{ type: 'text', text: text.trim() }]
-    });
-    if (r.ok) {
-      addChatMeta('stopReason: ' + (r.data.stopReason || 'unknown'));
+    try {
+      const r = await api('POST', '/session/' + sessionId + '/prompt', {
+        prompt: [{ type: 'text', text: text.trim() }]
+      });
+      if (r.ok) {
+        addChatMeta('stopReason: ' + (r.data.stopReason || 'unknown'));
+      } else {
+        addChatMeta('Error: ' + (r.data.error || 'prompt failed (' + r.status + ')'));
+      }
+    } finally {
+      promptInFlight = false;
+      if (sessionId) enablePrompt(true);
     }
   }
 
@@ -514,6 +544,24 @@ export function getDemoHtml(_port: number): string {
       idDiv.style.cssText = 'font-size:11px;color:var(--text2);margin-bottom:6px';
       idDiv.textContent = id;
       card.appendChild(idDiv);
+
+      // Show toolCall context (command, input, path, etc.) when available
+      const tc = req.toolCall || req.tool;
+      if (tc) {
+        const detail = document.createElement('pre');
+        detail.style.cssText = 'font-size:11px;color:var(--text2);margin-bottom:6px;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto;background:var(--bg);padding:6px;border-radius:4px;border:1px solid var(--border)';
+        const parts = [];
+        if (tc.command) parts.push('command: ' + tc.command);
+        if (tc.input) parts.push('input: ' + (typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input, null, 2)));
+        if (tc.path) parts.push('path: ' + tc.path);
+        if (tc.diff) parts.push('diff: ' + tc.diff);
+        if (tc.serverUrl) parts.push('url: ' + tc.serverUrl);
+        if (parts.length === 0 && tc.name) parts.push('tool: ' + tc.name);
+        if (parts.length > 0) {
+          detail.textContent = parts.join('\\n');
+          card.appendChild(detail);
+        }
+      }
 
       function makePermBtn(reqId, optId, label, isCancel) {
         const btn = document.createElement('button');
