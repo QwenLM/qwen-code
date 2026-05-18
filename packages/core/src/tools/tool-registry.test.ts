@@ -195,6 +195,63 @@ describe('ToolRegistry', () => {
       expect(resolved).not.toBeInstanceOf(DiscoveredMCPTool);
       expect(resolved!.name).toBe('structured_output');
     });
+
+    it('skips tools whose name is in Config.disabledTools (#4175 Wave 4 PR 17)', () => {
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: ['Bash', 'mcp__github__create_issue'],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      registry.registerTool(new MockTool({ name: 'Bash' }));
+      registry.registerTool(new MockTool({ name: 'Read' }));
+      registry.registerTool(
+        new MockTool({ name: 'mcp__github__create_issue' }),
+      );
+      expect(registry.getTool('Bash')).toBeUndefined();
+      expect(registry.getTool('Read')).toBeDefined();
+      expect(registry.getTool('mcp__github__create_issue')).toBeUndefined();
+    });
+
+    it('skips lazy factories whose name is in Config.disabledTools', async () => {
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: ['structured_output'],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      registry.registerFactory(
+        'structured_output',
+        async () => new MockTool({ name: 'structured_output' }),
+      );
+      registry.registerFactory(
+        'sequential_thinking',
+        async () => new MockTool({ name: 'sequential_thinking' }),
+      );
+      // Disabled factory never materializes.
+      expect(await registry.ensureTool('structured_output')).toBeUndefined();
+      // Non-disabled factory still materializes.
+      const live = await registry.ensureTool('sequential_thinking');
+      expect(live).toBeDefined();
+      expect(live!.name).toBe('sequential_thinking');
+    });
+
+    it('does not retroactively unregister tools registered before toggle (next-refresh semantic)', () => {
+      // Toggle semantics are documented as "effective on next refresh /
+      // ACP child spawn"; a Set lookup at register time cannot un-do a
+      // prior registration. This test pins the contract.
+      const registry = new ToolRegistry(config);
+      registry.registerTool(new MockTool({ name: 'live-tool' }));
+      expect(registry.getTool('live-tool')).toBeDefined();
+      // Simulate a "fresh Config" with the tool now disabled.
+      const reconfigured = new Config({
+        ...baseConfigParams,
+        disabledTools: ['live-tool'],
+      });
+      const next = new ToolRegistry(reconfigured);
+      next.registerTool(new MockTool({ name: 'live-tool' }));
+      // The new registry skips; the old registry is unaffected.
+      expect(next.getTool('live-tool')).toBeUndefined();
+      expect(registry.getTool('live-tool')).toBeDefined();
+    });
   });
 
   describe('getAllTools', () => {

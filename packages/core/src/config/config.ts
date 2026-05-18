@@ -470,6 +470,18 @@ export interface ConfigParameters {
    * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
    */
   disabledSlashCommands?: string[];
+  /**
+   * Tool names hidden from the registry at construction time. Unlike
+   * `permissions.deny` (which keeps the tool registered and rejects
+   * invocation), tools listed here are not registered at all and never
+   * appear in `/tools`, `getAllTools()`, or function-call discovery.
+   * Sourced from `settings.tools.disabled` and the daemon mutation route
+   * `POST /workspace/tools/:name/enable {enabled:false}` (#4175 Wave 4 PR
+   * 17). Active sessions retain already-registered tools — the disabled
+   * set is consulted at register time, so toggling takes effect on the
+   * next ACP child spawn or `ToolRegistry.refresh()`.
+   */
+  disabledTools?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -742,6 +754,7 @@ export class Config {
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
+  private readonly disabledTools: ReadonlySet<string>;
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -896,6 +909,7 @@ export class Config {
     this.disabledSlashCommands = Object.freeze([
       ...(params.disabledSlashCommands ?? []),
     ]);
+    this.disabledTools = new Set(params.disabledTools ?? []);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -2265,6 +2279,17 @@ export class Config {
    */
   getDisabledSlashCommands(): readonly string[] {
     return this.disabledSlashCommands;
+  }
+
+  /**
+   * Returns the read-only set of tool names hidden from this Config's
+   * ToolRegistry. Consulted by `ToolRegistry.registerTool` and
+   * `ToolRegistry.registerFactory` to skip registration. Toggling at
+   * runtime requires re-spawning the ACP child (the set is frozen at
+   * construction time). See `disabledTools` in ConfigParameters.
+   */
+  getDisabledTools(): ReadonlySet<string> {
+    return this.disabledTools;
   }
 
   getToolCallCommand(): string | undefined {
