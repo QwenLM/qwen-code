@@ -707,6 +707,85 @@ export interface HeartbeatResult {
   lastSeenAt: number;
 }
 
+/** Issue #4175 PR 21 — auth device-flow wire types. */
+
+export type DaemonAuthProviderId = 'qwen-oauth' | (string & {});
+
+// PR #4255 review S4: Sdk-prefixed aliases USED to be parallel literal
+// unions, which silently diverged from the canonical event-side types
+// the moment one was extended. Single-source the canonical definitions
+// from `./events.js` so a single source of truth governs both layers
+// (event payloads + REST wire shapes). TypeScript handles the
+// circular type-only import cleanly because there is no runtime
+// dependency direction. Local `type X = ...` aliases (rather than a
+// re-export) make the symbols usable INSIDE this module too — required
+// by `DaemonDeviceFlowState` / `DaemonAuthProviderStatus` below.
+import type {
+  DaemonAuthDeviceFlowStatus,
+  DaemonAuthDeviceFlowErrorKind,
+} from './events.js';
+export type DaemonAuthDeviceFlowSdkStatus = DaemonAuthDeviceFlowStatus;
+export type DaemonAuthDeviceFlowSdkErrorKind = DaemonAuthDeviceFlowErrorKind;
+
+/** Returned from `POST /workspace/auth/device-flow`. */
+export interface DaemonDeviceFlowStartResult {
+  deviceFlowId: string;
+  providerId: DaemonAuthProviderId;
+  status: DaemonAuthDeviceFlowSdkStatus;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete?: string;
+  expiresAt: number;
+  intervalMs: number;
+  /** True iff the daemon returned an existing pending entry rather than
+   *  starting a fresh flow (per-provider singleton take-over). */
+  attached: boolean;
+  initiatorClientId?: string;
+}
+
+/** Returned from `GET /workspace/auth/device-flow/:id`. */
+export interface DaemonDeviceFlowState {
+  deviceFlowId: string;
+  providerId: DaemonAuthProviderId;
+  status: DaemonAuthDeviceFlowSdkStatus;
+  errorKind?: DaemonAuthDeviceFlowSdkErrorKind;
+  hint?: string;
+  userCode?: string;
+  verificationUri?: string;
+  verificationUriComplete?: string;
+  expiresAt?: number;
+  intervalMs?: number;
+  lastPolledAt?: number;
+  createdAt: number;
+  initiatorClientId?: string;
+}
+
+export interface DaemonAuthProviderStatus extends DaemonStatusCell {
+  kind: 'auth_provider';
+  providerId: DaemonAuthProviderId;
+  expiresAt?: number;
+  /** Best-effort non-PII account label. Never email/phone/username. */
+  accountAlias?: string;
+}
+
+/** Returned from `GET /workspace/auth/status`. */
+export interface DaemonAuthStatusSnapshot {
+  v: 1;
+  workspaceCwd: string;
+  /** Currently registered providers and their auth status. */
+  providers: DaemonAuthProviderStatus[];
+  /** Pending flows; userCode/verificationUri intentionally redacted (the
+   *  full record is fetched via GET /workspace/auth/device-flow/:id). */
+  pendingDeviceFlows: Array<{
+    deviceFlowId: string;
+    providerId: DaemonAuthProviderId;
+    expiresAt: number;
+  }>;
+  /** Provider ids the daemon advertises support for under
+   *  `POST /workspace/auth/device-flow`. */
+  supportedDeviceFlowProviders: DaemonAuthProviderId[];
+}
+
 /** A frame in the SSE event stream. */
 export interface DaemonEvent {
   /**

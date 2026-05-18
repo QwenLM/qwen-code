@@ -116,6 +116,44 @@ export {
   type SubscribeOptions,
 } from './daemon/index.js';
 
+// PR #4255 fold-in 9 review thread #11 — Issue #4175 PR 21 auth
+// surface. These were re-exported from `./daemon/index.js` but the
+// public SDK entry (this file) never re-exported them, so an
+// `import { DaemonAuthFlow } from '@qwen-code/sdk'` resolved to
+// undefined. The PR description lists `reduceDaemonAuthEvent` as
+// SDK surface and `client.auth.start()` works only because
+// `DaemonClient` (already exported above) constructs `DaemonAuthFlow`
+// internally; every other API path was unreachable.
+export {
+  DaemonAuthFlow,
+  DEVICE_FLOW_EXPIRY_GRACE_MS,
+  createDaemonAuthState,
+  reduceDaemonAuthEvent,
+  reduceDaemonAuthEvents,
+  type AwaitCompletionOptions,
+  type DaemonAuthDeviceFlowAuthorizedData,
+  type DaemonAuthDeviceFlowAuthorizedEvent,
+  type DaemonAuthDeviceFlowCancelledData,
+  type DaemonAuthDeviceFlowCancelledEvent,
+  type DaemonAuthDeviceFlowErrorKind,
+  type DaemonAuthDeviceFlowFailedData,
+  type DaemonAuthDeviceFlowFailedEvent,
+  type DaemonAuthDeviceFlowProviderId,
+  type DaemonAuthDeviceFlowStartedData,
+  type DaemonAuthDeviceFlowStartedEvent,
+  type DaemonAuthDeviceFlowStatus,
+  type DaemonAuthDeviceFlowThrottledData,
+  type DaemonAuthDeviceFlowThrottledEvent,
+  type DaemonAuthEvent,
+  type DaemonAuthFlowHandle,
+  type DaemonAuthProviderId,
+  type DaemonAuthState,
+  type DaemonAuthStatusSnapshot,
+  type DaemonDeviceFlowReducerState,
+  type DaemonDeviceFlowStartResult,
+  type DaemonDeviceFlowState,
+} from './daemon/index.js';
+
 // SDK MCP Server exports
 export { tool } from './mcp/tool.js';
 export { createSdkMcpServer } from './mcp/createSdkMcpServer.js';
