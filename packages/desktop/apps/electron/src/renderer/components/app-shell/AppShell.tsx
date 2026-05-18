@@ -111,6 +111,7 @@ import * as storage from "@/lib/local-storage"
 import { toast } from "sonner"
 import { navigate, routes } from "@/lib/navigate"
 import { loadProjectWorkspaceSessionSnapshot } from "@/lib/project-session-snapshots"
+import { shouldLoadWorkspaceSkills } from "@/lib/skills-loading"
 import {
   useNavigation,
   useNavigationState,
@@ -1530,9 +1531,11 @@ function AppShellContent({
     [activeEffectiveConnectionSlug, llmConnections],
   )
   const shouldUseQwenAcpSkills = activeEffectiveConnection?.providerType === 'qwen'
-  const shouldLoadSkills = isSkillsNavigation(navState) || (
-    llmConnections.length > 0 && !shouldUseQwenAcpSkills
-  )
+  const shouldLoadSkills = shouldLoadWorkspaceSkills({
+    isSkillsNavigation: isSkillsNavigation(navState),
+    llmConnectionCount: llmConnections.length,
+    providerType: activeEffectiveConnection?.providerType,
+  })
 
   // Subscribe to live skill updates (when skills are added/removed dynamically)
   React.useEffect(() => {
