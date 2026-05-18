@@ -648,7 +648,10 @@ export interface AcpChannelExitInfo {
   signalCode: NodeJS.Signals | null;
 }
 
-export type ChannelFactory = (workspaceCwd: string) => Promise<AcpChannel>;
+export type ChannelFactory = (
+  workspaceCwd: string,
+  childEnvOverrides?: Readonly<Record<string, string | undefined>>,
+) => Promise<AcpChannel>;
 
 // FIXME(stage-1.5, chiga0 finding 1 + 4):
 // Stage 1.5 should split this file's responsibilities into:
@@ -748,6 +751,30 @@ export interface BridgeOptions {
    * MUST canonicalize before passing.
    */
   boundWorkspace: string;
+  /**
+   * PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): per-
+   * handle env overrides forwarded to `defaultSpawnChannelFactory`
+   * at spawn time. Replaces the prior `process.env` mutation in
+   * `runQwenServe` so concurrent embedded daemons in the same
+   * process don't cross-contaminate each other's MCP budget /
+   * mode env (the `defaultSpawnChannelFactory` snapshots
+   * `process.env` AT SPAWN TIME, not at `runQwenServe()` call
+   * time — so the last `runQwenServe()` to set the global env
+   * would win for all subsequent spawns across all daemon
+   * handles, breaking the documented per-daemon policy).
+   *
+   * Shape: `Record<string, string | undefined>`. A `string` value
+   * sets the env var for the child; `undefined` explicitly
+   * REMOVES the var from the child env (useful for "this daemon
+   * has no MCP budget" embedded callers that need to scrub a
+   * stale global). Keys NOT present in this record are inherited
+   * from `process.env` as before.
+   *
+   * Custom `channelFactory` callers receive this through the
+   * factory's second arg and decide what to do with it (tests
+   * typically ignore it; the production factory merges it).
+   */
+  childEnvOverrides?: Readonly<Record<string, string | undefined>>;
 }
 
 /**
@@ -1481,6 +1508,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
+  // PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): close over
+  // a per-handle env-override snapshot. Calls to `channelFactory` at
+  // spawn time receive this as the 2nd arg, so the default factory
+  // can merge into the child env without consulting any global state
+  // that another concurrent `runQwenServe()` handle might have
+  // mutated. Frozen to make accidental mutation throw rather than
+  // silently corrupt later spawns.
+  const childEnvOverrides: Readonly<Record<string, string | undefined>> =
+    opts.childEnvOverrides
+      ? Object.freeze({ ...opts.childEnvOverrides })
+      : Object.freeze({});
   const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
   if (initTimeoutMs <= 0) {
     throw new TypeError(
@@ -1782,7 +1820,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
-      const channel = await channelFactory(boundWorkspace);
+      const channel = await channelFactory(boundWorkspace, childEnvOverrides);
       const client = new BridgeClient(
         // BfFut: ACP today carries a sessionId on every per-session
         // notification / request, so the no-sessionId branch is
@@ -4005,6 +4043,7 @@ async function safeCheck(
  */
 export const defaultSpawnChannelFactory: ChannelFactory = async (
   workspaceCwd,
+  childEnvOverrides,
 ) => {
   // Resolution order:
   //   1. `QWEN_CLI_ENTRY` env override — escape hatch for non-standard
@@ -4065,6 +4104,24 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   for (const key of SCRUBBED_CHILD_ENV_KEYS) {
     delete childEnv[key];
+  }
+  // PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): apply
+  // per-handle env overrides on top of the process.env snapshot.
+  // `undefined` value means "delete this var from the child env" so
+  // an embedded caller can scrub a stale inherited var without
+  // having to mutate the daemon's global process.env. Applied AFTER
+  // `SCRUBBED_CHILD_ENV_KEYS` so the daemon-only secret list still
+  // wins (operators can't override the scrub by passing
+  // `QWEN_SERVER_TOKEN` in overrides — defense in depth).
+  if (childEnvOverrides) {
+    for (const [key, value] of Object.entries(childEnvOverrides)) {
+      if (SCRUBBED_CHILD_ENV_KEYS.has(key)) continue;
+      if (value === undefined) {
+        delete childEnv[key];
+      } else {
+        childEnv[key] = value;
+      }
+    }
   }
   // CodeQL `js/path-injection` flags the `cwd: workspaceCwd` flow.
   // Stage 1 trust model accepts this — see the function-level comment

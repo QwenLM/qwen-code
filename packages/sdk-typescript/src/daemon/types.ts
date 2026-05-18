@@ -190,6 +190,9 @@ export const DAEMON_ERROR_KINDS = [
   'protocol_error',
   'missing_file',
   'parse_error',
+  // Issue #4175 PR 14: budget refusal under `--mcp-budget-mode=enforce`.
+  // Mirrors the serve-side `SERVE_ERROR_KINDS` addition.
+  'budget_exhausted',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
@@ -228,6 +231,47 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   disabled: boolean;
   description?: string;
   extensionName?: string;
+  /**
+   * Why this server is not live, when known (issue #4175 PR 14).
+   * `'config'`  — operator-disabled via `disabledMcpServers`.
+   * `'budget'`  — refused by the workspace MCP client budget
+   *               (snapshot also surfaces `errorKind:
+   *               'budget_exhausted'`).
+   * Absent on pre-PR-14 daemons.
+   */
+  disabledReason?: 'config' | 'budget';
+}
+
+/** Budget enforcement mode for MCP client guardrails (issue #4175 PR 14). */
+export type DaemonMcpBudgetMode = 'enforce' | 'warn' | 'off';
+
+/**
+ * MCP client budget status cell. Issue #4175 PR 14 v1 emits one
+ * entry with `scope: 'session'` (per-session enforcement; see the
+ * `scope` field doc for why). Wave 5 PR 23 shared pool will add
+ * `scope: 'workspace'`. Consumers MUST tolerate unrecognized scope
+ * values — drop, don't fail.
+ */
+export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
+  kind: 'mcp_budget';
+  /**
+   * **PR 14 v1 emits `'session'`** — the budget caps live MCP
+   * clients per ACP session, not per-workspace. Each session has its
+   * own `McpClientManager` (created via `acpAgent.newSessionConfig`).
+   * Wave 5 PR 23 (shared MCP pool) will introduce a workspace-scoped
+   * manager and emit `'workspace'` (or `'pool'`) cells.
+   *
+   * The `string & {}` widening keeps IDE autocomplete + literal
+   * narrowing for known scopes while allowing unknown scopes through
+   * — the protocol contract is "consumers MUST tolerate additional
+   * scope values, drop don't fail." See `qwen-serve-protocol.md`.
+   */
+  scope: 'session' | 'workspace' | (string & {});
+  liveCount: number;
+  /** Configured cap. Absent when mode is `off`. */
+  budget?: number;
+  mode: DaemonMcpBudgetMode;
+  refusedCount: number;
 }
 
 export interface DaemonWorkspaceMcpStatus {
@@ -237,6 +281,18 @@ export interface DaemonWorkspaceMcpStatus {
   discoveryState?: DaemonMcpDiscoveryState;
   servers: DaemonWorkspaceMcpServerStatus[];
   errors?: DaemonStatusCell[];
+  /** PR 14: live MCP client count, all transports. Absent on pre-PR-14 daemons. */
+  clientCount?: number;
+  /** PR 14: configured budget. Absent when no cap set. */
+  clientBudget?: number;
+  /** PR 14: active enforcement mode. Absent on pre-PR-14 daemons. */
+  budgetMode?: DaemonMcpBudgetMode;
+  /**
+   * PR 14: workspace-level budget cells. Empty array (not absent)
+   * on post-PR-14 daemons when no budget is configured AND mode
+   * resolves to `off`. Pre-PR-14 daemons omit the field.
+   */
+  budgets?: DaemonMcpBudgetStatusCell[];
 }
 
 export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
