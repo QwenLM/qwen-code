@@ -12,6 +12,7 @@ import { loadServerHierarchicalMemory } from './memoryDiscovery.js';
 import {
   setGeminiMdFilename,
   DEFAULT_CONTEXT_FILENAME,
+  LOCAL_CONTEXT_FILENAME,
 } from '../memory/const.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { QWEN_DIR } from './paths.js';
@@ -535,5 +536,124 @@ describe('loadServerHierarchicalMemory', () => {
     ).length;
     expect(parentOccurrences).toBe(1);
     expect(childOccurrences).toBe(1);
+  });
+
+  describe('.qwen/QWEN.local.md', () => {
+    // These tests need a real git root so findProjectRoot resolves correctly.
+    beforeEach(async () => {
+      await fsPromises.mkdir(path.join(projectRoot, '.git'), {
+        recursive: true,
+      });
+    });
+
+    it('loads local context file when present at project root', async () => {
+      const localFile = await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local instructions',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.memoryContent).toContain('local instructions');
+      expect(result.memoryContent).toContain(
+        path.relative(cwd, localFile).toString(),
+      );
+    });
+
+    it('places local file between committed and global files', async () => {
+      await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        'committed content',
+      );
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local content',
+      );
+      await createTestFile(
+        path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+        'global content',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(3);
+
+      const committedIdx = result.memoryContent!.indexOf('committed content');
+      const localIdx = result.memoryContent!.indexOf('local content');
+      const globalIdx = result.memoryContent!.indexOf('global content');
+      // Order in prompt: global → local → committed (later = higher priority).
+      expect(globalIdx).toBeLessThan(localIdx);
+      expect(localIdx).toBeLessThan(committedIdx);
+    });
+
+    it('does not load local file for untrusted workspaces', async () => {
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local instructions',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        false, // untrusted
+      );
+
+      expect(result.fileCount).toBe(0);
+      expect(result.memoryContent).toBe('');
+    });
+
+    it('does not load local file in explicitOnly mode', async () => {
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local instructions',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+        'tree',
+        [],
+        { explicitOnly: true },
+      );
+
+      expect(result.fileCount).toBe(0);
+      expect(result.memoryContent).toBe('');
+    });
+
+    it('loads local file when no committed QWEN.md exists', async () => {
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME),
+        'local-only instructions',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.memoryContent).toContain('local-only instructions');
+    });
   });
 });

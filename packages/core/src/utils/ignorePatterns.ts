@@ -6,7 +6,11 @@
 
 import path from 'node:path';
 import type { Config } from '../config/config.js';
-import { getAllGeminiMdFilenames } from '../memory/const.js';
+import {
+  getAllGeminiMdFilenames,
+  LOCAL_CONTEXT_FILENAME,
+} from '../memory/const.js';
+import { QWEN_DIR } from './paths.js';
 
 /**
  * Common ignore patterns used across multiple tools for basic exclusions.
@@ -163,6 +167,7 @@ export class FileExclusions {
       for (const filename of getAllGeminiMdFilenames()) {
         patterns.push(`**/${filename}`);
       }
+      patterns.push(`**/${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`);
     }
 
     // Add custom patterns from configuration

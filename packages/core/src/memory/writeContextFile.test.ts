@@ -9,9 +9,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
+import { QWEN_DIR } from '../utils/paths.js';
 import {
   AGENT_CONTEXT_FILENAME,
   DEFAULT_CONTEXT_FILENAME,
+  LOCAL_CONTEXT_FILENAME,
   MEMORY_SECTION_HEADER,
   setGeminiMdFilename,
 } from './const.js';
@@ -479,6 +481,118 @@ describe('writeWorkspaceContextFile', () => {
       expect(result.filePath).toBe(qwenPath);
       const qwenContent = await fs.readFile(qwenPath, 'utf8');
       expect(qwenContent).toContain('- which one?');
+    });
+
+    it('falls back to local file when no committed context exists', async () => {
+      const localPath = path.join(workspace, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(localPath, '# local\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- auto local entry',
+        projectRoot: workspace,
+      });
+
+      expect(result.filePath).toBe(localPath);
+      const written = await fs.readFile(localPath, 'utf8');
+      expect(written).toContain('- auto local entry');
+    });
+
+    it('prefers committed QWEN.md over local file in auto scope', async () => {
+      const qwenPath = path.join(workspace, DEFAULT_CONTEXT_FILENAME);
+      const localPath = path.join(workspace, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+      await fs.writeFile(qwenPath, '# qwen\n', 'utf8');
+      await fs.mkdir(path.dirname(localPath), { recursive: true });
+      await fs.writeFile(localPath, '# local\n', 'utf8');
+
+      const result = await writeWorkspaceContextFile({
+        scope: 'auto',
+        mode: 'append',
+        content: '- which scope?',
+        projectRoot: workspace,
+      });
+
+      expect(result.filePath).toBe(qwenPath);
+    });
+  });
+
+  describe('local scope', () => {
+    it('writes to .qwen/QWEN.local.md', async () => {
+      const result = await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- local entry',
+        projectRoot: workspace,
+      });
+
+      const expectedPath = path.join(
+        workspace,
+        QWEN_DIR,
+        LOCAL_CONTEXT_FILENAME,
+      );
+      expect(result.filePath).toBe(expectedPath);
+      const written = await fs.readFile(expectedPath, 'utf8');
+      expect(written).toBe(`${MEMORY_SECTION_HEADER}\n- local entry\n`);
+    });
+
+    it('creates the .qwen directory if missing', async () => {
+      const qwenDir = path.join(workspace, QWEN_DIR);
+      await expect(fs.access(qwenDir)).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+
+      await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- created',
+        projectRoot: workspace,
+      });
+
+      const stat = await fs.stat(qwenDir);
+      expect(stat.isDirectory()).toBe(true);
+    });
+
+    it('adds .qwen/QWEN.local.md to .gitignore on first write', async () => {
+      await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- local entry',
+        projectRoot: workspace,
+      });
+
+      const gitignore = await fs.readFile(
+        path.join(workspace, '.gitignore'),
+        'utf8',
+      );
+      expect(gitignore).toContain(`${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`);
+    });
+
+    it('does not duplicate the gitignore entry on subsequent writes', async () => {
+      await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- first',
+        projectRoot: workspace,
+      });
+      await writeWorkspaceContextFile({
+        scope: 'local',
+        mode: 'append',
+        content: '- second',
+        projectRoot: workspace,
+      });
+
+      const gitignore = await fs.readFile(
+        path.join(workspace, '.gitignore'),
+        'utf8',
+      );
+      const count = gitignore
+        .split('\n')
+        .filter(
+          (l) => l.trim() === `${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`,
+        ).length;
+      expect(count).toBe(1);
     });
   });
 });

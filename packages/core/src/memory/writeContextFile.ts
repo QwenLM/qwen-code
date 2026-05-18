@@ -16,8 +16,10 @@ import { Storage } from '../config/storage.js';
 import {
   getCurrentGeminiMdFilename,
   getAllGeminiMdFilenames,
+  LOCAL_CONTEXT_FILENAME,
   MEMORY_SECTION_HEADER,
 } from './const.js';
+import { QWEN_DIR } from '../utils/paths.js';
 
 /**
  * Per-resolved-file mutex map. Two simultaneous `writeWorkspaceContextFile`
@@ -81,7 +83,7 @@ export class WorkspaceMemoryWriteTimeoutError extends Error {
   }
 }
 
-export type WriteContextFileScope = 'workspace' | 'global' | 'auto';
+export type WriteContextFileScope = 'workspace' | 'global' | 'local' | 'auto';
 export type WriteContextFileMode = 'append' | 'replace';
 
 export interface WriteContextFileOptions {
@@ -152,6 +154,11 @@ export async function writeWorkspaceContextFile(
     options.scope,
     options.projectRoot,
   );
+
+  // Ensure the local context file is gitignored before writing.
+  if (options.scope === 'local') {
+    await ensureGitignoreEntry(options.projectRoot);
+  }
 
   // Hold the per-file mutex for the entire read-compose-write sequence
   // INCLUDING the whitespace-only no-op detection. Two concurrent
@@ -227,6 +234,31 @@ async function runWrite(
   };
 }
 
+/**
+ * Idempotently add `.qwen/QWEN.local.md` to `.gitignore` so the local
+ * context file is never accidentally committed. Safe to call on every
+ * local-scope write — exits early when the pattern is already present.
+ */
+async function ensureGitignoreEntry(projectRoot: string): Promise<void> {
+  const entry = `${QWEN_DIR}/${LOCAL_CONTEXT_FILENAME}`;
+  const gitignorePath = path.join(projectRoot, '.gitignore');
+
+  try {
+    const existing = await fs.readFile(gitignorePath, 'utf8');
+    if (existing.split('\n').some((line) => line.trim() === entry)) {
+      return;
+    }
+    const sep = existing.endsWith('\n') ? '' : '\n';
+    await fs.writeFile(gitignorePath, existing + sep + entry + '\n', 'utf8');
+  } catch (err) {
+    if (isEnoent(err)) {
+      await fs.writeFile(gitignorePath, entry + '\n', 'utf8');
+    } else {
+      throw err;
+    }
+  }
+}
+
 async function resolveContextFilePath(
   scope: WriteContextFileScope,
   projectRoot: string,
@@ -236,6 +268,10 @@ async function resolveContextFilePath(
   const filename = getCurrentGeminiMdFilename();
   if (scope === 'workspace') {
     return path.join(projectRoot, filename);
+  }
+
+  if (scope === 'local') {
+    return path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
   }
 
   if (scope === 'auto') {
@@ -255,6 +291,16 @@ async function resolveContextFilePath(
       } catch (err) {
         if (!isEnoent(err)) throw err;
       }
+    }
+    // Check for local file before falling back to global.
+    const localPath = path.join(projectRoot, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+    try {
+      const stat = await fs.stat(localPath);
+      if (stat.isFile()) {
+        return localPath;
+      }
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
     }
     return path.join(Storage.getGlobalQwenDir(), filename);
   }

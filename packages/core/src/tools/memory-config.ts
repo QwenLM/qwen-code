@@ -12,6 +12,7 @@
 
 export const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
 export const AGENT_CONTEXT_FILENAME = 'AGENTS.md';
+export const LOCAL_CONTEXT_FILENAME = 'QWEN.local.md';
 export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
 
 // This variable will hold the currently configured filename for context files.

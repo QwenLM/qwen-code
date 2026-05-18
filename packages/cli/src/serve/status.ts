@@ -257,7 +257,7 @@ export interface ServeSessionSupportedCommandsStatus {
  * so the SDK reducer can render any of these with one pattern.
  */
 
-export type ServeContextFileScope = 'workspace' | 'global';
+export type ServeContextFileScope = 'workspace' | 'local' | 'global';
 
 export interface ServeWorkspaceMemoryFile {
   kind: 'memory_file';

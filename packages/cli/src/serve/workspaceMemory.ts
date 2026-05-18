@@ -12,6 +12,8 @@ import {
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
   getAllGeminiMdFilenames,
+  LOCAL_CONTEXT_FILENAME,
+  QWEN_DIR,
   writeWorkspaceContextFile,
   type WriteContextFileScope,
 } from '@qwen-code/qwen-code-core';
@@ -82,6 +84,7 @@ const MAX_MEMORY_CONTENT_BYTES = 1024 * 1024;
 const VALID_SCOPES: ReadonlySet<string> = new Set([
   'workspace',
   'global',
+  'local',
   'auto',
 ]);
 
@@ -343,6 +346,29 @@ async function collectWorkspaceMemoryStatus(
     errors,
   );
   files.push(...workspaceFiles);
+
+  // Probe for .qwen/QWEN.local.md at the workspace root.
+  const localPath = path.join(boundWorkspace, QWEN_DIR, LOCAL_CONTEXT_FILENAME);
+  try {
+    const stat = await fs.stat(localPath);
+    if (stat.isFile()) {
+      files.push({
+        absolutePath: localPath,
+        scope: 'local',
+        bytes: stat.size,
+      });
+    }
+  } catch (err) {
+    if (!isEnoent(err)) {
+      errors.push({
+        kind: 'memory_file',
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+        errorKind: 'stat_failed',
+        hint: localPath,
+      });
+    }
+  }
 
   const globalDir = Storage.getGlobalQwenDir();
   for (const filename of filenames) {
