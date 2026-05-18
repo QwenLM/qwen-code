@@ -119,7 +119,7 @@ export function useProviderSetupFlow(
   const [modalityEnabled, setModalityEnabled] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
   const [modalityVideo, setModalityVideo] = useState(true);
-  const [modalityAudio, setModalityAudio] = useState(true);
+  const [modalityAudio, setModalityAudio] = useState(false);
   const [modalityPdf, setModalityPdf] = useState(false);
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
@@ -164,7 +164,7 @@ export function useProviderSetupFlow(
       setModalityEnabled(false);
       setModalityImage(true);
       setModalityVideo(true);
-      setModalityAudio(true);
+      setModalityAudio(false);
       setModalityPdf(false);
       setContextWindowSize('');
       setFocusedConfigIndex(0);

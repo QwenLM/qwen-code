@@ -1637,14 +1637,14 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
       stdin.write('\r');
       await wait();
 
-      // Verify review includes generationConfig
+      // Verify review includes generationConfig (audio is off by default)
       await vi.waitFor(() => {
         const frame = lastFrame();
         expect(frame).toContain('"generationConfig"');
         expect(frame).toContain('"enable_thinking"');
         expect(frame).toContain('"image": true');
         expect(frame).toContain('"video": true');
-        expect(frame).toContain('"audio": true');
+        expect(frame).not.toContain('"audio"');
       });
 
       // Press Enter to save
@@ -1661,7 +1661,6 @@ describe('AuthDialog Custom API Key Wizard', { timeout: 15000 }, () => {
               multimodal: {
                 image: true,
                 video: true,
-                audio: true,
               },
             },
           }),
