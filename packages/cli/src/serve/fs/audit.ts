@@ -214,7 +214,18 @@ export function createAuditPublisher(
         errorKind: record.errorKind,
       };
       if (record.hint) payload.hint = record.hint;
-      if (record.message) payload.message = record.message;
+      // `message` carries the underlying `FsError.message`, which
+      // many throw-sites embed `${p}` (absolute workspace path) or
+      // user-supplied `oldText` snippets into. Privacy-mode
+      // deployments that intentionally disabled raw-path logging
+      // would otherwise see those paths leak through the message.
+      // Gate the field on `includeRawPaths` so privacy mode means
+      // privacy mode for ALL path-bearing audit content (relPath
+      // AND message). Operators who want full forensic context
+      // opt in via `QWEN_AUDIT_RAW_PATHS=1`.
+      if (record.message && includeRawPaths) {
+        payload.message = record.message;
+      }
       if (includeRawPaths) {
         payload.relPath = relForAudit(record.input, boundWorkspace);
       }

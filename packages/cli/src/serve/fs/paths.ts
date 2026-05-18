@@ -97,19 +97,35 @@ export type ResolvedPath = string & { readonly __brand: 'ResolvedPath' };
 
 /**
  * Intent declared at boundary entry. Used by callers (and the upcoming
- * `policy.ts` module) to decide ignore/trust handling. `resolveWithinWorkspace`
- * itself uses the intent only to differentiate ENOENT semantics: write
- * intents tolerate a non-existent leaf (the file is about to be created),
- * read intents do not.
+ * `policy.ts` module) to decide ignore/trust handling.
+ * `resolveWithinWorkspace` itself uses the intent to differentiate
+ * ENOENT semantics: `'write'` and `'stat'` tolerate a non-existent
+ * leaf (the file is about to be created, or the caller is asking
+ * "does this exist?"), other intents do not.
  *
- * `'edit'` is a distinct intent from `'write'` so the trust gate, audit
- * payload, and exhaustiveness checks can reason about partial-replace
- * semantics separately from full-overwrite. Both gate identically in
- * `assertTrustedForIntent`; the split exists to keep audit events
- * faithful to the operation actually performed.
+ * `'edit'` is a distinct intent from `'write'` so the trust gate,
+ * audit payload, and exhaustiveness checks can reason about
+ * partial-replace semantics separately from full-overwrite. Both
+ * gate identically in `assertTrustedForIntent`; the split exists
+ * to keep audit events faithful to the operation actually
+ * performed.
+ *
+ * Why `'stat'` tolerates ENOENT: stat-ing a path that doesn't
+ * exist is a legitimate existence check (a route handler asking
+ * "should I 404?" before letting a downstream call fail with a
+ * cryptic message). `WorkspaceFileSystem.stat()` re-`lstat`s the
+ * resolved path itself and surfaces the natural ENOENT to the
+ * caller, so the resolver doesn't need to pre-emptively reject.
  */
 export type Intent = 'read' | 'write' | 'edit' | 'list' | 'glob' | 'stat';
 
+/**
+ * Intents that tolerate a non-existent leaf — see `Intent`'s
+ * docstring for why each is in the set. Adding a new intent here
+ * is a deliberate decision: the resolver's ancestor walk returns
+ * a synthetic canonical path that the caller MUST be prepared to
+ * see succeed for nonexistent leaves.
+ */
 const ENOENT_TOLERATING_INTENTS: ReadonlySet<Intent> = new Set([
   'write',
   'stat',

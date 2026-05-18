@@ -208,15 +208,23 @@ export function enforceWriteSize(
  * Throw `file_too_large` if a read would exceed the cap and the
  * caller cannot accept truncation (used by `readBytes`, where
  * partial content is unsafe to return).
+ *
+ * Critical: `MAX_READ_BYTES` is the **hard** ceiling — caller-
+ * supplied `maxBytes` clamps it DOWN, never up. Without this
+ * `Math.min` clamp, a future PR 19/20 route that blindly forwards
+ * `req.query.maxBytes` would let a request widen past the daemon's
+ * 256 KiB safety cap and trigger the OOM scenario the cap exists
+ * to prevent.
  */
 export function enforceReadBytesSize(
   fileBytes: number,
   maxBytes: number = MAX_READ_BYTES,
 ): void {
-  if (fileBytes > maxBytes) {
+  const effectiveMax = Math.min(maxBytes, MAX_READ_BYTES);
+  if (fileBytes > effectiveMax) {
     throw new FsError(
       'file_too_large',
-      `file of ${fileBytes} bytes exceeds read limit of ${maxBytes} bytes`,
+      `file of ${fileBytes} bytes exceeds read limit of ${effectiveMax} bytes`,
       {
         hint: 'use readText for capped truncation, or raise the daemon limit',
       },

@@ -518,6 +518,77 @@ describe('WorkspaceFileSystem - TOCTOU + UTF-8 + cwd hardening', () => {
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('path_outside_workspace');
   });
+
+  it('glob rejects opts.cwd that is a symlink resolving outside the workspace', async () => {
+    // The textual `path.resolve` + `isWithinRoot` check admits
+    // `<ws>/link` even when `<ws>/link → /scratch` is a symlink
+    // to outside. `realpath` on cwd follows the chain so the
+    // containment check sees the actual walk root and rejects.
+    const link = path.join(h.workspace, 'link-to-scratch');
+    await fsp.symlink(h.scratch, link, 'dir');
+    const err = await h.fs
+      .glob('**/*', { cwd: link as unknown as ResolvedPath })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('path_outside_workspace');
+  });
+
+  it('writeText rejects when path was swapped to a symlink between resolve and write', async () => {
+    // resolve a path → swap target with a symlink to outside →
+    // writeText should reject with `symlink_escape` rather than
+    // letting `atomicWriteFile`'s symlink-following code write
+    // outside the workspace.
+    const target = path.join(h.workspace, 'about-to-write.txt');
+    const r = await h.fs.resolve('about-to-write.txt', 'write');
+    const outside = path.join(h.scratch, 'outside-target.txt');
+    await fsp.writeFile(outside, ''); // pre-create so symlink isn't dangling
+    await fsp.symlink(outside, target, 'file');
+    const err = await h.fs.writeText(r, 'hello').catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+    // The outside file MUST remain empty (no escape).
+    const outsideContent = await fsp.readFile(outside, 'utf-8');
+    expect(outsideContent).toBe('');
+  });
+
+  it('edit rejects when path was swapped to a symlink between read and write', async () => {
+    // edit() reads the file, then writes back. After the post-read
+    // inode check, an attacker could in theory swap to a symlink
+    // before the writeTextFile call. The pre-write guard catches
+    // that. We approximate: write a file, resolve, edit-pattern
+    // setup, then mid-operation we can't easily inject — instead
+    // we test the boundary directly by setting up a symlink that
+    // matches a pre-existing inode but points outside, similar
+    // shape to the writeText test above.
+    const target = path.join(h.workspace, 'edit-target.txt');
+    await fsp.writeFile(target, 'foo=1\n');
+    const r = await h.fs.resolve('edit-target.txt', 'edit');
+    // Replace with symlink-to-outside AFTER resolve.
+    const outside = path.join(h.scratch, 'edit-outside.txt');
+    await fsp.writeFile(outside, 'foo=1\n');
+    await fsp.unlink(target);
+    await fsp.symlink(outside, target, 'file');
+    const err = await h.fs.edit(r, 'foo=1', 'foo=2').catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    // post-read inode check fires first since inode changed; either
+    // catch is acceptable as a security signal.
+    expect(['symlink_escape']).toContain((err as { kind: string }).kind);
+    const outsideContent = await fsp.readFile(outside, 'utf-8');
+    expect(outsideContent).toBe('foo=1\n');
+  });
+
+  it('readBytes opts.maxBytes is clamped to MAX_READ_BYTES (cannot widen past hard cap)', async () => {
+    const policy = await import('./policy.js');
+    const big = path.join(h.workspace, 'overrun.bin');
+    await fsp.writeFile(big, Buffer.alloc(policy.MAX_READ_BYTES + 1));
+    const r = await h.fs.resolve('overrun.bin', 'read');
+    // Caller tries to widen past the hard cap.
+    const err = await h.fs
+      .readBytes(r, { maxBytes: policy.MAX_READ_BYTES * 10 })
+      .catch((e: unknown) => e);
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('file_too_large');
+  });
 });
 
 describe('WorkspaceFileSystem - audit always emits on body errors', () => {
@@ -554,17 +625,40 @@ describe('WorkspaceFileSystem - audit always emits on body errors', () => {
     expect(denied).toBeDefined();
   });
 
-  it('fs.denied audit payload carries the FsError message for forensic context', async () => {
-    // The earlier audit only recorded `errorKind` + `hint`; the
-    // underlying OS / `FsError` message (path, errno detail, byte
-    // count) was lost from the audit trail. `recordAndWrap` now
-    // forwards the message so audit consumers debugging a
-    // production incident can see the actual cause.
+  it('fs.denied audit message field is gated behind QWEN_AUDIT_RAW_PATHS (privacy default omits)', async () => {
+    // Default (privacy) mode: `message` MUST be absent because the
+    // underlying `FsError.message` embeds `${p}` absolute paths
+    // that would otherwise leak workspace structure to audit
+    // consumers — even when operators explicitly disabled
+    // raw-path logging via not-setting `QWEN_AUDIT_RAW_PATHS`.
+    // See `audit.ts:recordDenied` — message gates on
+    // `includeRawPaths`.
     const err = (await h.fs
       .resolve('../escape', 'read')
       .catch((e: unknown) => e)) as { message: string };
     expect(err.message).toMatch(/escapes workspace/);
     const denied = h.events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
+    expect(denied).toBeDefined();
+    // Privacy-default mode: message is OMITTED.
+    expect((denied!.data as { message?: string }).message).toBeUndefined();
+  });
+
+  it('fs.denied carries message when includeRawPaths is enabled (forensic mode)', async () => {
+    // Build a fresh harness with includeRawPaths: true to verify
+    // the audit message round-trip works in raw-path mode.
+    const events: BridgeEvent[] = [];
+    const factory = createWorkspaceFileSystemFactory({
+      boundWorkspace: h.workspace,
+      trusted: true,
+      emit: (e) => events.push(e),
+      includeRawPaths: true,
+    });
+    const fs = factory.forRequest({ route: 'TEST /op' });
+    const err = (await fs
+      .resolve('../escape', 'read')
+      .catch((e: unknown) => e)) as { message: string };
+    expect(err.message).toMatch(/escapes workspace/);
+    const denied = events.find((e) => e.type === FS_DENIED_EVENT_TYPE);
     expect(denied).toBeDefined();
     expect((denied!.data as { message?: string }).message).toBe(err.message);
   });

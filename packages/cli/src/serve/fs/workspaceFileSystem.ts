@@ -314,6 +314,27 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         limit: opts.limit ?? Number.POSITIVE_INFINITY,
         line: startLineIndex,
       });
+      // Post-read size sanity check. The pre-stat `MAX_READ_BYTES`
+      // gate above sees the file's size at stat time; a concurrent
+      // writer can grow the file from sub-cap to multi-GB between
+      // `fsp.stat` and `lowFs.readTextFile`'s underlying
+      // `fs.promises.readFile`. `readFileWithLineAndLimit` slurps
+      // the whole file into memory before slicing, so the stat
+      // gate alone is bypassable. Reject post-read if the
+      // returned content exceeds the cap. The proper fix is
+      // fd-based reading (open + stat + read tied to the same fd)
+      // — tracked as a hardening follow-up; this byte-length
+      // check is the defense-in-depth layer.
+      const decodedBytes = Buffer.byteLength(result.content, 'utf-8');
+      if (decodedBytes > MAX_READ_BYTES) {
+        throw new FsError(
+          'file_too_large',
+          `file grew during read to ${decodedBytes} bytes (cap ${MAX_READ_BYTES})`,
+          {
+            hint: 'concurrent writer detected via post-read size; retry or readBytes with explicit window',
+          },
+        );
+      }
       const ignoreVerdict = shouldIgnore(
         p,
         this.deps.boundWorkspace,
@@ -474,12 +495,32 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // against `boundWorkspace` (or was verified at a stale
       // moment). Re-validate at the entry point so a glob with
       // `cwd: '/etc'` cannot enumerate files outside the workspace
-      // even when the *pattern* is harmlessly relative. The
-      // pattern-side checks above only constrain the pattern
-      // shape; without this check `cwd` is the actual hazard.
+      // even when the *pattern* is harmlessly relative.
+      //
+      // **Important**: use `realpath` rather than `path.resolve` —
+      // a textual containment check on `path.resolve(cwd)` admits
+      // `<ws>/link` even when `<ws>/link → /etc` is a symlink to
+      // outside the workspace; `globAsync` would then walk
+      // `/etc` before the per-hit filter drops the results.
+      // `realpath` follows the chain (or throws ENOENT for missing
+      // ancestors), so the containment check sees the actual
+      // walk root.
       const cwd = (opts.cwd as string | undefined) ?? this.deps.boundWorkspace;
-      const cwdAbs = path.resolve(cwd);
-      if (!isWithinRoot(cwdAbs, this.deps.boundWorkspace)) {
+      let cwdReal: string;
+      try {
+        cwdReal = await fsp.realpath(path.resolve(cwd));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        if (code === 'ENOENT') {
+          throw new FsError(
+            'path_not_found',
+            `glob cwd does not exist: ${cwd}`,
+            { cause: err },
+          );
+        }
+        throw err;
+      }
+      if (!isWithinRoot(cwdReal, this.deps.boundWorkspace)) {
         throw new FsError(
           'path_outside_workspace',
           `glob cwd is outside workspace: ${cwd}`,
@@ -487,7 +528,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         );
       }
       const matches = await globAsync(pattern, {
-        cwd: cwdAbs,
+        cwd: cwdReal,
         nodir: false,
         absolute: true,
         dot: true,
@@ -623,6 +664,13 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // wasting heap on every write.
       const sizeBytes = Buffer.byteLength(content, 'utf-8');
       enforceWriteSize(sizeBytes);
+      // Pre-write TOCTOU guard — `atomicWriteFile`'s
+      // `resolveSymlinkChain` follows symlinks at write time, so
+      // a swap between the boundary's `resolve()` and this call
+      // would land the write outside the workspace. ENOENT is
+      // fine (ahead-of-create flow); an actual symlink is
+      // rejected.
+      await assertNotSymlinkBeforeWrite(p as string);
       await this.deps.lowFs.writeTextFile({
         path: p as string,
         content,
@@ -723,6 +771,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         current.slice(0, idx) + newText + current.slice(idx + oldText.length);
       const writtenBytes = Buffer.byteLength(next, 'utf-8');
       enforceWriteSize(writtenBytes);
+      // Pre-write TOCTOU guard — same shape as writeText. The
+      // read-modify-write race window between the post-read
+      // inode check above and this call is the deferred PR 20
+      // atomic-via-temp follow-up; this guard is the
+      // defense-in-depth layer.
+      await assertNotSymlinkBeforeWrite(p as string);
       await this.deps.lowFs.writeTextFile({
         path: p as string,
         content: next,
@@ -869,6 +923,54 @@ async function assertInodeStableAfterRead(
  * `kindFromStats` + `kindFromDirent` pair as a maintenance hazard
  * (drift risk if the union grows).
  */
+/**
+ * Pre-write TOCTOU guard. Mirrors the post-read inode check but
+ * runs BEFORE the actual write. The earlier `resolve()` →
+ * `writeTextFile()` window let an attacker swap `p` with a
+ * symlink to outside the workspace; `atomicWriteFile`'s
+ * underlying `resolveSymlinkChain` follows the symlink and the
+ * write lands outside.
+ *
+ * Catches:
+ * - the path is now a symlink (`isSymbolicLink()`) — reject
+ *   with `symlink_escape` regardless of where it points; PR 19/20
+ *   should re-`resolve` after a swap rather than blindly writing
+ *   through the rename.
+ *
+ * Does NOT catch:
+ * - swap-back AFTER this guard but BEFORE `lowFs.writeTextFile`
+ *   completes — the residual race window. The proper fix is
+ *   fd-based atomic write (`fsp.open(O_NOFOLLOW)` + temp + rename
+ *   tied to the parent dir), which is the deferred PR 20
+ *   atomic-via-temp follow-up. This guard is the defense-in-depth
+ *   layer that closes the wide window.
+ *
+ * Used by `writeText` and `edit()` immediately before
+ * `lowFs.writeTextFile`. ENOENT (the file doesn't exist yet) is
+ * fine — that's the legitimate ahead-of-mkdir flow already
+ * sanctioned by `resolveWithinWorkspace`'s ENOENT-tolerant
+ * branch for write intents; only an actual symlink is rejected.
+ */
+async function assertNotSymlinkBeforeWrite(p: string): Promise<void> {
+  let pre: Awaited<ReturnType<typeof fsp.lstat>>;
+  try {
+    pre = await fsp.lstat(p);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return; // ahead-of-create flow
+    throw err;
+  }
+  if (pre.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path was replaced with a symlink before write: ${p}`,
+      {
+        hint: 'TOCTOU swap detected via pre-write lstat — re-resolve before retrying',
+      },
+    );
+  }
+}
+
 function kindFromStatLike(s: {
   isFile(): boolean;
   isDirectory(): boolean;

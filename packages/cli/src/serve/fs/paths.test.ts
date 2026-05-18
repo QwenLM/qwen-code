@@ -226,6 +226,22 @@ describe('resolveWithinWorkspace', () => {
     );
   });
 
+  it('tolerates ENOENT for stat intent and resolves via existing ancestor', async () => {
+    // Pinned per the docstring on `Intent` / `ENOENT_TOLERATING_INTENTS`:
+    // `'stat'` joins `'write'` in the tolerant set so a route asking
+    // "does this path exist?" gets back a synthetic canonical the
+    // caller can pass straight to `fsp.lstat`. The natural ENOENT
+    // surfaces from the lstat itself rather than from the resolver.
+    const out = await resolveWithinWorkspace(
+      'newdir/leaf.txt',
+      workspace,
+      'stat',
+    );
+    expect(out).toBe(
+      path.join(realpathSync.native(workspace), 'newdir', 'leaf.txt'),
+    );
+  });
+
   it('rejects ENOENT under read intent with path_not_found', async () => {
     const err = await resolveWithinWorkspace(
       'does-not-exist',
