@@ -9,7 +9,7 @@
  * WorktreeSession sidecar cleanup introduced in Phase C.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -20,7 +20,11 @@ import { readWorktreeSession } from '../services/worktreeSessionService.js';
 import { SessionService } from '../services/sessionService.js';
 import type { Config } from '../config/config.js';
 
+// Real git invocations + user-global hooks can take 10-20s on slow
+// runners; bump per-test and per-hook timeouts. (Phase C #4174.)
 describe('ExitWorktreeTool — WorktreeSession sidecar cleanup', () => {
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   let repoRoot: string;
   let sessionService: SessionService;
   let sessionId: string;

@@ -47,9 +47,31 @@ describe('readWorktreeSession', () => {
     expect(await readWorktreeSession(filePath)).toEqual(sample);
   });
 
-  it('rethrows non-ENOENT errors (e.g. malformed JSON)', async () => {
+  it('returns null for malformed JSON instead of throwing', async () => {
+    // Robustness against partial writes / crashes / manual edits.
+    // A throwing read would block --resume on every subsequent attempt.
     await fs.writeFile(filePath, 'not valid json {', 'utf-8');
-    await expect(readWorktreeSession(filePath)).rejects.toThrow();
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('returns null when sidecar is missing required fields', async () => {
+    // Partial write or schema drift — must not propagate undefined paths
+    // to consumers (removeUserWorktree, git status, Footer rendering).
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ slug: 'x', worktreePath: '/p' }), // missing 4 fields
+      'utf-8',
+    );
+    expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('returns null when a required field has the wrong type', async () => {
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ ...sample, slug: 42 }),
+      'utf-8',
+    );
+    expect(await readWorktreeSession(filePath)).toBeNull();
   });
 });
 
@@ -130,13 +152,44 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toBeNull();
   });
 
-  it('forwards warning when sidecar JSON is malformed', async () => {
+  it('cleans up malformed sidecar so subsequent --resume calls do not keep hitting it', async () => {
+    // Reviewer #4174 finding 3252368651: a malformed sidecar used to be
+    // returned as null without cleanup, so every --resume hit the same
+    // parse error indefinitely. The clear should be best-effort and
+    // not surface a warning for the benign null-return case.
     await fs.writeFile(filePath, 'not valid json {', 'utf-8');
-    const warnings: unknown[] = [];
-    const result = await restoreWorktreeContext(filePath, (e) =>
-      warnings.push(e),
-    );
+    expect(
+      await fs
+        .stat(filePath)
+        .then((s) => s.isFile())
+        .catch(() => false),
+    ).toBe(true);
+
+    const result = await restoreWorktreeContext(filePath);
     expect(result.session).toBeNull();
-    expect(warnings.length).toBe(1);
+    expect(result.contextMessage).toBeNull();
+    expect(
+      await fs
+        .stat(filePath)
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
+  });
+
+  it('cleans up sidecar with valid JSON but missing required fields', async () => {
+    // Partial write or schema drift — same recovery as malformed JSON.
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({ slug: 'incomplete' }),
+      'utf-8',
+    );
+    const result = await restoreWorktreeContext(filePath);
+    expect(result.session).toBeNull();
+    expect(
+      await fs
+        .stat(filePath)
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
   });
 });

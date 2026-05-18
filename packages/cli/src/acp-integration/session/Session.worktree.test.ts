@@ -137,6 +137,9 @@ describe('Session.pendingWorktreeNotice', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),
+      // Added on main after the test was written; Session.prompt's stop-hook
+      // loop reads this so the mock has to provide it.
+      getStopHookBlockingCap: vi.fn().mockReturnValue(0),
     } as unknown as Config;
 
     mockClient = {

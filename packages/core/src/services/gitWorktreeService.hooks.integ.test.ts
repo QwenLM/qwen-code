@@ -11,14 +11,19 @@
  * unsuitable for verifying actual `git config` side effects.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { GitWorktreeService } from './gitWorktreeService.js';
 
+// Real git invocations + user-global hooks (e.g. trustup) can take
+// 10–20s per setUp on slower runners; bump per-test and per-hook
+// timeouts so the suite isn't flaky on CI. (Phase C reviewer #4174.)
 describe('GitWorktreeService.createUserWorktree() — hooksPath setup', () => {
+  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+
   let repoRoot: string;
 
   beforeEach(async () => {

@@ -1144,20 +1144,41 @@ export const AppContainer = (props: AppContainerProps) => {
       setShowWorktreeExitDialog(false);
       if (choice === 'remove' && activeWorktree) {
         try {
-          const svc = new GitWorktreeService(config.getTargetDir());
-          await svc.removeUserWorktree(activeWorktree.slug, {
+          // Anchor at the repo top-level (captured at enter time) rather
+          // than the current targetDir — when the CLI was launched from
+          // a monorepo subdirectory, `config.getTargetDir()` is that
+          // subdir but the worktree lives at `<repoRoot>/.qwen/worktrees/`,
+          // so a service rooted at the subdir would never find it. (PR
+          // #4174 review finding 3252368637.)
+          const svc = new GitWorktreeService(activeWorktree.originalCwd);
+          // The user just clicked Remove on a dialog that already showed
+          // the dirty-state and unmerged-commit counts ("discards N
+          // commits, M files"). Force-delete the branch to honour that
+          // intent — without it, `git branch -d` refuses unmerged
+          // commits and the branch is silently preserved, contradicting
+          // the dialog text. (Finding 3252368640 part 2.)
+          const result = await svc.removeUserWorktree(activeWorktree.slug, {
             deleteBranch: true,
+            forceDeleteBranch: true,
           });
-          // ExitWorktreeTool would normally clear the sidecar; we bypass
-          // the tool here so do it explicitly.
+          // removeUserWorktree returns {success, error} on failure — it
+          // does NOT throw — so the previous try/catch never tripped on
+          // a soft failure. If removal failed, leave the sidecar intact
+          // so the next --resume can still see the worktree and let the
+          // user retry. (Finding 3252368640 part 1.)
+          if (!result.success) {
+            handleSlashCommand('/quit');
+            return;
+          }
           await clearWorktreeSession(
             config
               .getSessionService()
               .getWorktreeSessionPath(config.getSessionId()),
           );
         } catch {
-          // Non-fatal: the worktree directory may be in an inconsistent
-          // state, but the user explicitly asked to exit so we proceed.
+          // Hard failure (e.g. git binary missing) — proceed with quit
+          // anyway so the user isn't stranded. Sidecar stays so
+          // --resume can recover.
         }
       }
       handleSlashCommand('/quit');
@@ -2638,6 +2659,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeHelpDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
+    showWorktreeExitDialog,
+    closeWorktreeExitDialog: () => setShowWorktreeExitDialog(false),
   });
 
   const handleExit = useCallback(

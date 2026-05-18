@@ -1191,8 +1191,17 @@ export class GitWorktreeService {
         await fs.stat(candidate);
         hooksPath = candidate;
         break;
-      } catch {
-        // Not found — try next candidate.
+      } catch (error) {
+        // ENOENT is the expected "this candidate isn't present" signal;
+        // any other code (EACCES, EIO, ENOTDIR) means the candidate
+        // exists but we can't probe it — log so the silent fall-through
+        // to the next candidate (or to a no-hooks worktree) is visible.
+        if (isNodeError(error) && error.code === 'ENOENT') {
+          continue;
+        }
+        debugLogger.warn(
+          `configureHooksPath: cannot stat ${candidate}: ${error}`,
+        );
       }
     }
     if (!hooksPath) return;
