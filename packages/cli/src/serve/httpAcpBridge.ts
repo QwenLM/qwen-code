@@ -6,7 +6,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { promises as fs, realpathSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import {
@@ -15,6 +15,7 @@ import {
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { canonicalizeWorkspace } from './fs/paths.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -648,7 +649,10 @@ export interface AcpChannelExitInfo {
   signalCode: NodeJS.Signals | null;
 }
 
-export type ChannelFactory = (workspaceCwd: string) => Promise<AcpChannel>;
+export type ChannelFactory = (
+  workspaceCwd: string,
+  childEnvOverrides?: Readonly<Record<string, string | undefined>>,
+) => Promise<AcpChannel>;
 
 // FIXME(stage-1.5, chiga0 finding 1 + 4):
 // Stage 1.5 should split this file's responsibilities into:
@@ -748,6 +752,30 @@ export interface BridgeOptions {
    * MUST canonicalize before passing.
    */
   boundWorkspace: string;
+  /**
+   * PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): per-
+   * handle env overrides forwarded to `defaultSpawnChannelFactory`
+   * at spawn time. Replaces the prior `process.env` mutation in
+   * `runQwenServe` so concurrent embedded daemons in the same
+   * process don't cross-contaminate each other's MCP budget /
+   * mode env (the `defaultSpawnChannelFactory` snapshots
+   * `process.env` AT SPAWN TIME, not at `runQwenServe()` call
+   * time — so the last `runQwenServe()` to set the global env
+   * would win for all subsequent spawns across all daemon
+   * handles, breaking the documented per-daemon policy).
+   *
+   * Shape: `Record<string, string | undefined>`. A `string` value
+   * sets the env var for the child; `undefined` explicitly
+   * REMOVES the var from the child env (useful for "this daemon
+   * has no MCP budget" embedded callers that need to scrub a
+   * stale global). Keys NOT present in this record are inherited
+   * from `process.env` as before.
+   *
+   * Custom `channelFactory` callers receive this through the
+   * factory's second arg and decide what to do with it (tests
+   * typically ignore it; the production factory merges it).
+   */
+  childEnvOverrides?: Readonly<Record<string, string | undefined>>;
 }
 
 /**
@@ -1481,6 +1509,17 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
+  // PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): close over
+  // a per-handle env-override snapshot. Calls to `channelFactory` at
+  // spawn time receive this as the 2nd arg, so the default factory
+  // can merge into the child env without consulting any global state
+  // that another concurrent `runQwenServe()` handle might have
+  // mutated. Frozen to make accidental mutation throw rather than
+  // silently corrupt later spawns.
+  const childEnvOverrides: Readonly<Record<string, string | undefined>> =
+    opts.childEnvOverrides
+      ? Object.freeze({ ...opts.childEnvOverrides })
+      : Object.freeze({});
   const initTimeoutMs = opts.initializeTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS;
   if (initTimeoutMs <= 0) {
     throw new TypeError(
@@ -1782,7 +1821,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
-      const channel = await channelFactory(boundWorkspace);
+      const channel = await channelFactory(boundWorkspace, childEnvOverrides);
       const client = new BridgeClient(
         // BfFut: ACP today carries a sessionId on every per-session
         // notification / request, so the no-sessionId branch is
@@ -3655,74 +3694,14 @@ function sliceLineRange(
 }
 
 /**
- * Canonicalize a workspace path so the boot-time bound path and every
- * request's `workspaceCwd` collapse to the same key. `path.resolve`
- * alone normalizes `..` and `.` segments and absolutizes, but on
- * case-insensitive filesystems (macOS APFS, Windows NTFS) `/Work/A`
- * and `/work/a` are the same directory yet `resolve` returns them
- * verbatim — without normalization the `boundWorkspace` check would
- * reject every request that spelled the path with different casing
- * and `sessionScope: 'single'` re-attach would silently degrade to
- * "one per spelling".
- *
- * `realpathSync.native` (when the path exists) walks symlinks and returns
- * the on-disk casing; this matches what `config.ts` / `settings.ts` /
- * `sandbox.ts` use for their own workspace resolution. When the path
- * doesn't exist (test fixtures, ahead-of-mkdir flows) we fall back to
- * the resolved-but-uncanonicalized form rather than throwing — the
- * downstream `spawn({cwd})` will fail with a useful ENOENT if the
- * workspace truly doesn't exist.
- *
- * NOTE: This is a **cross-module contract** (BX9_q) — `config.ts`,
- * `settings.ts`, `sandbox.ts`, and this file all need to canonicalize
- * the same way for the bound-workspace check + `sessionScope:
- * 'single'` re-attach to work correctly across paths. The contract:
- * use `realpathSync.native` on the resolved absolute path; fall back
- * to `path.resolve` only when the path doesn't exist yet. If a future
- * change breaks this alignment (e.g. one module starts lowercasing on
- * Windows but this one doesn't), the canonicalized request path
- * won't match the canonicalized bound path → every request returns
- * `workspace_mismatch` even though the human-readable paths look
- * equivalent. There's no test that pins the alignment; the
- * integration suite would catch a divergence only if it tested the
- * specific casing / symlink path the affected module changed.
- *
- * Stage 2 in-process (#3803 §10) collapses the bridge into core,
- * removing the bridge-side path resolution entirely. Stage 1.5
- * `@qwen-code/acp-bridge` lift (chiga0 finding 1) is the natural
- * place to extract a shared `canonicalizeWorkspace` primitive that
- * all four modules consume — the lowest-common-denominator
- * extraction is fine THERE because the package boundary forces the
- * call sites to converge. Until then, *any* change to how those
- * modules resolve workspace paths needs a matching change here.
+ * Re-export of the workspace canonicalizer for callers that historically
+ * imported it from `httpAcpBridge.ts`. The implementation was extracted
+ * to `./fs/paths.ts` in #4175 PR 18 (commit 1) so the forthcoming
+ * `WorkspaceFileSystem` boundary can reuse the same primitive without
+ * pulling in the 3.6k-line bridge module. See `./fs/paths.ts` for the
+ * cross-module contract that governs this function.
  */
-export function canonicalizeWorkspace(p: string): string {
-  const resolved = path.resolve(p);
-  try {
-    // FIXME(stage-2): switch to `fs.promises.realpath` once the
-    // bridge call sites become async-friendly. This sync syscall
-    // runs on the hot `spawnOrAttach` path and blocks the event
-    // loop for one filesystem stat per call. Single-user loopback
-    // (Stage 1's design target) doesn't notice; high-concurrency
-    // deployments will. Stage 2 in-process refactor removes the
-    // entire bridge-side path resolution anyway, but if Stage 2
-    // ever lands without that change, switch to the async version.
-    return realpathSync.native(resolved);
-  } catch (err) {
-    // Only fall back to path.resolve for ENOENT (path doesn't exist
-    // yet). Other filesystem errors (EACCES, EIO, ELOOP) should
-    // propagate — swallowing them would hide transient I/O failures
-    // behind misleading workspace_mismatch rejections.
-    if (
-      err &&
-      typeof err === 'object' &&
-      (err as { code?: unknown }).code === 'ENOENT'
-    ) {
-      return resolved;
-    }
-    throw err;
-  }
-}
+export { canonicalizeWorkspace };
 
 /**
  * Race `p` against a timeout. The timeout REJECTS the returned
@@ -4005,6 +3984,7 @@ async function safeCheck(
  */
 export const defaultSpawnChannelFactory: ChannelFactory = async (
   workspaceCwd,
+  childEnvOverrides,
 ) => {
   // Resolution order:
   //   1. `QWEN_CLI_ENTRY` env override — escape hatch for non-standard
@@ -4065,6 +4045,24 @@ export const defaultSpawnChannelFactory: ChannelFactory = async (
   const childEnv: NodeJS.ProcessEnv = { ...process.env };
   for (const key of SCRUBBED_CHILD_ENV_KEYS) {
     delete childEnv[key];
+  }
+  // PR 14 fix (review #4247 wenshao R5 runQwenServe.ts:216): apply
+  // per-handle env overrides on top of the process.env snapshot.
+  // `undefined` value means "delete this var from the child env" so
+  // an embedded caller can scrub a stale inherited var without
+  // having to mutate the daemon's global process.env. Applied AFTER
+  // `SCRUBBED_CHILD_ENV_KEYS` so the daemon-only secret list still
+  // wins (operators can't override the scrub by passing
+  // `QWEN_SERVER_TOKEN` in overrides — defense in depth).
+  if (childEnvOverrides) {
+    for (const [key, value] of Object.entries(childEnvOverrides)) {
+      if (SCRUBBED_CHILD_ENV_KEYS.has(key)) continue;
+      if (value === undefined) {
+        delete childEnv[key];
+      } else {
+        childEnv[key] = value;
+      }
+    }
   }
   // CodeQL `js/path-injection` flags the `cwd: workspaceCwd` flow.
   // Stage 1 trust model accepts this — see the function-level comment

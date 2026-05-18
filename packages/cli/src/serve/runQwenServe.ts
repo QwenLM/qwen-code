@@ -177,6 +177,60 @@ export async function runQwenServe(
   // server.ts's raw `opts.workspace` and clients see one path on
   // `/capabilities` but another on `POST /session` responses.
   const boundWorkspace = canonicalizeWorkspace(rawWorkspace);
+  // Issue #4175 PR 14. The MCP client guardrails enforce in the ACP
+  // child process (where `McpClientManager` lives), not the daemon.
+  // Forward the budget config via env vars so the child's
+  // `readBudgetFromEnv()` picks them up.
+  //
+  // PR 14 fix (review #4247 wenshao R5 line 216): use per-handle env
+  // overrides via `BridgeOptions.childEnvOverrides` instead of
+  // mutating global `process.env`. Pre-fix concurrent embedded
+  // daemons (`runQwenServe()` × 2 in the same process) would race
+  // on `process.env` — `defaultSpawnChannelFactory` snapshots
+  // `process.env` AT SPAWN TIME, so the later daemon's env value
+  // would silently win for the earlier daemon's subsequent ACP
+  // child spawns. With per-handle overrides closed over inside
+  // each bridge, each daemon's children inherit ONLY that
+  // daemon's intended budget config, regardless of what other
+  // daemons in the same process are doing.
+  //
+  // Also: `runQwenServe` is exported and other validations
+  // (`requireAuth` no-token, `maxConnections` NaN, `--workspace`
+  // checks) live here, so embedded callers expect boot-time
+  // rejection of invalid inputs. The yargs CLI handler duplicates
+  // these for fast-fail UX, but `runQwenServe` is the source of
+  // truth.
+  if (opts.mcpClientBudget !== undefined) {
+    if (
+      !Number.isFinite(opts.mcpClientBudget) ||
+      !Number.isInteger(opts.mcpClientBudget) ||
+      opts.mcpClientBudget <= 0
+    ) {
+      throw new TypeError(
+        `Invalid mcpClientBudget: ${opts.mcpClientBudget}. Must be a positive integer.`,
+      );
+    }
+  }
+  if (opts.mcpBudgetMode === 'enforce' && opts.mcpClientBudget === undefined) {
+    throw new Error(
+      'mcpBudgetMode="enforce" requires a positive mcpClientBudget. ' +
+        'Pass mcpClientBudget=N, or set mcpBudgetMode to "warn" or "off".',
+    );
+  }
+  // Per-handle env overrides: `undefined` value means "scrub this
+  // var from the child env" — important when a different daemon
+  // in the same process set the var globally previously. Always
+  // set both keys explicitly (to value or `undefined`) so each
+  // child's MCP budget env is fully determined by this handle's
+  // options, with no inheritance from process.env's current state.
+  const childEnvOverrides: Record<string, string | undefined> = {
+    QWEN_SERVE_MCP_CLIENT_BUDGET:
+      opts.mcpClientBudget !== undefined
+        ? String(opts.mcpClientBudget)
+        : undefined,
+    QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
+  };
+
   const bridge =
     deps.bridge ??
     createHttpAcpBridge({
@@ -185,6 +239,7 @@ export async function runQwenServe(
         ? { eventRingSize: opts.eventRingSize }
         : {}),
       boundWorkspace,
+      childEnvOverrides,
     });
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`

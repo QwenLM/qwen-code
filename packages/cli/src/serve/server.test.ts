@@ -102,6 +102,11 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_supported_commands',
   'session_close',
   'session_metadata',
+  // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
+  // guardrail surface (`--mcp-client-budget`, `clientCount` /
+  // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
+  // refused per-server cells).
+  'mcp_guardrails',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -648,6 +653,19 @@ describe('createServeApp', () => {
       ).toEqual(EXPECTED_REGISTERED_FEATURES.map(() => 'v1'));
     });
 
+    it('exposes `modes` metadata on mcp_guardrails (#4175 PR 14)', () => {
+      // `modes` is currently registry-only documentation (no wire
+      // surface yet) — a client wanting to feature-detect `enforce`
+      // semantics reads `caps.features.includes('mcp_guardrails')`,
+      // not a separate `featureModes` field. The descriptor still
+      // carries `modes` so future PRs that DO expose it on the wire
+      // don't have to chase down every entry to backfill metadata.
+      expect(SERVE_CAPABILITY_REGISTRY['mcp_guardrails']).toEqual({
+        since: 'v1',
+        modes: ['warn', 'enforce'],
+      });
+    });
+
     it('returns protocol version metadata with a fresh supported array', () => {
       const versions = getServeProtocolVersions();
       expect(versions).toEqual({ current: 'v1', supported: ['v1'] });
@@ -769,6 +787,86 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual(payload);
       expect(bridge.workspaceMcpCalls).toBe(1);
+    });
+
+    it('round-trips PR 14 budget fields on /workspace/mcp', async () => {
+      // Issue #4175 PR 14. The route is a thin JSON forwarder, so the
+      // assertion is structural: the new fields (`clientCount`,
+      // `clientBudget`, `budgetMode`, `budgets[]`, per-server
+      // `disabledReason`) must survive verbatim. Catches future
+      // serialization regressions that drop unknown optional fields.
+      const payload: ServeWorkspaceMcpStatus = {
+        v: 1,
+        workspaceCwd: WS_BOUND,
+        initialized: true,
+        discoveryState: 'completed',
+        clientCount: 3,
+        clientBudget: 2,
+        budgetMode: 'enforce',
+        budgets: [
+          {
+            kind: 'mcp_budget',
+            scope: 'session',
+            status: 'error',
+            errorKind: 'budget_exhausted',
+            hint: 'Raise --mcp-client-budget or remove servers.',
+            liveCount: 2,
+            budget: 2,
+            mode: 'enforce',
+            refusedCount: 1,
+          },
+        ],
+        servers: [
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'a',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+          {
+            kind: 'mcp_server',
+            status: 'ok',
+            name: 'b',
+            mcpStatus: 'connected',
+            transport: 'stdio',
+            disabled: false,
+          },
+          {
+            kind: 'mcp_server',
+            status: 'error',
+            errorKind: 'budget_exhausted',
+            hint: 'Raise --mcp-client-budget or remove servers from mcpServers config.',
+            name: 'c',
+            mcpStatus: 'disconnected',
+            transport: 'stdio',
+            disabled: false,
+            disabledReason: 'budget',
+          },
+        ],
+      };
+      const bridge = fakeBridge({ workspaceMcpImpl: async () => payload });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .get('/workspace/mcp')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(payload);
+      expect(res.body.budgets).toHaveLength(1);
+      expect(res.body.budgets[0]).toMatchObject({
+        kind: 'mcp_budget',
+        scope: 'session',
+        status: 'error',
+        errorKind: 'budget_exhausted',
+        refusedCount: 1,
+      });
+      expect(res.body.servers[2].disabledReason).toBe('budget');
     });
 
     it('returns workspace skills and providers status from the bridge', async () => {
@@ -2681,6 +2779,91 @@ describe('runQwenServe', () => {
     ).rejects.toThrow(/--require-auth/);
   });
 
+  // PR 14 fix (review #4247): runQwenServe is the documented embedded
+  // entry point, so budget validation must live here, not just in the
+  // yargs CLI handler. Embedded callers (other tools wrapping the
+  // daemon, deps.bridge test injection) silently produced an uncapped
+  // child pre-fix despite requesting enforce.
+  it('rejects non-positive mcpClientBudget (#4175 PR 14)', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpClientBudget: 0,
+      }),
+    ).rejects.toThrow(/mcpClientBudget/);
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpClientBudget: -5,
+      }),
+    ).rejects.toThrow(/mcpClientBudget/);
+  });
+
+  it('rejects mcpBudgetMode=enforce without a budget (#4175 PR 14)', async () => {
+    await expect(
+      runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        mcpBudgetMode: 'enforce',
+      }),
+    ).rejects.toThrow(/enforce.*requires.*mcpClientBudget/);
+  });
+
+  // Round 6 (wenshao R5 line 216): replaced the R3 `process.env`
+  // mutation tests. `runQwenServe` now passes per-handle env
+  // overrides via `BridgeOptions.childEnvOverrides`, NOT by mutating
+  // global `process.env` — so concurrent embedded daemons don't
+  // cross-contaminate each other's MCP budget env. The two tests
+  // below assert (a) runQwenServe doesn't touch process.env and
+  // (b) a pre-existing process.env value survives runQwenServe
+  // calls unrelated to MCP overrides (proving runQwenServe is no
+  // longer the source of env mutation).
+  it('does not mutate process.env when caller provides mcp budget options (#4247 R6 line 216)', async () => {
+    // Sanity-check: no MCP env vars set before.
+    delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    delete process.env['QWEN_SERVE_MCP_BUDGET_MODE'];
+    handle = await runQwenServe({
+      hostname: '127.0.0.1',
+      port: 0,
+      mode: 'http-bridge',
+      mcpClientBudget: 10,
+      mcpBudgetMode: 'warn',
+    });
+    // Pre-R6 this leaked into global process.env. Post-R6 the values
+    // travel via `BridgeOptions.childEnvOverrides` closure → only
+    // the spawned ACP child sees them.
+    expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBeUndefined();
+    expect(process.env['QWEN_SERVE_MCP_BUDGET_MODE']).toBeUndefined();
+  });
+
+  it('preserves pre-existing process.env values (no longer wipes globals on omit) (#4247 R6 line 216)', async () => {
+    // Pre-R6 the "scrub on omit" code path delete'd these from
+    // process.env. Post-R6 runQwenServe doesn't touch process.env
+    // at all; the override mechanism handles "scrub" at the
+    // per-handle level inside the bridge's spawn factory. So if an
+    // operator had QWEN_SERVE_MCP_CLIENT_BUDGET exported in their
+    // shell BEFORE starting the daemon, it stays in their process
+    // env (and gets ignored by this daemon's child, which receives
+    // `undefined` via overrides to scrub it on spawn).
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = '99';
+    try {
+      handle = await runQwenServe({
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        // No mcpClientBudget — override will scrub the var on spawn.
+      });
+      expect(process.env['QWEN_SERVE_MCP_CLIENT_BUDGET']).toBe('99');
+    } finally {
+      delete process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'];
+    }
+  });
+
   it('starts with --require-auth + token on loopback', async () => {
     handle = await runQwenServe({
       hostname: '127.0.0.1',
@@ -3547,5 +3730,88 @@ describe('runQwenServe SIGINT handler', () => {
     // is covered indirectly by the loopback boot test above.
     expect(typeof runQwenServe).toBe('function');
     void vi.fn(); // silence unused-import lint if vitest tree-shakes
+  });
+});
+
+describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const fsFactory = (
+      app.locals as {
+        fsFactory?: { forRequest: (ctx: { route: string }) => unknown };
+      }
+    ).fsFactory;
+    expect(fsFactory).toBeDefined();
+    expect(typeof fsFactory!.forRequest).toBe('function');
+    // The factory is functional — it can build a per-request boundary.
+    const fs = fsFactory!.forRequest({ route: 'TEST /op' });
+    expect(fs).toBeDefined();
+  });
+
+  it('uses the injected fsFactory verbatim when supplied', async () => {
+    const { createServeApp } = await import('./server.js');
+    const sentinel = { forRequest: vi.fn(() => ({ marker: 'injected' })) };
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { fsFactory: sentinel as any },
+    );
+    expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
+  });
+
+  it('default fsFactory is built with trusted=false (writes refused)', async () => {
+    const { createServeApp } = await import('./server.js');
+    const { isFsError } = await import('./fs/index.js');
+    const os = await import('node:os');
+    const tmp = await import('node:fs').then((m) =>
+      m.promises.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-default-trust-')),
+    );
+    try {
+      const app = createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: tmp,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+      );
+      type FsCtx = { route: string };
+      type WfsLite = {
+        resolve: (input: string, intent: 'write') => Promise<string>;
+        writeText: (p: string, content: string) => Promise<void>;
+      };
+      const fsFactory = (
+        app.locals as {
+          fsFactory?: { forRequest: (ctx: FsCtx) => WfsLite };
+        }
+      ).fsFactory;
+      expect(fsFactory).toBeDefined();
+      const fs = fsFactory!.forRequest({ route: 'TEST /op' });
+      // Resolve a write target inside the workspace; the resolve
+      // succeeds but writeText must throw `untrusted_workspace` —
+      // that's the safe-default behavior the strict-default factory
+      // exists to enforce.
+      const resolved = await fs.resolve('child.txt', 'write');
+      const err = await fs.writeText(resolved, 'x').catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+    } finally {
+      await import('node:fs').then((m) =>
+        m.promises.rm(tmp, { recursive: true, force: true }),
+      );
+    }
   });
 });
