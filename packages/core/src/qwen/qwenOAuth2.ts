@@ -237,11 +237,14 @@ export interface IQwenOAuth2Client {
   setCredentials(credentials: QwenCredentials): void;
   getCredentials(): QwenCredentials;
   getAccessToken(): Promise<{ token?: string }>;
-  requestDeviceAuthorization(options: {
-    scope: string;
-    code_challenge: string;
-    code_challenge_method: string;
-  }): Promise<DeviceAuthorizationResponse>;
+  requestDeviceAuthorization(
+    options: {
+      scope: string;
+      code_challenge: string;
+      code_challenge_method: string;
+    },
+    fetchOpts?: { signal?: AbortSignal },
+  ): Promise<DeviceAuthorizationResponse>;
   pollDeviceToken(
     options: {
       device_code: string;
@@ -290,11 +293,14 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
     }
   }
 
-  async requestDeviceAuthorization(options: {
-    scope: string;
-    code_challenge: string;
-    code_challenge_method: string;
-  }): Promise<DeviceAuthorizationResponse> {
+  async requestDeviceAuthorization(
+    options: {
+      scope: string;
+      code_challenge: string;
+      code_challenge_method: string;
+    },
+    fetchOpts?: { signal?: AbortSignal },
+  ): Promise<DeviceAuthorizationResponse> {
     const bodyData = {
       client_id: QWEN_OAUTH_CLIENT_ID,
       scope: options.scope,
@@ -310,6 +316,12 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
         'x-request-id': randomUUID(),
       },
       body: objectToUrlEncoded(bodyData),
+      // PR #4255 — daemon device-flow registry passes its
+      // `cancelController.signal` so dispose / cancel during a slow
+      // device-authorization request actually aborts the in-flight
+      // socket immediately. Pre-existing CLI callers omit it; the
+      // optional shape preserves backward compatibility.
+      ...(fetchOpts?.signal ? { signal: fetchOpts.signal } : {}),
     });
 
     if (!response.ok) {
@@ -827,21 +839,12 @@ async function authWithQwenDeviceFlow(
 
           client.setCredentials(credentials);
 
-          // Cache the new tokens
+          // Cache the new tokens. `cacheQwenCredentials` itself folds
+          // in `SharedTokenManager.clearCache()` (PR #4255 review D1) so
+          // we no longer need a paired call here — the previous explicit
+          // post-cache clear was a duplicate that fired clearCache twice
+          // on the success path.
           await cacheQwenCredentials(credentials);
-
-          // IMPORTANT:
-          // SharedTokenManager maintains an in-memory cache and throttles file checks.
-          // If we only write the creds file here, a subsequent `getQwenOAuthClient()`
-          // call in the same process (within the throttle window) may not re-read the
-          // updated file and could incorrectly re-trigger device auth.
-          // Clearing the cache forces the next call to reload from disk.
-          try {
-            SharedTokenManager.getInstance().clearCache();
-          } catch {
-            // In unit tests we sometimes mock SharedTokenManager.getInstance() with a
-            // minimal stub; cache invalidation is best-effort and should not break auth.
-          }
 
           emitAuthProgress(
             'success',

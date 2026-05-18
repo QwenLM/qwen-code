@@ -150,10 +150,11 @@ class FakeProvider implements DeviceFlowProvider {
       const inner = next;
       return {
         kind: 'success',
-        persist: async () => {
+        persist: async (persistOpts: { signal: AbortSignal }) => {
           this.persistCalls += 1;
-          return inner.persist();
+          return inner.persist(persistOpts);
         },
+        ...(inner.unpersist ? { unpersist: inner.unpersist } : {}),
       };
     }
     return next;

@@ -600,10 +600,17 @@ export function createServeApp(
     async (req, res) => {
       const body = safeBody(req);
       const providerIdRaw = body['providerId'];
+      // PR #4255 review W2: split `invalid_request` (request shape is
+      // wrong — missing/non-string field) from `unsupported_provider`
+      // (the field is well-formed but its value isn't in the
+      // daemon's known set). Conflating the two surfaced misleading
+      // remediation hints to SDK consumers branching on `code`
+      // ("this provider isn't supported here" when the actual cause
+      // was a serializer dropping the field).
       if (typeof providerIdRaw !== 'string' || providerIdRaw.length === 0) {
         res.status(400).json({
           error: '`providerId` must be a non-empty string',
-          code: 'unsupported_provider',
+          code: 'invalid_request',
         });
         return;
       }

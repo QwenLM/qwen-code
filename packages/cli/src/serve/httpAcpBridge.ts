@@ -2710,6 +2710,14 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // of `byId` (would only happen on a closed-bus terminal frame
       // racing with the broadcast) doesn't break the loop.
       const sessions = Array.from(byId.values());
+      // PR #4255 review S5: track per-session success/fail. Per-session
+      // failures are debug-noise (a closed bus on one session shouldn't
+      // page anyone), but a 100%-fail broadcast (every session bus
+      // refused) is operationally interesting — clients won't see the
+      // event and the GET fallback is the only path. Elevate to
+      // unconditional stderr so monitoring catches it.
+      let successCount = 0;
+      let failureCount = 0;
       for (const entry of sessions) {
         try {
           entry.events.publish({
@@ -2719,13 +2727,20 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
               ? { originatorClientId: envelope.originatorClientId }
               : {}),
           });
+          successCount += 1;
         } catch (err) {
+          failureCount += 1;
           writeServeDebugLine(
             `broadcastWorkspaceEvent: publish on session ${entry.sessionId} failed: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
         }
+      }
+      if (sessions.length > 0 && successCount === 0) {
+        writeStderrLine(
+          `qwen serve: broadcastWorkspaceEvent type=${envelope.type} dropped on ALL ${failureCount} session bus(es); SSE subscribers will miss this event (GET fallback still authoritative)`,
+        );
       }
     },
 

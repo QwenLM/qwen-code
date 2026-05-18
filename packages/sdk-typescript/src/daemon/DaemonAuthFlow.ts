@@ -27,12 +27,15 @@ export const DEVICE_FLOW_EXPIRY_GRACE_MS = 30_000;
  *   console.log(`Open ${flow.verificationUri}\nCode: ${flow.userCode}`);
  *   const result = await flow.awaitCompletion({ signal });
  *
- * The handle's `awaitCompletion` first attempts to consume an SSE event
- * stream (so the resolution is real-time on a freshly-running daemon);
- * if no stream is available — or it produces a parse error — the helper
- * transparently falls back to GET-based polling using the daemon-supplied
- * `intervalMs`. Both paths terminate when the daemon's view reaches a
- * terminal status (`authorized`, `expired`, `error`, `cancelled`).
+ * `awaitCompletion` polls `client.getDeviceFlow(...)` at the daemon-
+ * supplied `intervalMs`, honors `slow_down`-driven interval bumps via
+ * `getDeviceFlow`'s response, and terminates when the daemon's view
+ * reaches a terminal status (`authorized`, `expired`, `error`,
+ * `cancelled`). The same `auth_device_flow_*` SSE events are emitted
+ * by the daemon for clients that ARE already subscribed to a session
+ * stream — those provide a real-time hint, but `awaitCompletion`
+ * itself does not require an SSE subscription and works against any
+ * client that can hit the GET endpoint.
  *
  * Issue #4175 PR 21.
  */
@@ -152,6 +155,10 @@ async function pollUntilTerminal(
     deviceFlowId: string;
     intervalMs: number;
     expiresAt: number;
+    /** Carried through from the parent `start` so the synthetic 404
+     *  fallback below reports the actual provider rather than the
+     *  hardcoded `'qwen-oauth'` (PR #4255 review C1). */
+    providerId: DaemonAuthProviderId;
   },
   clientId: string | undefined,
   opts: AwaitCompletionOptions,
@@ -182,7 +189,7 @@ async function pollUntilTerminal(
         // The entry was evicted post-grace; treat as terminal and stop.
         return {
           deviceFlowId: start.deviceFlowId,
-          providerId: 'qwen-oauth',
+          providerId: start.providerId,
           status: 'expired',
           createdAt: now,
         };
@@ -202,13 +209,17 @@ async function pollUntilTerminal(
 async function waitFor(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) throw signalAbortError(signal);
   await new Promise<void>((resolve, reject) => {
+    // PR #4255 review C5: do NOT `unref()` this timer. The earlier
+    // version did, which on a standalone Node CLI/script that does
+    // `await client.auth.start().awaitCompletion()` and nothing else
+    // could leave Node with no remaining ref'd handles between polls
+    // and exit the process before the user finishes authorization.
+    // This sleep is foreground work the caller explicitly awaits;
+    // unref'ing it broke the contract.
     const handle = setTimeout(() => {
       cleanup();
       resolve();
     }, ms);
-    if (typeof handle === 'object' && handle && 'unref' in handle) {
-      (handle as { unref(): void }).unref();
-    }
     const onAbort = () => {
       cleanup();
       reject(signalAbortError(signal));

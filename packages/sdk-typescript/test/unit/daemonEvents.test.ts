@@ -933,12 +933,28 @@ describe('PR 21 — auth device-flow events', () => {
         },
       }),
     ).toBeUndefined();
+    // PR #4255 fold-in 2 (C2): unknown errorKind is no longer a
+    // narrowing failure — the open `(string & {})` arm of the
+    // DaemonAuthDeviceFlowErrorKind union accepts ANY non-empty
+    // string so a daemon adding a new kind isn't silently dropped.
+    // The data IS valid; consumers branching on the known literals
+    // still narrow exhaustively, with unknown kinds falling into the
+    // string fallback arm.
+    const futureKind = asKnownDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'auth_device_flow_failed',
+      data: { deviceFlowId: 'x', errorKind: 'rate_limited' },
+    });
+    expect(futureKind).toBeDefined();
+    expect(futureKind?.type).toBe('auth_device_flow_failed');
+    // Empty string still rejected (truly malformed).
     expect(
       asKnownDaemonEvent({
-        id: 2,
+        id: 3,
         v: 1,
         type: 'auth_device_flow_failed',
-        data: { deviceFlowId: 'x', errorKind: 'totally-fake' },
+        data: { deviceFlowId: 'x', errorKind: '' },
       }),
     ).toBeUndefined();
   });

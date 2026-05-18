@@ -30,6 +30,15 @@ export const DEVICE_FLOW_TERMINAL_GRACE_MS = 5 * 60_000;
 export const DEVICE_FLOW_SWEEP_INTERVAL_MS = 30_000;
 export const DEVICE_FLOW_MAX_CONCURRENT = 4;
 export const DEVICE_FLOW_SLOW_DOWN_BUMP_MS = 5_000;
+/**
+ * Hard ceiling on `provider.persist()`. A wedged disk I/O (NFS stall,
+ * encrypted-volume contention) without this would leave a flow stuck
+ * in `pending` until the sweeper catches the upstream `expires_in` —
+ * potentially minutes. 30s is generous for a normal local FS write
+ * but short enough that operators see disk problems quickly.
+ * PR #4255 review C3.
+ */
+export const DEVICE_FLOW_PERSIST_TIMEOUT_MS = 30_000;
 
 export type DeviceFlowProviderId = 'qwen-oauth';
 export const DEVICE_FLOW_SUPPORTED_PROVIDERS: readonly DeviceFlowProviderId[] =
@@ -177,8 +186,21 @@ export type DeviceFlowPollResult =
   | {
       kind: 'success';
       /** The provider persists credentials and returns metadata for the
-       *  `auth_device_flow_authorized` event. */
-      persist(): Promise<{ expiresAt?: number; accountAlias?: string }>;
+       *  `auth_device_flow_authorized` event. The registry passes its
+       *  per-entry `cancelController.signal` so a slow disk I/O
+       *  (NFS, encrypted volumes) honors `cancel()` / `dispose()`. */
+      persist(opts: { signal: AbortSignal }): Promise<{
+        expiresAt?: number;
+        accountAlias?: string;
+      }>;
+      /** Best-effort rollback for the cancel × success race. After
+       *  `persist()` succeeds, if `transitionTerminal(authorized)`
+       *  returns false (entry was cancelled / disposed during
+       *  persist), the registry calls `unpersist()` so disk state
+       *  matches the cancelled flow status. Failure to unpersist is
+       *  audited but not propagated — the user re-running auth will
+       *  overwrite. PR #4255 review C4. */
+      unpersist?(): Promise<void>;
     }
   | {
       kind: 'error';
@@ -285,6 +307,10 @@ export interface DeviceFlowAuditSink {
       | 'lost_success';
     errorKind?: DeviceFlowErrorKind;
     expiresInMs?: number;
+    /** Free-form audit detail. Used by the C4 lost-success rollback
+     *  path to capture rollback failures without polluting the
+     *  user-facing event hint. */
+    hint?: string;
   }): void;
 }
 
@@ -354,13 +380,10 @@ export class TooManyActiveDeviceFlowsError extends Error {
   }
 }
 
-export class DeviceFlowNotFoundError extends Error {
-  readonly code = 'device_flow_not_found';
-  constructor(deviceFlowId: string) {
-    super(`Device-flow ${deviceFlowId} not found`);
-    this.name = 'DeviceFlowNotFoundError';
-  }
-}
+// PR #4255 review S3: `DeviceFlowNotFoundError` was exported but never
+// imported anywhere — the route handlers handle the not-found case
+// inline with `res.status(404).json(...)`. Removed to avoid dead-code
+// rot. Future routes that prefer typed-error flow can re-introduce it.
 
 export class UpstreamDeviceFlowError extends Error {
   readonly code = 'upstream_error';
@@ -493,10 +516,28 @@ export class DeviceFlowRegistry {
     const startResult = await provider.start({
       signal: cancelController.signal,
     });
+    // PR #4255 review S6: dispose() may have run while we awaited
+    // `provider.start()`. If we proceed past this point the resulting
+    // entry would land in `byId` / `byProvider` AFTER `dispose()`
+    // already cleared them, leaving an orphan that has no poll
+    // scheduled (because `schedulePoll` guards on `this.disposed`)
+    // and never transitions. Bail out — the secrets in `startResult`
+    // are inaccessible to the caller (we threw), and the IdP-issued
+    // device_code is left to expire upstream on its own clock.
+    if (this.disposed) {
+      throw new Error('DeviceFlowRegistry disposed during start');
+    }
     const expiresAt = this.now() + Math.max(0, startResult.expiresIn) * 1000;
+    // RFC 8628 `interval` is in seconds; convert to ms. The earlier
+    // form `(interval ?? DEFAULT_INTERVAL_MS / 1000) * 1000` was
+    // arithmetically equivalent but unit-confusing — the `_MS` constant
+    // got divided then re-multiplied, hiding the s↔ms boundary on
+    // skim. The expanded form makes both branches unit-explicit.
     const intervalMs = Math.max(
       1_000,
-      (startResult.interval ?? DEVICE_FLOW_DEFAULT_INTERVAL_MS / 1000) * 1000,
+      typeof startResult.interval === 'number'
+        ? startResult.interval * 1000
+        : DEVICE_FLOW_DEFAULT_INTERVAL_MS,
     );
     const entry: DeviceFlowEntry = {
       deviceFlowId: randomUUID(),
@@ -668,21 +709,43 @@ export class DeviceFlowRegistry {
         this.schedulePoll(entry, provider);
         return;
       case 'success': {
+        // PR #4255 review C3: bound persist() with both the entry's
+        // cancelController signal AND a hard timeout, so a hung
+        // filesystem (NFS stall, encrypted-volume request) can't pin
+        // the entry in `pending` indefinitely. Hitting the timeout
+        // surfaces as `persist_failed` rather than waiting for the
+        // sweeper to catch the expiry — operators see the disk
+        // problem immediately.
         let metadata: { expiresAt?: number; accountAlias?: string } = {};
+        const persistTimeout = this.schedule(
+          DEVICE_FLOW_PERSIST_TIMEOUT_MS,
+          () => {
+            try {
+              entry.cancelController.abort(new Error('persist timeout'));
+            } catch {
+              // best-effort
+            }
+          },
+        );
         try {
-          metadata = await result.persist();
-        } catch (err: unknown) {
+          metadata = await result.persist({
+            signal: entry.cancelController.signal,
+          });
+        } catch (_err: unknown) {
           if (this.transitionTerminal(entry, 'error', 'persist_failed')) {
+            // S1 sanitize: `_err.message` from `cacheQwenCredentials`
+            // includes the full credential file path (`~/.qwen/...`)
+            // that flows verbatim through `broadcastWorkspaceEvent`
+            // to every SSE subscriber. Replace the user-facing hint
+            // with a generic sentence; full err detail goes to stderr
+            // audit only (`debugLogger` inside `cacheQwenCredentials`).
             this.deps.events.publish(
               {
                 type: 'failed',
                 data: {
                   deviceFlowId: entry.deviceFlowId,
                   errorKind: 'persist_failed',
-                  hint:
-                    err instanceof Error
-                      ? `persist failed: ${err.message}`
-                      : 'persist failed',
+                  hint: 'credentials could not be written to the daemon filesystem — check disk space and permissions',
                 },
               },
               entry.initiatorClientId,
@@ -696,6 +759,8 @@ export class DeviceFlowRegistry {
             });
           }
           return;
+        } finally {
+          this.clearScheduled(persistTimeout);
         }
         if (this.transitionTerminal(entry, 'authorized')) {
           this.deps.events.publish(
@@ -717,12 +782,34 @@ export class DeviceFlowRegistry {
             status: 'authorized',
           });
         } else {
-          // Lost-success branch: poll succeeded but the entry transitioned
-          // (cancel / dispose) while we awaited persist. The IdP marked
-          // `device_code` as consumed (RFC 8628 single-use) — the user
-          // must `client.auth.start` again to acquire a fresh one. Audit
-          // the loss so the operator can correlate "user re-auth'd
-          // immediately after cancel" with this branch.
+          // PR #4255 review C4: cancel × success race rollback. The
+          // poll returned success and `persist()` already wrote
+          // credentials to disk; meanwhile cancel/dispose transitioned
+          // the entry to a non-pending state. Without rollback the
+          // user's view (cancelled / expired) diverges from disk
+          // (a valid token sitting at `~/.qwen/oauth_creds.json`).
+          // Best-effort `unpersist()` brings disk back into line with
+          // the registry's terminal state; failure here is audited
+          // but not propagated — re-running auth would overwrite the
+          // file anyway, so a noisy rollback failure isn't worth
+          // surfacing to the user.
+          if (result.unpersist) {
+            try {
+              await result.unpersist();
+            } catch (rollbackErr: unknown) {
+              this.deps.audit?.record({
+                deviceFlowId: entry.deviceFlowId,
+                providerId: entry.providerId,
+                clientId: entry.initiatorClientId,
+                status: 'failed',
+                errorKind: 'persist_failed',
+                hint:
+                  rollbackErr instanceof Error
+                    ? `lost_success rollback failed: ${rollbackErr.message}`
+                    : 'lost_success rollback failed',
+              });
+            }
+          }
           this.deps.audit?.record({
             deviceFlowId: entry.deviceFlowId,
             providerId: entry.providerId,

@@ -180,6 +180,16 @@ export type DaemonAuthDeviceFlowStatus =
   | 'error'
   | 'cancelled';
 
+/**
+ * Known errorKind values surfaced on `auth_device_flow_failed`. The
+ * trailing `(string & {})` keeps this as an OPEN union so a daemon
+ * adding a new errorKind doesn't get its event silently dropped by an
+ * older SDK's type guard — consumers branching exhaustively on the
+ * known literals get the same narrowing as before, while unknown
+ * future kinds fall through to a `string` fallback rather than failing
+ * `isAuthDeviceFlowFailedData` and being filtered out by
+ * `asKnownDaemonEvent` (PR #4255 review C2).
+ */
 export type DaemonAuthDeviceFlowErrorKind =
   | 'expired_token'
   | 'access_denied'
@@ -188,7 +198,8 @@ export type DaemonAuthDeviceFlowErrorKind =
   /** Disk-write / `provider.persist()` failure path. The IdP-side token
    *  exchange succeeded but the daemon couldn't durably store credentials
    *  (EACCES, EROFS, ENOSPC, etc.). Distinct from `upstream_error`. */
-  | 'persist_failed';
+  | 'persist_failed'
+  | (string & {});
 
 export interface DaemonAuthDeviceFlowStartedData {
   deviceFlowId: string;
@@ -1076,13 +1087,15 @@ function isAuthDeviceFlowCancelledData(
 function isAuthDeviceFlowErrorKind(
   value: unknown,
 ): value is DaemonAuthDeviceFlowErrorKind {
-  return (
-    value === 'expired_token' ||
-    value === 'access_denied' ||
-    value === 'invalid_grant' ||
-    value === 'upstream_error' ||
-    value === 'persist_failed'
-  );
+  // Forward-compat: accept ANY non-empty string. The earlier closed
+  // allowlist would silently drop a daemon-emitted `failed` event with
+  // a future errorKind (e.g. `rate_limited`) — `asKnownDaemonEvent`
+  // would treat it as malformed and `reduceDaemonAuthEvent` never
+  // transitions the flow's status, leaving SDK consumers stuck on
+  // `pending` (PR #4255 review C2). The known literals still narrow
+  // exhaustively in consumer `switch` statements; unknown kinds fall
+  // into the `(string & {})` arm of the union for graceful handling.
+  return typeof value === 'string' && value.length > 0;
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {

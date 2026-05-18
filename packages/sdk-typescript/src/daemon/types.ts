@@ -625,19 +625,21 @@ export interface HeartbeatResult {
 
 export type DaemonAuthProviderId = 'qwen-oauth' | (string & {});
 
-export type DaemonAuthDeviceFlowSdkStatus =
-  | 'pending'
-  | 'authorized'
-  | 'expired'
-  | 'error'
-  | 'cancelled';
-
-export type DaemonAuthDeviceFlowSdkErrorKind =
-  | 'expired_token'
-  | 'access_denied'
-  | 'invalid_grant'
-  | 'upstream_error'
-  | 'persist_failed';
+// PR #4255 review S4: Sdk-prefixed aliases USED to be parallel literal
+// unions, which silently diverged from the canonical event-side types
+// the moment one was extended. Single-source the canonical definitions
+// from `./events.js` so a single source of truth governs both layers
+// (event payloads + REST wire shapes). TypeScript handles the
+// circular type-only import cleanly because there is no runtime
+// dependency direction. Local `type X = ...` aliases (rather than a
+// re-export) make the symbols usable INSIDE this module too — required
+// by `DaemonDeviceFlowState` / `DaemonAuthProviderStatus` below.
+import type {
+  DaemonAuthDeviceFlowStatus,
+  DaemonAuthDeviceFlowErrorKind,
+} from './events.js';
+export type DaemonAuthDeviceFlowSdkStatus = DaemonAuthDeviceFlowStatus;
+export type DaemonAuthDeviceFlowSdkErrorKind = DaemonAuthDeviceFlowErrorKind;
 
 /** Returned from `POST /workspace/auth/device-flow`. */
 export interface DaemonDeviceFlowStartResult {

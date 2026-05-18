@@ -6,6 +6,7 @@
 
 import {
   cacheQwenCredentials,
+  clearQwenCredentials,
   generatePKCEPair,
   isDeviceAuthorizationSuccess,
   isDeviceTokenPending,
@@ -50,11 +51,19 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
     const { code_verifier, code_challenge } = generatePKCEPair();
     let auth;
     try {
-      auth = await this.client.requestDeviceAuthorization({
-        scope: QWEN_OAUTH_SCOPE,
-        code_challenge,
-        code_challenge_method: 'S256',
-      });
+      // PR #4255 review W1: thread `signal` into the IdP fetch so a
+      // dispose / cancel during the device-authorization request
+      // aborts the in-flight socket immediately. Pre-existing CLI
+      // callers don't pass a signal; the optional second arg keeps
+      // them compatible.
+      auth = await this.client.requestDeviceAuthorization(
+        {
+          scope: QWEN_OAUTH_SCOPE,
+          code_challenge,
+          code_challenge_method: 'S256',
+        },
+        { signal: opts.signal },
+      );
     } catch (err: unknown) {
       // Network / parse / non-2xx errors from the Qwen IdP. Wrap so the
       // route layer maps to `502 upstream_error` rather than the generic
@@ -129,12 +138,22 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       // upstream payloads) and on RFC 8628 terminal errors that aren't
       // `authorization_pending` or `slow_down`. Map RFC 8628 errors to
       // structured terminal results; everything else is `upstream_error`.
+      // PR #4255 review S2: do NOT echo the raw thrown message into
+      // `hint` — `qwenOAuth2.ts` embeds the entire IdP responseText
+      // (which can be an HTML error page from a reverse proxy / WAF
+      // running into hundreds of bytes) into the message, and that
+      // would flow through `broadcastWorkspaceEvent` to every SSE
+      // subscriber. Use a stable bounded summary; full detail goes
+      // through the registry's stderr audit only.
       const message = err instanceof Error ? err.message : String(err);
       const errorKind = mapRfc8628ErrorMessage(message);
       return {
         kind: 'error',
         errorKind,
-        hint: message,
+        hint:
+          errorKind === 'upstream_error'
+            ? 'unexpected response from identity provider'
+            : `Qwen IdP returned ${errorKind}`,
       };
     }
     if (isDeviceTokenSuccess(response)) {
@@ -152,15 +171,20 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       const client = this.client;
       return {
         kind: 'success',
-        async persist() {
+        // PR #4255 review C3: `persist({signal})` lets the registry
+        // abort a wedged disk write via the entry's
+        // `cancelController`. The Qwen path's `cacheQwenCredentials`
+        // doesn't currently take a signal — that's a follow-up; for
+        // now the registry's hard timeout (DEVICE_FLOW_PERSIST_TIMEOUT_MS)
+        // bounds the wait + the post-write disposed check below
+        // ensures we don't update the in-process client after a
+        // dispose-during-persist race.
+        async persist(_persistOpts: { signal: AbortSignal }) {
           // Order matters: write to disk FIRST. If `cacheQwenCredentials`
           // throws (EACCES, EROFS, ENOSPC) we MUST NOT update the
           // in-process client — otherwise the daemon enters a zombie
           // state where this session "remembers" the token but a
-          // restart loses it (silent-failure-hunter S4). The post-await
-          // `setCredentials` is best-effort; failure here is benign
-          // because the disk file is the source of truth and any
-          // SharedTokenManager consumer reads it via mtime check.
+          // restart loses it.
           await cacheQwenCredentials(credentials);
           try {
             client.setCredentials(credentials);
@@ -168,7 +192,22 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
             // ignore — disk file is the durable record; in-process
             // refresh happens on next SharedTokenManager mtime poll
           }
+          // PR #4255 review W3: `accountAlias` USED to be wired
+          // through events / reducer / audit but the Qwen IdP token
+          // response doesn't carry one (see DeviceTokenData shape in
+          // `qwenOAuth2.ts:152-160` — no `name` / `email` / `sub`
+          // field). Returning only `{expiresAt}` makes the field
+          // type-honestly absent rather than always-undefined. A
+          // future provider whose token response carries an alias
+          // can populate it; the type stays optional.
           return { expiresAt };
+        },
+        // PR #4255 review C4: cancel-during-success rollback. If the
+        // registry's `transitionTerminal(authorized)` returns false
+        // (entry was cancelled / disposed mid-persist), unpersist
+        // restores disk parity with the cancelled flow status.
+        async unpersist() {
+          await clearQwenCredentials();
         },
       };
     }
@@ -181,18 +220,12 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
     // response (it never returns a structured error envelope from the
     // success path). So this fall-through is reached only if a future
     // refactor changes that contract. Map defensively to
-    // `upstream_error` and surface the response shape via `hint`.
-    const errorData = response as {
-      error?: string;
-      error_description?: string;
-    };
+    // `upstream_error` with a bounded hint (PR #4255 review S2 — never
+    // forward the raw IdP response body to SDK clients).
     return {
       kind: 'error',
       errorKind: 'upstream_error',
-      hint:
-        errorData?.error_description ??
-        errorData?.error ??
-        'unknown error envelope',
+      hint: 'unexpected response from identity provider',
     };
   }
 }
