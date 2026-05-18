@@ -407,6 +407,8 @@ describe('installation scripts', () => {
       expect(readScript(fakeCurl)).toContain(
         '/releases/qwen-code/latest/VERSION',
       );
+      expect(readScript(fakeCurl)).toContain('set "destination=%~2"');
+      expect(readScript(fakeCurl)).not.toContain('set "destination=%~1"');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -3318,20 +3320,20 @@ function createFakeWindowsCurlCommand(fakeBin) {
       'set "arg=%~1"',
       'if "!arg:~0,1!"=="-" (',
       '  if /i "!arg!"=="-o" (',
+      '    set "destination=%~2"',
       '    shift',
-      '    set "destination=%~1"',
       '    shift',
       '    goto parse_args',
       '  )',
       '  if /i "!arg!"=="--output" (',
+      '    set "destination=%~2"',
       '    shift',
-      '    set "destination=%~1"',
       '    shift',
       '    goto parse_args',
       '  )',
       '  if not "!arg:~0,2!"=="--" if /i "!arg:~-1!"=="o" (',
+      '    set "destination=%~2"',
       '    shift',
-      '    set "destination=%~1"',
       '    shift',
       '    goto parse_args',
       '  )',
