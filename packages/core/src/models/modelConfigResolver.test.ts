@@ -854,4 +854,38 @@ describe('modelConfigResolver', () => {
       }
     });
   });
+
+  describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
+    it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
+      // REPRODUCES issue-4219:
+      // When the model is supplied only via OPENAI_MODEL (no modelProviders entry),
+      // resolveGenerationConfig() iterates MODEL_GENERATION_CONFIG_FIELDS but never
+      // calls defaultModalities(). This leaves config.modalities undefined, causing
+      // image attachments to be silently dropped with an "Unsupported <modality>"
+      // message even though the model supports images.
+      //
+      // The modelRegistry path (resolveModelConfig -> resolveModelConfig in modelRegistry.ts)
+      // and the modelsConfig path (applyResolvedModelDefaults) both call defaultModalities()
+      // when generationConfig.modalities is undefined. The env-var-only path does not.
+      const result = resolveModelConfig({
+        authType: AuthType.USE_OPENAI,
+        cli: {},
+        settings: {},
+        env: {
+          OPENAI_API_KEY: 'test-key',
+          OPENAI_BASE_URL: 'http://localhost:8000/v1',
+          OPENAI_MODEL: 'qwen3.6-35b-a3b',
+        },
+        // No modelProvider — this is the env-var-only path
+      });
+
+      expect(result.config.model).toBe('qwen3.6-35b-a3b');
+
+      // The qwen3.6-35b pattern in modalityDefaults.ts maps to { image: true, video: true }.
+      // The env-var-only path must auto-detect this — just as the modelProviders path does
+      // in modelsConfig.ts applyResolvedModelDefaults() lines 791-797.
+      expect(result.config.modalities).toBeDefined();
+      expect(result.config.modalities?.image).toBe(true);
+    });
+  });
 });

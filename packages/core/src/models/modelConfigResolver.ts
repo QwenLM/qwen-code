@@ -21,6 +21,7 @@
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
+import { defaultModalities } from '../core/modalityDefaults.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -268,7 +269,7 @@ export function resolveModelConfig(
     settings?.generationConfig,
     modelProvider?.generationConfig,
     authType,
-    modelProvider?.id,
+    modelProvider?.id ?? modelResult.value,
     sources,
   );
 
@@ -394,6 +395,16 @@ function resolveGenerationConfig(
       (result as any)[field] = settingsConfig[field];
       sources[field] = settingsSource(`model.generationConfig.${field}`);
     }
+  }
+
+  // modalities fallback: auto-detect from model when neither modelProvider nor
+  // settings supplied it. Mirrors modelRegistry.resolveModelConfig and
+  // modelsConfig.applyResolvedModelDefaults so all paths agree on which models
+  // are multimodal — without this, env-var-only setups silently drop @image
+  // attachments for image-capable models (issue #4219).
+  if (result.modalities === undefined && modelId) {
+    result.modalities = defaultModalities(modelId);
+    sources['modalities'] = computedSource('auto-detected from model');
   }
 
   return result;
