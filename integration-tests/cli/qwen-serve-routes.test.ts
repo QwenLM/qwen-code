@@ -214,6 +214,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_supported_commands',
       'session_close',
       'session_metadata',
+      'mcp_guardrails',
     ]);
   });
 });
