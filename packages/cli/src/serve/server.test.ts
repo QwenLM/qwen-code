@@ -223,7 +223,7 @@ interface FakeBridgeOpts {
   initWorkspaceImpl?: (
     initOpts: { force?: boolean },
     originatorClientId: string | undefined,
-  ) => Promise<{ path: string; action: 'created' | 'overwrote' }>;
+  ) => Promise<{ path: string; action: 'created' | 'overwrote' | 'noop' }>;
   restartMcpServerImpl?: (
     serverName: string,
     originatorClientId: string | undefined,
@@ -2538,6 +2538,21 @@ describe('createServeApp', () => {
       ).send({});
       expect(res.status).toBe(404);
     });
+
+    it('400 when serverName exceeds 256 chars (#4282 fold-in 4 S1)', async () => {
+      // Mirror the existing tool-name length cap so an unbounded path
+      // parameter can't bloat SSE event bodies, ACP messages, or error
+      // responses with arbitrarily long server names.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const overlong = 'a'.repeat(257);
+      const res = await auth(
+        request(app).post(`/workspace/mcp/${overlong}/restart`),
+      ).send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_server_name');
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
   });
 
   describe('POST /workspace/tools/:name/enable (#4175 Wave 4 PR 17)', () => {
@@ -2639,6 +2654,37 @@ describe('createServeApp', () => {
       expect(bridge.setToolEnabledCalls[0]?.toolName).toBe(
         'mcp__github__create_issue',
       );
+    });
+
+    it('trims surrounding whitespace before persisting (#4282 fold-in 4 C3)', async () => {
+      // The disk read path (`loadCliConfig` → `Set` of trimmed strings)
+      // applies `.trim()` when consuming `tools.disabled`. Without
+      // matching the route's write path, disabling URL-encoded
+      // `%20Bash%20` would persist `" Bash "` verbatim and the next
+      // ACP child spawn would key on `"Bash"` — leaving the entry
+      // permanently stuck because re-enable for `"Bash"` would
+      // `.delete("Bash")` on a Set containing `" Bash "`.
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/tools/%20Bash%20/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(200);
+      expect(bridge.setToolEnabledCalls[0]?.toolName).toBe('Bash');
+    });
+
+    it('400 when whitespace-only path parameter trims to empty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // `%20%20` is two spaces — survives the path-segment guard but
+      // collapses to '' after trim. Surface the same 400 the
+      // routing layer would return for an empty segment.
+      const res = await auth(
+        request(app).post('/workspace/tools/%20%20/enable'),
+      ).send({ enabled: false });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_tool_name');
+      expect(bridge.setToolEnabledCalls).toHaveLength(0);
     });
   });
 

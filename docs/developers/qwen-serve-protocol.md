@@ -1183,7 +1183,7 @@ Response (200):
 { "path": "/work/bound/QWEN.md", "action": "created" }
 ```
 
-`action` is `'created'` for fresh creates and whitespace-only overrides; `'overwrote'` when `force: true` replaced non-empty content.
+`action` is `'created'` for fresh creates, `'noop'` when an existing whitespace-only file was left untouched (no write performed), and `'overwrote'` when `force: true` replaced non-empty content. The `workspace_initialized` SSE event mirrors the response action — observers can filter for `action !== 'noop'` to react only to actual on-disk changes.
 
 Errors:
 

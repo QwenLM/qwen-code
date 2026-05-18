@@ -53,6 +53,7 @@ import {
 } from './httpAcpBridge.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import type { BridgeEvent } from './eventBus.js';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
 // expected values match what the bridge canonicalizes internally on
@@ -4276,6 +4277,189 @@ describe('createHttpAcpBridge', () => {
           modelId: 'qwen3-coder',
         }),
       ).rejects.toBeInstanceOf(SessionNotFoundError);
+    });
+  });
+
+  describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
+    /**
+     * #4282 fold-in 4 (qwen-latest C1). Build a channel factory whose
+     * extMethod handler answers `qwen/control/session/approval_mode`
+     * with the expected `{previous, current}` shape. Tracks invocations
+     * so the guard-ordering tests can assert that the ACP call did NOT
+     * happen when the persist contract was already violated upfront.
+     */
+    function approvalModeFactoryWithCallTracker(): {
+      factory: ChannelFactory;
+      getCalls: () => Array<{ method: string }>;
+    } {
+      const calls: Array<{ method: string }> = [];
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            calls.push({ method });
+            if (method === 'qwen/control/session/approval_mode') {
+              return Promise.resolve({
+                previous: 'default',
+                current: (params as { mode: string }).mode,
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      return { factory, getCalls: () => calls };
+    }
+
+    it('throws BEFORE the ACP roundtrip when persist:true but no callback wired', async () => {
+      // The previous post-ACP placement of the persist guard meant a
+      // missing callback produced a 500 *after* the ACP child had
+      // already applied the mode change — observable to other in-flight
+      // requests but invisible to the caller. Pre-call ordering closes
+      // that window; assert by checking the ACP `extMethod` was never
+      // invoked when the guard fires.
+      const { factory, getCalls } = approvalModeFactoryWithCallTracker();
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        bridge.setSessionApprovalMode(
+          session.sessionId,
+          ApprovalMode.YOLO,
+          { persist: true },
+          undefined,
+        ),
+      ).rejects.toThrow(/persistApprovalMode/);
+      expect(
+        getCalls().some(
+          (c) => c.method === 'qwen/control/session/approval_mode',
+        ),
+      ).toBe(false);
+      await bridge.shutdown();
+    });
+
+    it('persist:false bypasses the guard regardless of callback wiring', async () => {
+      // Symmetric coverage for the guard: when `persist` is omitted /
+      // false, the missing callback is irrelevant and the ACP call must
+      // proceed normally. Without this check, a future regression that
+      // moves the guard could over-restrict the no-persist path.
+      const { factory } = approvalModeFactoryWithCallTracker();
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const res = await bridge.setSessionApprovalMode(
+        session.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false },
+        undefined,
+      );
+      expect(res.persisted).toBe(false);
+      expect(res.mode).toBe('yolo');
+      await bridge.shutdown();
+    });
+
+    it('broadcasts approval_mode_changed to peer sessions when persisted (#4282 fold-in 4 S2)', async () => {
+      // When `persist:true` succeeds the change becomes the workspace
+      // default, so a peer session needs to know its next ACP child
+      // will spawn into a different mode. The session-scoped publish
+      // remains the authoritative signal for the requester; the
+      // workspace broadcast is the informational mirror for peers.
+      const { factory } = approvalModeFactoryWithCallTracker();
+      const bridge = makeBridge({
+        channelFactory: factory,
+        persistApprovalMode: async () => {},
+      });
+      const a = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const b = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const aborts = [new AbortController(), new AbortController()];
+      const itA = bridge
+        .subscribeEvents(a.sessionId, { signal: aborts[0]!.signal })
+        [Symbol.asyncIterator]();
+      const itB = bridge
+        .subscribeEvents(b.sessionId, { signal: aborts[1]!.signal })
+        [Symbol.asyncIterator]();
+      await bridge.setSessionApprovalMode(
+        a.sessionId,
+        ApprovalMode.YOLO,
+        { persist: true },
+        undefined,
+      );
+      // Session A receives both the session-scoped event and the
+      // workspace-scoped mirror; collect two events.
+      const aFirst = await itA.next();
+      const aSecond = await itA.next();
+      const aTypes = [aFirst.value?.type, aSecond.value?.type];
+      expect(aTypes.filter((t) => t === 'approval_mode_changed').length).toBe(
+        2,
+      );
+      // Session B receives only the workspace-scoped mirror.
+      const bFirst = await itB.next();
+      expect(bFirst.value?.type).toBe('approval_mode_changed');
+      expect(bFirst.value?.data).toMatchObject({
+        sessionId: a.sessionId,
+        previous: 'default',
+        next: 'yolo',
+        persisted: true,
+      });
+      aborts.forEach((a) => a.abort());
+      await bridge.shutdown();
+    });
+
+    it('does NOT broadcast to peers when persisted is false', async () => {
+      // Symmetric coverage: ephemeral changes affect only the
+      // requesting session and must not surface on peer SSE buses, or
+      // peer UIs would react to a workspace-wide change that didn't
+      // happen.
+      const { factory } = approvalModeFactoryWithCallTracker();
+      const bridge = makeBridge({ channelFactory: factory });
+      const a = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const b = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const aborts = [new AbortController(), new AbortController()];
+      const itA = bridge
+        .subscribeEvents(a.sessionId, { signal: aborts[0]!.signal })
+        [Symbol.asyncIterator]();
+      const itB = bridge
+        .subscribeEvents(b.sessionId, { signal: aborts[1]!.signal })
+        [Symbol.asyncIterator]();
+      await bridge.setSessionApprovalMode(
+        a.sessionId,
+        ApprovalMode.YOLO,
+        { persist: false },
+        undefined,
+      );
+      const aFirst = await itA.next();
+      expect(aFirst.value?.type).toBe('approval_mode_changed');
+      // Race the peer subscriber against a 50ms timer. Without a
+      // timeout the test would hang because no event is expected.
+      const timed = await Promise.race([
+        itB.next().then((v) => ({ kind: 'event' as const, v })),
+        new Promise((r) => setTimeout(r, 50)).then(() => ({
+          kind: 'timeout' as const,
+        })),
+      ]);
+      expect(timed.kind).toBe('timeout');
+      aborts.forEach((a) => a.abort());
+      await bridge.shutdown();
     });
   });
 

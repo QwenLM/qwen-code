@@ -3792,6 +3792,21 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         entry,
         context?.clientId,
       );
+      // #4282 fold-in 4 (qwen-latest C1): validate the persist contract
+      // BEFORE the ACP roundtrip changes the in-process mode. The previous
+      // post-call placement meant a missing `persistApprovalMode` callback
+      // produced a 500 *after* the ACP child had already applied the
+      // mode change — observable to other in-flight requests but
+      // invisible to the caller. Mirrors the pre-call validation in
+      // `setWorkspaceToolEnabled`.
+      if (opts.persist && !persistApprovalMode) {
+        throw new Error(
+          'setSessionApprovalMode called with `persist: true` but no ' +
+            '`persistApprovalMode` callback wired in BridgeOptions. ' +
+            'runQwenServe wires the production callback; direct embeds ' +
+            'and tests must opt in or omit `persist`.',
+        );
+      }
       let response: { previous: ApprovalMode; current: ApprovalMode };
       try {
         response = (await Promise.race([
@@ -3828,21 +3843,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         }
         throw err;
       }
-      // #4282 wenshao H3 fold-in: throw clearly when the caller asked
-      // for `persist: true` but the bridge wasn't wired with a
-      // `persistApprovalMode` callback. The previous silent
-      // `persisted: false` was indistinguishable from "hook ran but
-      // failed" or genuine `persisted: true` from the caller's point
-      // of view, leaving a contract gap. Mirrors the throw in
-      // `setWorkspaceToolEnabled` for the same situation.
-      if (opts.persist && !persistApprovalMode) {
-        throw new Error(
-          'setSessionApprovalMode called with `persist: true` but no ' +
-            '`persistApprovalMode` callback wired in BridgeOptions. ' +
-            'runQwenServe wires the production callback; direct embeds ' +
-            'and tests must opt in or omit `persist`.',
-        );
-      }
       let persisted = false;
       if (opts.persist) {
         try {
@@ -3873,6 +3873,25 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         });
       } catch {
         /* bus closed */
+      }
+      // #4282 fold-in 4 (qwen-latest S2): when the change is persisted to
+      // workspace settings, the new mode becomes the default for every
+      // future session in this workspace. Fan out a workspace-scoped
+      // mirror so peer sessions can update their UI before they next
+      // spawn an ACP child. The session-scoped publish above remains the
+      // authoritative signal for the requesting session (and carries the
+      // sessionId in `data`); the workspace mirror is informational.
+      if (persisted) {
+        broadcastWorkspaceEvent({
+          type: 'approval_mode_changed',
+          data: {
+            sessionId: entry.sessionId,
+            previous: response.previous,
+            next: response.current,
+            persisted,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
       }
       return {
         sessionId: entry.sessionId,

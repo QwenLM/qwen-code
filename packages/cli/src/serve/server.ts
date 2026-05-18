@@ -1377,6 +1377,18 @@ export function createServeApp(
         });
         return;
       }
+      // #4282 fold-in 4 (qwen-latest S1): match the
+      // `MAX_TOOL_NAME_LENGTH` cap so the server name (which propagates
+      // into SSE event bodies, ACP messages, and error responses) can't
+      // be used to bloat any of those surfaces with an unbounded
+      // path-parameter input.
+      if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+        res.status(400).json({
+          error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+          code: 'invalid_server_name',
+        });
+        return;
+      }
       // #4282 fold-in 1 (gpt-5.5 C2): validate `X-Qwen-Client-Id`
       // against `bridge.knownClientIds()` so the originator stamped
       // onto `mcp_server_restart*` events is grounded in a known
@@ -1432,8 +1444,23 @@ export function createServeApp(
       // session SSE bus. Already-registered tools in live sessions
       // are NOT retroactively unregistered — toggling takes effect on
       // the next ACP child spawn or session refresh.
-      const toolName = req.params['name'];
-      if (!toolName || typeof toolName !== 'string') {
+      const rawToolName = req.params['name'];
+      if (!rawToolName || typeof rawToolName !== 'string') {
+        res.status(400).json({
+          error: 'Tool name path parameter is required',
+          code: 'invalid_tool_name',
+        });
+        return;
+      }
+      // #4282 fold-in 4 (qwen-latest C3): trim before persistence so the
+      // write path matches the read path. `loadCliConfig` applies
+      // `.trim()` when consuming `tools.disabled` at child spawn, so a
+      // leading/trailing space stored verbatim would never round-trip:
+      // disable would persist `" Bash "`, the spawn would key on
+      // `"Bash"`, and a re-enable for `"Bash"` would leave the original
+      // entry permanently stuck.
+      const toolName = rawToolName.trim();
+      if (toolName.length === 0) {
         res.status(400).json({
           error: 'Tool name path parameter is required',
           code: 'invalid_tool_name',
@@ -1839,6 +1866,8 @@ const CLIENT_ID_HEADER = 'x-qwen-client-id';
 const MAX_CLIENT_ID_LENGTH = 128;
 /** #4282 fold-in 2 (deepseek SV1) — see /workspace/tools/:name/enable. */
 const MAX_TOOL_NAME_LENGTH = 256;
+/** #4282 fold-in 4 (qwen-latest S1) — see /workspace/mcp/:server/restart. */
+const MAX_SERVER_NAME_LENGTH = 256;
 const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
