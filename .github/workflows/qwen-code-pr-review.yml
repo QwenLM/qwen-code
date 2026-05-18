@@ -2,7 +2,7 @@ name: 'Qwen Pull Request Review'
 
 on:
   pull_request_target:
-    types: ['opened', 'reopened', 'ready_for_review']
+    types: ['opened', 'reopened', 'ready_for_review', 'synchronize']
   issue_comment:
     types: ['created', 'edited']
   pull_request_review_comment:
@@ -33,7 +33,7 @@ jobs:
     if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
-       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review') &&
+       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review' || github.event.action == 'synchronize') &&
        (github.event.pull_request.author_association == 'OWNER' ||
         github.event.pull_request.author_association == 'MEMBER' ||
         github.event.pull_request.author_association == 'COLLABORATOR')) ||
@@ -219,23 +219,35 @@ jobs:
 
           pr_json="$(gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --json additions,deletions,changedFiles,title,baseRefName,headRefName,isCrossRepository,headRepositoryOwner,headRepository)"
+            --json additions,deletions,changedFiles,title,baseRefName,headRefName,headRefOid,isCrossRepository,headRepositoryOwner,headRepository)"
           additions="$(jq -r '.additions' <<< "$pr_json")"
           deletions="$(jq -r '.deletions' <<< "$pr_json")"
           changed_files="$(jq -r '.changedFiles' <<< "$pr_json")"
           title="$(jq -r '.title' <<< "$pr_json")"
           base_ref="$(jq -r '.baseRefName' <<< "$pr_json")"
           head_ref="$(jq -r '.headRefName' <<< "$pr_json")"
+          head_sha="$(jq -r '.headRefOid // ""' <<< "$pr_json")"
           is_cross_repository="$(jq -r '.isCrossRepository' <<< "$pr_json")"
           head_owner="$(jq -r '.headRepositoryOwner.login // ""' <<< "$pr_json")"
           head_repo="$(jq -r '.headRepository.name // ""' <<< "$pr_json")"
           changed_lines=$((additions + deletions))
 
+          # Reject empty head_sha early. Cache key generation downstream depends
+          # on it, and the bundled review skill needs a stable head SHA to
+          # compute the incremental diff range. An empty value almost always
+          # means the gh pr view call partially failed.
+          if [ -z "$head_sha" ]; then
+            echo "::error::Could not resolve PR head SHA via gh pr view --json headRefOid."
+            exit 1
+          fi
+
           echo "changed_lines=$changed_lines" >> "$GITHUB_OUTPUT"
           echo "changed_files=$changed_files" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
           echo "Review branch: $base_ref <- $head_owner/$head_repo:$head_ref"
+          echo "Review head SHA: $head_sha"
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
 
           if [ "$is_cross_repository" = "true" ]; then
@@ -282,6 +294,26 @@ jobs:
             echo "should_review=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Restore the bundled /review skill's per-PR cache only on synchronize.
+      # The skill writes .qwen/review-cache/pr-<n>.json with the last reviewed
+      # commit SHA so subsequent runs can scope review to the incremental
+      # diff. Cache is intentionally NOT restored on opened/reopened (full
+      # review) or comment / workflow_dispatch (manual re-review must not
+      # short-circuit on "No new changes since last review"). See
+      # docs/design/code-review/code-review-design.md §增量评审与缓存.
+      - name: 'Restore review cache'
+        id: 'restore-cache'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          github.event_name == 'pull_request_target' &&
+          github.event.action == 'synchronize'
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen/review-cache'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.head_sha }}'
+          restore-keys: |
+            qwen-review-${{ steps.pr.outputs.number }}-
+
       - name: 'Run Qwen Code Review'
         id: 'review'
         if: |-
@@ -292,6 +324,22 @@ jobs:
           openai_base_url: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
           openai_model: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           prompt: '${{ steps.pr.outputs.review_prompt }}'
+
+      # Save cache after a successful review on pull_request_target events
+      # (any of opened / reopened / ready_for_review / synchronize). Comment
+      # and workflow_dispatch triggers are excluded so manual re-reviews do
+      # not overwrite the author-driven cache lineage. The cache key uses the
+      # PR head SHA, not github.sha, because in pull_request_target context
+      # github.sha points at the base branch, not the PR head.
+      - name: 'Save review cache'
+        if: |-
+          steps.review.outcome == 'success' &&
+          github.event_name == 'pull_request_target' &&
+          steps.size.outputs.head_sha != ''
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen/review-cache'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.head_sha }}'
 
       - name: 'Post dry-run summary'
         if: |-
