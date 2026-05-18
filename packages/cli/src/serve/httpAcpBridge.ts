@@ -1019,6 +1019,28 @@ export class InvalidPermissionOptionError extends Error {
 
 const MAX_DISPLAY_NAME_LENGTH = 256;
 
+/**
+ * PR 14b fix #1 (codex review round 1): bounded buffering for ACP
+ * `extNotification` frames that arrive on `BridgeClient` before the
+ * matching session has been registered in `byId`. The bridge populates
+ * `byId` only AFTER `connection.newSession` returns, but the child's
+ * MCP discovery runs INSIDE `newSession` and may fire budget events
+ * synchronously before the response makes it back. Without buffering,
+ * those frames hit `resolveEntry → undefined` and are silently dropped
+ * — the very first replay-ring slot for the new session is missing
+ * the events that fired during its creation.
+ *
+ * The triple bound (max sessions × max events per session × TTL)
+ * caps worst-case heap retention even if a malicious / buggy child
+ * spammed `extNotification` for sessionIds that never register:
+ * 64 × 32 × ~200B ≈ 400 KB total. TTL is generous (60s — far longer
+ * than realistic session creation latency of seconds) so brief
+ * scheduling pauses don't cause real warnings to be evicted.
+ */
+const MAX_EARLY_EVENT_SESSIONS = 64;
+const MAX_EARLY_EVENTS_PER_SESSION = 32;
+const EARLY_EVENT_TTL_MS = 60_000;
+
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
@@ -1227,14 +1249,35 @@ class BridgeClient implements Client {
   }
 
   /**
+   * PR 14b fix #1 (codex review round 1): bounded early-event buffer.
+   * Frames are keyed by sessionId; each entry tracks its `expiresAt`
+   * for lazy TTL-based eviction in `bufferEarlyEvent`. Drained by
+   * `drainEarlyEvents` whenever the bridge registers a session with
+   * a matching id. See MAX_EARLY_EVENT_* constants for capacity
+   * bounds.
+   */
+  private readonly earlyEvents = new Map<
+    string,
+    {
+      frames: Array<Omit<BridgeEvent, 'id' | 'v'>>;
+      expiresAt: number;
+    }
+  >();
+
+  /**
    * PR 14b: handle child→bridge ACP `extNotification` calls. Only one
    * method is recognized today — `qwen/notify/session/mcp-budget-event`
    * — translating the McpClientManager's budget-event payload into a
    * session-scoped SSE frame. Unknown methods, unknown event kinds,
-   * and missing-or-unresolvable sessionIds are dropped silently for
-   * forward-compat (a future child can add new notification methods
-   * without breaking this handler; an older daemon can ignore them
-   * cleanly).
+   * and missing sessionIds are dropped silently for forward-compat
+   * (a future child can add new notification methods without breaking
+   * this handler; an older daemon can ignore them cleanly).
+   *
+   * Codex review fix #1: when the sessionId IS present but the
+   * `byId`-resolvable entry is not yet registered (the child fired
+   * the event during its own `newSession` handler, before
+   * `connection.newSession` returned to `doSpawn`), buffer the frame
+   * and replay it on `drainEarlyEvents`.
    */
   async extNotification(
     method: string,
@@ -1243,8 +1286,6 @@ class BridgeClient implements Client {
     if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
-    const entry = this.resolveEntry(sessionId);
-    if (!entry) return;
     const kind = params['kind'];
     const type =
       kind === 'budget_warning'
@@ -1262,13 +1303,74 @@ class BridgeClient implements Client {
     void _v;
     void _sid;
     void _kind;
-    entry.events.publish({
+    const entry = this.resolveEntry(sessionId);
+    const frame: Omit<BridgeEvent, 'id' | 'v'> = {
       type,
       data: rest,
-      ...(entry.activePromptOriginatorClientId
+      ...(entry?.activePromptOriginatorClientId
         ? { originatorClientId: entry.activePromptOriginatorClientId }
         : {}),
-    });
+    };
+    if (entry) {
+      entry.events.publish(frame);
+      return;
+    }
+    // No entry yet — buffer for `drainEarlyEvents`. The bridge calls
+    // `drainEarlyEvents` immediately after `byId.set(sessionId, entry)`
+    // in `createSessionEntry`; if the session never registers (spawn
+    // failure), the entry is GC'd by TTL after EARLY_EVENT_TTL_MS.
+    this.bufferEarlyEvent(sessionId, frame);
+  }
+
+  /**
+   * PR 14b fix #1: enqueue `frame` for `sessionId`. Lazy TTL sweep
+   * runs first so caller doesn't pay for stale entries before
+   * deciding whether the session-cap is reached. New sessionIds
+   * past `MAX_EARLY_EVENT_SESSIONS` are dropped (defense against a
+   * malicious / buggy child fanning out fake sessionIds); same-
+   * sessionId frames past `MAX_EARLY_EVENTS_PER_SESSION` are dropped
+   * to bound per-session memory.
+   */
+  private bufferEarlyEvent(
+    sessionId: string,
+    frame: Omit<BridgeEvent, 'id' | 'v'>,
+  ): void {
+    const now = Date.now();
+    this.sweepExpiredEarlyEvents(now);
+    let buf = this.earlyEvents.get(sessionId);
+    if (!buf) {
+      if (this.earlyEvents.size >= MAX_EARLY_EVENT_SESSIONS) return;
+      buf = { frames: [], expiresAt: now + EARLY_EVENT_TTL_MS };
+      this.earlyEvents.set(sessionId, buf);
+    }
+    if (buf.frames.length >= MAX_EARLY_EVENTS_PER_SESSION) return;
+    buf.frames.push(frame);
+  }
+
+  private sweepExpiredEarlyEvents(now: number): void {
+    for (const [sid, buf] of this.earlyEvents) {
+      if (buf.expiresAt <= now) this.earlyEvents.delete(sid);
+    }
+  }
+
+  /**
+   * PR 14b fix #1: drain any frames buffered for `sessionId` onto
+   * `entry.events`. Bridge calls this immediately after
+   * `byId.set(sessionId, entry)` in `createSessionEntry`. The frames
+   * were captured before the entry existed (e.g. MCP discovery during
+   * the child's `newSession` handler), so draining them now lands
+   * them in the replay ring as the FIRST events of this session —
+   * SDK consumers reconnecting with `Last-Event-ID: 0` see them on
+   * their initial subscription.
+   *
+   * Public so the bridge factory can call it directly. Idempotent on
+   * unknown sessionIds.
+   */
+  drainEarlyEvents(sessionId: string, entry: SessionEntry): void {
+    const buf = this.earlyEvents.get(sessionId);
+    if (!buf) return;
+    for (const frame of buf.frames) entry.events.publish(frame);
+    this.earlyEvents.delete(sessionId);
   }
 
   async writeTextFile(
@@ -2416,6 +2518,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     };
     ci.sessionIds.add(entry.sessionId);
     byId.set(entry.sessionId, entry);
+    // PR 14b fix #1 (codex review round 1): drain any guardrail
+    // events that fired during this session's `newSession` handler
+    // (before this entry registered) onto the freshly-created
+    // EventBus. Idempotent on unknown sessionIds.
+    ci.client.drainEarlyEvents(entry.sessionId, entry);
     return entry;
   };
 

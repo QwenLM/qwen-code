@@ -59,6 +59,7 @@ import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import type { McpBudgetEvent } from '../tools/mcp-client-manager.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 
@@ -683,6 +684,17 @@ export class Config {
   private sessionData?: ResumedSessionData;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
+  /**
+   * PR 14b fix #2 (codex review round 1): callback stashed BEFORE
+   * `initialize()` runs and applied as soon as `toolRegistry` is up,
+   * so the manager's `setOnBudgetEvent` is wired before
+   * `startMcpDiscoveryInBackground` (or legacy blocking discovery)
+   * fires the first pass. Pre-fix the acpAgent registered after
+   * `initialize()` returned, missing the first pass entirely under
+   * `QWEN_CODE_LEGACY_MCP_BLOCKING=1` and racing against background
+   * discovery completion under the default mode.
+   */
+  private pendingMcpBudgetCallback?: (event: McpBudgetEvent) => void;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
@@ -3633,6 +3645,20 @@ export class Config {
       return new MonitorTool(this);
     });
 
+    // PR 14b fix #2 (codex review round 1): apply any pending MCP
+    // budget-event callback BEFORE `discoverAllTools` (legacy blocking
+    // mode runs MCP discovery synchronously in there) and BEFORE the
+    // post-`createToolRegistry` `startMcpDiscoveryInBackground` (default
+    // mode). Either way the manager has its callback wired at the
+    // moment the first discovery pass fires, so end-of-pass events
+    // for that pass are routed through the SDK push channel.
+    if (this.pendingMcpBudgetCallback) {
+      const mgr = registry.getMcpClientManager();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(this.pendingMcpBudgetCallback);
+      }
+    }
+
     if (!options?.skipDiscovery) {
       await registry.discoverAllTools();
     }
@@ -3640,5 +3666,29 @@ export class Config {
       `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
     );
     return registry;
+  }
+
+  /**
+   * PR 14b fix #2 (codex review round 1): register the MCP guardrail
+   * push-event callback. Acceptable to call at any point in the
+   * Config lifecycle — before, during, or after `initialize()`. The
+   * callback is stashed and applied lazily inside `createToolRegistry`
+   * (the only construction site for `McpClientManager`); a late call
+   * after `initialize()` already ran applies directly to the existing
+   * manager.
+   *
+   * `cb: undefined` clears the registration. `off`-mode managers
+   * silently drop the callback (their state machine never runs).
+   */
+  setMcpBudgetEventCallback(
+    cb: ((event: McpBudgetEvent) => void) | undefined,
+  ): void {
+    this.pendingMcpBudgetCallback = cb;
+    if (this.toolRegistry) {
+      const mgr = this.toolRegistry.getMcpClientManager?.();
+      if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
+        mgr.setOnBudgetEvent(cb);
+      }
+    }
   }
 }

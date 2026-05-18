@@ -4564,9 +4564,110 @@ describe('createHttpAcpBridge', () => {
         collected.push({ type: e.type });
         if (collected.length === 1) break;
       }
-      // Exactly one event got through — the real one. The 4 dropped
-      // notifications produced no SSE frames.
+      // Exactly one event got through. Codex review fix #1 changed
+      // the "unknown sessionId" path from drop to buffer — the
+      // `nonexistent` frame above is now sitting in the early-event
+      // buffer (it never registers, so it'll TTL out). All other
+      // drops (unknown method, missing sessionId, unknown kind)
+      // remain hard-drops.
       expect(collected).toEqual([{ type: 'mcp_budget_warning' }]);
+
+      abort.abort();
+      await bridge.shutdown();
+    });
+
+    it('buffers events for a not-yet-registered sessionId, drains them on registration (codex fix #1)', async () => {
+      // Codex review round 1, finding #1: budget events fired during
+      // a session's startup window (between `connection.newSession`
+      // dispatching and `byId.set`) reach `BridgeClient.extNotification`
+      // with a valid sessionId but no matching entry. Pre-fix those
+      // were dropped silently; post-fix they're buffered and replayed
+      // via `drainEarlyEvents` so SSE subscribers see them as the
+      // FIRST frames of the new session.
+      //
+      // This test exercises the buffer + drain mechanism directly,
+      // pre-buffering for a sessionId that doesn't yet exist, then
+      // creating that session via newSessionImpl-controlled id and
+      // verifying the drain replayed the frame onto the new EventBus.
+      // (Forcing the actual production race window is timing-flaky;
+      // the mechanism is the invariant we care about.)
+      let capturedConn: AgentSideConnection | undefined;
+      // Use sessionScope: 'thread' + a deterministic id-prefix so
+      // `spawnOrAttach` returns an id we can pre-target.
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({ sessionIdPrefix: 'pre-buffer' });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'thread',
+      });
+
+      // Boot ANY session first to get the channel + BridgeClient
+      // alive (factory + AgentSideConnection are constructed lazily
+      // on first spawn). After this, subsequent spawns share the
+      // channel and BridgeClient.
+      const seed = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Pre-buffer for the NEXT thread-scope session id. FakeAgent
+      // names them `<prefix>:<cwd>#<n>`; the seed was call 1
+      // (suffix ''), the next will be call 2 (suffix '#2').
+      const futureSessionId = `pre-buffer:${WS_A}#2`;
+      expect(seed.sessionId).not.toBe(futureSessionId);
+
+      void capturedConn!.extNotification(
+        'qwen/notify/session/mcp-budget-event',
+        {
+          v: 1,
+          sessionId: futureSessionId,
+          kind: 'budget_warning',
+          liveCount: 4,
+          reservedCount: 4,
+          budget: 4,
+          thresholdRatio: 0.75,
+          mode: 'warn',
+        },
+      );
+
+      // Give the bridge's reader loop a tick to dispatch the
+      // notification onto BridgeClient.extNotification — it goes
+      // through `bufferEarlyEvent` because `futureSessionId` isn't
+      // in `byId` yet.
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Now create the future session. `createSessionEntry`'s new
+      // `drainEarlyEvents` call replays the buffered frame onto the
+      // freshly-constructed EventBus.
+      const target = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(target.sessionId).toBe(futureSessionId);
+
+      // Subscribe with `lastEventId: 0` so the replay-ring drain
+      // path runs (live-only subscriptions skip the ring per
+      // `eventBus.ts` semantics). Production SSE clients reconnecting
+      // with `Last-Event-ID: 0` get this same behavior.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(target.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const collected: Array<{ id?: number; type: string }> = [];
+      for await (const e of iter) {
+        collected.push({ id: e.id, type: e.type });
+        if (collected.length === 1) break;
+      }
+      expect(collected[0]?.type).toBe('mcp_budget_warning');
+      // Drained frame went through `events.publish`, so it gets an
+      // `id` — PR 14b events are session-scoped + replayable.
+      expect(collected[0]?.id).toBe(1);
 
       abort.abort();
       await bridge.shutdown();

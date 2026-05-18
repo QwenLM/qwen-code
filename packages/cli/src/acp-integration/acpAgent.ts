@@ -13,7 +13,6 @@ import {
   QwenOAuth2Event,
   qwenOAuth2Events,
   MCP_BUDGET_WARN_FRACTION,
-  type McpBudgetEvent,
   MCPServerConfig,
   SessionService,
   SESSION_TITLE_MAX_LENGTH,
@@ -1658,61 +1657,41 @@ class QwenAgent implements Agent {
         projectHooks: this.settings.getProjectHooks(),
       },
     );
-    await config.initialize();
-    // PR 14b: wire the manager's budget-event callback to push the
-    // events out as ACP `extNotification` frames. Done AFTER
-    // `initialize()` (which constructs the tool registry / manager)
-    // and BEFORE `waitForMcpReady()` (which awaits the still-in-
-    // flight first discovery pass) so the registration completes
-    // before discovery finishes and emits its end-of-pass events.
+    // PR 14b fix #2 (codex review round 1): register the MCP guardrail
+    // budget-event callback BEFORE `config.initialize()`. Pre-fix the
+    // registration ran AFTER initialize, which (a) missed end-of-pass
+    // events under `QWEN_CODE_LEGACY_MCP_BLOCKING=1` (synchronous
+    // discovery completes inside initialize, before our setter runs)
+    // and (b) raced against background-discovery completion under the
+    // default progressive mode. `Config.setMcpBudgetEventCallback`
+    // stashes the callback and `createToolRegistry` applies it to the
+    // manager BEFORE `discoverAllTools` / `startMcpDiscoveryInBackground`
+    // fires, closing both windows.
     //
-    // Best-effort: the manager is `off` mode (and `setOnBudgetEvent`
-    // is a no-op) when no budget is configured — production cost is
-    // a single property read. `getMcpClientManager()` may be absent
-    // on stubbed test ToolRegistries, hence the optional chain.
+    // sessionId source: `config.getSessionId()` reads the Config's own
+    // session id (auto-assigned via `randomUUID()` in the Config
+    // constructor when no override is passed — see `config.ts:849`),
+    // so the value is available immediately after `loadCliConfig`
+    // returns. The closure pins it for the manager's whole lifetime.
     //
-    // sessionId capture: this Config is per-session (see
-    // `newSessionConfig` JSDoc + #4175 PR 14 R4 scope correction),
-    // so the sessionId stays stable for the manager's lifetime.
-    // Source: `config.getSessionId()` — Core's Config auto-assigns a
-    // randomUUID at construction when no `sessionId` is passed in
-    // (`config.ts:849`), so the value is always present after
-    // `loadCliConfig` returns. Defensive optional chain keeps this
-    // safe if a stub Config in tests omits the method.
-    // Best-effort lookup: older / stubbed test ToolRegistry shapes may
-    // omit `getMcpClientManager`, so a `typeof` check is required in
-    // addition to the optional chain (the optional chain only protects
-    // against the registry itself being missing).
-    const toolRegistry = config.getToolRegistry?.() as
-      | { getMcpClientManager?: () => unknown }
-      | undefined;
-    const budgetManager =
-      typeof toolRegistry?.getMcpClientManager === 'function'
-        ? (toolRegistry.getMcpClientManager() as
-            | {
-                setOnBudgetEvent?: (
-                  cb: (event: McpBudgetEvent) => void,
-                ) => void;
-              }
-            | undefined)
-        : undefined;
+    // Defensive `typeof` checks tolerate stub Configs / ToolRegistries
+    // in older tests (older fixtures may omit `setMcpBudgetEventCallback`
+    // or `getSessionId`).
     const wiredSessionId =
       typeof config.getSessionId === 'function'
         ? config.getSessionId()
         : undefined;
     if (
-      budgetManager &&
-      typeof budgetManager.setOnBudgetEvent === 'function' &&
+      typeof config.setMcpBudgetEventCallback === 'function' &&
       wiredSessionId !== undefined
     ) {
       const sid = wiredSessionId;
-      budgetManager.setOnBudgetEvent!((event) => {
-        // Fire-and-forget: extNotification returns Promise<void> but
-        // the manager's call site doesn't await it. The .catch
-        // suppresses unhandled rejections — a mid-flight ACP
-        // disconnect would otherwise crash the child via uncaught
-        // rejection. Snapshot still carries the state for clients
-        // that reconnect.
+      config.setMcpBudgetEventCallback((event) => {
+        // Fire-and-forget: `extNotification` returns Promise<void> but
+        // the manager's call site doesn't await. `.catch` suppresses
+        // unhandled rejections — a mid-flight ACP disconnect would
+        // otherwise crash the child. Snapshot still carries the state
+        // for clients that reconnect.
         void this.connection
           .extNotification('qwen/notify/session/mcp-budget-event', {
             v: 1,
@@ -1724,6 +1703,7 @@ class QwenAgent implements Agent {
           });
       });
     }
+    await config.initialize();
     // Same reasoning as the top-level runAcpAgent path: ACP feeds session
     // messages to the model immediately, so we cannot return a Config whose
     // MCP discovery is still in flight.
