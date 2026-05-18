@@ -69,6 +69,16 @@ export function canonicalizeWorkspace(p: string): string {
     // deployments will. Stage 2 in-process refactor removes the
     // entire bridge-side path resolution anyway, but if Stage 2
     // ever lands without that change, switch to the async version.
+    //
+    // Note for the resolveWithinWorkspace fast-path:
+    // `CANONICAL_BOUND_CACHE` (defined later in this file) memoizes
+    // the canonical mapping per `boundWorkspace` string. Under the
+    // `1 daemon = 1 workspace` model the cache is hit 100% of the
+    // time after the factory's boot-time canonicalization, so the
+    // sync syscall in steady state is **zero per request** —
+    // event-loop blocking only happens at boot or whenever a fresh
+    // `boundWorkspace` value first appears (e.g. tests sharing a
+    // module instance across `mkdtemp` workspaces).
     return realpathSync.native(resolved);
   } catch (err) {
     // Only fall back to path.resolve for ENOENT (path doesn't exist

@@ -141,16 +141,38 @@ function hashPath(absolute: string): string {
 }
 
 /**
+ * Sentinel returned when `path.relative` produces an absolute
+ * path — happens on Windows when the input is on a different
+ * drive than `boundWorkspace`. Without this guard, audit
+ * consumers (even in raw-paths mode) would see something that
+ * looks like a valid relative path but is actually a fully
+ * qualified `D:\evil\...` leaking the attacker's drive letter +
+ * directory structure. The sentinel lets a UI render
+ * cross-drive denials distinctly without ambiguity over what's
+ * relative vs absolute.
+ */
+const CROSS_DRIVE_RELPATH = '<cross-drive>' as const;
+
+/**
  * Compute the workspace-relative form of a path for the optional
  * `relPath` audit field. Returns the trailing path even when the
  * input lies outside `boundWorkspace` (the `denied` case): the
  * audit consumer wants to see what the caller asked for, not be
  * silently dropped.
+ *
+ * On Windows, `path.relative` between paths on different drives
+ * (`C:\\ws` vs `D:\\evil`) can't produce a relative form and
+ * returns the absolute target — leaking the off-drive path into
+ * the audit row. We detect that with `path.isAbsolute` on the
+ * *result* and substitute `CROSS_DRIVE_RELPATH` so the field
+ * stays a true relative-or-sentinel and the cross-drive case is
+ * still visible (just not the absolute path content).
  */
 function relForAudit(raw: string, boundWorkspace: string): string {
   // For absolute inputs, compute relative; for relative, pass through.
   // Either way the operator gets a workspace-anchored view.
-  return path.isAbsolute(raw) ? path.relative(boundWorkspace, raw) : raw;
+  const rel = path.isAbsolute(raw) ? path.relative(boundWorkspace, raw) : raw;
+  return path.isAbsolute(rel) ? CROSS_DRIVE_RELPATH : rel;
 }
 
 /**

@@ -205,26 +205,23 @@ export function enforceWriteSize(
 }
 
 /**
- * Throw `file_too_large` if a read would exceed the cap and the
- * caller cannot accept truncation (used by `readBytes`, where
- * partial content is unsafe to return).
+ * Throw `file_too_large` when `fileBytes` exceeds the hard
+ * `MAX_READ_BYTES` cap. This is the OOM-defense gate `readBytes`
+ * runs at stat time — a 5 GB file is rejected before
+ * `fsp.readFile` allocates the buffer.
  *
- * Critical: `MAX_READ_BYTES` is the **hard** ceiling — caller-
- * supplied `maxBytes` clamps it DOWN, never up. Without this
- * `Math.min` clamp, a future PR 19/20 route that blindly forwards
- * `req.query.maxBytes` would let a request widen past the daemon's
- * 256 KiB safety cap and trigger the OOM scenario the cap exists
- * to prevent.
+ * Soft window-read (`opts.maxBytes` truncation) is NOT this
+ * function's job: `readBytes` truncates the returned buffer
+ * post-read so a caller asking for `maxBytes: 1024` on a 200 KB
+ * file gets 1 KB back, matching the parameter's window-read
+ * promise. Mixing the soft window into the hard reject was the
+ * round-7 reviewer-flagged contract violation.
  */
-export function enforceReadBytesSize(
-  fileBytes: number,
-  maxBytes: number = MAX_READ_BYTES,
-): void {
-  const effectiveMax = Math.min(maxBytes, MAX_READ_BYTES);
-  if (fileBytes > effectiveMax) {
+export function enforceReadBytesSize(fileBytes: number): void {
+  if (fileBytes > MAX_READ_BYTES) {
     throw new FsError(
       'file_too_large',
-      `file of ${fileBytes} bytes exceeds read limit of ${effectiveMax} bytes`,
+      `file of ${fileBytes} bytes exceeds read limit of ${MAX_READ_BYTES} bytes`,
       {
         hint: 'use readText for capped truncation, or raise the daemon limit',
       },
