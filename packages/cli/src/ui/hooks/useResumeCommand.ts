@@ -172,7 +172,7 @@ export function useResumeCommand(
       // additionalContext can be injected into the resumed model context.
 
       // Refresh terminal UI.
-      remount();
+      remount?.();
     },
     [
       closeResumeDialog,
