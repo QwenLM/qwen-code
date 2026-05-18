@@ -9,7 +9,7 @@ import { type Server } from 'node:http';
 import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from './eventBus.js';
-import type { DeviceFlowRegistry } from './auth/deviceFlow.js';
+import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
@@ -328,10 +328,9 @@ export async function runQwenServe(
   // we tell agent children to exit (otherwise a stuck IdP fetch could
   // pin the drain). `unref()`'d timers mean the process WILL exit
   // either way; explicit dispose is for cleanliness + audit
-  // visibility.
-  const deviceFlowRegistry = app.locals['deviceFlowRegistry'] as
-    | DeviceFlowRegistry
-    | undefined;
+  // visibility. Typed accessor (fold-in 4 review thread D) prevents
+  // a key-name typo from silently nulling out the dispose path.
+  const deviceFlowRegistry = getDeviceFlowRegistry(app);
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that

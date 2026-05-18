@@ -360,10 +360,30 @@ export interface DeviceFlowStartParams {
   initiatorClientId?: string;
 }
 
+/**
+ * Thrown when `DeviceFlowRegistry.start()` cannot resolve a
+ * `DeviceFlowProvider` for the supplied `providerId`.
+ *
+ * **Reachability:** the route layer (`server.ts`) already screens
+ * unknown ids against `DEVICE_FLOW_SUPPORTED_PROVIDERS` and returns
+ * `400 invalid_request` BEFORE reaching the registry — so this error
+ * is reachable only on a daemon-internal invariant violation:
+ * `DEVICE_FLOW_SUPPORTED_PROVIDERS` declares an id but the runtime
+ * `resolveProvider` map doesn't carry an implementation for it
+ * (e.g. forgot to register a provider for a newly-added id, or a
+ * test harness omitted it). The `code` field stays
+ * `'unsupported_provider'` for backward-compat with any test that
+ * may have asserted on it; the route layer maps to `400` for
+ * symmetry with the user-input path even though this branch
+ * indicates a programmer error rather than user error. PR #4255
+ * fold-in 4 review thread E.
+ */
 export class UnsupportedDeviceFlowProviderError extends Error {
   readonly code = 'unsupported_provider';
   constructor(providerId: string) {
-    super(`Unsupported device-flow provider: ${providerId}`);
+    super(
+      `Unsupported device-flow provider (internal: declared but not registered): ${providerId}`,
+    );
     this.name = 'UnsupportedDeviceFlowProviderError';
   }
 }
@@ -390,6 +410,34 @@ export class UpstreamDeviceFlowError extends Error {
     super(message);
     this.name = 'UpstreamDeviceFlowError';
   }
+}
+
+/**
+ * Typed accessors for parking the `DeviceFlowRegistry` on
+ * `express.Application['locals']`. The string key is shared between
+ * `createServeApp` (writer) and `runQwenServe`'s shutdown drain
+ * (reader); without typed setter/getter, a typo in either site
+ * would compile cleanly and the dispose call would silently no-op,
+ * leaving polling timers hanging until process `unref()`-driven
+ * exit. PR #4255 fold-in 4 review thread D.
+ */
+const DEVICE_FLOW_REGISTRY_LOCAL = 'deviceFlowRegistry' as const;
+
+interface DeviceFlowAppLocals {
+  [DEVICE_FLOW_REGISTRY_LOCAL]?: DeviceFlowRegistry;
+}
+
+export function setDeviceFlowRegistry(
+  app: { locals: Record<string, unknown> },
+  registry: DeviceFlowRegistry,
+): void {
+  (app.locals as DeviceFlowAppLocals)[DEVICE_FLOW_REGISTRY_LOCAL] = registry;
+}
+
+export function getDeviceFlowRegistry(app: {
+  locals: Record<string, unknown>;
+}): DeviceFlowRegistry | undefined {
+  return (app.locals as DeviceFlowAppLocals)[DEVICE_FLOW_REGISTRY_LOCAL];
 }
 
 /**
@@ -544,18 +592,29 @@ export class DeviceFlowRegistry {
     if (this.disposed) {
       throw new Error('DeviceFlowRegistry disposed during start');
     }
-    const expiresAt = this.now() + Math.max(0, startResult.expiresIn) * 1000;
-    // RFC 8628 `interval` is in seconds; convert to ms. The earlier
-    // form `(interval ?? DEFAULT_INTERVAL_MS / 1000) * 1000` was
-    // arithmetically equivalent but unit-confusing — the `_MS` constant
-    // got divided then re-multiplied, hiding the s↔ms boundary on
-    // skim. The expanded form makes both branches unit-explicit.
-    const intervalMs = Math.max(
-      1_000,
-      typeof startResult.interval === 'number'
-        ? startResult.interval * 1000
-        : DEVICE_FLOW_DEFAULT_INTERVAL_MS,
-    );
+    // PR #4255 fold-in 4 (review thread A): Provider's contract types
+    // `expiresIn: number`, but a misbehaving / future provider could
+    // hand us `undefined` / `NaN` / `Infinity`. `Math.max(0, NaN) *
+    // 1000` is `NaN`; `now() + NaN` is `NaN`; `now >= NaN` is always
+    // `false`, so the sweeper would NEVER evict the entry — pinning
+    // an upstream `device_code` slot until daemon restart. Reject
+    // non-finite-positive values and fall back to RFC 8628's
+    // suggested ceiling (10 min) so the entry still expires.
+    const expiresInSec =
+      Number.isFinite(startResult.expiresIn) && startResult.expiresIn > 0
+        ? startResult.expiresIn
+        : 600;
+    const expiresAt = this.now() + expiresInSec * 1000;
+    // Same defense for `interval`: a non-finite-positive value would
+    // schedule a `setTimeout(NaN)` (fires immediately) or
+    // `setTimeout(Infinity)` (scheduler clamps to TIMEOUT_MAX). RFC
+    // 8628 recommends a 5s default when the IdP omits `interval`.
+    const intervalSec =
+      Number.isFinite(startResult.interval) &&
+      (startResult.interval as number) > 0
+        ? (startResult.interval as number)
+        : DEVICE_FLOW_DEFAULT_INTERVAL_MS / 1000;
+    const intervalMs = Math.max(1_000, intervalSec * 1000);
     const entry: DeviceFlowEntry = {
       deviceFlowId: randomUUID(),
       providerId: params.providerId,

@@ -17,6 +17,7 @@ import {
 import {
   DeviceFlowRegistry,
   DEVICE_FLOW_SUPPORTED_PROVIDERS,
+  setDeviceFlowRegistry,
   TooManyActiveDeviceFlowsError,
   UnsupportedDeviceFlowProviderError,
   UpstreamDeviceFlowError,
@@ -355,10 +356,10 @@ export function createServeApp(
     });
   // Park the registry on `app.locals` so request handlers can reach it
   // without closure capture (and so future helper extracts can find it
-  // without threading it through their args). The fold-in 4 typed
-  // accessor (`setDeviceFlowRegistry`) lands in commit 5/5 of this
-  // rebase chain.
-  app.locals['deviceFlowRegistry'] = deviceFlowRegistry;
+  // without threading it through their args). Typed accessor (fold-in 4
+  // review thread D) prevents a string-key typo from silently
+  // detaching `runQwenServe`'s shutdown dispose call.
+  setDeviceFlowRegistry(app, deviceFlowRegistry);
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
