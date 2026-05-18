@@ -5273,4 +5273,97 @@ describe('createHttpAcpBridge', () => {
       await bridge.shutdown();
     });
   });
+
+  describe('publishWorkspaceEvent + knownClientIds (issue #4175 PR 16)', () => {
+    it('fans out a workspace event onto every active session bus', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const a = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const b = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const aFrames: BridgeEvent[] = [];
+      const bFrames: BridgeEvent[] = [];
+      const collect = async (
+        sessionId: string,
+        target: BridgeEvent[],
+        signal: AbortSignal,
+      ) => {
+        for await (const frame of bridge.subscribeEvents(sessionId, {
+          signal,
+        })) {
+          target.push(frame);
+        }
+      };
+      const ctrl = new AbortController();
+      const tasks = Promise.all([
+        collect(a.sessionId, aFrames, ctrl.signal),
+        collect(b.sessionId, bFrames, ctrl.signal),
+      ]);
+      // Yield once so the subscribe handlers register.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      bridge.publishWorkspaceEvent({
+        type: 'memory_changed',
+        data: {
+          scope: 'workspace',
+          filePath: '/work/QWEN.md',
+          mode: 'append',
+          bytesWritten: 5,
+        },
+      });
+
+      // Yield so the bus's async push reaches both subscribers.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(aFrames.some((f) => f.type === 'memory_changed')).toBe(true);
+      expect(bFrames.some((f) => f.type === 'memory_changed')).toBe(true);
+
+      ctrl.abort();
+      await tasks.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('returns an empty knownClientIds set when no clients are attached', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const ids = bridge.knownClientIds();
+      expect(ids).toBeInstanceOf(Set);
+      expect(ids.size).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('aggregates clientIds across sessions in knownClientIds()', async () => {
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({ channelFactory: factory });
+      const a = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const b = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+
+      const ids = bridge.knownClientIds();
+      expect(ids.size).toBe(2);
+      expect(ids.has(a.clientId!)).toBe(true);
+      expect(ids.has(b.clientId!)).toBe(true);
+
+      // Snapshot semantics: mutating the returned Set must not
+      // affect future calls. The interface returns
+      // `ReadonlySet<string>` so cast through `Set<string>` to attempt
+      // a mutation; the live registry must stay intact.
+      (ids as Set<string>).delete(a.clientId!);
+      const fresh = bridge.knownClientIds();
+      expect(fresh.size).toBe(2);
+
+      await bridge.shutdown();
+    });
+  });
 });

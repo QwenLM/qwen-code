@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
+import { realpathSync, promises as fsp } from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect, afterEach, vi } from 'vitest';
@@ -59,6 +60,7 @@ import type {
   ServeWorkspaceSkillsStatus,
 } from './status.js';
 import { CAPABILITIES_SCHEMA_VERSION, type ServeOptions } from './types.js';
+import { FsError, type WorkspaceFileSystemFactory } from './fs/index.js';
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -96,6 +98,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_mcp',
   'workspace_skills',
   'workspace_providers',
+  'workspace_memory',
+  'workspace_agents',
   'workspace_env',
   'workspace_preflight',
   'session_context',
@@ -111,6 +115,9 @@ const EXPECTED_STAGE1_FEATURES = [
   // MCP budget state crossings (`mcp_budget_warning` with hysteresis,
   // `mcp_child_refused_batch` coalesced per pass).
   'mcp_guardrail_events',
+  // Issue #4175 PR 19. Always-on. Daemon exposes the read-only file
+  // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`.
+  'workspace_file_read',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -551,6 +558,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     getHeartbeatState(sessionId) {
       heartbeatStateCalls.push(sessionId);
       return heartbeatStateImpl(sessionId);
+    },
+    publishWorkspaceEvent(_event) {
+      // Issue #4175 PR 16 — fakeBridge default is a no-op. Tests that
+      // assert on workspace fan-out override this through the dedicated
+      // route-level test files (workspaceMemory.test.ts /
+      // workspaceAgents.test.ts) where the real fan-out behavior is
+      // exercised against a live bridge.
+    },
+    knownClientIds() {
+      // Default empty set — workspace mutation tests opt in by
+      // overriding the bridge in their suite.
+      return new Set<string>();
     },
     async killSession(sessionId, opts) {
       killCalls.push({ sessionId, opts });
@@ -3171,6 +3190,194 @@ describe('runQwenServe', () => {
     expect(bridge.shutdownCalls).toBe(1);
   });
 
+  it('wires fsFactory + emit through to the read routes (#4175 PR 19 follow-up #2)', async () => {
+    // Pin the contract that `runQwenServe` constructs the workspace
+    // filesystem boundary, threads its emit hook through to
+    // `createServeApp`, and that boundary actually drives the new
+    // PR 19 read routes. A regression that drops the `fsFactory`
+    // injection (or that swaps in a different emit channel) shows
+    // up here as either a 500 response or a missing audit event.
+    const captured: BridgeEvent[] = [];
+    const bridge = fakeBridge();
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-fs-'),
+    );
+    await fsp.writeFile(path.join(wsRoot, 'a.txt'), 'hello');
+    try {
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsAuditEmit: (e) => captured.push(e) },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const ok = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+      expect(ok.status).toBe(200);
+      expect(
+        captured.find(
+          (e) =>
+            e.type === 'fs.access' &&
+            (e.data as { intent?: string }).intent === 'read',
+        ),
+      ).toBeDefined();
+
+      const bad = await fetch(`http://127.0.0.1:${port}/file?path=../escape`);
+      expect(bad.status).toBe(400);
+      const denied = captured.find(
+        (e) =>
+          e.type === 'fs.denied' &&
+          (e.data as { errorKind?: string }).errorKind ===
+            'path_outside_workspace',
+      );
+      expect(denied).toBeDefined();
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('honors deps.fsFactory override (#4175 PR 19 follow-up #2)', async () => {
+    // The injection point exists so embedded callers (other tools
+    // wrapping the daemon, future runtime locality contracts) can
+    // swap in a remote-fronting factory. This test asserts
+    // `runQwenServe` does NOT silently shadow a caller-supplied
+    // factory with its built-in default. A regression that ignored
+    // `deps.fsFactory` and fell back to the built-in factory would
+    // resolve `a.txt` against `process.cwd()`, find no such file,
+    // and return 404 `path_not_found`. The sentinel-throwing
+    // factory ensures we see 400 with `sentinel-from-fake-factory`
+    // in the body — proof the override actually drives the request.
+    const sentinelMessage = 'sentinel-from-fake-factory';
+    const fsFactory: WorkspaceFileSystemFactory = {
+      forRequest: () => ({
+        resolve: async () => {
+          throw new FsError('parse_error', sentinelMessage);
+        },
+        readText: async () => {
+          throw new Error('unreachable');
+        },
+        readBytes: async () => {
+          throw new Error('unreachable');
+        },
+        list: async () => {
+          throw new Error('unreachable');
+        },
+        glob: async () => {
+          throw new Error('unreachable');
+        },
+        stat: async () => {
+          throw new Error('unreachable');
+        },
+        writeText: async () => {
+          throw new Error('unreachable');
+        },
+        edit: async () => {
+          throw new Error('unreachable');
+        },
+      }),
+    };
+    const bridge = fakeBridge();
+    handle = await runQwenServe(
+      {
+        hostname: '127.0.0.1',
+        port: 0,
+        mode: 'http-bridge',
+        workspace: process.cwd(),
+      },
+      { bridge, fsFactory },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const res = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string; errorKind: string };
+    expect(body.errorKind).toBe('parse_error');
+    expect(body.error).toContain(sentinelMessage);
+  });
+
+  it('trust snapshot defaults to true (operator-chosen workspace)', async () => {
+    // The default trust value drives PR 20 write-route behavior
+    // even though PR 19 only exercises read intents. Pin the
+    // default here so a future contributor flipping it has to
+    // rewrite this test, surfacing the security-relevant change
+    // for review.
+    const bridge = fakeBridge();
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-trust-'),
+    );
+    try {
+      const captured: BridgeEvent[] = [];
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsAuditEmit: (e) => captured.push(e) },
+      );
+      // Drive a read so the factory's `assertTrustedForIntent`
+      // gate fires. Read intents pass under both trusted and
+      // untrusted; the test signal is the absence of any
+      // `untrusted_workspace` denial event in the captured stream.
+      await fsp.writeFile(path.join(wsRoot, 'b.txt'), 'b');
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/file?path=b.txt`);
+      expect(res.status).toBe(200);
+      expect(
+        captured.find(
+          (e) =>
+            (e.data as { errorKind?: string }).errorKind ===
+            'untrusted_workspace',
+        ),
+      ).toBeUndefined();
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('trust snapshot=false flows through deps.trustedWorkspace into the boundary (#4175 PR 19 follow-up #2)', async () => {
+    // PR 19 has no write routes, so the trust gate's effect on
+    // mutating intents can't be observed via HTTP. Instead, we
+    // construct the same factory that runQwenServe would build,
+    // with the same `trusted` value runQwenServe would pass, and
+    // assert the gate trips. The contract is: when
+    // `deps.trustedWorkspace = false`, the factory's
+    // `assertTrustedForIntent` rejects writes with
+    // `untrusted_workspace` — exactly what PR 20 will rely on.
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-untrust-'),
+    );
+    try {
+      // Mirror runQwenServe's construction. If `runQwenServe`
+      // changes the call shape (different deps order, different
+      // fields), this test will start failing to type-check —
+      // which is the point: the failure is the audit trail.
+      const { createWorkspaceFileSystemFactory } = await import(
+        './fs/index.js'
+      );
+      const factory = createWorkspaceFileSystemFactory({
+        boundWorkspace: wsRoot,
+        trusted: false,
+        emit: () => undefined,
+      });
+      const fsApi = factory.forRequest({ route: 'TEST /op' });
+      // Read still passes — read intents are always trusted.
+      await fsp.writeFile(path.join(wsRoot, 'a.txt'), 'a');
+      const r = await fsApi.resolve('a.txt', 'read');
+      const out = await fsApi.readText(r);
+      expect(out.content).toBe('a');
+      // Write throws untrusted_workspace.
+      const w = await fsApi.resolve('out.txt', 'write');
+      await expect(fsApi.writeText(w, 'x')).rejects.toMatchObject({
+        kind: 'untrusted_workspace',
+      });
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
+  });
+
   it('handle.close() is idempotent — concurrent + repeat calls share one drain cycle', async () => {
     const bridge = fakeBridge();
     handle = await runQwenServe(
@@ -3587,6 +3794,155 @@ describe('GET /session/:id/events (SSE)', () => {
     }
     // None of these should pass through as a parsed lastEventId.
     expect(seen).toEqual([undefined, undefined, undefined]);
+  });
+});
+
+describe('GET /demo', () => {
+  it('returns 200 with text/html content type on loopback', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+    expect(res.text).toContain('Qwen Serve');
+    expect(res.text).toContain('<!DOCTYPE html>');
+  });
+
+  it('is accessible without bearer token on loopback even when --token is set', async () => {
+    // Loopback: /demo is registered BEFORE bearerAuth so browsers can
+    // reach the page via address-bar navigation (no Authorization header).
+    const app = createServeApp({ ...baseOpts, token: 'secret' }, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('requires bearer token on non-loopback (401 without token)', async () => {
+    // Non-loopback: /demo is registered AFTER bearerAuth to prevent
+    // unauthenticated access on public interfaces.
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app).get('/demo').set('Host', '0.0.0.0:4170');
+    expect(res.status).toBe(401);
+  });
+
+  it('is accessible on non-loopback with valid bearer token', async () => {
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', '0.0.0.0:4170')
+      .set('Authorization', 'Bearer secret');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('is guarded by CORS (rejects cross-origin requests)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://evil.example.com');
+    expect(res.status).toBe(403);
+  });
+
+  it('sets anti-clickjacking headers (X-Frame-Options + CSP)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/demo')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['content-security-policy']).toContain(
+      "frame-ancestors 'none'",
+    );
+  });
+});
+
+describe('same-origin Origin-stripping middleware', () => {
+  it('strips loopback Origin header matching daemon port', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    // A request with matching same-origin should pass CORS check
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:4170');
+    // Should NOT be rejected by denyBrowserOriginCors (status != 403)
+    expect(res.status).not.toBe(403);
+  });
+
+  it('does not strip non-loopback Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://evil.com:4170');
+    expect(res.status).toBe(403);
+  });
+
+  it('does not strip Origin with wrong port', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://127.0.0.1:9999');
+    expect(res.status).toBe(403);
+  });
+
+  it('strips host.docker.internal Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://host.docker.internal:4170');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('strips localhost Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://localhost:4170');
+    expect(res.status).not.toBe(403);
+  });
+
+  it('strips [::1] Origin', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/health')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'http://[::1]:4170');
+    expect(res.status).not.toBe(403);
   });
 });
 

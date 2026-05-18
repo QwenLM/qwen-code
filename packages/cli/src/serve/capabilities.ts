@@ -66,6 +66,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
+  // Issue #4175 PR 16: workspace memory CRUD (`GET/POST /workspace/memory`).
+  // Daemon exposes hierarchical QWEN.md state and accepts append/replace
+  // writes scoped to either the bound workspace or the global ~/.qwen
+  // directory. Mutation path is gated by the centralized mutation gate.
+  workspace_memory: { since: 'v1' },
+  // Issue #4175 PR 16: workspace agents CRUD (`GET/POST /workspace/agents`
+  // + `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
+  // `SubagentManager` over HTTP so remote clients can list / read /
+  // create / update / delete project- and user-level subagent
+  // definitions. Built-in / extension agents stay read-only.
+  workspace_agents: { since: 'v1' },
   workspace_env: { since: 'v1' },
   workspace_preflight: { since: 'v1' },
   session_context: { since: 'v1' },
@@ -97,6 +108,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // surface). Listed alongside `mcp_guardrails` to keep the MCP-related
   // tags grouped.
   mcp_guardrail_events: { since: 'v1' },
+  // Issue #4175 PR 19. Daemon supports the read-only workspace file
+  // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`. The
+  // four routes are gated as a single feature because they share the
+  // same backing `WorkspaceFileSystem` boundary (PR 18) and the same
+  // failure shape — clients that pre-flight one of them get the
+  // others for free, and a future deprecation would have to coordinate
+  // across all four anyway. Per-route tags would force four
+  // simultaneous registry entries with no operator-meaningful
+  // difference between them. Mutating routes (`POST /file/write`,
+  // `POST /file/edit`) ship under a separate `workspace_file_write`
+  // tag in PR 20.
+  workspace_file_read: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

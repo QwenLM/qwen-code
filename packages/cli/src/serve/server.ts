@@ -39,10 +39,14 @@ import {
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from './types.js';
+import { getDemoHtml } from './demo.js';
+import { mountWorkspaceMemoryRoutes } from './workspaceMemory.js';
+import { mountWorkspaceAgentsRoutes } from './workspaceAgents.js';
 import {
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,
 } from './fs/index.js';
+import { registerWorkspaceFileReadRoutes } from './routes/workspaceFileRead.js';
 
 /**
  * Build a no-op fs-audit emitter that logs a warning every
@@ -61,7 +65,7 @@ import {
  * per-session emit, so legitimate production traffic never hits
  * the warning.
  */
-function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
+export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
   const WARN_EVERY = 100;
   let droppedCount = 0;
   return (event: BridgeEvent) => {
@@ -211,6 +215,35 @@ export function createServeApp(
       boundWorkspace,
     });
 
+  // Allow same-origin requests from the demo page. Browsers send an
+  // `Origin` header on same-origin POST/fetch calls; `denyBrowserOriginCors`
+  // below would reject them. This middleware strips `Origin` when it
+  // matches the daemon's own address so the demo page's API calls pass
+  // through. Only loopback origins are matched — non-loopback deployments
+  // require the operator to front the daemon with a reverse proxy for
+  // browser access anyway (per the threat-model docs).
+  let cachedStripPort = -1;
+  let cachedSelfOrigins: Set<string> = new Set();
+  app.use((req: import('express').Request, _res, next) => {
+    const origin = req.headers.origin;
+    if (origin) {
+      const port = getPort();
+      if (port !== cachedStripPort) {
+        cachedStripPort = port;
+        cachedSelfOrigins = new Set([
+          `http://127.0.0.1:${port}`,
+          `http://localhost:${port}`,
+          `http://[::1]:${port}`,
+          `http://host.docker.internal:${port}`,
+        ]);
+      }
+      if (cachedSelfOrigins.has(origin)) {
+        delete req.headers.origin;
+      }
+    }
+    next();
+  });
+
   // Strict-default factory: `trusted: false` so an upstream refactor
   // that forgets to inject `deps.fsFactory` never silently allows
   // writes against an untrusted workspace. Read-shaped intents still
@@ -237,6 +270,11 @@ export function createServeApp(
   // a generic record; we cast to keep a precise property name.
   (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
     fsFactory;
+  // Surface the bound workspace on `app.locals` so the PR 19 read
+  // routes can compute workspace-relative response paths without
+  // re-resolving. Same canonical form `/capabilities` advertises
+  // and the bridge enforces — keeping every layer in agreement.
+  (app.locals as { boundWorkspace?: string }).boundWorkspace = boundWorkspace;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST
@@ -244,6 +282,38 @@ export function createServeApp(
   // amplified CPU/memory cost from any wrong-token client.
   app.use(denyBrowserOriginCors);
   app.use(hostAllowlist(opts.hostname, getPort));
+
+  // --- Demo page: mirrors the `/health` loopback-gating pattern.
+  // On loopback binds, registered BEFORE bearerAuth so browsers can
+  // reach the page via address-bar navigation (which cannot attach
+  // Authorization headers). On non-loopback binds, registered AFTER
+  // bearerAuth — an unauthenticated `/demo` on a public interface
+  // would leak the full API surface (route enumeration + interactive
+  // console), far more than `/health`'s `{"status":"ok"}`.
+  // X-Frame-Options: DENY + CSP frame-ancestors 'none' prevent
+  // clickjacking — a malicious site embedding the demo in an iframe
+  // could trick a user into performing daemon actions via transparent
+  // overlay (the iframe's same-origin fetches bypass CORS).
+  const demoHandler = (
+    _req: import('express').Request,
+    res: import('express').Response,
+  ) => {
+    try {
+      res
+        .type('html')
+        .set('X-Frame-Options', 'DENY')
+        .set(
+          'Content-Security-Policy',
+          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        )
+        .send(getDemoHtml(getPort()));
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({ error: 'Failed to render demo page' });
+    }
+  };
 
   // `/health` is exempted from `bearerAuth` ONLY on loopback binds —
   // the canonical liveness-probe case (k8s/Compose probes don't
@@ -307,17 +377,21 @@ export function createServeApp(
   const exposeHealthPreAuth = loopback && !opts.requireAuth;
   if (exposeHealthPreAuth) {
     app.get('/health', healthHandler);
+    app.get('/demo', demoHandler);
   }
 
   app.use(bearerAuth(opts.token));
+
   app.use(express.json({ limit: '10mb' }));
 
   if (!exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
-    // `/health` AFTER `bearerAuth` so probes must carry the token.
-    // Otherwise unauthenticated callers can ping any reachable
-    // address:port to confirm a daemon exists.
+    // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
+    // the token. Otherwise unauthenticated callers can ping any
+    // reachable address:port to confirm a daemon exists (and `/demo`
+    // leaks the full API surface).
     app.get('/health', healthHandler);
+    app.get('/demo', demoHandler);
   }
 
   // Issue #4175 PR 15. Mutation-route gate factory. Today's existing
@@ -376,6 +450,28 @@ export function createServeApp(
     }
   });
 
+  // Issue #4175 PR 16: workspace memory + agents CRUD. Routes mounted
+  // through factories so server.ts stays the composition root while
+  // the feature modules own their own validation, error mapping, and
+  // event fan-out. Both factories receive the shared `mutate` gate
+  // and the request-helpers `parseClientIdHeader` / `safeBody` so
+  // strict mutation gating and pollution-key scrubbing match the
+  // existing routes bit-for-bit.
+  mountWorkspaceMemoryRoutes(app, {
+    bridge,
+    boundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceAgentsRoutes(app, {
+    bridge,
+    boundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+
   // TODO(#4175 PR 24 — PermissionMediator audit log): emit an
   // `audit.diagnostic_read` event from these two routes so a security
   // operator can correlate "who read what when". Read-only diagnostic
@@ -399,6 +495,17 @@ export function createServeApp(
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
     }
+  });
+
+  // Issue #4175 PR 19 — read-only workspace file routes
+  // (`GET /file|/list|/glob|/stat`). Registered after the workspace
+  // diagnostics routes so the file surface sits next to its sibling
+  // workspace-scoped reads and shares the same auth posture (no
+  // `mutate()` gate; only the global `bearerAuth` middleware
+  // applies). Mutation file routes (`POST /file/write|/edit`) come
+  // in PR 20.
+  registerWorkspaceFileReadRoutes(app, {
+    parseClientId: parseClientIdHeader,
   });
 
   app.post('/session', mutate(), async (req, res) => {

@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { Ignore } from '@qwen-code/qwen-code-core';
 import {
   FS_ACCESS_EVENT_TYPE,
@@ -33,6 +33,7 @@ interface Harness {
 async function makeHarness(opts?: {
   trusted?: boolean;
   ignore?: Ignore;
+  includeRawPaths?: boolean;
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -46,6 +47,7 @@ async function makeHarness(opts?: {
     trusted: opts?.trusted ?? true,
     emit: (e) => events.push(e),
     ignore: opts?.ignore,
+    includeRawPaths: opts?.includeRawPaths,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -113,6 +115,7 @@ describe('WorkspaceFileSystem - readText', () => {
     const out = await h.fs.readText(r);
     expect(out.content).toBe('hello\nworld\n');
     expect(out.meta.lineEnding).toBe('lf');
+    expect(out.meta.sizeBytes).toBe(12);
     expect(out.meta.truncated).toBeUndefined();
   });
 
@@ -250,6 +253,15 @@ describe('WorkspaceFileSystem - list', () => {
     const entries = await h.fs.list(r, { includeIgnored: true });
     const log = entries.find((e) => e.name === 'b.log');
     expect(log?.ignored).toBe(true);
+  });
+
+  it('stops collecting entries once maxEntries is reached', async () => {
+    const r = await h.fs.resolve('.', 'list');
+    const entries = await h.fs.list(r, {
+      includeIgnored: true,
+      maxEntries: 2,
+    });
+    expect(entries).toHaveLength(2);
   });
 });
 
@@ -758,9 +770,12 @@ describe('WorkspaceFileSystem - audit always emits on body errors', () => {
 });
 
 describe('WorkspaceFileSystem - glob escape audit', () => {
+  // `pattern` rides on the same privacy gate as `relPath` /
+  // `message`. Use `includeRawPaths: true` so the orchestrator's
+  // pattern wiring is observable in the test harness.
   let h: Harness;
   beforeEach(async () => {
-    h = await makeHarness();
+    h = await makeHarness({ includeRawPaths: true });
   });
   afterEach(async () => teardown(h));
 
@@ -786,6 +801,77 @@ describe('WorkspaceFileSystem - glob escape audit', () => {
     expect((denied!.data as { hint?: string }).hint).toMatch(
       /\d+ hit\(s\) that resolved outside workspace/,
     );
+    expect((denied!.data as { pattern?: string }).pattern).toBe('*.ts');
+  });
+
+  it('records fs.access with workspace-hashed pathHash and pattern field on glob success (raw-paths mode)', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'one.ts'), 'a');
+    await h.fs.glob('*.ts');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob',
+    );
+    expect(access).toBeDefined();
+    const data = access!.data as { pathHash: string; pattern?: string };
+    expect(data.pattern).toBe('*.ts');
+    // Hash equals sha256(boundWorkspace) sliced to 16 hex chars —
+    // every glob audit row in this workspace shares the same
+    // pathHash, and `pattern` is the per-call signal.
+    const expectedHash = createHash('sha256')
+      .update(h.workspace)
+      .digest('hex')
+      .slice(0, 16);
+    expect(data.pathHash).toBe(expectedHash);
+  });
+
+  it('emits fs.denied with pattern when glob pattern is rejected as parse_error (raw-paths mode)', async () => {
+    await expect(h.fs.glob('../../**')).rejects.toThrow(/'..' segments/);
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob' &&
+        (e.data as { errorKind: string }).errorKind === 'parse_error',
+    );
+    expect(denied).toBeDefined();
+    expect((denied!.data as { pattern?: string }).pattern).toBe('../../**');
+  });
+});
+
+describe('WorkspaceFileSystem - glob audit privacy default', () => {
+  // Default factory has `includeRawPaths: false`. The orchestrator
+  // still passes the pattern, but the audit publisher must strip it
+  // — same gate as `relPath` / `message`. Locks the privacy regression
+  // surfaced by the round-1 review on PR #4269.
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('strips pattern from fs.access in privacy default', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'one.ts'), 'a');
+    await h.fs.glob('*.ts');
+    const access = h.events.find(
+      (e) =>
+        e.type === FS_ACCESS_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob',
+    );
+    expect(access).toBeDefined();
+    expect(access!.data).not.toHaveProperty('pattern');
+    expect(access!.data).not.toHaveProperty('relPath');
+  });
+
+  it('strips pattern from fs.denied in privacy default', async () => {
+    await expect(h.fs.glob('../../**')).rejects.toThrow();
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { intent: string }).intent === 'glob' &&
+        (e.data as { errorKind: string }).errorKind === 'parse_error',
+    );
+    expect(denied).toBeDefined();
+    expect(denied!.data).not.toHaveProperty('pattern');
   });
 });
 
