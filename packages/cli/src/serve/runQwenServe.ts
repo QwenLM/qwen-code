@@ -16,6 +16,7 @@ import {
   createHttpAcpBridge,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
+import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import { isLoopbackBind } from './loopbackBinds.js';
 import { createDefaultFsAuditEmit, createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
@@ -313,6 +314,12 @@ export async function runQwenServe(
         : {}),
       boundWorkspace,
       childEnvOverrides,
+      // #4175 PR 22b/2: inject the daemon-host status provider so the
+      // bridge can pull env / preflight cells through a typed seam
+      // instead of importing daemon-host helpers directly. Production
+      // implementation wraps `buildEnvStatusFromProcess` and the
+      // (lifted) `buildDaemonPreflightCells` body.
+      statusProvider: createDaemonStatusProvider(),
       // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
       // an opt-in `persist: true` flag. We re-load settings on each
       // persist call rather than caching a `LoadedSettings` handle —

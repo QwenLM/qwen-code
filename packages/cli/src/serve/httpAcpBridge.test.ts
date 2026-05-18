@@ -35,6 +35,7 @@ import type {
   SetSessionModeRequest,
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
+import { createDaemonStatusProvider } from './daemonStatusProvider.js';
 import {
   createHttpAcpBridge,
   InvalidClientIdError,
@@ -71,9 +72,19 @@ const SESS_A = `sess:${WS_A}`;
  * `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere; this
  * helper defaults it. Tests that need a different bind path (e.g. the
  * mismatch test) pass `boundWorkspace` explicitly.
+ *
+ * #4175 PR 22b/2: also defaults `statusProvider` to the production daemon
+ * impl so existing env / preflight tests (which exercise the bridge's
+ * delegation path) keep seeing populated cells. Tests that want to
+ * exercise the no-provider idle fallback can override with
+ * `{ statusProvider: undefined }`.
  */
 function makeBridge(opts: Partial<BridgeOptions> = {}): HttpAcpBridge {
-  return createHttpAcpBridge({ boundWorkspace: WS_A, ...opts });
+  return createHttpAcpBridge({
+    boundWorkspace: WS_A,
+    statusProvider: createDaemonStatusProvider(),
+    ...opts,
+  });
 }
 
 interface FakeAgentOpts {
