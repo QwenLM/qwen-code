@@ -755,6 +755,37 @@ export interface DaemonInitWorkspaceResult {
 }
 
 /**
+ * #4175 Wave 4 PR 17. Result body of `POST /workspace/mcp/:server/
+ * restart`. Discriminated by `restarted`: `true` carries the wall-
+ * clock duration of the disconnect+reconnect+rediscover sequence;
+ * `false` is a soft skip with the reason. Both shapes return HTTP
+ * 200 — only hard errors (server not configured, no live ACP child)
+ * surface as non-2xx.
+ *
+ * Soft skip reasons:
+ * - `'in_flight'`: another restart / discovery is already in progress
+ *   for this server. Caller should wait or retry.
+ * - `'disabled'`: the server is configured but in
+ *   `excludedMcpServers`. Re-enable it before restart.
+ * - `'budget_would_exceed'`: under `--mcp-budget-mode=enforce`, the
+ *   target server is not currently in `reservedSlots` and the live
+ *   total has reached `clientBudget`. Caller should free a slot
+ *   (disconnect another server) before retrying.
+ */
+export type DaemonMcpRestartResult =
+  | {
+      serverName: string;
+      restarted: true;
+      durationMs: number;
+    }
+  | {
+      serverName: string;
+      restarted: false;
+      skipped: true;
+      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+    };
+
+/**
  * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
  * server-side `Date.now()` epoch (ms) the daemon stored for this
  * session. `clientId` is echoed back only when the caller supplied a

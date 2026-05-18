@@ -126,6 +126,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_approval_mode_control',
   'workspace_tool_toggle',
   'workspace_init',
+  'workspace_mcp_restart',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -212,6 +213,18 @@ interface FakeBridgeOpts {
     initOpts: { force?: boolean },
     originatorClientId: string | undefined,
   ) => Promise<{ path: string; action: 'created' | 'overwrote' }>;
+  restartMcpServerImpl?: (
+    serverName: string,
+    originatorClientId: string | undefined,
+  ) => Promise<
+    | { serverName: string; restarted: true; durationMs: number }
+    | {
+        serverName: string;
+        restarted: false;
+        skipped: true;
+        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      }
+  >;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -285,6 +298,10 @@ interface FakeBridge extends HttpAcpBridge {
   }>;
   initWorkspaceCalls: Array<{
     initOpts: { force?: boolean };
+    originatorClientId?: string;
+  }>;
+  restartMcpServerCalls: Array<{
+    serverName: string;
     originatorClientId?: string;
   }>;
   closeCalls: Array<{
@@ -450,6 +467,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       path: path.resolve(WS_BOUND, 'QWEN.md'),
       action: 'created' as const,
     }));
+  const restartMcpServerCalls: FakeBridge['restartMcpServerCalls'] = [];
+  const restartMcpServerImpl =
+    opts.restartMcpServerImpl ??
+    (async (serverName: string) => ({
+      serverName,
+      restarted: true as const,
+      durationMs: 42,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -488,6 +513,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setApprovalModeCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
+    restartMcpServerCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -634,6 +660,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
       });
       return initWorkspaceImpl(initOpts, originatorClientId);
+    },
+    async restartMcpServer(serverName, originatorClientId) {
+      restartMcpServerCalls.push({
+        serverName,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return restartMcpServerImpl(serverName, originatorClientId);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -2363,6 +2396,100 @@ describe('createServeApp', () => {
         path: '/work/bound/QWEN.md',
         existingSize: 1234,
       });
+    });
+  });
+
+  describe('POST /workspace/mcp/:server/restart (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/mcp/docs/restart')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(401);
+      expect(bridge.restartMcpServerCalls).toHaveLength(0);
+    });
+
+    it('200 with restarted:true on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        serverName: 'docs',
+        restarted: true,
+        durationMs: 42,
+      });
+      expect(bridge.restartMcpServerCalls).toHaveLength(1);
+      expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('docs');
+    });
+
+    it('200 on soft skip with structured reason', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async (serverName) => ({
+          serverName,
+          restarted: false as const,
+          skipped: true as const,
+          reason: 'budget_would_exceed' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        serverName: 'docs',
+        restarted: false,
+        skipped: true,
+        reason: 'budget_would_exceed',
+      });
+    });
+
+    it('passes client identity into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/mcp/docs/restart'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+      expect(bridge.restartMcpServerCalls[0]?.originatorClientId).toBe(
+        'client-1',
+      );
+    });
+
+    it('decodes URL-encoded server names', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      // Server name with hyphen + dot is a legitimate stdio MCP config key.
+      const res = await auth(
+        request(app).post(
+          `/workspace/mcp/${encodeURIComponent('foo-bar.io')}/restart`,
+        ),
+      ).send({});
+      expect(res.status).toBe(200);
+      expect(bridge.restartMcpServerCalls[0]?.serverName).toBe('foo-bar.io');
+    });
+
+    it('404 when bridge reports SessionNotFoundError (no live channel)', async () => {
+      const bridge = fakeBridge({
+        restartMcpServerImpl: async () => {
+          throw new SessionNotFoundError('mcp:docs');
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/workspace/mcp/docs/restart'),
+      ).send({});
+      expect(res.status).toBe(404);
     });
   });
 

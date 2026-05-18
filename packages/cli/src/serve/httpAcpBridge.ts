@@ -510,6 +510,37 @@ export interface HttpAcpBridge {
   }>;
 
   /**
+   * Restart a configured MCP server through the ACP child's
+   * `McpClientManager`. Pre-checks the live budget snapshot from PR 14
+   * v1 and returns a structured "skipped" response (200 OK) for soft
+   * refusals (in-flight discovery, server disabled, restart would
+   * push live count over budget under `enforce` mode). Hard errors
+   * (server not configured at all, `McpClientManager` unavailable)
+   * propagate as ACP errors → mapped to HTTP 4xx/5xx by the route.
+   *
+   * On success, fan-outs `mcp_server_restarted` to every live session
+   * SSE bus with `{serverName, durationMs}`. On soft skip, fan-outs
+   * `mcp_server_restart_refused` with `{serverName, reason}`.
+   *
+   * Throws `SessionNotFoundError`-like (via `SERVE_CONTROL_EXT_METHODS`
+   * routing) when no ACP channel is alive — restart requires a live
+   * `McpClientManager` instance, which only exists inside a spawned
+   * ACP child.
+   */
+  restartMcpServer(
+    serverName: string,
+    originatorClientId: string | undefined,
+  ): Promise<
+    | { serverName: string; restarted: true; durationMs: number }
+    | {
+        serverName: string;
+        restarted: false;
+        skipped: true;
+        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      }
+  >;
+
+  /**
    * Kill the agent process for the session and remove it from the maps.
    * Used by the HTTP route layer to reap orphans created when a client
    * disconnects mid-spawn (the server-side child kept being created
@@ -3806,6 +3837,59 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ...(originatorClientId ? { originatorClientId } : {}),
       });
       return { toolName, enabled };
+    },
+
+    async restartMcpServer(serverName, originatorClientId) {
+      // #4175 Wave 4 PR 17. The restart logic lives inside the ACP
+      // child (it owns the `McpClientManager`); the bridge's role is
+      // to (a) pick a live channel to forward through, (b) translate
+      // the structured response back into the typed result, (c) fan
+      // out the appropriate event to every session bus. Soft refusals
+      // (skipped:true) come back as a normal response; hard errors
+      // (server not configured, manager unavailable) are propagated
+      // as JSON-RPC errors that the route maps via sendBridgeError.
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError(`mcp:${serverName}`);
+      }
+      const response = (await Promise.race([
+        withTimeout(
+          info.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+            { serverName },
+          ),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+        ),
+        getChannelClosedReject(info),
+      ])) as
+        | { serverName: string; restarted: true; durationMs: number }
+        | {
+            serverName: string;
+            restarted: false;
+            skipped: true;
+            reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+          };
+      if (response.restarted === true) {
+        broadcastWorkspaceEvent({
+          type: 'mcp_server_restarted',
+          data: {
+            serverName: response.serverName,
+            durationMs: response.durationMs,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } else {
+        broadcastWorkspaceEvent({
+          type: 'mcp_server_restart_refused',
+          data: {
+            serverName: response.serverName,
+            reason: response.reason,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+      return response;
     },
 
     async initWorkspace(initOpts, originatorClientId) {

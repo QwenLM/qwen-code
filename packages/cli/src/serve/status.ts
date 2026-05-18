@@ -68,6 +68,7 @@ export const SERVE_STATUS_EXT_METHODS = {
  */
 export const SERVE_CONTROL_EXT_METHODS = {
   sessionApprovalMode: 'qwen/control/session/approval_mode',
+  workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
 } as const;
 
 export type ServeStatus =

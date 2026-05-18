@@ -1437,6 +1437,71 @@ class QwenAgent implements Agent {
           sessionId,
         )) as unknown as Record<string, unknown>;
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
+        // #4175 Wave 4 PR 17. Single-server MCP restart with budget
+        // pre-check from PR 14 v1's accounting snapshot. Soft skips
+        // (in_flight, disabled, budget_would_exceed) come back as
+        // structured 200 responses; hard errors (server not in
+        // config, manager unavailable) propagate as JSON-RPC errors
+        // that the bridge translates to HTTP 4xx/5xx.
+        const serverName = params['serverName'];
+        if (typeof serverName !== 'string' || serverName.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing serverName',
+          );
+        }
+        const servers = this.config.getMcpServers() ?? {};
+        if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
+          throw RequestError.resourceNotFound(`mcpServer:${serverName}`);
+        }
+        if (this.config.isMcpServerDisabled(serverName)) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'disabled' as const,
+          };
+        }
+        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw RequestError.internalError(
+            undefined,
+            'McpClientManager unavailable on this Config',
+          );
+        }
+        if (manager.isServerDiscovering(serverName)) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'in_flight' as const,
+          };
+        }
+        const accounting = manager.getMcpClientAccounting();
+        const budget = manager.getMcpClientBudget();
+        const mode = manager.getMcpBudgetMode();
+        if (
+          mode === 'enforce' &&
+          budget !== undefined &&
+          !accounting.reservedSlots.includes(serverName) &&
+          accounting.total >= budget
+        ) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'budget_would_exceed' as const,
+          };
+        }
+        const start = Date.now();
+        await manager.discoverMcpToolsForServer(serverName, this.config);
+        return {
+          serverName,
+          restarted: true,
+          durationMs: Date.now() - start,
+        };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         // #4175 Wave 4 PR 17: remote callers change a live session's
         // approval mode via this ACP extMethod. `Config.setApprovalMode`

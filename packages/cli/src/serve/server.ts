@@ -1357,6 +1357,37 @@ export function createServeApp(
     },
   );
 
+  app.post(
+    '/workspace/mcp/:server/restart',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17. Forwards through the ACP child's
+      // `McpClientManager.discoverMcpToolsForServer` after a budget
+      // pre-check on PR 14 v1's accounting. Soft refusals are 200 OK
+      // with `{restarted:false, skipped:true, reason}`; unknown server
+      // names or no live ACP channel are hard errors mapped to 4xx/5xx
+      // via sendBridgeError.
+      const serverName = req.params['server'];
+      if (!serverName || typeof serverName !== 'string') {
+        res.status(400).json({
+          error: 'Server name path parameter is required',
+          code: 'invalid_server_name',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const result = await bridge.restartMcpServer(serverName, clientId);
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /workspace/mcp/:server/restart',
+        });
+      }
+    },
+  );
+
   app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
     // #4175 Wave 4 PR 17. Scaffold-only init: the bridge writes an
     // empty QWEN.md without invoking the LLM. Default refuses

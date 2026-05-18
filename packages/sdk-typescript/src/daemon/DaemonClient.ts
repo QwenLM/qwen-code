@@ -46,6 +46,7 @@ import type {
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonInitWorkspaceResult,
+  DaemonMcpRestartResult,
   DaemonToolToggleResult,
 } from './types.js';
 
@@ -917,6 +918,40 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonToolToggleResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Restart a configured MCP server through the
+   * ACP child's `McpClientManager`. The daemon pre-checks the live
+   * budget snapshot from PR 14 v1; soft refusals (in-flight discovery,
+   * disabled server, budget would exceed under `enforce` mode) come
+   * back as 200 OK with `{restarted: false, skipped: true, reason}`.
+   * Only hard errors (unknown server name, no live ACP channel)
+   * surface as non-2xx.
+   *
+   * Pre-flight `caps.features.workspace_mcp_restart` before calling.
+   */
+  async restartMcpServer(
+    serverName: string,
+    clientId?: string,
+  ): Promise<DaemonMcpRestartResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/mcp/:server/restart',
+          );
+        }
+        return (await res.json()) as DaemonMcpRestartResult;
       },
     );
   }

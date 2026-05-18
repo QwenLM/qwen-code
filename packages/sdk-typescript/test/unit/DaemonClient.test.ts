@@ -1366,6 +1366,85 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('restartMcpServer (#4175 Wave 4 PR 17)', () => {
+    it('POSTs an empty body and returns the typed result on success', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 1234,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.restartMcpServer('docs');
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: true,
+        durationMs: 1234,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/mcp/docs/restart');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('returns the soft-skip discriminated shape unchanged', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          restarted: false,
+          skipped: true,
+          reason: 'in_flight',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.restartMcpServer('docs');
+      expect(result).toEqual({
+        serverName: 'docs',
+        restarted: false,
+        skipped: true,
+        reason: 'in_flight',
+      });
+    });
+
+    it('URL-encodes the server name', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'foo bar',
+          restarted: true,
+          durationMs: 0,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.restartMcpServer('foo bar');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/mcp/foo%20bar/restart',
+      );
+    });
+
+    it('forwards X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          serverName: 'docs',
+          restarted: true,
+          durationMs: 0,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.restartMcpServer('docs', 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 404 when the daemon reports an unknown server', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'no such server' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.restartMcpServer('ghost')).rejects.toMatchObject({
+        status: 404,
+      });
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(

@@ -38,6 +38,8 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'approval_mode_changed',
   'tool_toggled',
   'workspace_initialized',
+  'mcp_server_restarted',
+  'mcp_server_restart_refused',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -294,6 +296,33 @@ export interface DaemonWorkspaceInitializedData {
   [key: string]: unknown;
 }
 
+/**
+ * #4175 Wave 4 PR 17. Workspace-scoped: fired when
+ * `POST /workspace/mcp/:server/restart` successfully reconnected and
+ * rediscovered the named MCP server. `durationMs` measures the full
+ * disconnect+reconnect+rediscover sequence on the ACP-child side.
+ */
+export interface DaemonMcpServerRestartedData {
+  serverName: string;
+  durationMs: number;
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * #4175 Wave 4 PR 17. Workspace-scoped: fired when
+ * `POST /workspace/mcp/:server/restart` was a soft skip
+ * (`skipped: true`). `reason` is the same closed enum surfaced on
+ * the route's response body, so SDK consumers can branch on a single
+ * union when reconciling event-driven state with HTTP-call results.
+ */
+export interface DaemonMcpServerRestartRefusedData {
+  serverName: string;
+  reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -362,6 +391,14 @@ export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
   'workspace_initialized',
   DaemonWorkspaceInitializedData
 >;
+export type DaemonMcpServerRestartedEvent = DaemonEventEnvelope<
+  'mcp_server_restarted',
+  DaemonMcpServerRestartedData
+>;
+export type DaemonMcpServerRestartRefusedEvent = DaemonEventEnvelope<
+  'mcp_server_restart_refused',
+  DaemonMcpServerRestartRefusedData
+>;
 
 export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
   'auth_device_flow_started',
@@ -405,7 +442,9 @@ export type DaemonControlEvent =
   | DaemonPermissionAlreadyResolvedEvent
   | DaemonApprovalModeChangedEvent
   | DaemonToolToggledEvent
-  | DaemonWorkspaceInitializedEvent;
+  | DaemonWorkspaceInitializedEvent
+  | DaemonMcpServerRestartedEvent
+  | DaemonMcpServerRestartRefusedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -496,6 +535,18 @@ export interface DaemonSessionViewState {
    */
   workspaceInitCount: number;
   lastWorkspaceInit?: DaemonWorkspaceInitializedData;
+  /**
+   * #4175 Wave 4 PR 17. Workspace-scoped MCP restart counters. Only
+   * `mcp_server_restarted` increments `mcpRestartCount`; soft skips
+   * (`mcp_server_restart_refused`) increment `mcpRestartRefusedCount`
+   * separately so adapters can distinguish "the user kept hitting
+   * restart but it's been refused" from "we've actually rotated the
+   * server N times."
+   */
+  mcpRestartCount: number;
+  lastMcpRestart?: DaemonMcpServerRestartedData;
+  mcpRestartRefusedCount: number;
+  lastMcpRestartRefused?: DaemonMcpServerRestartRefusedData;
 }
 
 export function createDaemonSessionViewState(
@@ -531,6 +582,10 @@ export function createDaemonSessionViewState(
     lastToolToggle: seed.lastToolToggle,
     workspaceInitCount: seed.workspaceInitCount ?? 0,
     lastWorkspaceInit: seed.lastWorkspaceInit,
+    mcpRestartCount: seed.mcpRestartCount ?? 0,
+    lastMcpRestart: seed.lastMcpRestart,
+    mcpRestartRefusedCount: seed.mcpRestartRefusedCount ?? 0,
+    lastMcpRestartRefused: seed.lastMcpRestartRefused,
   };
 }
 
@@ -639,6 +694,14 @@ export function asKnownDaemonEvent(
     case 'workspace_initialized':
       return isWorkspaceInitializedData(event.data)
         ? (event as DaemonWorkspaceInitializedEvent)
+        : undefined;
+    case 'mcp_server_restarted':
+      return isMcpServerRestartedData(event.data)
+        ? (event as DaemonMcpServerRestartedEvent)
+        : undefined;
+    case 'mcp_server_restart_refused':
+      return isMcpServerRestartRefusedData(event.data)
+        ? (event as DaemonMcpServerRestartRefusedEvent)
         : undefined;
     default:
       return undefined;
@@ -830,6 +893,18 @@ export function reduceDaemonSessionEvent(
         ...base,
         workspaceInitCount: base.workspaceInitCount + 1,
         lastWorkspaceInit: event.data,
+      };
+    case 'mcp_server_restarted':
+      return {
+        ...base,
+        mcpRestartCount: base.mcpRestartCount + 1,
+        lastMcpRestart: event.data,
+      };
+    case 'mcp_server_restart_refused':
+      return {
+        ...base,
+        mcpRestartRefusedCount: base.mcpRestartRefusedCount + 1,
+        lastMcpRestartRefused: event.data,
       };
     default: {
       const _exhaustive: never = event;
@@ -1326,6 +1401,33 @@ function isWorkspaceInitializedData(
   if (!isNonEmptyString(value['path'])) return false;
   const action = value['action'];
   return action === 'created' || action === 'overwrote';
+}
+
+function isMcpServerRestartedData(
+  value: unknown,
+): value is DaemonMcpServerRestartedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['serverName']) &&
+    isFiniteNumber(value['durationMs'])
+  );
+}
+
+const MCP_RESTART_REFUSED_REASONS: ReadonlySet<string> = new Set([
+  'in_flight',
+  'disabled',
+  'budget_would_exceed',
+]);
+
+function isMcpServerRestartRefusedData(
+  value: unknown,
+): value is DaemonMcpServerRestartRefusedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['serverName'])) return false;
+  return (
+    typeof value['reason'] === 'string' &&
+    MCP_RESTART_REFUSED_REASONS.has(value['reason'])
+  );
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {

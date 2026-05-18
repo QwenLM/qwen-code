@@ -139,6 +139,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the file, the caller should follow up with
   // `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
+  // #4175 Wave 4 PR 17. `POST /workspace/mcp/:server/restart` performs
+  // a single-server MCP restart (disconnect + reconnect + rediscover)
+  // through the ACP child's `McpClientManager`. Pre-checks the live
+  // budget snapshot from PR 14 v1: when the target server is not
+  // already in `reservedSlots` AND the live count would exceed the
+  // configured budget under `enforce` mode, returns 200 with
+  // `{restarted:false, skipped:true, reason:'budget_would_exceed'}`
+  // rather than triggering a refusal cascade. Other skip reasons:
+  // `'in_flight'` (concurrent discovery in progress), `'disabled'`
+  // (server is configured but explicitly disabled).
+  workspace_mcp_restart: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so
