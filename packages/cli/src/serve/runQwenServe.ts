@@ -8,14 +8,19 @@ import * as fs from 'node:fs';
 import { type Server } from 'node:http';
 import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
+import type { BridgeEvent } from './eventBus.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
 import { isLoopbackBind } from './loopbackBinds.js';
-import { createServeApp } from './server.js';
+import { createDefaultFsAuditEmit, createServeApp } from './server.js';
 import type { ServeOptions } from './types.js';
+import {
+  createWorkspaceFileSystemFactory,
+  type WorkspaceFileSystemFactory,
+} from './fs/index.js';
 
 const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
@@ -52,6 +57,38 @@ export interface RunHandle {
 export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: HttpAcpBridge;
+  /**
+   * Workspace filesystem factory (#4175 PR 19). When omitted,
+   * `runQwenServe` constructs one using `boundWorkspace`,
+   * `trustedWorkspace`, and a default warning-emit hook. Tests
+   * inject a real factory + custom emit to capture audit events,
+   * or override `trustedWorkspace` to flip the trust snapshot
+   * without re-routing through the OS-level trustedFolders config
+   * file.
+   */
+  fsFactory?: WorkspaceFileSystemFactory;
+  /**
+   * Trust snapshot for the bound workspace at boot. Drives the
+   * `WorkspaceFileSystem`'s `assertTrustedForIntent` gate — read
+   * intents always pass; mutating intents (`write`, `edit`) throw
+   * `untrusted_workspace` when this is false. Defaults to true:
+   * the daemon binds at boot to a workspace the operator
+   * explicitly chose, and the trust dialog flow that ungates write
+   * permissions in the interactive CLI is not yet replicated for
+   * the daemon. Tests pin this to false to assert the gate is
+   * actually wired through `runQwenServe → createServeApp →
+   * fsFactory`.
+   */
+  trustedWorkspace?: boolean;
+  /**
+   * Audit-emit hook for `fs.access` / `fs.denied`. Defaults to a
+   * stderr warning every 100 events so a regression that drops
+   * audit emission stays visible in the operator log. PR 21's SSE
+   * fan-out will replace the default with a workspace-scoped event
+   * channel; for now tests inject a recording array to assert the
+   * audit pipeline.
+   */
+  fsAuditEmit?: (event: BridgeEvent) => void;
 }
 
 /**
@@ -249,9 +286,39 @@ export async function runQwenServe(
   // syscall — idempotent but unnecessary I/O at boot). Direct
   // callers of createServeApp (tests / embeds) omit it and the
   // server canonicalizes itself.
+  //
+  // PR 19 — wire up `fsFactory` so the new read routes
+  // (`GET /file|/list|/glob|/stat`) consume a per-request boundary
+  // built against THIS daemon's bound workspace. Trust snapshot
+  // defaults to true; tests / future hardening flows pass an
+  // explicit `trustedWorkspace` to flip the gate. The audit-emit
+  // hook plugs into PR 21's SSE fan-out once that lands; until then
+  // the warning-emit fallback in `createServeApp` makes any silent
+  // drop visible in operator logs.
+  const trustedWorkspace = deps.trustedWorkspace ?? true;
+  // Reuse `createDefaultFsAuditEmit` so the throttle behavior here
+  // matches what `createServeApp`'s built-in fallback would emit.
+  // The earlier per-event `writeStderrLine` would print one line for
+  // every `/file` / `/list` / `/glob` / `/stat` audit event under
+  // normal traffic — a workspace scan can flood operator logs in
+  // seconds. The shared helper warns once + every 100th drop and
+  // includes payload context (errorKind / intent / pathHash), so a
+  // genuine wiring regression still surfaces but routine audit
+  // traffic stays quiet. Future PR 21 SSE fan-out replaces this
+  // default with the workspace-scoped event channel; until then the
+  // throttled stderr warning is the canonical "emit channel orphaned"
+  // breadcrumb.
+  const fsFactory =
+    deps.fsFactory ??
+    createWorkspaceFileSystemFactory({
+      boundWorkspace,
+      trusted: trustedWorkspace,
+      emit: deps.fsAuditEmit ?? createDefaultFsAuditEmit(),
+    });
   const app = createServeApp(opts, () => actualPort, {
     bridge,
     boundWorkspace,
+    fsFactory,
   });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but

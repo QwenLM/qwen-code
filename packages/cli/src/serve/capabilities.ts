@@ -96,6 +96,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `require_auth` is the only conditional tag, kept last for
   // visibility in `Object.keys(SERVE_CAPABILITY_REGISTRY)`.
   mcp_guardrails: { since: 'v1', modes: ['warn', 'enforce'] },
+  // Issue #4175 PR 19. Daemon supports the read-only workspace file
+  // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`. The
+  // four routes are gated as a single feature because they share the
+  // same backing `WorkspaceFileSystem` boundary (PR 18) and the same
+  // failure shape — clients that pre-flight one of them get the
+  // others for free, and a future deprecation would have to coordinate
+  // across all four anyway. Per-route tags would force four
+  // simultaneous registry entries with no operator-meaningful
+  // difference between them. Mutating routes (`POST /file/write`,
+  // `POST /file/edit`) ship under a separate `workspace_file_write`
+  // tag in PR 20.
+  workspace_file_read: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so
