@@ -129,6 +129,15 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // defaults (no flag) omit the tag, preserving the bit-for-bit shape
   // older clients expect.
   require_auth: { since: 'v1' },
+  // Issue #4175 PR 21. Daemon exposes the device-flow auth surface
+  // (`POST /workspace/auth/device-flow`, GET/DELETE on `/:id`, and
+  // `GET /workspace/auth/status`). Advertised UNCONDITIONALLY: the
+  // routes themselves return `400 unsupported_provider` if the daemon
+  // can't satisfy a specific provider, so clients always probe via the
+  // route. The list of supported providers is surfaced through the
+  // status route (extension data on `/capabilities` would inflate the
+  // descriptor shape; we keep the registry uniform).
+  auth_device_flow: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;

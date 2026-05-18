@@ -9,6 +9,7 @@ import { type Server } from 'node:http';
 import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from './eventBus.js';
+import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
@@ -320,6 +321,16 @@ export async function runQwenServe(
     boundWorkspace,
     fsFactory,
   });
+  // Issue #4175 PR 21 — `createServeApp` parks the device-flow registry
+  // on `app.locals` when it constructs (or accepts) one. Pull it back
+  // out so the close hook can dispose it before `bridge.shutdown()`,
+  // ensuring polling timers + cancel controllers are torn down BEFORE
+  // we tell agent children to exit (otherwise a stuck IdP fetch could
+  // pin the drain). `unref()`'d timers mean the process WILL exit
+  // either way; explicit dispose is for cleanliness + audit
+  // visibility. Typed accessor (fold-in 4 review thread D) prevents
+  // a key-name typo from silently nulling out the dispose path.
+  const deviceFlowRegistry = getDeviceFlowRegistry(app);
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
@@ -542,6 +553,21 @@ export async function runQwenServe(
               else res();
             };
 
+            // PR 21: dispose the device-flow registry FIRST so any
+            // in-flight IdP poll is cancelled and timers are cleared
+            // before the bridge tear-down (which would otherwise race
+            // with the still-polling registry on shared HTTP agents).
+            if (deviceFlowRegistry) {
+              try {
+                deviceFlowRegistry.dispose();
+              } catch (err) {
+                writeStderrLine(
+                  `qwen serve: device-flow registry dispose error: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              }
+            }
             bridge
               .shutdown()
               .catch((err) => {

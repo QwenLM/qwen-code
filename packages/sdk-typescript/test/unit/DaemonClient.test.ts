@@ -1576,4 +1576,203 @@ describe('DaemonClient', () => {
       }
     });
   });
+
+  // PR #4255 fold-in 10 #3 — device-flow HTTP method coverage. The
+  // round-8 reviewer flagged that `startDeviceFlow` /
+  // `getDeviceFlow` / `cancelDeviceFlow` / `getAuthStatus` plus the
+  // `client.auth` lazy getter had zero unit tests; this block
+  // exercises route paths, method codes, signal forwarding (fold-in
+  // 7 #6), and the `failOnError` → `DaemonHttpError` mapping.
+  describe('device-flow methods (fold-in 10 #3)', () => {
+    it('startDeviceFlow POSTs /workspace/auth/device-flow + forwards body / clientId header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(201, {
+          deviceFlowId: 'flow-A',
+          providerId: 'qwen-oauth',
+          status: 'pending',
+          userCode: 'USER-1',
+          verificationUri: 'https://idp.example/verify',
+          expiresAt: 1_700_000_000_000,
+          intervalMs: 5_000,
+          attached: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.startDeviceFlow({
+        providerId: 'qwen-oauth',
+        clientId: 'sdk-X',
+      });
+      expect(res.deviceFlowId).toBe('flow-A');
+      expect(res.attached).toBe(false);
+      const call = calls[0];
+      expect(call?.url).toBe('http://daemon/workspace/auth/device-flow');
+      expect(call?.method).toBe('POST');
+      expect(call?.headers['x-qwen-client-id']).toBe('sdk-X');
+      expect(JSON.parse(call?.body ?? '{}')).toEqual({
+        providerId: 'qwen-oauth',
+      });
+    });
+
+    it('startDeviceFlow accepts 200 (take-over branch) and 201 (fresh) identically', async () => {
+      const body = {
+        deviceFlowId: 'flow-A',
+        providerId: 'qwen-oauth',
+        status: 'pending',
+        userCode: 'USER-1',
+        verificationUri: 'https://idp.example/verify',
+        expiresAt: 1_700_000_000_000,
+        intervalMs: 5_000,
+        attached: true,
+      };
+      for (const status of [200, 201]) {
+        const { fetch } = recordingFetch(() => jsonResponse(status, body));
+        const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+        await expect(
+          client.startDeviceFlow({ providerId: 'qwen-oauth' }),
+        ).resolves.toMatchObject({ attached: true });
+      }
+    });
+
+    it('startDeviceFlow throws DaemonHttpError on non-2xx (e.g. 502 upstream_error)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(502, { error: 'upstream', code: 'upstream_error' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.startDeviceFlow({ providerId: 'qwen-oauth' }),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+
+    it('getDeviceFlow GETs /workspace/auth/device-flow/:id with URL-encoded id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          deviceFlowId: 'flow with space',
+          providerId: 'qwen-oauth',
+          status: 'authorized',
+          createdAt: 1_700_000_000_000,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.getDeviceFlow('flow with space');
+      expect(res.status).toBe('authorized');
+      // RFC 3986 / encodeURIComponent — `' '` → `%20`.
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/auth/device-flow/flow%20with%20space',
+      );
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('getDeviceFlow forwards opts.signal into fetch (fold-in 7 #6)', async () => {
+      const ctrl = new AbortController();
+      let observedSignal: AbortSignal | undefined;
+      const fetchImpl = vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) => {
+          observedSignal = init?.signal ?? undefined;
+          return jsonResponse(200, {
+            deviceFlowId: 'flow-A',
+            providerId: 'qwen-oauth',
+            status: 'pending',
+            createdAt: 1_700_000_000_000,
+          });
+        },
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch: fetchImpl,
+      });
+      await client.getDeviceFlow('flow-A', { signal: ctrl.signal });
+      // The fetched signal is COMPOSED with the per-request timeout
+      // controller (composeAbortSignals), so we can't assert
+      // identity. Instead verify that aborting the caller's signal
+      // propagates to fetch's signal.
+      expect(observedSignal).toBeDefined();
+      expect(observedSignal!.aborted).toBe(false);
+      ctrl.abort(new Error('caller-cancel'));
+      expect(observedSignal!.aborted).toBe(true);
+    });
+
+    it('getDeviceFlow throws DaemonHttpError(404) on missing/evicted id', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'not found',
+          code: 'device_flow_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const err = await client
+        .getDeviceFlow('nonexistent')
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DaemonHttpError);
+      expect((err as DaemonHttpError).status).toBe(404);
+    });
+
+    it('cancelDeviceFlow DELETEs /workspace/auth/device-flow/:id and resolves on 204', async () => {
+      const { fetch, calls } = recordingFetch(
+        () =>
+          new Response(null, {
+            status: 204,
+          }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.cancelDeviceFlow('flow-A', { clientId: 'sdk-Y' }),
+      ).resolves.toBeUndefined();
+      expect(calls[0]?.method).toBe('DELETE');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('sdk-Y');
+    });
+
+    it('cancelDeviceFlow swallows 404 idempotently (matches closeSession contract)', async () => {
+      // Per `cancelDeviceFlow`'s JSDoc + the daemon's DELETE route:
+      // both 204 (terminal-grace no-op) and 404 (unknown / evicted)
+      // resolve to undefined so retries from a SDK that's lost track
+      // are safe. Non-404/204 statuses are the only error envelope.
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, {
+          error: 'not found',
+          code: 'device_flow_not_found',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.cancelDeviceFlow('nope')).resolves.toBeUndefined();
+    });
+
+    it('cancelDeviceFlow throws DaemonHttpError on non-204/404 (e.g. 500)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'daemon exploded' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.cancelDeviceFlow('flow-A')).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+
+    it('getAuthStatus GETs /workspace/auth/status and returns the snapshot', async () => {
+      const snapshot = {
+        v: 1 as const,
+        workspaceCwd: '/work/bound',
+        providers: [],
+        pendingDeviceFlows: [],
+        supportedDeviceFlowProviders: ['qwen-oauth' as const],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.getAuthStatus();
+      expect(res).toEqual(snapshot);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/auth/status');
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('client.auth is a lazy DaemonAuthFlow instance (constructed on first access, then cached)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(200, { status: 'ok' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const a = client.auth;
+      const b = client.auth;
+      // Same instance on subsequent reads — singleton allocation.
+      expect(a).toBe(b);
+    });
+  });
 });

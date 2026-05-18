@@ -208,6 +208,8 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_mcp',
       'workspace_skills',
       'workspace_providers',
+      'workspace_memory',
+      'workspace_agents',
       'workspace_env',
       'workspace_preflight',
       'session_context',
@@ -215,6 +217,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_close',
       'session_metadata',
       'mcp_guardrails',
+      'workspace_file_read',
     ]);
   });
 });
