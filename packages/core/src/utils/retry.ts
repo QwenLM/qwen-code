@@ -243,7 +243,7 @@ export async function retryWithBackoff<T>(
 
       // Classification is diagnostic-only in this PR; retry control still
       // follows shouldRetryOnError and the persistent retry policy below.
-      const retryClassification = classifyRetryError(error, { authType });
+      const retryDiagnostics = classifyRetryError(error, { authType });
 
       // Determine if this error qualifies for persistent retry.
       // Persistent mode still respects shouldRetryOnError — callers can force
@@ -286,7 +286,7 @@ export async function retryWithBackoff<T>(
         debugLogger.warn(
           `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
             `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
-          retryClassification,
+          retryDiagnostics,
           error,
         );
 
@@ -311,7 +311,7 @@ export async function retryWithBackoff<T>(
         if (retryAfterMs !== null && retryAfterMs > 0) {
           debugLogger.warn(
             `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
-            retryClassification,
+            retryDiagnostics,
             error,
           );
           // Normal HTTP retries intentionally preserve provider-directed
@@ -321,7 +321,7 @@ export async function retryWithBackoff<T>(
           await delay(retryAfterMs, signal);
           currentDelay = initialDelayMs;
         } else {
-          logRetryAttempt(attempt, error, retryClassification, errorStatus);
+          logRetryAttempt(attempt, error, retryDiagnostics, errorStatus);
           const delayMs = getRetryDelayMs({
             // attempt: 1 — currentDelay already tracks exponential growth;
             // getRetryDelayMs is called here only for jitter calculation.
@@ -350,7 +350,7 @@ export async function retryWithBackoff<T>(
 function logRetryAttempt(
   attempt: number,
   error: unknown,
-  retryClassification: ReturnType<typeof classifyRetryError>,
+  retryDiagnostics: ReturnType<typeof classifyRetryError>,
   errorStatus?: number,
 ): void {
   const message = errorStatus
@@ -358,10 +358,10 @@ function logRetryAttempt(
     : `Attempt ${attempt} failed. Retrying with backoff...`;
 
   if (errorStatus === 429) {
-    debugLogger.warn(message, retryClassification, error);
+    debugLogger.warn(message, retryDiagnostics, error);
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    debugLogger.error(message, retryClassification, error);
+    debugLogger.error(message, retryDiagnostics, error);
   } else {
-    debugLogger.warn(message, retryClassification, error);
+    debugLogger.warn(message, retryDiagnostics, error);
   }
 }

@@ -22,7 +22,8 @@ export interface RetryDelayPolicyOptions {
  *
  * Retry-After handling depends on `retryAfterMode`:
  *   - `'ignore'` (default): do not parse Retry-After; always return the
- *     exponential delay (with optional jitter).
+ *     exponential delay (with optional jitter). Passing `error` alone does not
+ *     enable Retry-After handling.
  *   - `'minimum'`: use Retry-After as a floor on the exponential delay.
  *
  * When Retry-After is honored, `jitterRatio` is intentionally not applied —

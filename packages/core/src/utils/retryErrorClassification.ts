@@ -26,6 +26,7 @@ export type RetryErrorDiagnosis =
 
 export interface RetryErrorClassificationContext {
   authType?: AuthType | string;
+  extraRetryErrorCodes?: readonly number[];
 }
 
 export interface RetryErrorClassification {
@@ -92,7 +93,7 @@ export function classifyRetryError(
     };
   }
 
-  if (isRateLimitError(error)) {
+  if (isRateLimitError(error, context.extraRetryErrorCodes)) {
     const kind: RetryErrorKind =
       details.transport === 'sse'
         ? 'sse-provider'
@@ -237,28 +238,37 @@ function getProviderFields(error: unknown): ProviderFields {
     return {};
   }
 
-  if (error instanceof Error) {
-    return {};
-  }
-
   const source = error as {
     code?: unknown;
     message?: unknown;
     request_id?: unknown;
     requestId?: unknown;
   };
+  const rawCode =
+    typeof source.code === 'string' || typeof source.code === 'number'
+      ? String(source.code)
+      : undefined;
+  const providerCode =
+    error instanceof Error && rawCode?.startsWith('ERR_')
+      ? undefined
+      : rawCode;
+  const requestId =
+    typeof source.request_id === 'string'
+      ? source.request_id
+      : typeof source.requestId === 'string'
+        ? source.requestId
+        : undefined;
+  const providerMessage =
+    typeof source.message === 'string' &&
+    (!(error instanceof Error) ||
+      providerCode !== undefined ||
+      requestId !== undefined)
+      ? source.message
+      : undefined;
 
   return {
-    ...(typeof source.code === 'string' || typeof source.code === 'number'
-      ? { providerCode: String(source.code) }
-      : {}),
-    ...(typeof source.message === 'string'
-      ? { providerMessage: source.message }
-      : {}),
-    ...(typeof source.request_id === 'string'
-      ? { requestId: source.request_id }
-      : typeof source.requestId === 'string'
-        ? { requestId: source.requestId }
-        : {}),
+    ...(providerCode !== undefined ? { providerCode } : {}),
+    ...(providerMessage !== undefined ? { providerMessage } : {}),
+    ...(requestId !== undefined ? { requestId } : {}),
   };
 }

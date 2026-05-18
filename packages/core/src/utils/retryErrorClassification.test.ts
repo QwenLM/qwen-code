@@ -59,6 +59,21 @@ describe('classifyRetryError', () => {
     });
   });
 
+  it('honors caller-provided extra rate-limit codes in diagnostics', () => {
+    expect(
+      classifyRetryError(
+        { error: { code: 4999, message: 'Provider-specific throttle' } },
+        { extraRetryErrorCodes: [4999] },
+      ),
+    ).toMatchObject({
+      kind: 'provider',
+      diagnosis: 'retryable',
+      providerCode: '4999',
+      providerMessage: 'Provider-specific throttle',
+      reason: 'rate-limit',
+    });
+  });
+
   it('classifies SSE-embedded non-quota 429 errors as retryable rate limiting', () => {
     const error = new Error(
       'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-1","code":"Throttling.RateLimit","message":"Rate limit exceeded"}',
@@ -275,6 +290,22 @@ describe('classifyRetryError', () => {
     });
     expect(classification).not.toHaveProperty('providerCode');
     expect(classification).not.toHaveProperty('providerMessage');
+  });
+
+  it('extracts provider fields from Error instances with direct SDK properties', () => {
+    const error = Object.assign(new Error('Provider-specific throttle'), {
+      code: 'Throttling.Custom',
+      request_id: 'req-direct-error',
+    });
+
+    expect(classifyRetryError(error)).toMatchObject({
+      kind: 'unknown',
+      diagnosis: 'unknown',
+      providerCode: 'Throttling.Custom',
+      providerMessage: 'Provider-specific throttle',
+      requestId: 'req-direct-error',
+      reason: 'unclassified',
+    });
   });
 
   it('does not copy unparsed SSE frames into providerMessage', () => {

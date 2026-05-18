@@ -796,6 +796,7 @@ export class GeminiChat {
               const details = getRateLimitErrorDetails(error);
               const classification = classifyRetryError(error, {
                 authType: cgConfig?.authType,
+                extraRetryErrorCodes,
               });
               // The classifier is observation-only here; stream retry control
               // remains governed by isRateLimitError and the retry budget.
