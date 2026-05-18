@@ -4,6 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+/**
+ * Centralized error taxonomy for ACP bridge operations.
+ *
+ * Each class is a structurally-distinct subclass of `Error` that the
+ * HTTP route layer (and embedded callers) can `instanceof`-branch on
+ * to map to a specific status code without text-matching the message.
+ * The fields on each class (`sessionId`, `bound`/`requested`, `limit`,
+ * etc.) are the structured payload that `sendBridgeError` surfaces in
+ * the JSON body, so SDK consumers can render typed prompts (e.g.
+ * "session limit reached, retry after N seconds") without parsing
+ * free-form text.
+ *
+ * Lifted from `packages/cli/src/serve/httpAcpBridge.ts` in #4175 PR
+ * 22b/1 so the bridge package owns the error contract directly. The
+ * 7 error classes server.ts imports + 1 each from workspaceAgents.ts
+ * and workspaceMemory.ts continue to resolve through the
+ * httpAcpBridge.ts re-export shim.
+ */
+
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 
 export class SessionNotFoundError extends Error {
