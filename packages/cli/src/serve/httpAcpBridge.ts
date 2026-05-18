@@ -24,6 +24,7 @@ import {
 } from './eventBus.js';
 import {
   BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
@@ -43,7 +44,12 @@ import {
   type ServeWorkspaceSkillsStatus,
 } from './status.js';
 import { buildEnvStatusFromProcess } from './envSnapshot.js';
-import { canUseRipgrep } from '@qwen-code/qwen-code-core';
+import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  TrustGateError,
+  canUseRipgrep,
+  getCurrentGeminiMdFilename,
+} from '@qwen-code/qwen-code-core';
 import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
 import type {
   CancelNotification,
@@ -426,6 +432,113 @@ export interface HttpAcpBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /**
+   * Change the approval mode of a live session and broadcast an
+   * `approval_mode_changed` event. Forwards through the
+   * `qwen/control/session/approval_mode` ACP extMethod so the change
+   * lands inside the ACP child's own `Config` instance.
+   *
+   * `opts.persist === true` also writes `tools.approvalMode` to the
+   * workspace settings file so a future ACP child or a future daemon
+   * restart picks up the new default. Default is ephemeral
+   * (`persist: false`) — the remote caller does not pollute the
+   * user's on-disk settings unless they ask for it.
+   *
+   * Throws `SessionNotFoundError` for unknown sessions. The ACP-side
+   * trust-folder rejection surfaces as a `TrustGateError` from core
+   * which the route maps via `mapDomainErrorToErrorKind` to
+   * `auth_env_error`.
+   */
+  setSessionApprovalMode(
+    sessionId: string,
+    mode: ApprovalMode,
+    opts: { persist: boolean },
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    sessionId: string;
+    mode: ApprovalMode;
+    previous: ApprovalMode;
+    persisted: boolean;
+  }>;
+
+  /**
+   * Add or remove a tool name from the workspace's `tools.disabled`
+   * settings list and fan-out a `tool_toggled` event to every live
+   * session SSE bus. Does NOT consult the ACP child — settings are
+   * file IO the daemon owns directly. Already-registered tools in
+   * active sessions stay registered until the next ACP child spawn
+   * (`tools.disabled` is consulted at `Config` construction time, so
+   * the toggle takes effect on the next workspace-wide refresh).
+   *
+   * Unknown tool names are accepted: the daemon has no authoritative
+   * tool registry to validate against (built-ins live inside the ACP
+   * child, MCP tools are discovered post-spawn). Pre-disabling a
+   * not-yet-installed MCP tool is a legitimate use case.
+   *
+   * Throws when the daemon was constructed without a
+   * `persistDisabledTools` callback — direct embeds / tests must opt
+   * in to write semantics.
+   */
+  setWorkspaceToolEnabled(
+    toolName: string,
+    enabled: boolean,
+    originatorClientId: string | undefined,
+  ): Promise<{ toolName: string; enabled: boolean }>;
+
+  /**
+   * Scaffold an empty `QWEN.md` (or whatever
+   * `getCurrentGeminiMdFilename()` returns) at the bound workspace
+   * root. Mechanical only — does NOT invoke the LLM. The caller is
+   * expected to follow up with `POST /session/:id/prompt` if it wants
+   * AI-driven content fill.
+   *
+   * Default refuses to overwrite: when the target file already exists
+   * with non-whitespace content, throws `WorkspaceInitConflictError`
+   * (translated to HTTP 409 by the route). `opts.force === true`
+   * overwrites unconditionally.
+   *
+   * Fan-outs a `workspace_initialized` event with `{path, action:
+   * 'created' | 'overwrote'}` to every live session SSE bus.
+   */
+  initWorkspace(
+    opts: { force?: boolean },
+    originatorClientId: string | undefined,
+  ): Promise<{
+    path: string;
+    action: 'created' | 'overwrote' | 'noop';
+  }>;
+
+  /**
+   * Restart a configured MCP server through the ACP child's
+   * `McpClientManager`. Pre-checks the live budget snapshot from PR 14
+   * v1 and returns a structured "skipped" response (200 OK) for soft
+   * refusals (in-flight discovery, server disabled, restart would
+   * push live count over budget under `enforce` mode). Hard errors
+   * (server not configured at all, `McpClientManager` unavailable)
+   * propagate as ACP errors → mapped to HTTP 4xx/5xx by the route.
+   *
+   * On success, fan-outs `mcp_server_restarted` to every live session
+   * SSE bus with `{serverName, durationMs}`. On soft skip, fan-outs
+   * `mcp_server_restart_refused` with `{serverName, reason}`.
+   *
+   * Throws `SessionNotFoundError`-like (via `SERVE_CONTROL_EXT_METHODS`
+   * routing) when no ACP channel is alive — restart requires a live
+   * `McpClientManager` instance, which only exists inside a spawned
+   * ACP child.
+   */
+  restartMcpServer(
+    serverName: string,
+    originatorClientId: string | undefined,
+  ): Promise<
+    | { serverName: string; restarted: true; durationMs: number }
+    | {
+        serverName: string;
+        restarted: false;
+        skipped: true;
+        reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      }
+  >;
 
   /**
    * Kill the agent process for the session and remove it from the maps.
@@ -816,6 +929,38 @@ export interface BridgeOptions {
    * typically ignore it; the production factory merges it).
    */
   childEnvOverrides?: Readonly<Record<string, string | undefined>>;
+  /**
+   * #4175 Wave 4 PR 17 — optional callback for persisting `tools.
+   * approvalMode` to the workspace settings file. Invoked by
+   * `setSessionApprovalMode` ONLY when the route caller passes
+   * `{persist: true}`. The default `runQwenServe` wires this to
+   * `loadSettings(boundWorkspace).setValue(SettingScope.Workspace,
+   * 'tools.approvalMode', mode)`. Bridge tests and embedded callers
+   * may omit it; when omitted, `setSessionApprovalMode` still applies
+   * the in-process change and returns `persisted: false` regardless
+   * of the request flag.
+   */
+  persistApprovalMode?: (
+    boundWorkspace: string,
+    mode: ApprovalMode,
+  ) => Promise<void>;
+  /**
+   * #4175 Wave 4 PR 17 — optional callback for mutating
+   * `tools.disabled` in workspace settings. Invoked by
+   * `setWorkspaceToolEnabled` to add (`enabled: false`) or remove
+   * (`enabled: true`) `toolName` from the persisted disabled set.
+   * The default `runQwenServe` wires this to a fresh
+   * `loadSettings(boundWorkspace)` per call so concurrent edits from
+   * other writers (CLI, another daemon, an editor) are picked up.
+   * Bridge tests / embedded callers may omit it; without the hook
+   * `setWorkspaceToolEnabled` throws a clear error rather than
+   * silently dropping the write.
+   */
+  persistDisabledTools?: (
+    boundWorkspace: string,
+    toolName: string,
+    enabled: boolean,
+  ) => Promise<void>;
 }
 
 /**
@@ -1097,6 +1242,67 @@ export class InvalidSessionMetadataError extends Error {
     super(`Invalid session metadata: ${field} ${reason}`);
     this.name = 'InvalidSessionMetadataError';
     this.field = field;
+  }
+}
+
+/**
+ * #4175 Wave 4 PR 17. Thrown by `initWorkspace` when the target file
+ * already exists with non-whitespace content and the caller did not
+ * pass `force: true`. Translated to HTTP 409 by the route. The
+ * `path` and `existingSize` fields let SDK clients render a clear
+ * "file already exists; pass `force: true` to overwrite" prompt
+ * without re-stat'ing the workspace.
+ */
+export class WorkspaceInitConflictError extends Error {
+  readonly path: string;
+  readonly existingSize: number;
+  constructor(path: string, existingSize: number) {
+    super(
+      `Workspace file ${path} already exists ` +
+        `(${existingSize} bytes); pass {force: true} to overwrite.`,
+    );
+    this.name = 'WorkspaceInitConflictError';
+    this.path = path;
+    this.existingSize = existingSize;
+  }
+}
+
+/**
+ * #4282 fold-in 1 (gpt-5.5 C5). Thrown by `restartMcpServer` when the
+ * caller asks for a server name that isn't in the daemon's
+ * `McpServers` config. Translated to HTTP 404 + structured body by
+ * the route — distinguishable from a generic 500 so a bad server
+ * name doesn't look like an internal daemon failure.
+ */
+export class McpServerNotFoundError extends Error {
+  readonly serverName: string;
+  constructor(serverName: string) {
+    super(`MCP server not configured: ${JSON.stringify(serverName)}`);
+    this.name = 'McpServerNotFoundError';
+    this.serverName = serverName;
+  }
+}
+
+/**
+ * #4282 fold-in 1 (gpt-5.5 C4). Thrown by `restartMcpServer` when
+ * `discoverMcpToolsForServer` resolves but the MCP client fails to
+ * end up `CONNECTED` post-discover. The manager catches reconnect
+ * errors and returns void, so without an explicit post-check the
+ * route would report `restarted: true` while the server stays
+ * disconnected. Translated to HTTP 502 + `errorKind:
+ * 'protocol_error'` by the route.
+ */
+export class McpServerRestartFailedError extends Error {
+  readonly serverName: string;
+  readonly mcpStatus: string;
+  constructor(serverName: string, mcpStatus: string) {
+    super(
+      `MCP server ${JSON.stringify(serverName)} did not reach a connected ` +
+        `state after restart (status: ${mcpStatus}).`,
+    );
+    this.name = 'McpServerRestartFailedError';
+    this.serverName = serverName;
+    this.mcpStatus = mcpStatus;
   }
 }
 
@@ -1782,6 +1988,18 @@ class BridgeClient implements Client {
 }
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
+/**
+ * #4282 fold-in 2 (gpt-5.5 CV2). Bridge-race deadline for the
+ * `workspace/mcp/:server/restart` ACP extMethod. The MCP manager's
+ * per-server discovery deadline can be up to 5 minutes
+ * (`McpClientManager.MAX_DISCOVERY_TIMEOUT_MS`), so reusing
+ * `initTimeoutMs` (10s) here produced a guaranteed false-timeout for
+ * any stdio MCP server slower than 10s while the ACP child kept
+ * reconnecting in the background. The bridge race is purely a safety
+ * net against a completely wedged ACP channel; it should be at least
+ * as long as the slowest legitimate per-server discovery.
+ */
+const MCP_RESTART_TIMEOUT_MS = 300_000;
 const DEFAULT_MAX_SESSIONS = 20;
 /**
  * Soft upper bound on `BridgeOptions.eventRingSize` to catch operator
@@ -1923,6 +2141,8 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const boundWorkspace = opts.boundWorkspace;
+  const persistApprovalMode = opts.persistApprovalMode;
+  const persistDisabledTools = opts.persistDisabledTools;
 
   // #3803 §02 single-workspace model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
@@ -2708,6 +2928,31 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       getTransportClosedReject(entry),
     ]);
     return response as unknown as T;
+  };
+
+  /**
+   * Fan-out an event to every live session bus. PR 17 mutation events
+   * (`tool_toggled`, `workspace_initialized`, `mcp_server_restart*`)
+   * call this; semantically identical to PR 16's
+   * `publishWorkspaceEvent` member on the bridge object (same
+   * `byId.values()` iteration, same per-entry try/catch posture).
+   * Kept as a local closure alias rather than a member method because
+   * call sites within the bridge implementation can't invoke own
+   * methods through `this` here. PR 16's richer success/failure
+   * accounting (per-entry shutdown/debug logging) lives only on the
+   * member version — these PR 17 events are best-effort, so the
+   * simpler swallow-and-skip is acceptable.
+   */
+  const broadcastWorkspaceEvent = (
+    envelope: Omit<BridgeEvent, 'id' | 'v'>,
+  ): void => {
+    for (const entry of byId.values()) {
+      try {
+        entry.events.publish(envelope);
+      } catch {
+        /* bus closed for this session; skip */
+      }
+    }
   };
 
   const createSessionEntry = (
@@ -3888,6 +4133,342 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* bus closed */
       }
       return response;
+    },
+
+    async setSessionApprovalMode(sessionId, mode, opts, context) {
+      // #4175 Wave 4 PR 17. Forwards through `qwen/control/session/
+      // approval_mode` so the change lands inside the ACP child's own
+      // `Config` (per-session `setApprovalMode`). The bridge layer adds
+      // two things on top: trusted `originatorClientId` resolution and
+      // an opt-in persist hook that writes `tools.approvalMode` to the
+      // workspace settings file. Persist is OFF by default — see the
+      // interface doc for the reasoning.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      // #4282 fold-in 4 (qwen-latest C1): validate the persist contract
+      // BEFORE the ACP roundtrip changes the in-process mode. The previous
+      // post-call placement meant a missing `persistApprovalMode` callback
+      // produced a 500 *after* the ACP child had already applied the
+      // mode change — observable to other in-flight requests but
+      // invisible to the caller. Mirrors the pre-call validation in
+      // `setWorkspaceToolEnabled`.
+      if (opts.persist && !persistApprovalMode) {
+        throw new Error(
+          'setSessionApprovalMode called with `persist: true` but no ' +
+            '`persistApprovalMode` callback wired in BridgeOptions. ' +
+            'runQwenServe wires the production callback; direct embeds ' +
+            'and tests must opt in or omit `persist`.',
+        );
+      }
+      let response: { previous: ApprovalMode; current: ApprovalMode };
+      try {
+        response = (await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+              { sessionId, mode },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          ),
+          getTransportClosedReject(entry),
+        ])) as { previous: ApprovalMode; current: ApprovalMode };
+      } catch (err) {
+        // The ACP child rethrows `TrustGateError` as a JSON-RPC error
+        // whose `data.errorKind` is the literal `'trust_gate'`. On the
+        // wire it arrives as a plain `{code, message, data}` object —
+        // re-instantiate the typed class here so the HTTP route layer
+        // recognizes it via `instanceof` / `err.name` and maps the
+        // failure to HTTP 403 with the `auth_env_error` errorKind.
+        const data = (err as { data?: unknown })?.data;
+        if (
+          data &&
+          typeof data === 'object' &&
+          'errorKind' in data &&
+          (data as { errorKind?: unknown }).errorKind === 'trust_gate'
+        ) {
+          const rawMessage = (err as { message?: unknown })?.message;
+          const message =
+            typeof rawMessage === 'string'
+              ? rawMessage
+              : 'Trust-gate rejection from ACP child';
+          throw new TrustGateError(message);
+        }
+        throw err;
+      }
+      let persisted = false;
+      if (opts.persist) {
+        try {
+          await persistApprovalMode?.(boundWorkspace, mode);
+          persisted = persistApprovalMode !== undefined;
+        } catch (err) {
+          // Persist failure is non-fatal — the in-process change already
+          // took effect inside the ACP child. Log to stderr so operators
+          // notice but don't fail the route (the SDK consumer would have
+          // no good recovery path; the runtime change is real).
+          writeStderrLine(
+            `setSessionApprovalMode: persist failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+      try {
+        entry.events.publish({
+          type: 'approval_mode_changed',
+          data: {
+            sessionId: entry.sessionId,
+            previous: response.previous,
+            next: response.current,
+            persisted,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
+      // #4282 fold-in 4 (qwen-latest S2): when the change is persisted to
+      // workspace settings, the new mode becomes the default for every
+      // future session in this workspace. Fan out a workspace-scoped
+      // mirror so peer sessions can update their UI before they next
+      // spawn an ACP child. The session-scoped publish above remains the
+      // authoritative signal for the requesting session (and carries the
+      // sessionId in `data`); the workspace mirror is informational.
+      if (persisted) {
+        broadcastWorkspaceEvent({
+          type: 'approval_mode_changed',
+          data: {
+            sessionId: entry.sessionId,
+            previous: response.previous,
+            next: response.current,
+            persisted,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+      return {
+        sessionId: entry.sessionId,
+        mode: response.current,
+        previous: response.previous,
+        persisted,
+      };
+    },
+
+    async setWorkspaceToolEnabled(toolName, enabled, originatorClientId) {
+      // #4175 Wave 4 PR 17. Pure file IO + event fan-out — no ACP
+      // roundtrip. The settings file is the source of truth; live
+      // sessions retain their already-registered tools until the next
+      // ACP child spawn (when `tools.disabled` is consulted at Config
+      // construction time).
+      if (!persistDisabledTools) {
+        throw new Error(
+          'setWorkspaceToolEnabled requires `persistDisabledTools` in ' +
+            'BridgeOptions; runQwenServe wires the production callback. ' +
+            'Direct embeds and tests must opt in.',
+        );
+      }
+      await persistDisabledTools(boundWorkspace, toolName, enabled);
+      broadcastWorkspaceEvent({
+        type: 'tool_toggled',
+        data: { toolName, enabled },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      return { toolName, enabled };
+    },
+
+    async restartMcpServer(serverName, originatorClientId) {
+      // #4175 Wave 4 PR 17. The restart logic lives inside the ACP
+      // child (it owns the `McpClientManager`); the bridge's role is
+      // to (a) pick a live channel to forward through, (b) translate
+      // the structured response back into the typed result, (c) fan
+      // out the appropriate event to every session bus. Soft refusals
+      // (skipped:true) come back as a normal response; hard errors
+      // (server not configured, manager unavailable, post-discover
+      // not connected) are translated via `data.errorKind` into typed
+      // bridge errors that `sendBridgeError` maps to stable HTTP
+      // responses (#4282 gpt-5.5 C4/C5 fold-in).
+      const info = liveChannelInfo();
+      if (!info) {
+        throw new SessionNotFoundError(`mcp:${serverName}`);
+      }
+      let response:
+        | { serverName: string; restarted: true; durationMs: number }
+        | {
+            serverName: string;
+            restarted: false;
+            skipped: true;
+            reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+          };
+      try {
+        response = (await Promise.race([
+          withTimeout(
+            info.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+              { serverName },
+            ),
+            MCP_RESTART_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart,
+          ),
+          getChannelClosedReject(info),
+        ])) as
+          | { serverName: string; restarted: true; durationMs: number }
+          | {
+              serverName: string;
+              restarted: false;
+              skipped: true;
+              reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+            };
+      } catch (err) {
+        // Detect structured ACP error payloads and re-instantiate as
+        // typed bridge errors. JSON-RPC strips class names across the
+        // wire; the agent attaches `data.errorKind` as the
+        // reconstruction signal.
+        const data = (err as { data?: unknown })?.data;
+        if (data && typeof data === 'object') {
+          const kind = (data as { errorKind?: unknown }).errorKind;
+          const sn = (data as { serverName?: unknown }).serverName;
+          if (kind === 'mcp_server_not_found' && typeof sn === 'string') {
+            throw new McpServerNotFoundError(sn);
+          }
+          if (kind === 'mcp_restart_failed' && typeof sn === 'string') {
+            const status = (data as { mcpStatus?: unknown }).mcpStatus;
+            throw new McpServerRestartFailedError(
+              sn,
+              typeof status === 'string' ? status : 'unknown',
+            );
+          }
+        }
+        throw err;
+      }
+      if (response.restarted === true) {
+        broadcastWorkspaceEvent({
+          type: 'mcp_server_restarted',
+          data: {
+            serverName: response.serverName,
+            durationMs: response.durationMs,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } else {
+        broadcastWorkspaceEvent({
+          type: 'mcp_server_restart_refused',
+          data: {
+            serverName: response.serverName,
+            reason: response.reason,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      }
+      return response;
+    },
+
+    async initWorkspace(initOpts, originatorClientId) {
+      // #4175 Wave 4 PR 17. Mechanical scaffold of an empty `QWEN.md`
+      // (or whatever `getCurrentGeminiMdFilename()` returns under
+      // `--memory-file-name` overrides). No ACP roundtrip, no LLM
+      // call — clients that want AI-fill follow up with
+      // `POST /session/:id/prompt`.
+      //
+      // FIXME(#4282 fold-in 2 — deepseek SV2): this route uses
+      // `node:fs/promises` directly instead of routing through
+      // `WorkspaceFileSystem` (PR 18 boundary), so it produces no
+      // `fs.access`/`fs.denied` audit trail and skips
+      // `assertTrustedForIntent`. The bridge doesn't have an
+      // `fsFactory` plumbed at the bridge layer today — the boundary
+      // is constructed per-request inside `createServeApp` for PR 19+
+      // routes. A follow-up will hoist the factory into
+      // `BridgeOptions` so daemon-level routes (init, future
+      // workspace ops) can share the same trust + audit posture.
+      // Impact today is low: the daemon binds to a workspace the
+      // operator chose and the trust dialog flow doesn't yet exist
+      // for the daemon. The CV1 symlink reject below covers the
+      // immediate boundary-escape concern.
+      const filename = getCurrentGeminiMdFilename();
+      // #4282 gpt-5.5 C1 fold-in: `getCurrentGeminiMdFilename()` is
+      // settings-controlled. A daemon configured with
+      // `context.fileName: "../outside.md"` would otherwise resolve
+      // outside `boundWorkspace` and let this strict-gated mutation
+      // create or truncate a file outside the workspace boundary.
+      // Resolve the joined path and reject anything that escapes.
+      const target = path.resolve(boundWorkspace, filename);
+      const withinWorkspace =
+        target === boundWorkspace ||
+        target.startsWith(boundWorkspace + path.sep);
+      if (!withinWorkspace) {
+        throw new Error(
+          `Configured workspace context filename ${JSON.stringify(filename)} ` +
+            `resolves outside the bound workspace ${JSON.stringify(boundWorkspace)}. ` +
+            `Refusing to write.`,
+        );
+      }
+      // #4282 fold-in 2 (gpt-5.5 CV1): the textual `withinWorkspace`
+      // check above only validates the JOINED path, but a file at
+      // `target` that's a symlink can still point outside the
+      // workspace. Without an explicit `lstat` reject, `force: true`
+      // would follow the link and truncate the external target; a
+      // dangling-symlink pointing outside would also let `writeFile`
+      // create the external target. Reject symlinks at the boundary
+      // — PR 18's `WorkspaceFileSystem` will provide the proper
+      // chain-aware resolution + audit hooks once `initWorkspace`
+      // routes through that boundary (tracked as a follow-up).
+      try {
+        const lst = await fs.lstat(target);
+        if (lst.isSymbolicLink()) {
+          throw new Error(
+            `Workspace context file ${JSON.stringify(target)} is a symlink. ` +
+              `Refusing to follow it for write — replace the symlink with a ` +
+              `regular file (or remove it) before re-running init.`,
+          );
+        }
+      } catch (err) {
+        const code = (err as { code?: unknown } | null | undefined)?.code;
+        if (code !== 'ENOENT') throw err;
+        // ENOENT — target doesn't exist; fresh create is fine.
+      }
+      let existingSize: number | undefined;
+      let action: 'created' | 'overwrote' | 'noop' = 'created';
+      try {
+        const existing = await fs.readFile(target, 'utf8');
+        if (existing.trim().length > 0) {
+          existingSize = Buffer.byteLength(existing, 'utf8');
+          if (initOpts.force !== true) {
+            throw new WorkspaceInitConflictError(target, existingSize);
+          }
+          action = 'overwrote';
+        } else {
+          // #4282 wenshao H4 fold-in: an existing whitespace-only file
+          // is treated as a no-op rather than silently overwritten.
+          // Previously the code would label the response `'created'`
+          // and unconditionally `writeFile(target, '')`, destroying
+          // the user's whitespace content (stray template, half-
+          // written init, intentional newline) without `force: true`.
+          // The HTTP intent of "init only if absent" is honored by
+          // skipping the write and surfacing `'noop'` so the SSE
+          // event accurately reflects that no on-disk change
+          // occurred.
+          action = 'noop';
+        }
+      } catch (err) {
+        if (err instanceof WorkspaceInitConflictError) throw err;
+        const code = (err as { code?: unknown } | null | undefined)?.code;
+        if (code !== 'ENOENT') throw err;
+        // ENOENT — fall through to create.
+      }
+      if (action !== 'noop') {
+        await fs.writeFile(target, '', 'utf8');
+      }
+      broadcastWorkspaceEvent({
+        type: 'workspace_initialized',
+        data: { path: target, action },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      return { path: target, action };
     },
 
     async killSession(sessionId, opts) {

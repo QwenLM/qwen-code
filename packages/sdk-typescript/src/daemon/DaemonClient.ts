@@ -43,6 +43,11 @@ import type {
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
+  DaemonApprovalMode,
+  DaemonApprovalModeResult,
+  DaemonInitWorkspaceResult,
+  DaemonMcpRestartResult,
+  DaemonToolToggleResult,
 } from './types.js';
 
 /**
@@ -834,6 +839,163 @@ export class DaemonClient {
           throw await this.failOnError(res, `POST /session/:id/${action}`);
         }
         return (await res.json()) as DaemonRestoredSession;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Change the approval mode of a live session.
+   * The daemon applies the change in the ACP child's per-session
+   * `Config` and publishes an `approval_mode_changed` event. Pass
+   * `opts.persist: true` to also write `tools.approvalMode` to the
+   * workspace settings file (default is ephemeral so a remote caller
+   * does not pollute the user's host settings unless asked).
+   *
+   * Pre-flight `caps.features.session_approval_mode_control` before
+   * calling — older daemons reject the route with 404.
+   *
+   * The trust-folder gate inside core's `setApprovalMode` rejects
+   * privileged modes in untrusted folders; the route surfaces that
+   * with HTTP 403 + `errorKind: 'auth_env_error'`.
+   */
+  async setSessionApprovalMode(
+    sessionId: string,
+    mode: DaemonApprovalMode,
+    opts?: { persist?: boolean; clientId?: string },
+  ): Promise<DaemonApprovalModeResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/approval-mode`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          mode,
+          ...(opts?.persist === true ? { persist: true } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/approval-mode');
+        }
+        return (await res.json()) as DaemonApprovalModeResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Toggle a tool name in the workspace's
+   * `tools.disabled` settings list. Strict-gated mutation route — the
+   * daemon must be configured with a bearer token. The daemon writes
+   * the settings file directly and fan-outs a `tool_toggled` event to
+   * every live session SSE bus.
+   *
+   * Already-registered tools in active sessions are NOT retroactively
+   * unregistered. The toggle takes effect on the next ACP child spawn
+   * — listeners that need the live tool list to reflect the change
+   * should also `POST /workspace/mcp/:server/restart` (when the tool
+   * is MCP-discovered) or open a new session.
+   *
+   * Pre-flight `caps.features.workspace_tool_toggle` before calling.
+   */
+  async setWorkspaceToolEnabled(
+    toolName: string,
+    enabled: boolean,
+    opts?: { clientId?: string },
+  ): Promise<DaemonToolToggleResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/tools/${encodeURIComponent(toolName)}/enable`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({ enabled }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/tools/:name/enable',
+          );
+        }
+        return (await res.json()) as DaemonToolToggleResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Restart a configured MCP server through the
+   * ACP child's `McpClientManager`. The daemon pre-checks the live
+   * budget snapshot from PR 14 v1; soft refusals (in-flight discovery,
+   * disabled server, budget would exceed under `enforce` mode) come
+   * back as 200 OK with `{restarted: false, skipped: true, reason}`.
+   * Only hard errors (unknown server name, no live ACP channel)
+   * surface as non-2xx.
+   *
+   * Pre-flight `caps.features.workspace_mcp_restart` before calling.
+   */
+  async restartMcpServer(
+    serverName: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonMcpRestartResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/mcp/${encodeURIComponent(serverName)}/restart`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /workspace/mcp/:server/restart',
+          );
+        }
+        return (await res.json()) as DaemonMcpRestartResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Scaffold a `QWEN.md` at the daemon's bound
+   * workspace root. Mechanical only — does NOT invoke the LLM. The
+   * daemon writes an empty file; clients that want AI-driven content
+   * fill should follow up with `POST /session/:id/prompt`.
+   *
+   * Default refuses to overwrite — when the file exists with non-
+   * whitespace content the daemon returns 409
+   * `workspace_init_conflict` with the existing path and size in the
+   * body. Pass `opts.force: true` to overwrite unconditionally.
+   *
+   * Pre-flight `caps.features.workspace_init` before calling.
+   */
+  async initWorkspace(opts?: {
+    force?: boolean;
+    clientId?: string;
+  }): Promise<DaemonInitWorkspaceResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/init`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify(opts?.force === true ? { force: true } : {}),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/init');
+        }
+        return (await res.json()) as DaemonInitWorkspaceResult;
       },
     );
   }

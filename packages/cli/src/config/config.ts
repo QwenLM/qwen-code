@@ -1419,6 +1419,20 @@ export async function loadCliConfig(
     addDisabled(name);
   }
 
+  // Resolve the per-workspace tool denylist (#4175 Wave 4 PR 17). De-duplicate
+  // while preserving original casing; downstream lookups go through
+  // `Config.getDisabledTools()` which materializes a Set, so the order here
+  // is only meaningful for diagnostic output.
+  const disabledTools: string[] = [];
+  const seenDisabledTools = new Set<string>();
+  for (const raw of settings.tools?.disabled ?? []) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (!trimmed || seenDisabledTools.has(trimmed)) continue;
+    seenDisabledTools.add(trimmed);
+    disabledTools.push(trimmed);
+  }
+
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
   // to preserve the original behaviour where "ShellTool", "Shell", and
@@ -1636,6 +1650,7 @@ export async function loadCliConfig(
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
+    disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,

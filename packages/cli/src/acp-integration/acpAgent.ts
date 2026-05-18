@@ -21,10 +21,13 @@ import {
   getMCPServerStatus,
   MCPDiscoveryState,
   MCPServerStatus,
-  type Config,
-  type ConversationRecord,
-  type DeviceAuthorizationData,
   SessionEndReason,
+} from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  Config,
+  ConversationRecord,
+  DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -84,6 +87,7 @@ import { runExitCleanup } from '../utils/cleanup.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
@@ -1432,6 +1436,157 @@ class QwenAgent implements Agent {
         return (await this.buildSessionSupportedCommandsStatus(
           sessionId,
         )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
+        // #4175 Wave 4 PR 17. Single-server MCP restart with budget
+        // pre-check from PR 14 v1's accounting snapshot. Soft skips
+        // (in_flight, disabled, budget_would_exceed) come back as
+        // structured 200 responses; hard errors (server not in
+        // config, manager unavailable, post-discover not connected)
+        // propagate as JSON-RPC errors with structured `data` that
+        // the bridge translates to typed HTTP responses.
+        const serverName = params['serverName'];
+        if (typeof serverName !== 'string' || serverName.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing serverName',
+          );
+        }
+        const servers = this.config.getMcpServers() ?? {};
+        if (!Object.prototype.hasOwnProperty.call(servers, serverName)) {
+          // #4282 gpt-5.5 C5 fold-in: the bridge looks for
+          // `data.errorKind: 'mcp_server_not_found'` to map this back
+          // to a typed `McpServerNotFoundError` and a stable HTTP 404
+          // — without the structured payload the bridge can't
+          // distinguish this from a generic JSON-RPC error and the
+          // route falls through to 500.
+          throw new RequestError(
+            -32004,
+            `MCP server not configured: ${JSON.stringify(serverName)}`,
+            { errorKind: 'mcp_server_not_found', serverName },
+          );
+        }
+        if (this.config.isMcpServerDisabled(serverName)) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'disabled' as const,
+          };
+        }
+        const manager = this.config.getToolRegistry()?.getMcpClientManager();
+        if (!manager) {
+          throw RequestError.internalError(
+            undefined,
+            'McpClientManager unavailable on this Config',
+          );
+        }
+        if (manager.isServerDiscovering(serverName)) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'in_flight' as const,
+          };
+        }
+        const accounting = manager.getMcpClientAccounting();
+        const budget = manager.getMcpClientBudget();
+        const mode = manager.getMcpBudgetMode();
+        // #4282 gpt-5.5 C3 fold-in: enforce-mode capacity is reserved
+        // by `tryReserveSlot` via `reservedSlots` (which counts
+        // configured + in-flight + disconnected slot holders), not by
+        // `total` (which only counts CONNECTED clients). Comparing
+        // `total` to budget under-counted reservations and let a
+        // restart proceed past capacity; the manager would then
+        // refuse internally and return void, while this handler
+        // reported `restarted: true`. Mirror the manager's policy
+        // by checking `reservedSlots.length` for servers that don't
+        // already hold a reservation.
+        if (
+          mode === 'enforce' &&
+          budget !== undefined &&
+          !accounting.reservedSlots.includes(serverName) &&
+          accounting.reservedSlots.length >= budget
+        ) {
+          return {
+            serverName,
+            restarted: false,
+            skipped: true,
+            reason: 'budget_would_exceed' as const,
+          };
+        }
+        const start = Date.now();
+        await manager.discoverMcpToolsForServer(serverName, this.config);
+        // #4282 gpt-5.5 C4 fold-in: `discoverMcpToolsForServer`
+        // catches reconnect/discovery errors internally (logs and
+        // resolves void) so a broken MCP server would otherwise
+        // surface as `restarted: true`. Verify the live status from
+        // the per-server status map; anything other than CONNECTED
+        // means the restart didn't take effect.
+        const postStatus = getMCPServerStatus(serverName);
+        if (postStatus !== MCPServerStatus.CONNECTED) {
+          throw new RequestError(
+            -32099,
+            `MCP server ${JSON.stringify(serverName)} did not reach a ` +
+              `connected state after restart (status: ${postStatus}).`,
+            {
+              errorKind: 'mcp_restart_failed',
+              serverName,
+              mcpStatus: postStatus,
+            },
+          );
+        }
+        return {
+          serverName,
+          restarted: true,
+          durationMs: Date.now() - start,
+        };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
+        // #4175 Wave 4 PR 17: remote callers change a live session's
+        // approval mode via this ACP extMethod. `Config.setApprovalMode`
+        // throws `TrustGateError` for privileged modes in an untrusted
+        // folder; we let it propagate — the bridge's mapping helper
+        // converts the name to `errorKind: 'auth_env_error'` on the
+        // wire so the SDK consumer gets a structured failure.
+        const sessionId = params['sessionId'];
+        const mode = params['mode'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof mode !== 'string' ||
+          !APPROVAL_MODES.includes(mode as ApprovalMode)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid approval mode; allowed: ${APPROVAL_MODES.join(', ')}`,
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const previous = config.getApprovalMode();
+        try {
+          config.setApprovalMode(mode as ApprovalMode);
+        } catch (err) {
+          // `TrustGateError` is the core's structured rejection for
+          // untrusted-folder + privileged-mode. We re-raise it as a
+          // JSON-RPC error whose `data.errorKind` is the literal the
+          // bridge looks for to reconstruct a typed `TrustGateError` on
+          // the daemon side (JSON-RPC strips the class name across the
+          // wire). Other errors propagate unchanged.
+          if (err instanceof Error && err.name === 'TrustGateError') {
+            throw new RequestError(-32003, err.message, {
+              errorKind: 'trust_gate',
+            });
+          }
+          throw err;
+        }
+        const current = config.getApprovalMode();
+        return { previous, current };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
