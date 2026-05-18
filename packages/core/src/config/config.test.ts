@@ -91,6 +91,34 @@ vi.mock('../tools/tool-registry', () => {
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
   ToolRegistryMock.prototype.getTool = vi.fn();
   ToolRegistryMock.prototype.getFunctionDeclarations = vi.fn(() => []);
+  // PR 14b fix (codex round 4): per-instance manager stub so the
+  // `setMcpBudgetEventCallback → createToolRegistry → manager.setOnBudgetEvent`
+  // integration test can observe each instance's callback wiring.
+  // The mock constructor stamps a fresh `__mcpManagerMock` onto each
+  // ToolRegistry instance so tests can inspect it via
+  // `(registry as unknown as { __mcpManagerMock }).__mcpManagerMock`
+  // (escape hatch — production code reads it via `getMcpClientManager`).
+  ToolRegistryMock.mockImplementation(function (this: {
+    __mcpManagerMock: {
+      setOnBudgetEvent: Mock;
+      discoverAllMcpToolsIncremental: Mock;
+    };
+  }) {
+    this.__mcpManagerMock = {
+      setOnBudgetEvent: vi.fn(),
+      // Stubbed so `Config.startMcpDiscoveryInBackground` (kicked off
+      // at the tail of `initialize`) doesn't crash on missing method.
+      // Test cares only about the `setOnBudgetEvent` wiring; discovery
+      // itself is a no-op here.
+      discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
+    };
+    return this;
+  });
+  ToolRegistryMock.prototype.getMcpClientManager = function (this: {
+    __mcpManagerMock: { setOnBudgetEvent: Mock };
+  }) {
+    return this.__mcpManagerMock;
+  };
   return { ToolRegistry: ToolRegistryMock };
 });
 
@@ -2077,6 +2105,74 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(
         Number.POSITIVE_INFINITY,
       );
+    });
+  });
+
+  // PR 14b fix (codex round 4 — wenshao gpt-5.5 review): the
+  // `Config.setMcpBudgetEventCallback → pendingMcpBudgetCallback →
+  // createToolRegistry → registry.getMcpClientManager().setOnBudgetEvent`
+  // boundary previously had NO test. The acpAgent test stubs the
+  // setter (proves QwenAgent calls it pre-`initialize`); the manager
+  // tests bypass Config by passing `onBudgetEvent` directly to
+  // `McpClientManager`. Neither covers the actual stash + apply path
+  // inside Config — and that path is the safety net that prevents
+  // startup-window MCP guardrail events from being dropped under
+  // legacy blocking discovery + closes the progressive-mode race
+  // window. These two tests exercise both call orderings (pre-init
+  // and late-call).
+  describe('setMcpBudgetEventCallback handoff to McpClientManager', () => {
+    it('applies pending callback when registry is created during initialize()', async () => {
+      const config = new Config(baseParams);
+      const cb = vi.fn();
+      // Setter called BEFORE initialize — value stashed on
+      // `pendingMcpBudgetCallback` and applied inside
+      // `createToolRegistry` after the manager is constructed but
+      // BEFORE `discoverAllTools` / background discovery fires.
+      config.setMcpBudgetEventCallback(cb);
+      await config.initialize();
+
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+      // Exactly once — the apply path fires only once per
+      // `createToolRegistry` invocation.
+      expect(
+        registry.__mcpManagerMock.setOnBudgetEvent.mock.calls,
+      ).toHaveLength(1);
+    });
+
+    it('applies callback directly to existing manager when called after initialize()', async () => {
+      const config = new Config(baseParams);
+      // Initialize WITHOUT a pending callback first — the
+      // createToolRegistry apply branch is a no-op.
+      await config.initialize();
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      // Sanity: no apply happened during init since callback was
+      // never registered.
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).not.toHaveBeenCalled();
+
+      // Late-call path: setter dispatches DIRECTLY to the existing
+      // manager via the `if (this.toolRegistry)` branch in
+      // `setMcpBudgetEventCallback`. This is the path tests/adapters
+      // use when they discover the manager only after Config is up.
+      const cb = vi.fn();
+      config.setMcpBudgetEventCallback(cb);
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+
+      // Calling with `undefined` clears the registration on the
+      // manager (parity with the constructor-time `off`-mode strip
+      // in McpClientManager).
+      config.setMcpBudgetEventCallback(undefined);
+      expect(
+        registry.__mcpManagerMock.setOnBudgetEvent,
+      ).toHaveBeenLastCalledWith(undefined);
     });
   });
 });
