@@ -27,6 +27,17 @@ import {
 } from './subscriptionPlanDefinitions.js';
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * Object keys that would let a caller climb into the prototype chain when
+ * walking a dotted key path. Any attempt to write into one of these is
+ * rejected so install-plan inputs cannot pollute Object.prototype.
+ */
+const UNSAFE_KEY_PARTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -303,10 +314,23 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
 
     setValue(key: string, value: unknown): void {
       const parts = key.split('.');
+      // Refuse to walk through prototype-pollution keys. ProviderInstallPlan
+      // contents come from in-process callers, but install plans accept
+      // arbitrary string keys (env vars, providerState namespaces) so the
+      // input is untrusted enough to warrant the guard.
+      if (parts.some((p) => UNSAFE_KEY_PARTS.has(p))) {
+        throw new Error(
+          `Refusing to write settings key with reserved segment: ${key}`,
+        );
+      }
       let current = data;
       for (let i = 0; i < parts.length - 1; i++) {
         const part = parts[i]!;
-        if (!current[part] || typeof current[part] !== 'object') {
+        if (
+          !Object.prototype.hasOwnProperty.call(current, part) ||
+          !current[part] ||
+          typeof current[part] !== 'object'
+        ) {
           current[part] = {};
         }
         current = current[part] as Record<string, unknown>;
