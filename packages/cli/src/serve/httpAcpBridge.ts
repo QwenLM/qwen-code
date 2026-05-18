@@ -2131,8 +2131,10 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     const sessions = Array.from(byId.values());
     let successCount = 0;
     let failureCount = 0;
+    let skippedCount = 0;
     for (const entry of sessions) {
       if (skipSessionId !== undefined && entry.sessionId === skipSessionId) {
+        skippedCount += 1;
         continue;
       }
       try {
@@ -2163,7 +2165,18 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     // dropped the event. Single-session workspaces with the requester
     // skipped naturally produce zero recipients — that's not an
     // "all dropped" condition, just nobody to deliver to.
-    const eligible = sessions.length - (skipSessionId !== undefined ? 1 : 0);
+    //
+    // #4297 fold-in 6 (deepseek S1, addresses #3261079572): count the
+    // sessions we actually skipped instead of unconditionally
+    // subtracting 1 when `skipSessionId` is set. The previous shape
+    // suppressed the all-dropped alarm when a non-matching
+    // `skipSessionId` was passed (caller mistake, stale id, or the
+    // matching session was just torn down) — eligible would land at
+    // `sessions.length - 1` even though every session was published
+    // to and every publish failed. Counting actual skips makes the
+    // alarm condition self-consistent regardless of how the caller
+    // mis-uses the param.
+    const eligible = sessions.length - skippedCount;
     if (eligible > 0 && successCount === 0 && !shuttingDown) {
       writeStderrLine(
         `qwen serve: broadcastWorkspaceEvent type=${envelope.type} dropped on ALL ${failureCount} session bus(es); SSE subscribers will miss this event (GET fallback still authoritative)`,
