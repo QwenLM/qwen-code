@@ -260,13 +260,19 @@
           "order": 5,
           "type": "string",
           "default": "",
-          "description": "Experimental qwen serve URL used by the Daemon Smoke Test command."
+          "description": "Experimental qwen serve URL used by daemon-backed IDE drafts and the Daemon Smoke Test command."
         },
         "qwen-code.daemonToken": {
           "order": 6,
           "type": "string",
           "default": "",
-          "description": "Optional bearer token used by the Daemon Smoke Test command."
+          "description": "Optional bearer token used by daemon-backed IDE drafts and the Daemon Smoke Test command."
+        },
+        "qwen-code.experimentalDaemonIde": {
+          "order": 7,
+          "type": "boolean",
+          "default": false,
+          "description": "Experimental: route the IDE webview through a running qwen serve daemon instead of spawning a local ACP child process."
         }
       }
     },

@@ -7,6 +7,7 @@
 import * as vscode from 'vscode';
 import { execFile } from 'child_process';
 import { QwenAgentManager } from '../../services/qwenAgentManager.js';
+import { DaemonAcpConnection } from '../../services/daemonAcpConnection.js';
 import { ConversationStore } from '../../services/conversationStore.js';
 import type {
   RequestPermissionRequest,
@@ -34,6 +35,25 @@ import {
   clearPersistedAuth,
 } from '../../services/settingsWriter.js';
 import { parseInsightMessage } from '@qwen-code/qwen-code-core';
+
+function createAgentManagerFromConfiguration(): QwenAgentManager {
+  const config = vscode.workspace.getConfiguration('qwen-code');
+  const useDaemon = config.get<boolean>('experimentalDaemonIde') === true;
+  if (!useDaemon) {
+    return new QwenAgentManager();
+  }
+
+  return new QwenAgentManager({
+    connection: new DaemonAcpConnection(() => {
+      const latestConfig = vscode.workspace.getConfiguration('qwen-code');
+      return {
+        baseUrl:
+          latestConfig.get<string>('daemonUrl') || 'http://127.0.0.1:4170',
+        token: latestConfig.get<string>('daemonToken') || undefined,
+      };
+    }),
+  });
+}
 
 /** Threshold (ms) before a completed task triggers a notification. */
 const LONG_TASK_THRESHOLD_MS = 20_000;
@@ -124,7 +144,7 @@ export class WebViewProvider {
     private context: vscode.ExtensionContext,
     private extensionUri: vscode.Uri,
   ) {
-    this.agentManager = new QwenAgentManager();
+    this.agentManager = createAgentManagerFromConfiguration();
     this.conversationStore = new ConversationStore(context);
     this.panelManager = new PanelManager(extensionUri, () => {
       // Panel dispose callback — unblock any pending ACP Promises

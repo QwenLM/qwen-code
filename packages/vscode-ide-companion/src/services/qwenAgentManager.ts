@@ -86,6 +86,10 @@ interface AgentSessionOptions {
   forceNew?: boolean;
 }
 
+interface QwenAgentManagerOptions {
+  connection?: AcpConnection;
+}
+
 export class QwenAgentManager {
   private connection: AcpConnection;
   private sessionReader: QwenSessionReader;
@@ -116,8 +120,8 @@ export class QwenAgentManager {
   private baselineModelInfo: ModelInfo | null = null;
   private baselineAvailableModels: ModelInfo[] = [];
 
-  constructor() {
-    this.connection = new AcpConnection();
+  constructor(options: QwenAgentManagerOptions = {}) {
+    this.connection = options.connection ?? new AcpConnection();
     this.sessionReader = new QwenSessionReader();
     this.sessionManager = new QwenSessionManager();
     this.connectionHandler = new QwenConnectionHandler();
