@@ -406,4 +406,29 @@ describe('resumeHistoryUtils', () => {
     expect(items).toEqual([{ id: 41, type: 'user', text: '/legacy' }]);
     expect(items[0]).not.toHaveProperty('sentToModel');
   });
+
+  it('omits corrupted non-boolean sentToModel metadata on resume', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/filecmd',
+            sentToModel: 'true',
+          },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    const session: ResumedSessionData = {
+      conversation,
+    } as ResumedSessionData;
+
+    const items = buildResumedHistoryItems(session, makeConfig({}), 50);
+
+    expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
+    expect(items[0]).not.toHaveProperty('sentToModel');
+  });
 });

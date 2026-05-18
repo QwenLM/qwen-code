@@ -772,6 +772,11 @@ export const useSlashCommandProcessor = (
                 case 'submit_prompt':
                   if (invocationItemId !== undefined) {
                     invocationSentToModel = true;
+                    debugLogger.debug(
+                      `Marked slash command invocation as model-sent: /${resolvedCommandPath.join(
+                        ' ',
+                      )}`,
+                    );
                     // React applies this update asynchronously. No same-turn
                     // logic reads the UI history classification; rewind/resume
                     // consumers observe it after state has rendered.

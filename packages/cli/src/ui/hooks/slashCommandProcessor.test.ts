@@ -30,8 +30,14 @@ import {
   makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 
-const { logSlashCommand } = vi.hoisted(() => ({
+const { logSlashCommand, debugLoggerMock } = vi.hoisted(() => ({
   logSlashCommand: vi.fn(),
+  debugLoggerMock: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -40,6 +46,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...original,
     logSlashCommand,
+    createDebugLogger: () => debugLoggerMock,
     getIdeInstaller: vi.fn().mockReturnValue(null),
   };
 });
@@ -649,6 +656,9 @@ describe('useSlashCommandProcessor', () => {
         expect.any(Number),
       );
       expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+        'Marked slash command invocation as model-sent: /filecmd',
+      );
       const recorder = mockConfig.getChatRecordingService() as unknown as {
         recordSlashCommand: ReturnType<typeof vi.fn>;
       };

@@ -289,6 +289,17 @@ describe('isRealUserTurn', () => {
     expect(isRealUserTurn(userItem(1, '/help', false))).toBe(false);
   });
 
+  it('ignores corrupted non-boolean sentToModel metadata', () => {
+    const item = {
+      type: 'user',
+      id: 1,
+      text: '/filecmd',
+      sentToModel: 'true',
+    } as unknown as HistoryItem;
+
+    expect(isRealUserTurn(item)).toBe(false);
+  });
+
   it('returns true for path-like slash prompts', () => {
     expect(isRealUserTurn(userItem(1, '/api/apiFunction/接口的实现'))).toBe(
       true,

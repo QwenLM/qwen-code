@@ -237,12 +237,14 @@ function convertToHistoryItems(
           | undefined;
         if (!payload) continue;
         if (payload.phase === 'invocation' && payload.rawCommand) {
+          const sentToModel =
+            typeof payload.sentToModel === 'boolean'
+              ? payload.sentToModel
+              : undefined;
           items.push({
             type: 'user',
             text: payload.rawCommand,
-            ...(payload.sentToModel === undefined
-              ? {}
-              : { sentToModel: payload.sentToModel }),
+            ...(sentToModel === undefined ? {} : { sentToModel }),
           });
         }
         if (payload.phase === 'result') {

@@ -5,12 +5,15 @@
  */
 
 import { useState, useRef, useCallback, useMemo } from 'react';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
 
 // Type for the updater function passed to updateHistoryItem
 type HistoryItemUpdater = (
   prevItem: HistoryItem,
 ) => Partial<HistoryItemWithoutId>;
+
+const debugLogger = createDebugLogger('HISTORY_MANAGER');
 
 export interface UseHistoryManagerReturn {
   history: HistoryItem[];
@@ -81,17 +84,26 @@ export function useHistory(): UseHistoryManagerReturn {
       id: number,
       updates: Partial<HistoryItemWithoutId> | HistoryItemUpdater,
     ) => {
-      setHistory((prevHistory) =>
-        prevHistory.map((item) => {
+      setHistory((prevHistory) => {
+        let updated = false;
+        const nextHistory = prevHistory.map((item) => {
           if (item.id === id) {
+            updated = true;
             // Apply updates based on whether it's an object or a function
             const newUpdates =
               typeof updates === 'function' ? updates(item) : updates;
             return { ...item, ...newUpdates } as HistoryItem;
           }
           return item;
-        }),
-      );
+        });
+        if (!updated) {
+          debugLogger.debug(
+            `Skipped history update; item ${id} was not found.`,
+          );
+          return prevHistory;
+        }
+        return nextHistory;
+      });
     },
     [],
   );

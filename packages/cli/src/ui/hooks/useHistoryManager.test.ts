@@ -4,12 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useHistory } from './useHistoryManager.js';
 import type { HistoryItemWithoutId } from '../types.js';
 
+const { debugLoggerMock } = vi.hoisted(() => ({
+  debugLoggerMock: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  createDebugLogger: () => debugLoggerMock,
+}));
+
 describe('useHistoryManager', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it('should initialize with an empty history', () => {
     const { result } = renderHook(() => useHistory());
     expect(result.current.history).toEqual([]);
@@ -105,12 +122,17 @@ describe('useHistoryManager', () => {
     });
 
     const originalHistory = [...result.current.history]; // Clone before update attempt
+    const originalHistoryRef = result.current.history;
 
     act(() => {
       result.current.updateItem(99999, { text: 'Should not apply' }); // Nonexistent ID
     });
 
     expect(result.current.history).toEqual(originalHistory);
+    expect(result.current.history).toBe(originalHistoryRef);
+    expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+      'Skipped history update; item 99999 was not found.',
+    );
   });
 
   it('should clear the history', () => {
