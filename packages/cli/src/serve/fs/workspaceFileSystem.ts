@@ -404,8 +404,23 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     try {
       assertTrustedForIntent(this.deps.trusted, 'read');
       const st = await fsp.stat(p as string);
-      enforceReadBytesSize(st.size, opts.maxBytes);
-      const buf = await fsp.readFile(p as string);
+      // Hard cap (file size > MAX_READ_BYTES) always throws; this
+      // is the OOM defense that's independent of caller-supplied
+      // `maxBytes`.
+      enforceReadBytesSize(st.size);
+      let buf = await fsp.readFile(p as string);
+      // Soft cap: caller's `opts.maxBytes` is a window cap matching
+      // the parameter name's promise. Earlier semantics treated
+      // it as a "reject if file > maxBytes" gate, which violated
+      // the API contract — a caller asking for `maxBytes: 1024`
+      // on a 200 KB file expected to receive 1 KB, not an
+      // exception. We now truncate post-read so the returned
+      // buffer never exceeds `opts.maxBytes`. The hard
+      // `MAX_READ_BYTES` cap above ensures the underlying
+      // `fsp.readFile` allocation is bounded regardless.
+      if (opts.maxBytes !== undefined && opts.maxBytes < buf.length) {
+        buf = buf.subarray(0, opts.maxBytes);
+      }
       // Post-read TOCTOU guard — same shape as `readText`.
       await assertInodeStableAfterRead(p as string, st.ino);
       this.deps.audit.recordAccess(this.deps.ctx, {
@@ -527,11 +542,22 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           { hint: 'opts.cwd must be a path obtained from fs.resolve()' },
         );
       }
+      // Pass an `ignore` option so the glob library prunes
+      // common-and-huge directories at traversal time. Without
+      // this, `glob('**/*')` in a typical workspace walks every
+      // file under `node_modules/` and `.git/` (often hundreds
+      // of thousands of paths) before our per-hit `realpath` +
+      // `lstat` filter drops them. The post-filter via
+      // `shouldIgnore` is still authoritative — this is purely a
+      // walk-time optimization that aligns with the
+      // `loadIgnoreRules` defaults (which already include `.git`
+      // as a default ignore dir).
       const matches = await globAsync(pattern, {
         cwd: cwdReal,
         nodir: false,
         absolute: true,
         dot: true,
+        ignore: ['**/node_modules/**', '**/.git/**'],
       });
       const out: ResolvedPath[] = [];
       const max = opts.maxResults ?? Number.POSITIVE_INFINITY;
@@ -741,10 +767,24 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           },
         );
       }
-      const current = await fsp.readFile(p as string, 'utf-8');
+      // Use `lowFs.readTextFile` (not raw `fsp.readFile(p,
+      // 'utf-8')`) so BOM / encoding / CRLF handling matches what
+      // `readText` does and what `writeTextFile` will preserve on
+      // write-back. A direct utf-8 read on a UTF-8-BOM file would
+      // include the U+FEFF BOM codepoint in `current`,
+      // breaking `oldText` matching even when the user passed
+      // the exact string from a previous read; on iconv-supported
+      // codepages (GBK, Big5, Shift_JIS) it would mojibake the
+      // content and round-trip-corrupt the file on write-back.
+      const readResult = await this.deps.lowFs.readTextFile({
+        path: p as string,
+        limit: Number.POSITIVE_INFINITY,
+        line: 0,
+      });
+      const current = readResult.content;
       // Post-read TOCTOU guard — catches the swap-during-read
       // attack where `p` is replaced with a symlink between
-      // `fsp.stat` above and `fsp.readFile` here. The full
+      // `fsp.stat` above and the read here. The full
       // read-modify-write race window (between this check and
       // `lowFs.writeTextFile` below) is the deferred PR 20
       // follow-up that adds atomic-via-temp + `expectedHash`.
@@ -777,9 +817,16 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // atomic-via-temp follow-up; this guard is the
       // defense-in-depth layer.
       await assertNotSymlinkBeforeWrite(p as string);
+      // Forward the encoding/BOM/lineEnding metadata captured
+      // during the read so the write-back preserves the file's
+      // original encoding profile. Without this, a UTF-8-BOM
+      // file would be written without BOM, and a non-UTF-8 file
+      // (GBK/Shift_JIS) would be written as UTF-8 — silent
+      // round-trip corruption of any file the daemon edits.
       await this.deps.lowFs.writeTextFile({
         path: p as string,
         content: next,
+        _meta: readResult._meta,
       });
       // Symmetric with `readText` / `writeText` — operators
       // monitoring `fs.access` need to see when an edit landed on

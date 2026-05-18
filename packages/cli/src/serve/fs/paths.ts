@@ -170,7 +170,24 @@ export function hasSuspiciousPathPattern(p: string): boolean {
     const colonIndex = p.indexOf(':', 2);
     if (colonIndex !== -1) return true;
   }
-  if (/~\d/.test(p)) return true;
+  // NTFS 8.3 short-name suffix: `LONGFILENAME~1.TXT`. Two fixes
+  // over the original `/~\d/`:
+  //
+  // 1. Multi-digit (`~10`, `~99`) — NTFS allocates `~1`..`~4` for
+  //    the first 4 collisions, then switches to a hashed scheme
+  //    where `~10` and above are real, common short names. The
+  //    original regex missed those entirely.
+  // 2. Gate on Windows — on POSIX, `~\d` is a legitimate filename
+  //    character used by editor swap files (`file~1.swp`),
+  //    backup tools (`notes~2.md`, `backup~1.txt`), and version
+  //    schemes. The daemon's actual filesystem on Linux/macOS
+  //    isn't NTFS, so 8.3 interpretation doesn't apply and
+  //    rejecting these is a false positive that breaks
+  //    legitimate workflows. NTFS-on-Linux mounts (`ntfs-3g`) are
+  //    rare enough that we accept the residual gap; operators
+  //    mounting NTFS into a daemon workspace can disable
+  //    suspicious-pattern rejection at the route layer.
+  if (process.platform === 'win32' && /~\d+/.test(p)) return true;
   if (
     p.startsWith('\\\\?\\') ||
     p.startsWith('\\\\.\\') ||
@@ -218,6 +235,33 @@ export function hasSuspiciousPathPattern(p: string): boolean {
 
 /** Default ancestor-walk depth limit for ENOENT fallback. */
 const MAX_ANCESTOR_HOPS = 40;
+
+/**
+ * Module-level memo cache for `boundWorkspace → canonical`
+ * mapping. The factory already canonicalizes once at build time,
+ * so the inner call inside `resolveWithinWorkspace` is paying for
+ * a redundant `realpathSync.native` per request. The cache turns
+ * subsequent calls with the same `boundWorkspace` into an O(1)
+ * Map lookup; first call still pays the syscall (idempotent on
+ * already-canonical input).
+ *
+ * Cache size is bounded only by the number of *distinct*
+ * `boundWorkspace` values a daemon ever sees — `1 daemon = 1
+ * workspace` per #4175, so the steady-state size is exactly 1.
+ * Tests that exercise multiple workspaces add an entry per
+ * scratch dir; entries never have to be evicted because realpath
+ * is functional (a path's canonical form doesn't change unless
+ * the path is moved on disk, in which case the bound workspace
+ * is wrong elsewhere too).
+ */
+const CANONICAL_BOUND_CACHE = new Map<string, string>();
+function canonicalizeBoundWorkspaceCached(boundWorkspace: string): string {
+  const cached = CANONICAL_BOUND_CACHE.get(boundWorkspace);
+  if (cached !== undefined) return cached;
+  const canonical = canonicalizeWorkspace(boundWorkspace);
+  CANONICAL_BOUND_CACHE.set(boundWorkspace, canonical);
+  return canonical;
+}
 
 /**
  * Walk up `absolute` until a component exists on disk. Returns the
@@ -337,7 +381,7 @@ export async function resolveWithinWorkspace(
     );
   }
 
-  const boundCanonical = canonicalizeWorkspace(boundWorkspace);
+  const boundCanonical = canonicalizeBoundWorkspaceCached(boundWorkspace);
   const absolute = path.resolve(boundCanonical, input);
 
   // Cheap pre-filter on the resolved-but-not-realpathed form. Catches

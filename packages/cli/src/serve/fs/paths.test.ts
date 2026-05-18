@@ -98,10 +98,24 @@ describe('canonicalizeWorkspace', () => {
 });
 
 describe('hasSuspiciousPathPattern', () => {
-  it('rejects 8.3 short names regardless of platform', () => {
-    expect(hasSuspiciousPathPattern('GIT~1')).toBe(true);
-    expect(hasSuspiciousPathPattern('CLAUDE~2')).toBe(true);
-    expect(hasSuspiciousPathPattern('SETTIN~1.JSON')).toBe(true);
+  it('rejects 8.3 short names on Windows including multi-digit suffixes; admits POSIX legit ~N filenames', () => {
+    if (process.platform === 'win32') {
+      // Windows: original short names + multi-digit (NTFS allocates
+      // ~1..~4 then hashes; ~10+ are real)
+      expect(hasSuspiciousPathPattern('GIT~1')).toBe(true);
+      expect(hasSuspiciousPathPattern('CLAUDE~2')).toBe(true);
+      expect(hasSuspiciousPathPattern('SETTIN~1.JSON')).toBe(true);
+      expect(hasSuspiciousPathPattern('LONGFI~10.TXT')).toBe(true);
+      expect(hasSuspiciousPathPattern('OTHER~99.dat')).toBe(true);
+    } else {
+      // POSIX: ~N is a legitimate filename char (editor swaps,
+      // backup files, version schemes). Daemon's FS isn't NTFS,
+      // so 8.3 interpretation doesn't apply.
+      expect(hasSuspiciousPathPattern('backup~1.txt')).toBe(false);
+      expect(hasSuspiciousPathPattern('notes~2.md')).toBe(false);
+      expect(hasSuspiciousPathPattern('file~3.swp')).toBe(false);
+      expect(hasSuspiciousPathPattern('LONGFI~10.TXT')).toBe(false);
+    }
   });
 
   it('rejects long-path / device prefixes regardless of platform', () => {
@@ -253,12 +267,19 @@ describe('resolveWithinWorkspace', () => {
   });
 
   it('rejects suspicious patterns before any I/O', async () => {
-    await expect(
-      resolveWithinWorkspace('GIT~1', workspace, 'read'),
-    ).rejects.toMatchObject({ kind: 'path_outside_workspace' });
+    // UNC prefixes are platform-agnostic: a daemon should never
+    // accept `//server/share` regardless of OS. The 8.3
+    // short-name `~\d` check is gated on win32 (legitimate POSIX
+    // filenames can have `~N` in them); we exercise the win32
+    // branch only when the runner is Windows.
     await expect(
       resolveWithinWorkspace('//server/share', workspace, 'read'),
     ).rejects.toMatchObject({ kind: 'path_outside_workspace' });
+    if (process.platform === 'win32') {
+      await expect(
+        resolveWithinWorkspace('GIT~1', workspace, 'read'),
+      ).rejects.toMatchObject({ kind: 'path_outside_workspace' });
+    }
   });
 
   it('rejects empty/non-string input with parse_error', async () => {

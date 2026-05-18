@@ -183,11 +183,26 @@ describe('WorkspaceFileSystem - readBytes', () => {
     expect(Array.from(buf)).toEqual([1, 2, 3, 0, 4, 5]);
   });
 
-  it('throws file_too_large above the cap', async () => {
+  it('truncates returned buffer to opts.maxBytes (window read, matches API name)', async () => {
+    // Earlier semantics threw `file_too_large` here, but `maxBytes`
+    // in the parameter name promises window-read behavior. Files
+    // above the HARD `MAX_READ_BYTES` cap still throw — see
+    // separate test below — but a caller-supplied tighter cap
+    // truncates rather than rejects.
+    const target = path.join(h.workspace, 'small.bin');
+    await fsp.writeFile(target, Buffer.alloc(2048, 0xab));
+    const r = await h.fs.resolve('small.bin', 'read');
+    const buf = await h.fs.readBytes(r, { maxBytes: 1024 });
+    expect(buf.length).toBe(1024);
+    expect(buf[0]).toBe(0xab);
+  });
+
+  it('throws file_too_large when file size exceeds the hard MAX_READ_BYTES cap regardless of maxBytes', async () => {
+    const policy = await import('./policy.js');
     const target = path.join(h.workspace, 'huge.bin');
-    await fsp.writeFile(target, Buffer.alloc(2048));
+    await fsp.writeFile(target, Buffer.alloc(policy.MAX_READ_BYTES + 1));
     const r = await h.fs.resolve('huge.bin', 'read');
-    const err = await h.fs.readBytes(r, { maxBytes: 1024 }).catch((e) => e);
+    const err = await h.fs.readBytes(r).catch((e) => e);
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('file_too_large');
   });
@@ -271,6 +286,38 @@ describe('WorkspaceFileSystem - glob', () => {
     // `dist` directory is filtered because the trailing-slash dir
     // pattern now probes `<rel>/` against the directory ignorer.
     expect(names).not.toContain('dist');
+    expect(names).toContain('src.ts');
+  });
+
+  it('prunes node_modules and .git at glob walk time (no traversal cost)', async () => {
+    // The `ignore` option passed to `globAsync` short-circuits
+    // traversal at the directory level — files under
+    // node_modules/.git never reach our per-hit realpath +
+    // shouldIgnore filter. Simulate a workspace with deps and
+    // assert the deeply-nested `node_modules` file is absent
+    // even from a `**/*` glob.
+    await fsp.mkdir(
+      path.join(h.workspace, 'node_modules', 'left-pad', 'dist'),
+      {
+        recursive: true,
+      },
+    );
+    await fsp.writeFile(
+      path.join(h.workspace, 'node_modules', 'left-pad', 'dist', 'index.js'),
+      'module.exports = function leftPad() {};\n',
+    );
+    await fsp.mkdir(path.join(h.workspace, '.git', 'objects'), {
+      recursive: true,
+    });
+    await fsp.writeFile(
+      path.join(h.workspace, '.git', 'objects', 'pack.bin'),
+      '',
+    );
+    await fsp.writeFile(path.join(h.workspace, 'src.ts'), '');
+    const hits = await h.fs.glob('**/*');
+    const names = hits.map((p) => path.relative(h.workspace, p));
+    expect(names.some((n) => n.includes('node_modules'))).toBe(false);
+    expect(names.some((n) => n.includes('.git'))).toBe(false);
     expect(names).toContain('src.ts');
   });
 
@@ -372,6 +419,33 @@ describe('WorkspaceFileSystem - write/edit', () => {
       .edit(r, 'this string is not present', 'X')
       .catch((e: unknown) => e)) as { hint?: string };
     expect(err.hint).toMatch(/this string is not present/);
+  });
+
+  it('edit() preserves UTF-8 BOM round-trip via lowFs (no \\uFEFF leak into oldText match)', async () => {
+    // The earlier `fsp.readFile(p, 'utf-8')` would include the
+    // BOM (\\uFEFF codepoint) in the returned string, breaking
+    // `oldText` matching even when the user passed the exact
+    // source text; and the write-back without `_meta` would
+    // strip the BOM, silently changing the file's encoding
+    // profile. Using `lowFs.readTextFile` strips the BOM for
+    // matching and `_meta.bom: true` preserves it on write-back.
+    const target = path.join(h.workspace, 'bom.txt');
+    const bom = Buffer.from([0xef, 0xbb, 0xbf]);
+    await fsp.writeFile(
+      target,
+      Buffer.concat([bom, Buffer.from('foo=1\nbar=2\n', 'utf-8')]),
+    );
+    const r = await h.fs.resolve('bom.txt', 'edit');
+    // oldText is `'foo=1'` WITHOUT BOM — must still match.
+    const out = await h.fs.edit(r, 'foo=1', 'foo=42');
+    expect(out.writtenBytes).toBeGreaterThan(0);
+    const after = await fsp.readFile(target);
+    // BOM preserved at start
+    expect(after[0]).toBe(0xef);
+    expect(after[1]).toBe(0xbb);
+    expect(after[2]).toBe(0xbf);
+    // Edit applied
+    expect(after.subarray(3).toString('utf-8')).toBe('foo=42\nbar=2\n');
   });
 
   it('rejects edit on binary file', async () => {
