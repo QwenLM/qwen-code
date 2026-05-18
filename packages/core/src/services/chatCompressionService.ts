@@ -541,12 +541,17 @@ export class ChatCompressionService {
 
     // Defensive guard: if the side-query hit COMPACT_MAX_OUTPUT_TOKENS, the
     // summary is likely truncated mid-content and unsafe to persist. Drop it
-    // and surface it as a failure so the consecutive-failure breaker counts
-    // it — if the model consistently produces max-length summaries we want
-    // to stop trying after MAX_CONSECUTIVE_FAILURES strikes rather than burn
-    // an API call on every send. Reactive overflow still catches the
-    // catastrophic case. See docs/design/auto-compaction-threshold-redesign.md
-    // risk #2.
+    // and surface as a failure so the consecutive-failure breaker counts it —
+    // if the model consistently produces max-length summaries we want to stop
+    // trying after MAX_CONSECUTIVE_FAILURES strikes rather than burn an API
+    // call on every send. Reactive overflow still catches the catastrophic
+    // case. See docs/design/auto-compaction-threshold-redesign.md risk #2.
+    //
+    // TODO(finish_reason): the current `>= cap` check is a heuristic that
+    // false-positives on legitimate summaries that happen to land exactly at
+    // the cap. The proper signal is `finish_reason === 'length'` (OpenAI) /
+    // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
+    // Plumb it through and tighten this guard when that's available.
     if (
       !isSummaryEmpty &&
       typeof compressionOutputTokenCount === 'number' &&
@@ -565,11 +570,13 @@ export class ChatCompressionService {
         info: {
           originalTokenCount,
           newTokenCount: originalTokenCount,
-          // Reuse the empty-summary status: from the persistence layer's
-          // perspective a truncated summary is unusable just like an empty
-          // one. `isCompressionFailureStatus()` returns true for this enum,
-          // so non-force callers will tick the consecutive-failure counter.
-          compressionStatus: CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          // Distinct from EMPTY_SUMMARY so telemetry / logs can tell a
+          // prompt-quality failure (empty summary → tune prompt / splitter)
+          // apart from a capacity failure (output cap hit → raise cap or
+          // shrink splitter input). isCompressionFailureStatus() treats both
+          // as failures so the persistence behaviour is unchanged. (R5.2)
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
         },
       };
     }

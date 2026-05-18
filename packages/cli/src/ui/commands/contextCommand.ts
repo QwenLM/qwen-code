@@ -305,11 +305,22 @@ export async function collectContextData(
 
   // Tier classification: prefer the API-reported total when available.
   // When no API call has happened yet (first /context, --continue resume,
-  // sub-agent inheritance), classify against the estimated overhead instead
-  // of forcing `safe` — a restored session with 800K of inherited history
-  // should not silently show "safe" just because the API hasn't been hit.
-  // The estimate is a lower bound (excludes message body until first turn)
-  // so the tier may under-classify, but never over-classifies. (R2.2)
+  // sub-agent inheritance), classify against `rawOverhead` so a session
+  // dominated by system prompt / skills / MCP tools doesn't silently show
+  // "safe". (R2.2)
+  //
+  // SCOPE GAP (R5.1): `rawOverhead` excludes `messagesTokens` — the actual
+  // chat history. A `--continue` restore with 100K of historical messages
+  // (but small overhead) will still display "safe" here, even though the
+  // cheap-gate inside chatCompressionService will trigger compression on
+  // the very next send (it uses `estimatePromptTokens(history, ...)` which
+  // walks the real history). This is a UI/runtime divergence — for a
+  // single render — that resolves the moment any send happens.
+  //
+  // TODO: plumb the chat history into collectContextData and use
+  // estimatePromptTokens(history, undefined, 0, imageTokenEstimate) here
+  // for same-source-of-truth as the cheap-gate. Defer because Config
+  // doesn't expose the active chat instance today.
   const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;
 
   const breakdown: ContextCategoryBreakdown = {
