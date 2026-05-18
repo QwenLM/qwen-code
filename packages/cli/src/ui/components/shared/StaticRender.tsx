@@ -14,9 +14,17 @@ interface StaticRenderProps {
 }
 
 /**
- * Renders children once and caches the result. Subsequent renders with the
- * same key+width return the cached render without re-walking through React.
- * Used by VirtualizedList to freeze completed conversation items.
+ * Wraps a child in a fixed-width `<Box>` so completed history items in the
+ * virtualized list have a stable layout box. The actual "freeze" of unchanged
+ * items is delivered by `memo(HistoryItemDisplay)` one level deeper (the
+ * `VirtualHistoryItem` wrapper in `MainContent`): a stable history item
+ * reference makes React reconcile that subtree to a no-op.
+ *
+ * Note: this is NOT output caching like gemini-cli's `@jrichman/ink`
+ * `StaticRender` export. The reference-equality comparator below is a
+ * cheap belt-and-braces check; the parent's `renderedItems` `useMemo`
+ * normally allocates fresh JSX on every recompute, so the comparator
+ * rarely matches for in-viewport items. The real bail-out happens deeper.
  */
 const StaticRender = memo(
   ({ children, width }: StaticRenderProps) => (

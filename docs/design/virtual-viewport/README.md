@@ -1,8 +1,9 @@
 # Virtual viewport for long conversations on ink 7
 
-Status: **implemented**, V.0+V.1+V.2 complete, pending integration tests (V.3).
+Status: **implemented**, V.0 + character-scrollbar + V.2 (setting gate) shipped in PR #4146;
+ScrollProvider / animated scrollbar / integration tests deferred to follow-up PRs (V.3+).
 Author: 秦奇
-Tracking branch: `feat/virtual-viewport-on-ink7`
+Tracking branch: `feat/virtual-viewport-on-ink7` (stacked on `chore/re-upgrade-ink-7-0-3`)
 
 ## 1. Problem
 
@@ -98,22 +99,24 @@ Rejected alternatives:
 
 ## 5. Architecture
 
-### File map after V.0 + V.1 + V.2
+### File map after PR #4146
 
 ```
 packages/cli/src/ui/
 ├── components/shared/
-│   ├── VirtualizedList.tsx          [NEW, V.0] core viewport
-│   ├── ScrollableList.tsx           [NEW, V.0] scroll wrapper + keys
-│   └── StaticRender.tsx             [NEW, V.0] custom (replaces gemini-cli's ink fork export)
-├── contexts/
-│   └── ScrollProvider.tsx           [NEW, V.1] drag / lock / focus
+│   ├── VirtualizedList.tsx          [NEW] core viewport + ASCII scrollbar
+│   ├── ScrollableList.tsx           [NEW] keyboard scroll wrapper
+│   └── StaticRender.tsx             [NEW] React.memo wrapper (replaces gemini-cli's ink fork export)
 ├── hooks/
-│   ├── useBatchedScroll.ts          [NEW, V.0] coalesce scroll updates
-│   └── useAnimatedScrollbar.ts      [NEW, V.1] scrollbar fade
-├── components/MainContent.tsx       [MOD, V.2] add virtualized branch
-└── AppContainer.tsx                 [MOD, V.2] feed scroll state into UI context
+│   └── useBatchedScroll.ts          [NEW] coalesce same-tick scroll updates
+├── components/MainContent.tsx       [MOD] add virtualized branch + stability refs
+└── AppContainer.tsx                 [MOD] feed scroll-related UI state into context + gate refreshStatic
 ```
+
+Deferred to follow-up PRs:
+
+- `contexts/ScrollProvider.tsx` — mouse drag / scroll lock / focus
+- `hooks/useAnimatedScrollbar.ts` — scrollbar fade-in/out (V.0 ships a plain ASCII bar)
 
 ### Setting (V.2)
 
@@ -301,15 +304,14 @@ Same pattern in qwen-code. Required for virtualization to actually skip re-rende
 
 ## 7. PR sequence
 
-| PR      | Title (draft)                                                               | Scope                                                                                          | Lines             | Dependencies          | Risk                                       |
-| ------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------- | --------------------- | ------------------------------------------ |
-| **V.0** | feat(cli): port virtualized list primitives from gemini-cli                 | `VirtualizedList.tsx`, `ScrollableList.tsx`, `StaticRender.tsx`, `useBatchedScroll.ts` + tests | ~850 LoC          | `chore/upgrade-ink-7` | ✅ **done** — typecheck clean, tests green |
-| **V.1** | feat(cli): character scrollbar                                              | `VirtualizedList.tsx` scrollbar column (ASCII `│`/`█`)                                         | ~40 LoC           | V.0                   | ✅ **done** — included in V.0 PR           |
-| **V.2** | feat(cli): wire virtualized history behind `ui.useTerminalBuffer` setting   | `MainContent.tsx`, `AppContainer.tsx` mods, `settingsSchema.ts`                                | ~30 LoC           | V.0 + V.1             | ✅ **done** — included in V.0 PR           |
-| **V.3** | test(integration): capture-suite regressions for streaming / resize / shell | port 3 capture scripts from PR #3663                                                           | ~2000 (test-only) | V.2                   | pending                                    |
-| **V.4** | feat(cli): alternate-buffer mode (full alt-screen takeover)                 | additional setting `ui.useAlternateBuffer`                                                     | ~500              | V.2                   | deferred — separate UX decision required   |
+| PR        | Title (draft)                                                               | Scope                                                                                                         | Lines             | Dependencies                                      | Risk                                           |
+| --------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ----------------- | ------------------------------------------------- | ---------------------------------------------- |
+| **#4146** | feat(cli): virtual viewport for long conversations on ink 7                 | core primitives + ASCII scrollbar + `ui.useTerminalBuffer` gate + `MainContent`/`AppContainer` wiring + tests | ~2150 LoC         | `chore/re-upgrade-ink-7-0-3` (→ `main` on rebase) | ✅ **shipped** — typecheck clean, vitest green |
+| **V.3**   | test(integration): capture-suite regressions for streaming / resize / shell | port 3 capture scripts from PR #3663                                                                          | ~2000 (test-only) | #4146                                             | pending                                        |
+| **V.4**   | feat(cli): ScrollProvider — mouse drag / scroll lock                        | `contexts/ScrollProvider.tsx` + `useAnimatedScrollbar.ts`                                                     | ~500              | #4146                                             | deferred                                       |
+| **V.5**   | feat(cli): alternate-buffer mode (full alt-screen takeover)                 | additional setting `ui.useAlternateBuffer`                                                                    | ~500              | #4146                                             | deferred — separate UX decision required       |
 
-V.0–V.2 shipped in one PR. V.3 (integration tests) is the remaining critical-path item. V.4 deferred.
+V.3 (integration tests) is the remaining critical-path item. V.4 (mouse / animated scrollbar) and V.5 (alt-screen) deferred.
 
 ## 8. Verification plan
 
@@ -335,8 +337,8 @@ End-to-end (after V.3):
 2. **Default value**: ship as `false` (opt-in) or stage rollout via env var first?
 3. **Static-item heuristic**: gemini-cli marks only `header` as static. Should we also mark completed Gemini messages, tool results that are no longer in `pendingHistoryItems`, etc.?
 4. **Mouse support**: gemini-cli's `ScrollProvider` includes mouse drag for scrollbar. Worth porting now or skip until V.4?
-5. **Compatibility with #3905**: PR #3905 (Ctrl+O freeze fix) is open and modifies the same `MainContent.tsx`. Coordinate merge order — likely V.2 rebases on top of #3905.
-6. **Compatibility with `chore/upgrade-ink-7`**: V.0 starts on that branch; if ink 7 PR is rebased / amended, V.0 needs a follow-up rebase.
+5. **Compatibility with #3905**: ~~PR #3905 (Ctrl+O freeze fix) is open and modifies the same `MainContent.tsx`. Coordinate merge order — likely V.2 rebases on top of #3905.~~ **Resolved**: #3905's progressive-replay landed in `main` and is preserved in the legacy `<Static>` branch of `MainContent.tsx`; the VP branch supersedes it for opt-in users because the freeze trigger (full Static remount) no longer applies.
+6. **Compatibility with `chore/re-upgrade-ink-7-0-3`**: PR #4146 stacks on it. After #4119 (the ink 7.0.3 re-upgrade PR) merges to `main`, PR #4146's base will re-target to `main`.
 
 ## 10. Risks
 
@@ -353,6 +355,6 @@ End-to-end (after V.3):
 - [x] Architectural direction approved — port from gemini-cli (§4)
 - [x] Setting name + default decided — `ui.useTerminalBuffer`, default `false` (opt-in)
 - [x] Static-item heuristic — `isStaticItem={(item) => item.id > 0}` (completed history items)
-- [x] Mouse-support scope — deferred to V.4; keyboard-only scroll in V.0
-- [ ] Merge ordering with #3905 confirmed (§9.5) — V.2 `MainContent.tsx` changes overlap; rebase needed
-- [x] V.0 implementation PR complete
+- [x] Mouse-support scope — deferred to V.4; keyboard-only scroll in #4146
+- [x] Merge ordering with #3905 (§9.5) — #3905 already in `main`; #4146 preserves the legacy progressive-replay path and supersedes it only for VP users
+- [x] PR #4146 implementation complete

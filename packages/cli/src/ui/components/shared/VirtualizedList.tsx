@@ -18,6 +18,9 @@ import type React from 'react';
 import { useBatchedScroll } from '../../hooks/useBatchedScroll.js';
 import { StaticRender } from './StaticRender.js';
 import { type DOMElement, Box, Text, useBoxMetrics } from 'ink';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('VIRTUALIZED_LIST');
 
 export const SCROLL_TO_ITEM_END = Number.MAX_SAFE_INTEGER;
 
@@ -510,15 +513,17 @@ function VirtualizedList<T>(
         // renderItem propagates through React's commit phase and Ink
         // tears down the entire UI. The fallback keeps the row in the
         // viewport so the user can scroll past it instead of losing the
-        // session.
+        // session. The full error goes to the debug log; the visible
+        // marker stays generic so paths / partial tool state can't leak
+        // to scrollback or screen-scrapers.
         let content: React.ReactElement;
         try {
           content = renderItem({ item, index: i });
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          debugLogger.debug(`renderItem threw at index ${i}`, err);
           content = (
             <Box flexDirection="column" flexShrink={0}>
-              <Text color="red">[render error] {message}</Text>
+              <Text color="red">[render error]</Text>
             </Box>
           );
         }
