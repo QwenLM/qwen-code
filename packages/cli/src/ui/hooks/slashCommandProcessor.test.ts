@@ -1192,7 +1192,6 @@ describe('useSlashCommandProcessor', () => {
             new Map(),
             true,
             null,
-            undefined,
             mockUpdateItem,
           ),
         );
@@ -1262,7 +1261,6 @@ describe('useSlashCommandProcessor', () => {
               new Map(),
               isConfigInitialized,
               null,
-              undefined,
               mockUpdateItem,
             );
           },
@@ -1322,7 +1320,6 @@ describe('useSlashCommandProcessor', () => {
             new Map(),
             isConfigInitialized,
             null,
-            undefined,
             mockUpdateItem,
           ),
         { initialProps: { isConfigInitialized: false } },
