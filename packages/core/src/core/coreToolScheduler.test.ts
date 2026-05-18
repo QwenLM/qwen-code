@@ -1982,6 +1982,19 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cancelled: any = completedCalls[0];
     expect(cancelled.response.resultDisplay).toBe('hello');
+
+    // #4212: When the tool resolves cleanly after observing signal.aborted,
+    // the execution sub-span must end as not-success (cancelled) so it
+    // agrees with the parent tool span instead of misreporting success
+    // alongside a cancelled parent. `toolSpanRecords` accumulates across
+    // tests in this describe scope, so search the most recent record.
+    const execSpanRecord = toolSpanRecords.findLast(
+      (s) => s.name === 'tool.execution',
+    );
+    expect(execSpanRecord?.endMetadata?.success).toBe(false);
+    expect(execSpanRecord?.endMetadata?.error).toBe(
+      'Tool execution cancelled by user',
+    );
   });
 });
 
@@ -3733,7 +3746,14 @@ describe('CoreToolScheduler telemetry spans', () => {
     const exec = getExecutionSpan();
     expect(exec).toBeDefined();
     expect(exec!.ended).toBe(true);
-    expect(exec!.endMetadata).toEqual({ success: false });
+    // Since #4212 the success path also stamps a sanitized `error` reason on
+    // the exec span when ToolResult.error is set, so trace backends can
+    // distinguish a failed-result close from a cancelled one without
+    // cross-referencing the parent tool span.
+    expect(exec!.endMetadata).toEqual({
+      success: false,
+      error: 'Tool execution failed',
+    });
   });
 
   it('execution sub-span: ended (success: false) with sanitized error on thrown invocation exception', async () => {

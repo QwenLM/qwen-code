@@ -2033,10 +2033,20 @@ export class CoreToolScheduler {
       }
 
       const toolResult: ToolResult = await promise;
+      // A tool that observes signal.aborted and resolves with a normal
+      // ToolResult (no .error field) would otherwise close the execution
+      // sub-span as success while the parent tool span ends as cancelled.
+      // Mirror the abort signal here so the two spans agree (#4212).
+      const aborted = signal.aborted;
       endToolExecutionSpan(execSpan, {
-        success: toolResult.error === undefined,
+        success: toolResult.error === undefined && !aborted,
+        error: aborted
+          ? TOOL_SPAN_STATUS_TOOL_CANCELLED
+          : toolResult.error
+            ? TOOL_SPAN_STATUS_TOOL_ERROR
+            : undefined,
       });
-      if (signal.aborted) {
+      if (aborted) {
         // PostToolUseFailure Hook
         let cancelMessage = 'User cancelled tool execution.';
         if (hooksEnabled && messageBus) {

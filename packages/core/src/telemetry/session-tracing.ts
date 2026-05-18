@@ -11,6 +11,7 @@ import {
   SpanStatusCode,
   trace,
   type Attributes,
+  type Context,
   type Span,
 } from '@opentelemetry/api';
 import type { Config } from '../config/config.js';
@@ -68,6 +69,35 @@ interface SpanContext {
     // can add helpers without touching this type.
     | 'tool.blocked_on_user'
     | 'hook';
+}
+
+/**
+ * Resolve the parent OTel Context for a new span.
+ *
+ * Priority:
+ *  1. Explicit parent (from `interactionContext` / `toolContext` ALS) — keeps
+ *     the LLM/tool/exec span attached to its logical owner.
+ *  2. Currently-active OTel span — preserves the trace tree when an
+ *     LLM or tool call is nested inside another span (e.g. subagent inside a
+ *     tool, or any nested-tool path) but the ALS parent has already exited.
+ *     Without this, the new span re-parents to the synthetic session root and
+ *     the trace flattens.
+ *  3. Synthetic session-root context — keeps side-query spans (auto-title,
+ *     recap, etc.) correlated with the session even when they run outside
+ *     any interaction.
+ *  4. Active context as a no-op fallback.
+ *
+ * Mirrors `tracer.ts:getParentContext()` (#4126 review follow-up, #4212).
+ */
+function resolveParentContext(parent: SpanContext | undefined): Context {
+  if (parent) {
+    return trace.setSpan(otelContext.active(), parent.span);
+  }
+  const active = otelContext.active();
+  if (trace.getSpan(active)) {
+    return active;
+  }
+  return getSessionContext() ?? active;
 }
 
 const NOOP_SPAN = trace.wrapSpanContext({
@@ -198,13 +228,10 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   }
 
   const parentCtx = interactionContext.getStore();
-  // Fall back to session root context (deterministic traceId from sessionId)
-  // for side-query LLM calls (auto-title, recap, etc.) that run outside an
-  // interaction. Without this, those spans start a fresh trace and lose
-  // correlation with the session.
-  const ctx = parentCtx
-    ? trace.setSpan(otelContext.active(), parentCtx.span)
-    : (getSessionContext() ?? otelContext.active());
+  // resolveParentContext() also re-parents to the active OTel span when
+  // present, so a side-query LLM call nested inside a tool span still
+  // attaches to the tool span instead of skipping back to the session root.
+  const ctx = resolveParentContext(parentCtx);
 
   const attributes: Attributes = {
     'qwen-code.model': model,
@@ -298,10 +325,9 @@ export function startToolSpan(
   }
 
   const parentCtx = interactionContext.getStore();
-  // Same session-root fallback as startLLMRequestSpan.
-  const ctx = parentCtx
-    ? trace.setSpan(otelContext.active(), parentCtx.span)
-    : (getSessionContext() ?? otelContext.active());
+  // Same fallback as startLLMRequestSpan: prefer active OTel span for
+  // tools-inside-tools cases before falling back to the session root.
+  const ctx = resolveParentContext(parentCtx);
 
   const attributes: Attributes = {
     'tool.name': toolName,
@@ -409,9 +435,10 @@ export function startToolExecutionSpan(): Span {
       'startToolExecutionSpan called outside runInToolSpanContext — span will not be parented to tool span',
     );
   }
-  const ctx = parentCtx
-    ? trace.setSpan(otelContext.active(), parentCtx.span)
-    : (getSessionContext() ?? otelContext.active());
+  // Without an explicit toolContext parent we still try the active OTel span
+  // (some tool execution paths run inside a withSpan() block from another
+  // subsystem) before falling back to the session root.
+  const ctx = resolveParentContext(parentCtx);
 
   const span = getTracer().startSpan(
     SPAN_TOOL_EXECUTION,

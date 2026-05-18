@@ -108,6 +108,7 @@ vi.mock('@opentelemetry/api', async (importOriginal) => {
 
 vi.mock('../../telemetry/tracer.js', () => ({
   API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
+  API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
 }));
 
 vi.mock('../../telemetry/index.js', () => {
@@ -1094,6 +1095,100 @@ describe('LoggingContentGenerator', () => {
     ]);
     expect(JSON.stringify(spanRecord.statuses)).not.toContain('stream-fail');
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('skips success api_response log when stream span is ended by idle timeout (#4212)', async () => {
+    // The 5-min idle timeout would otherwise leave a contradictory pair of
+    // signals during incident response: the span says "timed out / error"
+    // while the api_response log says "success". We capture the idle-timeout
+    // callback through a setTimeout spy and invoke it manually — fake timers
+    // interact poorly with async-generator iteration.
+    const STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+    let idleCallback: (() => void) | undefined;
+    const realSetTimeout = global.setTimeout;
+    type SetTimeoutArgs = Parameters<typeof setTimeout>;
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout').mockImplementation(((
+      ...args: SetTimeoutArgs
+    ) => {
+      const [cb, ms] = args;
+      if (ms === STREAM_IDLE_TIMEOUT_MS) {
+        idleCallback = cb as () => void;
+        return { unref: () => {} } as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(...args);
+    }) as typeof setTimeout);
+
+    try {
+      let releaseStream: (() => void) | undefined;
+      // Set up the gate BEFORE the first yield so the outer test can
+      // release us as soon as it reads the first chunk.
+      const gate = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const response1 = createResponse('resp-idle', 'model-stream', [
+        { text: 'partial' },
+      ]);
+      const wrapped = createWrappedGenerator(
+        vi.fn(),
+        vi.fn().mockResolvedValue(
+          (async function* () {
+            yield response1;
+            // Pause until the test releases us — meanwhile the idle timer
+            // fires and ends the span as failed.
+            await gate;
+          })(),
+        ),
+      );
+      // Enable OpenAI logging so we can verify the post-loop OpenAI
+      // interaction log is also gated by spanEndedByTimeout — without this,
+      // safelyLogOpenAIInteraction short-circuits unconditionally and the
+      // skip behavior would go untested.
+      const generator = new LoggingContentGenerator(wrapped, createConfig(), {
+        model: 'test-model',
+        authType: AuthType.USE_OPENAI,
+        enableOpenAILogging: true,
+      });
+      const openaiLoggerInstance = vi.mocked(OpenAILogger).mock.results.at(-1)
+        ?.value as { logInteraction: ReturnType<typeof vi.fn> };
+
+      const request = {
+        model: 'test-model',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters;
+
+      const stream = await generator.generateContentStream(
+        request,
+        'prompt-idle-timeout',
+      );
+      const iterator = stream[Symbol.asyncIterator]();
+
+      const first = await iterator.next();
+      expect(first.done).toBe(false);
+      expect(idleCallback).toBeDefined();
+
+      // Fire the idle timeout — span should end as timed-out.
+      idleCallback?.();
+
+      const spanRecord = getStreamSpanRecord();
+      expect(spanRecord.attributes['stream.timed_out']).toBe(true);
+      expect(spanRecord.endMetadata?.success).toBe(false);
+      expect(spanRecord.endMetadata?.error).toBe(
+        'Stream span timed out (idle)',
+      );
+      expect(spanRecord.ended).toBe(true);
+
+      releaseStream?.();
+      const done = await iterator.next();
+      expect(done.done).toBe(true);
+
+      // Despite the stream completing cleanly afterwards, no success-flavored
+      // api_response or OpenAI-interaction log should have been emitted —
+      // the span's timeout state is the canonical signal.
+      expect(logApiResponse).not.toHaveBeenCalled();
+      expect(openaiLoggerInstance.logInteraction).not.toHaveBeenCalled();
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
   });
 
   it('preserves stream errors when error logging fails', async () => {

@@ -13,6 +13,10 @@ const mockState = vi.hoisted(() => ({
   // try/catch hardening in end*Span helpers (span.end() must still run).
   throwOnSetAttributes: false,
   throwOnSetStatus: false,
+  // When set, `context.active()` returns a context that carries this fake
+  // span and `trace.getSpan()` reports it. Lets tests exercise the
+  // active-OTel-span fallback in resolveParentContext (#4212).
+  activeOtelSpan: undefined as unknown,
 }));
 
 vi.mock('./sdk.js', () => ({
@@ -101,10 +105,17 @@ vi.mock('@opentelemetry/api', async () => {
         ...(ctx as object),
         __parentSpan: _span,
       }),
+      getSpan: (ctx: unknown) =>
+        typeof ctx === 'object' && ctx !== null && '__activeSpan' in ctx
+          ? (ctx as { __activeSpan: unknown }).__activeSpan
+          : undefined,
       wrapSpanContext: actual.trace.wrapSpanContext,
     },
     context: {
-      active: () => ({}),
+      active: () =>
+        mockState.activeOtelSpan
+          ? { __activeSpan: mockState.activeOtelSpan }
+          : {},
       with: <T>(_ctx: unknown, fn: () => T): T => fn(),
     },
   };
@@ -144,6 +155,7 @@ describe('session-tracing', () => {
     mockState.sdkInitialized = true;
     mockState.throwOnSetAttributes = false;
     mockState.throwOnSetStatus = false;
+    mockState.activeOtelSpan = undefined;
   });
 
   afterEach(() => {
@@ -320,6 +332,26 @@ describe('session-tracing', () => {
       );
     });
 
+    it('LLM request span re-parents to active OTel span when no interaction is set (#4212)', () => {
+      // Models a side-query LLM call running inside another OTel span (e.g.
+      // an HTTP-instrumented span in a subagent path) — the new span must
+      // attach to the active span instead of skipping back to session root,
+      // otherwise the trace tree flattens.
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, { success: true });
+
+      const llmSpan = mockSpans.find((s) => s.name === 'qwen-code.llm_request');
+      expect(llmSpan?.parentContext).toMatchObject({
+        __activeSpan: fakeActive,
+      });
+      // Without an explicit parent we still mark the call as standalone —
+      // the OTel parent comes from instrumentation, not from interactionContext.
+      expect(llmSpan?.attributes['llm_request.context']).toBe('standalone');
+    });
+
     it('treats missing metadata as OK status', () => {
       const span = startLLMRequestSpan('test-model', 'prompt-no-meta');
 
@@ -368,6 +400,19 @@ describe('session-tracing', () => {
       endToolSpan(span);
 
       expect(mockSpans[0]!.statuses).toHaveLength(0);
+    });
+
+    it('tool span re-parents to active OTel span when no interaction is set (#4212)', () => {
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      const span = startToolSpan('Bash');
+      endToolSpan(span, { success: true });
+
+      const toolSpan = mockSpans.find((s) => s.name === 'qwen-code.tool');
+      expect(toolSpan?.parentContext).toMatchObject({
+        __activeSpan: fakeActive,
+      });
     });
 
     it('concurrent tool spans are isolated', () => {
@@ -427,6 +472,19 @@ describe('session-tracing', () => {
       const execSpan = startToolExecutionSpan();
 
       expect(execSpan.spanContext().traceId).toBe('0'.repeat(32));
+    });
+
+    it('tool execution span re-parents to active OTel span when no toolContext is set (#4212)', () => {
+      const fakeActive = { kind: 'fake-active-span' };
+      mockState.activeOtelSpan = fakeActive;
+
+      const execSpan = startToolExecutionSpan();
+      endToolExecutionSpan(execSpan, { success: true });
+
+      const span = mockSpans.find((s) => s.name === 'qwen-code.tool.execution');
+      expect(span?.parentContext).toMatchObject({
+        __activeSpan: fakeActive,
+      });
     });
 
     it('falls back gracefully when no tool span is active', () => {

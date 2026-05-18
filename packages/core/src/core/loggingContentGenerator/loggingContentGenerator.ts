@@ -520,27 +520,34 @@ export class LoggingContentGenerator implements ContentGenerator {
       const streamResponseText = isInternal
         ? undefined
         : this.extractResponseText(consolidatedResponse);
-      runInSpan(() =>
-        this.safelyLogApiResponse(
-          firstResponseId,
-          durationMs,
-          firstModelVersion || model,
-          userPromptId,
-          lastUsageMetadata,
-          streamResponseText,
-        ),
-      );
-      if (!isInternal && span) {
-        addModelOutputAttributes(this.config, span, streamResponseText);
+      // If the idle timeout already closed the span as failed, do not contradict
+      // it with a "success" api_response log or model-output span attributes.
+      // The OpenAI interaction log is also skipped — telemetry already carries
+      // the timeout signal and a parallel "success" record would be confusing
+      // during incident response (#4212).
+      if (!spanEndedByTimeout) {
+        runInSpan(() =>
+          this.safelyLogApiResponse(
+            firstResponseId,
+            durationMs,
+            firstModelVersion || model,
+            userPromptId,
+            lastUsageMetadata,
+            streamResponseText,
+          ),
+        );
+        if (!isInternal && span) {
+          addModelOutputAttributes(this.config, span, streamResponseText);
+        }
+        await runInSpan(() =>
+          this.safelyLogOpenAIInteraction(
+            openaiRequest,
+            consolidatedResponse,
+            undefined,
+            userPromptId,
+          ),
+        );
       }
-      await runInSpan(() =>
-        this.safelyLogOpenAIInteraction(
-          openaiRequest,
-          consolidatedResponse,
-          undefined,
-          userPromptId,
-        ),
-      );
     } catch (error) {
       errorOccurred = true;
       const durationMs = Date.now() - startTime;
