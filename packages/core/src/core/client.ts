@@ -18,11 +18,27 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { recordStartupEvent } from '../utils/startupEventSink.js';
 import { microcompactHistory } from '../services/microcompaction/microcompact.js';
-import { getActiveGoal } from '../goals/activeGoalStore.js';
+import { getActiveGoal, type ActiveGoal } from '../goals/activeGoalStore.js';
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 
 const debugLogger = createDebugLogger('CLIENT');
+
+function activeGoalEquals(
+  left: ActiveGoal | undefined,
+  right: ActiveGoal | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return (
+    left.condition === right.condition &&
+    left.iterations === right.iterations &&
+    left.setAt === right.setAt &&
+    left.tokensAtStart === right.tokensAtStart &&
+    left.hookId === right.hookId &&
+    left.lastReason === right.lastReason
+  );
+}
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
@@ -1454,6 +1470,14 @@ export class GeminiClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
+      if (activeGoalAtTurnStart) {
+        yield {
+          type: GeminiEventType.ActiveGoal,
+          value: activeGoalAtTurnStart,
+        };
+      }
+
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       for await (const event of resultStream) {
@@ -1554,6 +1578,9 @@ export class GeminiClient {
             .map((p) => p.text)
             .join('') || '[no response text]';
 
+        const activeGoalBeforeStopHook = getActiveGoal(
+          this.config.getSessionId(),
+        );
         const response = await messageBus.request<
           HookExecutionRequest,
           HookExecutionResponse
@@ -1581,6 +1608,13 @@ export class GeminiClient {
           : undefined;
 
         const stopOutput = hookOutput as StopHookOutput | undefined;
+        const activeGoalAfterStopHook = getActiveGoal(
+          this.config.getSessionId(),
+        );
+        const didActiveGoalChange = !activeGoalEquals(
+          activeGoalBeforeStopHook,
+          activeGoalAfterStopHook,
+        );
 
         // This should happen regardless of the hook's decision
         if (stopOutput?.systemMessage) {
@@ -1626,6 +1660,12 @@ export class GeminiClient {
               this.config.getSessionId(),
               warning,
             );
+            if (activeGoalBeforeStopHook || activeGoalAfterStopHook) {
+              yield {
+                type: GeminiEventType.ActiveGoal,
+                value: null,
+              };
+            }
             yield {
               type: GeminiEventType.HookSystemMessage,
               value: warning,
@@ -1633,6 +1673,13 @@ export class GeminiClient {
             debugLogger.warn(warning);
             if (isTopLevelInteraction) endInteractionSpan('ok');
             return turn;
+          }
+
+          if (didActiveGoalChange) {
+            yield {
+              type: GeminiEventType.ActiveGoal,
+              value: activeGoalAfterStopHook ?? null,
+            };
           }
 
           yield {
@@ -1664,6 +1711,13 @@ export class GeminiClient {
           if (isTopLevelInteraction)
             endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
           return hookTurn;
+        }
+
+        if (didActiveGoalChange) {
+          yield {
+            type: GeminiEventType.ActiveGoal,
+            value: activeGoalAfterStopHook ?? null,
+          };
         }
       }
 

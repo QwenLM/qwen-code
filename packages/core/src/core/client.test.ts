@@ -52,6 +52,11 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import {
+  __resetActiveGoalStoreForTests,
+  clearActiveGoal,
+  setActiveGoal,
+} from '../goals/activeGoalStore.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -514,6 +519,7 @@ describe('Gemini Client (client.ts)', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    __resetActiveGoalStoreForTests();
   });
 
   describe('initialize', () => {
@@ -4499,6 +4505,89 @@ Other open files:
           getHistory: vi.fn().mockReturnValue([]),
         };
         client['chat'] = mockChat as GeminiChat;
+      });
+
+      it('emits active_goal when a goal is active for the turn', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-active-goal',
+          ),
+        );
+
+        expect(events[0]).toEqual({
+          type: GeminiEventType.ActiveGoal,
+          value: {
+            condition: 'finish the refactor',
+            iterations: 2,
+            setAt: 123,
+            tokensAtStart: 456,
+            hookId: 'goal-hook-id',
+            lastReason: 'still missing verification',
+          },
+        });
+      });
+
+      it('emits active_goal null when the Stop hook clears the goal', async () => {
+        setActiveGoal('test-session-id', {
+          condition: 'finish the refactor',
+          iterations: 2,
+          setAt: 123,
+          tokensAtStart: 456,
+          hookId: 'goal-hook-id',
+          lastReason: 'still missing verification',
+        });
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            clearActiveGoal('test-session-id');
+            return {};
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([
+            {
+              role: 'model',
+              parts: [{ text: 'done' }],
+            },
+          ]),
+        } as unknown as GeminiChat;
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: GeminiEventType.Content, value: 'done' };
+          })(),
+        );
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-cleared-active-goal',
+          ),
+        );
+
+        expect(events).toContainEqual({
+          type: GeminiEventType.ActiveGoal,
+          value: null,
+        });
       });
 
       it('should skip messageBus.request for UserPromptSubmit when hasHooksForEvent returns false', async () => {

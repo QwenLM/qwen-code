@@ -78,6 +78,8 @@ const mockParseAndFormatApiError = vi.hoisted(() =>
 );
 const mockLogApiCancel = vi.hoisted(() => vi.fn());
 const mockGetActiveGoal = vi.hoisted(() => vi.fn());
+const mockSetActiveGoal = vi.hoisted(() => vi.fn());
+const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -90,6 +92,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     parseAndFormatApiError: mockParseAndFormatApiError,
     logApiCancel: mockLogApiCancel,
     getActiveGoal: mockGetActiveGoal,
+    setActiveGoal: mockSetActiveGoal,
+    clearActiveGoal: mockClearActiveGoal,
   };
 });
 
@@ -4638,6 +4642,41 @@ describe('useGeminiStream', () => {
   });
 
   describe('StopHookLoop Event', () => {
+    it('syncs active_goal events into the active goal store', async () => {
+      const activeGoal = {
+        condition: 'finish the refactor',
+        iterations: 1,
+        setAt: 123,
+        tokensAtStart: 456,
+        hookId: 'goal-hook-id',
+        lastReason: 'still missing verification',
+      };
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ActiveGoal,
+            value: activeGoal,
+          };
+          yield {
+            type: ServerGeminiEventType.ActiveGoal,
+            value: null,
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('continue goal');
+      });
+
+      expect(mockSetActiveGoal).toHaveBeenCalledWith(
+        'test-session-id',
+        activeGoal,
+      );
+      expect(mockClearActiveGoal).toHaveBeenCalledWith('test-session-id');
+    });
+
     it('should handle StopHookLoop event and add stop hook loop history item', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {
