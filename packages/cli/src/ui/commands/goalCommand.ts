@@ -158,6 +158,9 @@ export const goalCommand: SlashCommand = {
         durationMs: Date.now() - cleared.setAt,
       };
       context.ui.addItem(clearedItem, Date.now());
+      if (context.executionMode === 'non_interactive') {
+        return infoMessage(`Goal cleared: ${cleared.condition}`);
+      }
       return;
     }
 

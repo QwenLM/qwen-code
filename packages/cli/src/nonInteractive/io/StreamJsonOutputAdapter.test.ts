@@ -100,6 +100,59 @@ describe('StreamJsonOutputAdapter', () => {
         });
       });
 
+      it('should emit active goal stream events', () => {
+        adapter.processEvent({
+          type: GeminiEventType.ActiveGoal,
+          value: {
+            condition: 'finish the refactor',
+            iterations: 2,
+            setAt: 123,
+            tokensAtStart: 456,
+            hookId: 'goal-hook-id',
+            lastReason: 'still missing verification',
+          },
+        });
+
+        adapter.processEvent({
+          type: GeminiEventType.ActiveGoal,
+          value: null,
+        });
+
+        const activeGoalEvents = stdoutWriteSpy.mock.calls
+          .map((call: unknown[]) => JSON.parse(call[0] as string))
+          .filter(
+            (message: { type?: string; event?: { type?: string } }) =>
+              message.type === 'stream_event' &&
+              message.event?.type === 'active_goal',
+          );
+
+        expect(activeGoalEvents).toEqual([
+          expect.objectContaining({
+            session_id: 'test-session-id',
+            parent_tool_use_id: null,
+            event: {
+              type: 'active_goal',
+              active_goal: {
+                condition: 'finish the refactor',
+                iterations: 2,
+                setAt: 123,
+                tokensAtStart: 456,
+                hookId: 'goal-hook-id',
+                lastReason: 'still missing verification',
+              },
+            },
+          }),
+          expect.objectContaining({
+            session_id: 'test-session-id',
+            parent_tool_use_id: null,
+            event: {
+              type: 'active_goal',
+              active_goal: null,
+            },
+          }),
+        ]);
+      });
+
       it('should emit message_start event on first content', () => {
         adapter.processEvent({
           type: GeminiEventType.Content,

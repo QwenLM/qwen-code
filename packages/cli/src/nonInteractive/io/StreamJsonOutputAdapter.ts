@@ -7,9 +7,11 @@
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
+  ServerGeminiStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
+import { GeminiEventType } from '@qwen-code/qwen-code-core';
 import type {
   CLIAssistantMessage,
   CLIMessage,
@@ -120,6 +122,21 @@ export class StreamJsonOutputAdapter
 
   send(message: CLIMessage | ControlMessage): void {
     this.emitMessage(message);
+  }
+
+  override processEvent(event: ServerGeminiStreamEvent): void {
+    if (event.type === GeminiEventType.ActiveGoal) {
+      this.emitStreamEventIfEnabled(
+        {
+          type: 'active_goal',
+          active_goal: event.value,
+        },
+        null,
+      );
+      return;
+    }
+
+    super.processEvent(event);
   }
 
   /**
