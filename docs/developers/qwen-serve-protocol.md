@@ -1136,7 +1136,9 @@ SSE event (session-scoped): `approval_mode_changed` with `{sessionId, previous, 
 
 Capability tag: `workspace_tool_toggle`. Pure file IO — no ACP roundtrip.
 
-Toggle a tool name in the workspace's `tools.disabled` settings list. Tools listed there are **not registered** at all (distinct from `permissions.deny`, which keeps the tool registered and rejects invocation). Both built-in tools (`Bash`, `Read`, `Write`) and MCP-discovered tools (`mcp__github__create_issue`) flow through `ToolRegistry.registerTool`, which consults the disabled set.
+Toggle a tool name in the workspace's `tools.disabled` settings list. Tools listed there are **not registered** at all (distinct from `permissions.deny`, which keeps the tool registered and rejects invocation). Both built-in tools and MCP-discovered tools flow through `ToolRegistry.registerTool`, which consults the disabled set.
+
+> ⚠️ **Names must match the registry's exposed identifier exactly.** No alias resolution happens — the route stores whatever string is in the path parameter into `tools.disabled`, and the next ACP child compares against `tool.name` at register time. Built-ins use their canonical registry name (snake_case verb form): `run_shell_command`, `read_file`, `write_file`, `list_directory`, `glob`, `search_file_content`, `ripgrep`, `web_fetch`, etc. — NOT the display labels (`Shell`, `Read`, `Write`) that the CLI surfaces. MCP-discovered tools use the qualified `mcp__<server>__<name>` form (which is also the form `tool_toggled` events broadcast and what `GET /workspace/mcp` lists). Disabling `Bash` will NOT prevent `run_shell_command` from registering on the next session.
 
 Live ACP children retain already-registered tools — the toggle takes effect on the **next** ACP child spawn. Combine with `POST /workspace/mcp/:server/restart` (for MCP-sourced tools) or new-session creation to make the change effective in the current daemon.
 
@@ -1151,12 +1153,12 @@ Request:
 Response (200):
 
 ```json
-{ "toolName": "Bash", "enabled": false }
+{ "toolName": "run_shell_command", "enabled": false }
 ```
 
 Errors:
 
-- `400 {code: 'invalid_tool_name'}` — empty path parameter.
+- `400 {code: 'invalid_tool_name'}` — empty path parameter, or path parameter exceeds the 256-character cap.
 - `400 {code: 'invalid_enabled_flag'}` — `enabled` missing or non-boolean.
 
 SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originatorClientId?}`.
