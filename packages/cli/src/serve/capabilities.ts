@@ -104,10 +104,18 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // others for free, and a future deprecation would have to coordinate
   // across all four anyway. Per-route tags would force four
   // simultaneous registry entries with no operator-meaningful
-  // difference between them. Mutating routes (`POST /file/write`,
-  // `POST /file/edit`) ship under a separate `workspace_file_write`
-  // tag in PR 20.
+  // difference between them.
   workspace_file_read: { since: 'v1' },
+  // Issue #4175 PR 20. Daemon supports bounded raw byte reads via
+  // `GET /file/bytes`. This is separate from `workspace_file_read`
+  // because PR19 daemons already advertise the text/list/stat/glob
+  // surface without byte-window support.
+  workspace_file_bytes: { since: 'v1' },
+  // Issue #4175 PR 20. Daemon supports hash-aware text mutation routes
+  // (`POST /file/write`, `POST /file/edit`) behind the strict mutation
+  // gate. Clients should still pre-flight `require_auth` separately for
+  // deployment posture; this tag only means the route contract exists.
+  workspace_file_write: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

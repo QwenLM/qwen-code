@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  MAX_READ_BYTES,
   isFsError,
   type FsError,
   type WorkspaceFileSystemFactory,
@@ -34,6 +35,9 @@ export const MAX_LIST_ENTRIES = 2000;
  * not accidentally alter file line slicing semantics.
  */
 export const MAX_FILE_LINE_LIMIT = 2000;
+
+/** Default byte window for `GET /file/bytes` when `maxBytes` is omitted. */
+export const DEFAULT_FILE_BYTES_MAX_BYTES = 64 * 1024;
 
 /**
  * Default cap when the caller omits `?maxResults` on `GET /glob`.
@@ -63,7 +67,7 @@ export const MAX_GLOB_MAX_RESULTS = 50_000;
  * directly. Both are harmless on the SDK / curl path and
  * mandatory for any browser-adjacent client.
  */
-function applyReadHeaders(res: Response): void {
+export function applyReadHeaders(res: Response): void {
   res.set('Cache-Control', 'no-store');
   res.set('X-Content-Type-Options', 'nosniff');
 }
@@ -121,7 +125,7 @@ function parseIntInRange(
   if (raw === undefined) return undefined;
   if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return null;
   const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n < min || n > max) return null;
+  if (!Number.isSafeInteger(n) || n < min || n > max) return null;
   return n;
 }
 
@@ -254,8 +258,71 @@ async function handleGetFile(
       sizeBytes: out.meta.sizeBytes ?? returnedBytes,
       returnedBytes,
       truncated: out.meta.truncated === true,
+      hash: out.meta.hash,
       matchedIgnore: out.meta.matchedIgnore ?? null,
       originalLineCount: out.meta.originalLineCount ?? null,
+    });
+  } catch (err) {
+    sendFsError(res, err, ROUTE);
+  }
+}
+
+async function handleGetFileBytes(
+  req: Request,
+  res: Response,
+  deps: RegisterDeps,
+): Promise<void> {
+  const ROUTE = 'GET /file/bytes';
+  const factory = getFsFactory(req, res);
+  if (!factory) return;
+  const clientId = deps.parseClientId(req, res);
+  if (clientId === null) return;
+  const queryPath = requireStringQuery(res, req.query['path'], 'path', ROUTE);
+  if (queryPath === null) return;
+  const offset = parseIntInRange(
+    req.query['offset'],
+    0,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (offset === null) {
+    applyReadHeaders(res);
+    res.status(400).json({
+      errorKind: 'parse_error',
+      error: '`offset` must be a non-negative safe integer',
+      status: 400,
+    });
+    return;
+  }
+  const maxBytes = parseIntInRange(req.query['maxBytes'], 1, MAX_READ_BYTES);
+  if (maxBytes === null) {
+    applyReadHeaders(res);
+    res.status(400).json({
+      errorKind: 'parse_error',
+      error: `\`maxBytes\` must be a positive integer in [1, ${MAX_READ_BYTES}]`,
+      status: 400,
+    });
+    return;
+  }
+  const fs = factory.forRequest({
+    originatorClientId: clientId ?? undefined,
+    route: ROUTE,
+  });
+  try {
+    const resolved = await fs.resolve(queryPath, 'read');
+    const out = await fs.readBytesWindow(resolved, {
+      offset: offset ?? 0,
+      maxBytes: maxBytes ?? DEFAULT_FILE_BYTES_MAX_BYTES,
+    });
+    applyReadHeaders(res);
+    res.status(200).json({
+      kind: 'file_bytes',
+      path: workspaceRelative(req, resolved),
+      offset: out.offset,
+      sizeBytes: out.sizeBytes,
+      returnedBytes: out.returnedBytes,
+      truncated: out.truncated,
+      contentBase64: out.buffer.toString('base64'),
+      ...(out.hash ? { hash: out.hash } : {}),
     });
   } catch (err) {
     sendFsError(res, err, ROUTE);
@@ -429,7 +496,7 @@ async function handleGetGlob(
  * misconfigured; never fall back to returning absolute filesystem
  * paths to clients.
  */
-function workspaceRelative(req: Request, resolved: string): string {
+export function workspaceRelative(req: Request, resolved: string): string {
   const boundWorkspace = (req.app.locals as { boundWorkspace?: string })
     .boundWorkspace;
   if (!boundWorkspace) {
@@ -444,6 +511,7 @@ export function registerWorkspaceFileReadRoutes(
   deps: RegisterDeps,
 ): void {
   app.get('/file', (req, res) => handleGetFile(req, res, deps));
+  app.get('/file/bytes', (req, res) => handleGetFileBytes(req, res, deps));
   app.get('/stat', (req, res) => handleGetStat(req, res, deps));
   app.get('/list', (req, res) => handleGetList(req, res, deps));
   app.get('/glob', (req, res) => handleGetGlob(req, res, deps));

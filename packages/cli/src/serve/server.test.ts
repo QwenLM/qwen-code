@@ -114,6 +114,10 @@ const EXPECTED_STAGE1_FEATURES = [
   // Issue #4175 PR 19. Always-on. Daemon exposes the read-only file
   // surface: `GET /file`, `GET /list`, `GET /glob`, `GET /stat`.
   'workspace_file_read',
+  // Issue #4175 PR 20. Always-on. Daemon exposes raw byte windows and
+  // hash-aware text mutation routes behind the strict mutation gate.
+  'workspace_file_bytes',
+  'workspace_file_write',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -3245,6 +3249,9 @@ describe('runQwenServe', () => {
         readBytes: async () => {
           throw new Error('unreachable');
         },
+        readBytesWindow: async () => {
+          throw new Error('unreachable');
+        },
         list: async () => {
           throw new Error('unreachable');
         },
@@ -3257,7 +3264,13 @@ describe('runQwenServe', () => {
         writeText: async () => {
           throw new Error('unreachable');
         },
+        writeTextAtomic: async () => {
+          throw new Error('unreachable');
+        },
         edit: async () => {
+          throw new Error('unreachable');
+        },
+        editAtomic: async () => {
           throw new Error('unreachable');
         },
       }),

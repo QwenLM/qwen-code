@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import { glob as globAsync } from 'glob';
@@ -40,7 +41,6 @@ import {
   MAX_READ_BYTES,
   assertTrustedForIntent,
   detectBinary,
-  enforceReadBytesSize,
   enforceReadSize,
   enforceWriteSize,
   shouldIgnore,
@@ -72,6 +72,7 @@ export interface ReadMeta {
   bom?: boolean;
   lineEnding: 'crlf' | 'lf';
   sizeBytes?: number;
+  hash?: ContentHash;
   truncated?: boolean;
   matchedIgnore?: 'file' | 'directory';
   originalLineCount?: number;
@@ -105,8 +106,44 @@ export interface GlobOptions {
   maxResults?: number;
 }
 
+export type ContentHash = `sha256:${string}`;
+
+export interface ReadBytesOptions {
+  /** Zero-based byte offset. */
+  offset?: number;
+  /** Maximum bytes to return; defaults to MAX_READ_BYTES. */
+  maxBytes?: number;
+}
+
+export interface ReadBytesOutcome {
+  buffer: Buffer;
+  sizeBytes: number;
+  returnedBytes: number;
+  offset: number;
+  truncated: boolean;
+  /** Present only when the returned window covers the whole file. */
+  hash?: ContentHash;
+}
+
+export type WriteMode = 'create' | 'replace';
+
+export interface WriteTextAtomicOptions extends WriteTextFileOptions {
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+  lineEnding?: 'crlf' | 'lf';
+}
+
+export interface WriteTextAtomicOutcome {
+  created: boolean;
+  sizeBytes: number;
+  hash: ContentHash;
+  meta: ReadMeta;
+}
+
 export interface WriteOutcome {
   writtenBytes: number;
+  hash?: ContentHash;
+  meta?: ReadMeta;
 }
 
 export interface RequestContext extends AuditContext {
@@ -126,9 +163,18 @@ export interface WorkspaceFileSystem {
     p: ResolvedPath,
     opts?: ReadTextOptions,
   ): Promise<{ content: string; meta: ReadMeta }>;
-  readBytes(p: ResolvedPath, opts?: { maxBytes?: number }): Promise<Buffer>;
+  readBytes(p: ResolvedPath, opts?: ReadBytesOptions): Promise<Buffer>;
+  readBytesWindow(
+    p: ResolvedPath,
+    opts?: ReadBytesOptions,
+  ): Promise<ReadBytesOutcome>;
   list(p: ResolvedPath, opts?: ListOptions): Promise<FsEntry[]>;
   glob(pattern: string, opts?: GlobOptions): Promise<ResolvedPath[]>;
+  writeTextAtomic(
+    p: ResolvedPath,
+    content: string,
+    opts: WriteTextAtomicOptions,
+  ): Promise<WriteTextAtomicOutcome>;
   writeText(
     p: ResolvedPath,
     content: string,
@@ -138,6 +184,13 @@ export interface WorkspaceFileSystem {
     p: ResolvedPath,
     oldText: string,
     newText: string,
+    opts?: { expectedHash?: ContentHash },
+  ): Promise<WriteOutcome>;
+  editAtomic(
+    p: ResolvedPath,
+    oldText: string,
+    newText: string,
+    opts: { expectedHash: ContentHash },
   ): Promise<WriteOutcome>;
 }
 
@@ -203,6 +256,7 @@ export function createWorkspaceFileSystemFactory(
     includeRawPaths: deps.includeRawPaths,
   });
   const lowFs = new StandardFileSystemService();
+  const pathLocks = new PathMutexRegistry();
 
   return {
     forRequest(ctx) {
@@ -213,6 +267,7 @@ export function createWorkspaceFileSystemFactory(
         audit,
         ctx,
         lowFs,
+        pathLocks,
       });
     },
   };
@@ -225,6 +280,7 @@ interface ImplDeps {
   audit: AuditPublisher;
   ctx: RequestContext;
   lowFs: StandardFileSystemService;
+  pathLocks: PathMutexRegistry;
 }
 
 class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
@@ -400,6 +456,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // mid-operation with a symlink pointing outside the
       // workspace.
       await assertInodeStableAfterRead(p as string, st.ino);
+      meta.hash = await hashFile(p as string);
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'read',
         absolute: p,
@@ -416,56 +473,76 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
 
   async readBytes(
     p: ResolvedPath,
-    opts: { maxBytes?: number } = {},
+    opts: ReadBytesOptions = {},
   ): Promise<Buffer> {
+    const out = await this.readBytesWindow(p, opts);
+    return out.buffer;
+  }
+
+  async readBytesWindow(
+    p: ResolvedPath,
+    opts: ReadBytesOptions = {},
+  ): Promise<ReadBytesOutcome> {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'read');
-      const st = await fsp.stat(p as string);
-      // Hard cap (file size > MAX_READ_BYTES) always throws; this
-      // is the OOM defense that's independent of caller-supplied
-      // `maxBytes`.
-      enforceReadBytesSize(st.size);
-      let buf = await fsp.readFile(p as string);
-      // Post-read size sanity check — same TOCTOU window as
-      // `readText` (concurrent appender keeps the same inode, so
-      // `assertInodeStableAfterRead` doesn't catch *growth*).
-      // The pre-stat gate sees the size at stat time; an attacker
-      // can grow the file from sub-cap to multi-GB between
-      // `fsp.stat` and `fsp.readFile`, OOMing the daemon. Reject
-      // post-read if the buffer ended up over the hard cap. The
-      // proper fix (fd-based read with `fileHandle.stat` +
-      // bounded `fileHandle.read`) is a hardening follow-up.
-      if (buf.length > MAX_READ_BYTES) {
+      const offset = opts.offset ?? 0;
+      const maxBytes = opts.maxBytes ?? MAX_READ_BYTES;
+      if (!Number.isSafeInteger(offset) || offset < 0) {
         throw new FsError(
-          'file_too_large',
-          `file grew during read to ${buf.length} bytes (cap ${MAX_READ_BYTES})`,
-          {
-            hint: 'concurrent writer detected via post-read size; retry or readText for capped truncation',
-          },
+          'parse_error',
+          `offset must be a non-negative integer, got ${offset}`,
         );
       }
-      // Soft cap: caller's `opts.maxBytes` is a window cap matching
-      // the parameter name's promise. Earlier semantics treated
-      // it as a "reject if file > maxBytes" gate, which violated
-      // the API contract — a caller asking for `maxBytes: 1024`
-      // on a 200 KB file expected to receive 1 KB, not an
-      // exception. We now truncate post-read so the returned
-      // buffer never exceeds `opts.maxBytes`. The hard
-      // `MAX_READ_BYTES` cap above ensures the underlying
-      // `fsp.readFile` allocation is bounded regardless.
-      if (opts.maxBytes !== undefined && opts.maxBytes < buf.length) {
-        buf = buf.subarray(0, opts.maxBytes);
+      if (
+        !Number.isSafeInteger(maxBytes) ||
+        maxBytes < 1 ||
+        maxBytes > MAX_READ_BYTES
+      ) {
+        throw new FsError(
+          'parse_error',
+          `maxBytes must be a positive integer in [1, ${MAX_READ_BYTES}], got ${maxBytes}`,
+        );
       }
-      // Post-read TOCTOU guard — same shape as `readText`.
+      const pre = await fsp.lstat(p as string);
+      if (!pre.isFile()) {
+        throw new FsError('parse_error', `path is not a regular file: ${p}`);
+      }
+      const fh = await fsp.open(p as string, 'r');
+      let st: Awaited<ReturnType<typeof fh.stat>>;
+      let buf: Buffer;
+      try {
+        st = await fh.stat();
+        assertSameFile(pre, st, p as string, 'read');
+        const available = Math.max(0, st.size - offset);
+        const toRead = Math.min(maxBytes, available);
+        buf = Buffer.allocUnsafe(toRead);
+        if (toRead > 0) {
+          const read = await fh.read(buf, 0, toRead, offset);
+          buf =
+            read.bytesRead === toRead ? buf : buf.subarray(0, read.bytesRead);
+        }
+      } finally {
+        await fh.close();
+      }
       await assertInodeStableAfterRead(p as string, st.ino);
+      const fullWindow = offset === 0 && buf.length === st.size;
+      const out: ReadBytesOutcome = {
+        buffer: buf,
+        sizeBytes: st.size,
+        returnedBytes: buf.length,
+        offset,
+        truncated: !fullWindow,
+        ...(fullWindow ? { hash: hashBuffer(buf) } : {}),
+      };
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'read',
         absolute: p,
         durationMs: performance.now() - start,
         sizeBytes: buf.length,
+        truncated: out.truncated,
       });
-      return buf;
+      return out;
     } catch (err) {
       throw this.recordAndWrap(err, 'read', p as string);
     }
@@ -742,6 +819,66 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async writeTextAtomic(
+    p: ResolvedPath,
+    content: string,
+    opts: WriteTextAtomicOptions,
+  ): Promise<WriteTextAtomicOutcome> {
+    const start = performance.now();
+    try {
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      validateWriteTextAtomicOptions(opts);
+      const decodedSizeBytes = Buffer.byteLength(content, 'utf-8');
+      enforceWriteSize(decodedSizeBytes);
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          const existingMeta =
+            opts.mode === 'replace'
+              ? await readExistingTextMeta(this.deps.lowFs, p)
+              : undefined;
+          if (opts.mode === 'create') {
+            await assertCreateTargetAbsent(p as string);
+          }
+          const meta = mergeWriteMeta(existingMeta, opts);
+          const result = await atomicWriteTextResolvedFile({
+            target: p,
+            content,
+            mode: opts.mode,
+            expectedHash: opts.expectedHash,
+            meta,
+            lowFs: this.deps.lowFs,
+          });
+          const verdict = shouldIgnore(
+            p,
+            this.deps.boundWorkspace,
+            this.deps.ignore,
+            'file',
+          );
+          if (verdict.ignored) meta.matchedIgnore = verdict.category;
+          meta.sizeBytes = result.sizeBytes;
+          meta.hash = result.hash;
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: meta.matchedIgnore,
+          });
+          return {
+            created: opts.mode === 'create',
+            sizeBytes: result.sizeBytes,
+            hash: result.hash,
+            meta,
+          };
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'write', p as string);
+    }
+  }
+
   async writeText(
     p: ResolvedPath,
     content: string,
@@ -787,11 +924,140 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async editAtomic(
+    p: ResolvedPath,
+    oldText: string,
+    newText: string,
+    opts: { expectedHash: ContentHash },
+  ): Promise<WriteOutcome> {
+    const start = performance.now();
+    try {
+      assertTrustedForIntent(this.deps.trusted, 'edit');
+      if (!isContentHash(opts.expectedHash)) {
+        throw new FsError(
+          'parse_error',
+          'expectedHash must match sha256:<64 lowercase hex chars>',
+        );
+      }
+      if (typeof oldText !== 'string' || oldText.length === 0) {
+        throw new FsError(
+          'parse_error',
+          `oldText must be a non-empty string for edit on ${p}`,
+        );
+      }
+      if (typeof newText !== 'string') {
+        throw new FsError('parse_error', 'newText must be a string');
+      }
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          const pre = await fsp.lstat(p as string);
+          if (pre.isSymbolicLink()) {
+            throw new FsError(
+              'symlink_escape',
+              `path is a symlink and cannot be edited atomically: ${p}`,
+              { hint: 're-resolve the target file instead of editing a link' },
+            );
+          }
+          if (!pre.isFile()) {
+            throw new FsError(
+              'parse_error',
+              `path is not a regular file: ${p}`,
+            );
+          }
+          if (pre.size > MAX_READ_BYTES) {
+            throw new FsError(
+              'file_too_large',
+              `file of ${pre.size} bytes exceeds edit cap of ${MAX_READ_BYTES} bytes`,
+              {
+                hint: 'split large edits into explicit read/write operations',
+              },
+            );
+          }
+          if (await detectBinary(p)) {
+            throw new FsError('binary_file', `cannot edit binary file: ${p}`, {
+              hint: 'editAtomic() works on text files only',
+            });
+          }
+          const readResult = await this.deps.lowFs.readTextFile({
+            path: p as string,
+            limit: Number.POSITIVE_INFINITY,
+            line: 0,
+          });
+          await assertInodeStableAfterRead(p as string, pre.ino);
+          const current = readResult.content;
+          const occurrences = countOccurrences(current, oldText);
+          if (occurrences === 0) {
+            const snippet =
+              oldText.length > 80 ? oldText.slice(0, 80) + '...' : oldText;
+            throw new FsError('text_not_found', `oldText not found in ${p}`, {
+              hint: `searched for: ${JSON.stringify(snippet)}`,
+            });
+          }
+          if (occurrences > 1) {
+            throw new FsError(
+              'ambiguous_text_match',
+              `oldText appears ${occurrences} times in ${p}`,
+              {
+                hint: 'pass a larger oldText span that occurs exactly once',
+              },
+            );
+          }
+          const idx = current.indexOf(oldText);
+          const next =
+            current.slice(0, idx) +
+            newText +
+            current.slice(idx + oldText.length);
+          enforceWriteSize(Buffer.byteLength(next, 'utf-8'));
+          const meta = mergeWriteMeta(readResult._meta, {});
+          const result = await atomicWriteTextResolvedFile({
+            target: p,
+            content: next,
+            mode: 'replace',
+            expectedHash: opts.expectedHash,
+            meta,
+            lowFs: this.deps.lowFs,
+          });
+          const verdict = shouldIgnore(
+            p,
+            this.deps.boundWorkspace,
+            this.deps.ignore,
+            'file',
+          );
+          if (verdict.ignored) meta.matchedIgnore = verdict.category;
+          meta.sizeBytes = result.sizeBytes;
+          meta.hash = result.hash;
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'edit',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: meta.matchedIgnore,
+          });
+          return {
+            writtenBytes: result.sizeBytes,
+            hash: result.hash,
+            meta,
+          };
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'edit', p as string);
+    }
+  }
+
   async edit(
     p: ResolvedPath,
     oldText: string,
     newText: string,
+    opts?: { expectedHash?: ContentHash },
   ): Promise<WriteOutcome> {
+    if (opts?.expectedHash !== undefined) {
+      return this.editAtomic(p, oldText, newText, {
+        expectedHash: opts.expectedHash,
+      });
+    }
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'edit');
@@ -956,6 +1222,416 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   }
 }
 
+const CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
+
+export function isContentHash(value: unknown): value is ContentHash {
+  return typeof value === 'string' && CONTENT_HASH_RE.test(value);
+}
+
+class PathMutexRegistry {
+  private readonly tails = new Map<string, Promise<void>>();
+
+  async runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => current);
+    this.tails.set(key, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    }
+  }
+}
+
+interface AtomicWriteTextInput {
+  target: ResolvedPath;
+  content: string;
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+  meta: ReadMeta;
+  lowFs: StandardFileSystemService;
+}
+
+interface AtomicWriteTextOutcome {
+  sizeBytes: number;
+  hash: ContentHash;
+}
+
+function validateWriteTextAtomicOptions(opts: WriteTextAtomicOptions): void {
+  if (opts.mode !== 'create' && opts.mode !== 'replace') {
+    throw new FsError(
+      'parse_error',
+      'mode must be either "create" or "replace"',
+    );
+  }
+  if (opts.expectedHash !== undefined && !isContentHash(opts.expectedHash)) {
+    throw new FsError(
+      'parse_error',
+      'expectedHash must match sha256:<64 lowercase hex chars>',
+    );
+  }
+  if (opts.mode === 'replace' && opts.expectedHash === undefined) {
+    throw new FsError(
+      'parse_error',
+      'expectedHash is required when mode is "replace"',
+    );
+  }
+  if (
+    opts.lineEnding !== undefined &&
+    opts.lineEnding !== 'lf' &&
+    opts.lineEnding !== 'crlf'
+  ) {
+    throw new FsError('parse_error', 'lineEnding must be "lf" or "crlf"');
+  }
+}
+
+async function readExistingTextMeta(
+  lowFs: StandardFileSystemService,
+  p: ResolvedPath,
+): Promise<ReadMeta> {
+  const pre = await fsp.lstat(p as string);
+  if (pre.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path is a symlink and cannot be replaced atomically: ${p}`,
+      { hint: 're-resolve the target file instead of writing through a link' },
+    );
+  }
+  if (!pre.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${p}`);
+  }
+  if (pre.size > MAX_READ_BYTES) {
+    throw new FsError(
+      'file_too_large',
+      `file of ${pre.size} bytes exceeds metadata read cap of ${MAX_READ_BYTES} bytes`,
+      {
+        hint: 'large replace targets are refused because PR20 preserves text encoding metadata by reading the existing file',
+      },
+    );
+  }
+  if (await detectBinary(p)) {
+    throw new FsError('binary_file', `cannot replace binary file: ${p}`, {
+      hint: 'POST /file/write is text-only',
+    });
+  }
+  const result = await lowFs.readTextFile({
+    path: p as string,
+    limit: Number.POSITIVE_INFINITY,
+    line: 0,
+  });
+  await assertInodeStableAfterRead(p as string, pre.ino);
+  return {
+    encoding: result._meta?.encoding,
+    bom: result._meta?.bom,
+    lineEnding: (result._meta?.lineEnding ?? 'lf') as 'crlf' | 'lf',
+    sizeBytes: pre.size,
+  };
+}
+
+function mergeWriteMeta(
+  existing: Partial<ReadMeta> | undefined,
+  opts: Partial<WriteTextAtomicOptions>,
+): ReadMeta {
+  return {
+    encoding: opts.encoding ?? existing?.encoding ?? 'utf-8',
+    bom: opts.bom ?? existing?.bom ?? false,
+    lineEnding: opts.lineEnding ?? existing?.lineEnding ?? 'lf',
+  };
+}
+
+async function atomicWriteTextResolvedFile(
+  input: AtomicWriteTextInput,
+): Promise<AtomicWriteTextOutcome> {
+  const target = input.target as string;
+  const parent = path.dirname(target);
+  const parentStat = await fsp.lstat(parent);
+  if (!parentStat.isDirectory()) {
+    throw new FsError(
+      'parse_error',
+      `parent path is not a directory: ${parent}`,
+    );
+  }
+  const tmpPath = path.join(
+    parent,
+    `.${path.basename(target)}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`,
+  );
+  let tempLive = false;
+  try {
+    await reserveTempFile(tmpPath);
+    tempLive = true;
+    const encoded = await writeEncodedTextTemp({
+      lowFs: input.lowFs,
+      tmpPath,
+      content: input.content,
+      meta: input.meta,
+    });
+    const targetState = await assertAtomicTargetPrecondition({
+      target,
+      mode: input.mode,
+      expectedHash: input.expectedHash,
+    });
+    await chmodBestEffort(tmpPath, targetState.mode ?? 0o600);
+    await renameWithRetryLocal(tmpPath, target, 3, 50);
+    tempLive = false;
+    await fsyncParentDirBestEffort(parent);
+    return encoded;
+  } catch (err) {
+    if (tempLive) {
+      try {
+        await fsp.unlink(tmpPath);
+      } catch {
+        // Best-effort cleanup; preserve the original failure.
+      }
+    }
+    throw err;
+  }
+}
+
+async function reserveTempFile(tmpPath: string): Promise<void> {
+  const fh = await fsp.open(tmpPath, 'wx', 0o600);
+  await fh.close();
+}
+
+async function writeEncodedTextTemp(input: {
+  lowFs: StandardFileSystemService;
+  tmpPath: string;
+  content: string;
+  meta: ReadMeta;
+}): Promise<AtomicWriteTextOutcome> {
+  await input.lowFs.writeTextFile({
+    path: input.tmpPath,
+    content: input.content,
+    _meta: buildWriteMeta(input.meta),
+  });
+  const st = await fsp.lstat(input.tmpPath);
+  if (st.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `temporary path became a symlink: ${input.tmpPath}`,
+      { hint: 'temp-file race detected before final rename' },
+    );
+  }
+  if (!st.isFile()) {
+    throw new FsError(
+      'parse_error',
+      `temporary path is not a regular file: ${input.tmpPath}`,
+    );
+  }
+  await fsyncFileBestEffort(input.tmpPath);
+  const buf = await fsp.readFile(input.tmpPath);
+  enforceWriteSize(buf.length);
+  return { sizeBytes: buf.length, hash: hashBuffer(buf) };
+}
+
+async function assertCreateTargetAbsent(target: string): Promise<void> {
+  try {
+    const st = await fsp.lstat(target);
+    if (st.isSymbolicLink()) {
+      throw new FsError(
+        'symlink_escape',
+        `path is a symlink and cannot be created over: ${target}`,
+        { hint: 'remove the symlink or resolve the target explicitly' },
+      );
+    }
+    throw new FsError('file_already_exists', `file already exists: ${target}`);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === 'ENOENT') return;
+    throw err;
+  }
+}
+
+async function assertAtomicTargetPrecondition(input: {
+  target: string;
+  mode: WriteMode;
+  expectedHash?: ContentHash;
+}): Promise<{ mode?: number }> {
+  if (input.mode === 'create') {
+    await assertCreateTargetAbsent(input.target);
+    return {};
+  }
+  if (!isContentHash(input.expectedHash)) {
+    throw new FsError(
+      'parse_error',
+      'expectedHash is required when mode is "replace"',
+    );
+  }
+  const pre = await fsp.lstat(input.target);
+  if (pre.isSymbolicLink()) {
+    throw new FsError(
+      'symlink_escape',
+      `path is a symlink and cannot be replaced atomically: ${input.target}`,
+      { hint: 're-resolve the target file instead of writing through a link' },
+    );
+  }
+  if (!pre.isFile()) {
+    throw new FsError(
+      'parse_error',
+      `path is not a regular file: ${input.target}`,
+    );
+  }
+  const actual = await hashRegularFileAtPath(input.target, pre);
+  if (actual !== input.expectedHash) {
+    throw new FsError(
+      'hash_mismatch',
+      `expected ${input.expectedHash}, found ${actual}`,
+      { hint: 're-read the file and retry with the latest hash' },
+    );
+  }
+  return { mode: pre.mode & 0o7777 };
+}
+
+async function hashFile(p: string): Promise<ContentHash> {
+  const pre = await fsp.lstat(p);
+  if (pre.isSymbolicLink()) {
+    throw new FsError('symlink_escape', `path is a symlink: ${p}`);
+  }
+  if (!pre.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${p}`);
+  }
+  return hashRegularFileAtPath(p, pre);
+}
+
+async function hashRegularFileAtPath(
+  p: string,
+  pre: Awaited<ReturnType<typeof fsp.lstat>>,
+): Promise<ContentHash> {
+  const fh = await fsp.open(p, 'r');
+  const hash = createHash('sha256');
+  let opened: Awaited<ReturnType<typeof fh.stat>> | undefined;
+  try {
+    opened = await fh.stat();
+    assertSameFile(pre, opened, p, 'read');
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    let offset = 0;
+    while (offset < opened.size) {
+      const read = await fh.read(
+        buf,
+        0,
+        Math.min(buf.length, opened.size - offset),
+        offset,
+      );
+      if (read.bytesRead === 0) break;
+      hash.update(buf.subarray(0, read.bytesRead));
+      offset += read.bytesRead;
+    }
+  } finally {
+    await fh.close();
+  }
+  if (opened === undefined) {
+    throw new FsError('internal_error', `failed to stat opened file: ${p}`);
+  }
+  const post = await fsp.lstat(p);
+  assertSameFile(pre, post, p, 'read');
+  if (post.size !== opened.size || post.mtimeMs !== opened.mtimeMs) {
+    throw new FsError('hash_mismatch', `file changed during hash: ${p}`, {
+      hint: 'retry after re-reading the latest file hash',
+    });
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
+function hashBuffer(buf: Buffer): ContentHash {
+  return `sha256:${createHash('sha256').update(buf).digest('hex')}`;
+}
+
+function assertSameFile(
+  pre: { dev: number | bigint; ino: number | bigint },
+  post: { dev: number | bigint; ino: number | bigint },
+  p: string,
+  intent: Intent,
+): void {
+  const preDev = toBigInt(pre.dev);
+  const postDev = toBigInt(post.dev);
+  const preIno = toBigInt(pre.ino);
+  const postIno = toBigInt(post.ino);
+  if (
+    preDev !== 0n &&
+    postDev !== 0n &&
+    preIno !== 0n &&
+    postIno !== 0n &&
+    (preDev !== postDev || preIno !== postIno)
+  ) {
+    throw new FsError('symlink_escape', `path changed during ${intent}: ${p}`, {
+      hint: 'TOCTOU swap detected via device/inode comparison',
+    });
+  }
+}
+
+function toBigInt(value: number | bigint): bigint {
+  return typeof value === 'bigint' ? value : BigInt(value);
+}
+
+async function fsyncFileBestEffort(p: string): Promise<void> {
+  let fh: Awaited<ReturnType<typeof fsp.open>> | undefined;
+  try {
+    fh = await fsp.open(p, 'r');
+    await fh.sync();
+  } catch {
+    // Some platforms/filesystems reject fsync on read-only handles.
+  } finally {
+    await fh?.close().catch(() => undefined);
+  }
+}
+
+async function fsyncParentDirBestEffort(parent: string): Promise<void> {
+  let fh: Awaited<ReturnType<typeof fsp.open>> | undefined;
+  try {
+    fh = await fsp.open(parent, 'r');
+    await fh.sync();
+  } catch {
+    // Windows and some filesystems do not support directory fsync.
+  } finally {
+    await fh?.close().catch(() => undefined);
+  }
+}
+
+async function chmodBestEffort(p: string, mode: number): Promise<void> {
+  try {
+    await fsp.chmod(p, mode);
+  } catch {
+    // Not all filesystems support POSIX permission bits.
+  }
+}
+
+async function renameWithRetryLocal(
+  src: string,
+  dest: string,
+  retries: number,
+  delayMs: number,
+): Promise<void> {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      await fsp.rename(src, dest);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      const retryable = code === 'EPERM' || code === 'EACCES';
+      if (!retryable || attempt === retries) throw err;
+      await new Promise((resolve) =>
+        setTimeout(resolve, delayMs * 2 ** attempt),
+      );
+    }
+  }
+}
+
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let index = 0;
+  while (true) {
+    const found = haystack.indexOf(needle, index);
+    if (found === -1) return count;
+    count += 1;
+    index = found + needle.length;
+  }
+}
+
 /**
  * Truncate a UTF-8 buffer to at most `maxBytes` bytes WITHOUT
  * splitting a multi-byte codepoint. `Buffer.subarray(0, n).toString('utf-8')`
@@ -1105,11 +1781,12 @@ function kindFromStatLike(s: {
 }
 
 function buildWriteMeta(
-  opts: WriteTextFileOptions,
+  opts: WriteTextFileOptions & { lineEnding?: 'crlf' | 'lf' },
 ): Record<string, unknown> | undefined {
   const meta: Record<string, unknown> = {};
-  if (opts.bom) meta['bom'] = true;
+  if (opts.bom !== undefined) meta['bom'] = opts.bom;
   if (opts.encoding) meta['encoding'] = opts.encoding;
+  if (opts.lineEnding) meta['lineEnding'] = opts.lineEnding;
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
 

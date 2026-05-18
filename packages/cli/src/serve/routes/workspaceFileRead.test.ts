@@ -7,7 +7,7 @@
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import { Ignore } from '@qwen-code/qwen-code-core';
@@ -63,6 +63,10 @@ function loopbackHost(): string {
   return `127.0.0.1:${baseOpts.port}`;
 }
 
+function rawHash(data: string | Buffer): `sha256:${string}` {
+  return `sha256:${createHash('sha256').update(data).digest('hex')}`;
+}
+
 describe('GET /file', () => {
   let h: Harness;
   beforeEach(async () => {
@@ -86,6 +90,7 @@ describe('GET /file', () => {
     });
     expect(res.body.sizeBytes).toBe(12);
     expect(res.body.returnedBytes).toBe(12);
+    expect(res.body.hash).toBe(rawHash('hello\nworld\n'));
   });
 
   it('returns the requested line window', async () => {
@@ -188,6 +193,65 @@ describe('GET /file', () => {
       intent: 'read',
       route: 'GET /file',
     });
+  });
+});
+
+describe('GET /file/bytes', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await makeHarness();
+  });
+  afterEach(async () => teardown(h));
+
+  it('returns base64 raw bytes and hash for a full-file window', async () => {
+    const data = Buffer.from([0, 1, 2, 3, 255]);
+    await fsp.writeFile(path.join(h.workspace, 'bin.dat'), data);
+    const res = await request(h.app)
+      .get('/file/bytes?path=bin.dat')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      kind: 'file_bytes',
+      path: 'bin.dat',
+      offset: 0,
+      sizeBytes: data.length,
+      returnedBytes: data.length,
+      truncated: false,
+      contentBase64: data.toString('base64'),
+      hash: rawHash(data),
+    });
+  });
+
+  it('returns a partial byte window without hash', async () => {
+    await fsp.writeFile(
+      path.join(h.workspace, 'window.bin'),
+      Buffer.from([1, 2, 3, 4, 5]),
+    );
+    const res = await request(h.app)
+      .get('/file/bytes?path=window.bin&offset=1&maxBytes=2')
+      .set('Host', loopbackHost());
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      offset: 1,
+      returnedBytes: 2,
+      truncated: true,
+      contentBase64: Buffer.from([2, 3]).toString('base64'),
+    });
+    expect(res.body.hash).toBeUndefined();
+  });
+
+  it('rejects malformed offset and maxBytes with parse_error', async () => {
+    const badOffset = await request(h.app)
+      .get('/file/bytes?path=x&offset=-1')
+      .set('Host', loopbackHost());
+    expect(badOffset.status).toBe(400);
+    expect(badOffset.body.errorKind).toBe('parse_error');
+
+    const badMax = await request(h.app)
+      .get('/file/bytes?path=x&maxBytes=999999999')
+      .set('Host', loopbackHost());
+    expect(badMax.status).toBe(400);
+    expect(badMax.body.errorKind).toBe('parse_error');
   });
 });
 
@@ -442,7 +506,7 @@ describe('GET /glob', () => {
 });
 
 describe('capability advertisement', () => {
-  it('advertises workspace_file_read on /capabilities', async () => {
+  it('advertises workspace file capabilities on /capabilities', async () => {
     const h = await makeHarness();
     try {
       const res = await request(h.app)
@@ -450,6 +514,8 @@ describe('capability advertisement', () => {
         .set('Host', loopbackHost());
       expect(res.status).toBe(200);
       expect(res.body.features).toContain('workspace_file_read');
+      expect(res.body.features).toContain('workspace_file_bytes');
+      expect(res.body.features).toContain('workspace_file_write');
     } finally {
       await teardown(h);
     }

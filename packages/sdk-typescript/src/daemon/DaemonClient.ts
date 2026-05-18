@@ -16,6 +16,12 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonUpdateAgentRequest,
+  DaemonWorkspaceFile,
+  DaemonWorkspaceFileBytes,
+  DaemonWorkspaceFileEditRequest,
+  DaemonWorkspaceFileEditResult,
+  DaemonWorkspaceFileWriteRequest,
+  DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
   DaemonWorkspaceEnvStatus,
@@ -346,6 +352,93 @@ export class DaemonClient {
           throw await this.failOnError(res, 'GET /workspace/providers');
         }
         return (await res.json()) as DaemonWorkspaceProvidersStatus;
+      },
+    );
+  }
+
+  // -- Workspace files (issue #4175 PR 20) -------------------------------
+
+  async readWorkspaceFile(
+    filePath: string,
+    opts: { maxBytes?: number; line?: number; limit?: number } = {},
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFile> {
+    const url = new URL(`${this.baseUrl}/file`);
+    url.searchParams.set('path', filePath);
+    if (opts.maxBytes !== undefined) {
+      url.searchParams.set('maxBytes', String(opts.maxBytes));
+    }
+    if (opts.line !== undefined) {
+      url.searchParams.set('line', String(opts.line));
+    }
+    if (opts.limit !== undefined) {
+      url.searchParams.set('limit', String(opts.limit));
+    }
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /file');
+        return (await res.json()) as DaemonWorkspaceFile;
+      },
+    );
+  }
+
+  async readWorkspaceFileBytes(
+    filePath: string,
+    opts: { offset?: number; maxBytes?: number } = {},
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileBytes> {
+    const url = new URL(`${this.baseUrl}/file/bytes`);
+    url.searchParams.set('path', filePath);
+    if (opts.offset !== undefined) {
+      url.searchParams.set('offset', String(opts.offset));
+    }
+    if (opts.maxBytes !== undefined) {
+      url.searchParams.set('maxBytes', String(opts.maxBytes));
+    }
+    return await this.fetchWithTimeout(
+      url.toString(),
+      { headers: this.headers({}, clientId) },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'GET /file/bytes');
+        return (await res.json()) as DaemonWorkspaceFileBytes;
+      },
+    );
+  }
+
+  async writeWorkspaceFile(
+    req: DaemonWorkspaceFileWriteRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileWriteResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/file/write`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'POST /file/write');
+        return (await res.json()) as DaemonWorkspaceFileWriteResult;
+      },
+    );
+  }
+
+  async editWorkspaceFile(
+    req: DaemonWorkspaceFileEditRequest,
+    clientId?: string,
+  ): Promise<DaemonWorkspaceFileEditResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/file/edit`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(req),
+      },
+      async (res) => {
+        if (!res.ok) throw await this.failOnError(res, 'POST /file/edit');
+        return (await res.json()) as DaemonWorkspaceFileEditResult;
       },
     );
   }

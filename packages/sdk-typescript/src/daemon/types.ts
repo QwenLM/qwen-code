@@ -411,6 +411,76 @@ export interface DaemonWriteMemoryResult {
   changed?: boolean;
 }
 
+export type DaemonContentHash = `sha256:${string}`;
+
+export interface DaemonWorkspaceFile {
+  kind: 'file';
+  path: string;
+  content: string;
+  encoding: string;
+  bom: boolean;
+  lineEnding: 'crlf' | 'lf';
+  sizeBytes: number;
+  returnedBytes: number;
+  truncated: boolean;
+  hash?: DaemonContentHash;
+  matchedIgnore: 'file' | 'directory' | null;
+  originalLineCount: number | null;
+}
+
+export interface DaemonWorkspaceFileBytes {
+  kind: 'file_bytes';
+  path: string;
+  offset: number;
+  sizeBytes: number;
+  returnedBytes: number;
+  truncated: boolean;
+  contentBase64: string;
+  hash?: DaemonContentHash;
+}
+
+export interface DaemonWorkspaceFileWriteRequest {
+  path: string;
+  content: string;
+  mode: 'create' | 'replace';
+  expectedHash?: DaemonContentHash;
+  bom?: boolean;
+  encoding?: string;
+  lineEnding?: 'crlf' | 'lf';
+}
+
+export interface DaemonWorkspaceFileEditRequest {
+  path: string;
+  oldText: string;
+  newText: string;
+  expectedHash: DaemonContentHash;
+}
+
+export interface DaemonWorkspaceFileWriteResult {
+  kind: 'file_write';
+  path: string;
+  mode: 'create' | 'replace';
+  created: boolean;
+  sizeBytes: number;
+  hash: DaemonContentHash;
+  encoding: string;
+  bom: boolean;
+  lineEnding: 'crlf' | 'lf';
+  matchedIgnore: 'file' | 'directory' | null;
+}
+
+export interface DaemonWorkspaceFileEditResult {
+  kind: 'file_edit';
+  path: string;
+  replacements: 1;
+  sizeBytes: number;
+  hash: DaemonContentHash;
+  encoding: string;
+  bom: boolean;
+  lineEnding: 'crlf' | 'lf';
+  matchedIgnore: 'file' | 'directory' | null;
+}
+
 /**
  * Issue #4175 PR 16: subagent CRUD types. `agentType` on the wire is
  * the `name` field from the agent's frontmatter (case-insensitive);

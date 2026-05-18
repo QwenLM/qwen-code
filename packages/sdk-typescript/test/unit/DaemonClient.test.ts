@@ -139,6 +139,153 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('workspace file helpers', () => {
+    it('reads text files with query params and client identity', async () => {
+      const payload = {
+        kind: 'file',
+        path: 'src/a.ts',
+        content: 'export {}\n',
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        sizeBytes: 10,
+        returnedBytes: 10,
+        truncated: false,
+        hash: 'sha256:' + 'a'.repeat(64),
+        matchedIgnore: null,
+        originalLineCount: null,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: 'http://daemon/', fetch });
+      await expect(
+        client.readWorkspaceFile('src/a.ts', { line: 2, limit: 3 }, 'client-1'),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.url).toBe(
+        'http://daemon/file?path=src%2Fa.ts&line=2&limit=3',
+      );
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('reads raw bytes as base64 payloads', async () => {
+      const payload = {
+        kind: 'file_bytes',
+        path: 'bin.dat',
+        offset: 4,
+        sizeBytes: 9,
+        returnedBytes: 2,
+        truncated: true,
+        contentBase64: Buffer.from([5, 6]).toString('base64'),
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, payload));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.readWorkspaceFileBytes('bin.dat', {
+          offset: 4,
+          maxBytes: 2,
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/file/bytes?path=bin.dat&offset=4&maxBytes=2',
+      );
+    });
+
+    it('writes and edits files with JSON bodies and client identity', async () => {
+      const writeResult = {
+        kind: 'file_write',
+        path: 'a.txt',
+        mode: 'replace',
+        created: false,
+        sizeBytes: 3,
+        hash: 'sha256:' + 'b'.repeat(64),
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        matchedIgnore: null,
+      };
+      const editResult = {
+        kind: 'file_edit',
+        path: 'a.txt',
+        replacements: 1,
+        sizeBytes: 4,
+        hash: 'sha256:' + 'c'.repeat(64),
+        encoding: 'utf-8',
+        bom: false,
+        lineEnding: 'lf',
+        matchedIgnore: null,
+      };
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/file/write')) {
+          return jsonResponse(200, writeResult);
+        }
+        if (req.url.endsWith('/file/edit')) {
+          return jsonResponse(200, editResult);
+        }
+        return jsonResponse(500, { error: 'unexpected' });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.writeWorkspaceFile(
+          {
+            path: 'a.txt',
+            content: 'new',
+            mode: 'replace',
+            expectedHash: `sha256:${'a'.repeat(64)}`,
+          },
+          'client-1',
+        ),
+      ).resolves.toEqual(writeResult);
+      await expect(
+        client.editWorkspaceFile(
+          {
+            path: 'a.txt',
+            oldText: 'new',
+            newText: 'next',
+            expectedHash: `sha256:${'b'.repeat(64)}`,
+          },
+          'client-1',
+        ),
+      ).resolves.toEqual(editResult);
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/file/write',
+        body: JSON.stringify({
+          path: 'a.txt',
+          content: 'new',
+          mode: 'replace',
+          expectedHash: `sha256:${'a'.repeat(64)}`,
+        }),
+      });
+      expect(calls[0]?.headers['content-type']).toBe('application/json');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(calls[1]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/file/edit',
+      });
+    });
+
+    it('preserves structured error bodies for hash conflicts', async () => {
+      const body = {
+        errorKind: 'hash_mismatch',
+        error: 'expected stale, found current',
+        status: 409,
+      };
+      const { fetch } = recordingFetch(() => jsonResponse(409, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const err = await client
+        .writeWorkspaceFile({
+          path: 'a.txt',
+          content: 'new',
+          mode: 'replace',
+          expectedHash: `sha256:${'a'.repeat(64)}`,
+        })
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(DaemonHttpError);
+      expect((err as DaemonHttpError).status).toBe(409);
+      expect((err as DaemonHttpError).body).toEqual(body);
+    });
+  });
+
   describe('read-only status routes', () => {
     it('GETs workspace status routes and returns payloads unchanged', async () => {
       const mcp: DaemonWorkspaceMcpStatus = {
