@@ -196,12 +196,37 @@ function readBudgetFromEnv(): McpBudgetConfig {
     const parsed = Number(rawBudget);
     if (Number.isFinite(parsed) && Number.isInteger(parsed) && parsed > 0) {
       clientBudget = parsed;
+    } else {
+      // PR 14 fix (review #4247 wenshao R7 line 191): operator typos
+      // like `QWEN_SERVE_MCP_CLIENT_BUDGET=abc` previously fell
+      // through silently to "no budget" with zero indication. The
+      // CLI parent (`commands/serve.ts` + `runQwenServe.ts`)
+      // validates and throws, but the ACP child process — where
+      // this function runs — has no such validation. Surface a
+      // boot breadcrumb so operators see the misconfiguration in
+      // journald / docker logs.
+      process.stderr.write(
+        `qwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=` +
+          `'${rawBudget}' (expected positive integer); ` +
+          `MCP budget enforcement disabled for this child.\n`,
+      );
     }
   }
   let budgetMode: McpBudgetMode;
   if (rawMode === 'enforce' || rawMode === 'warn' || rawMode === 'off') {
     budgetMode = rawMode;
   } else {
+    if (rawMode !== undefined && rawMode !== '') {
+      // Same operator-visibility rationale as the budget breadcrumb
+      // above. Unknown mode value silently fell through to the
+      // budget-driven default; now it gets a stderr line so the
+      // typo is visible.
+      process.stderr.write(
+        `qwen serve: ignoring invalid QWEN_SERVE_MCP_BUDGET_MODE=` +
+          `'${rawMode}' (expected enforce|warn|off); falling back to ` +
+          `${clientBudget === undefined ? 'off' : 'warn'}.\n`,
+      );
+    }
     budgetMode = clientBudget === undefined ? 'off' : 'warn';
   }
   // PR 14 fix (review #4247 wenshao S4): enforce-without-budget would
@@ -355,6 +380,47 @@ export class McpClientManager {
   }
 
   /**
+   * PR 14 fix (review #4247 wenshao R7 line 464): drop a server's
+   * entry from the per-pass refusal log, if present. The
+   * `indexOf` + `splice` pattern was repeated at 4 sites
+   * (`removeServer`, `disconnectServer`, `runWithDiscoveryTimeout`
+   * timeout handler, `readResource` late-reserve clear). Centralizing
+   * here makes future fixes (e.g. emitting an `mcp_budget_cleared`
+   * event when the entry is dropped) a one-place change.
+   */
+  private dropRefusalEntry(serverName: string): void {
+    const idx = this.lastRefusedServerNames.indexOf(serverName);
+    if (idx >= 0) {
+      this.lastRefusedServerNames.splice(idx, 1);
+    }
+  }
+
+  /**
+   * PR 14 fix (review #4247 wenshao R7 line 464): record a refusal +
+   * emit the operator-visible stderr breadcrumb. The push +
+   * stderr.write block was repeated at 3 sites (`discoverAllMcpTools`
+   * + `discoverAllMcpToolsIncremental` + `discoverMcpToolsForServerInternal`).
+   * Centralizing here keeps the message format consistent and makes
+   * future telemetry additions (e.g. `recordStartupEvent` per
+   * refusal) a one-place change.
+   *
+   * Idempotent on the push: if `serverName` is already in the list
+   * (rare but possible for the lazy-spawn refusal path which can be
+   * reached more than once for the same server), the array isn't
+   * grown. The stderr line still fires so the operator sees the
+   * refusal at every reproduction.
+   */
+  private refuseAndLog(serverName: string): void {
+    if (!this.lastRefusedServerNames.includes(serverName)) {
+      this.lastRefusedServerNames.push(serverName);
+    }
+    process.stderr.write(
+      `qwen serve: MCP server '${serverName}' refused (budget exhausted, ` +
+        `budget=${this.clientBudget}, mode=enforce)\n`,
+    );
+  }
+
+  /**
    * PR 14 fix (review #4247 wenshao S5): post-discovery budget
    * telemetry was duplicated verbatim in `discoverAllMcpTools` and
    * `discoverAllMcpToolsIncremental`. Centralized here so future
@@ -416,11 +482,7 @@ export class McpClientManager {
         // reflects the configured set. `off` is a no-op.
         const reservation = this.tryReserveSlot(name);
         if (reservation === 'refused') {
-          this.lastRefusedServerNames.push(name);
-          process.stderr.write(
-            `qwen serve: MCP server '${name}' refused (budget exhausted, ` +
-              `budget=${this.clientBudget}, mode=enforce)\n`,
-          );
+          this.refuseAndLog(name);
           return;
         }
 
@@ -527,6 +589,24 @@ export class McpClientManager {
     if (!serverConfig) {
       return;
     }
+    // PR 14 fix (review #4247 wenshao R7 line 528): disabled gate.
+    // `discoverMcpToolsForServerInternal` is reachable from
+    // `/mcp reconnect`, OAuth re-discovery, and the health monitor's
+    // `reconnectServer`. Without this check those paths could
+    // resurrect a server the operator has explicitly disabled,
+    // wasting a budget slot and registering tools the user told us
+    // to ignore. Mirrors the disabled checks in
+    // `discoverAllMcpTools` + `discoverAllMcpToolsIncremental` +
+    // `readResource`.
+    //
+    // Optional-chain on `isMcpServerDisabled` is defensive against
+    // test fixtures that omit the method (the bulk paths already
+    // assume it exists; this single-server path was the laggard).
+    // Production `Config` always defines the method.
+    if (this.cliConfig.isMcpServerDisabled?.(serverName)) {
+      debugLogger.debug(`Skipping disabled MCP server: ${serverName}`);
+      return;
+    }
 
     // PR 14 fix (review #4247): single-server rediscovery (reachable from
     // `/mcp reconnect <name>` and `ToolRegistry.discoverToolsForServer`)
@@ -540,13 +620,7 @@ export class McpClientManager {
     // failure.
     const reservation = this.tryReserveSlot(serverName);
     if (reservation === 'refused') {
-      if (!this.lastRefusedServerNames.includes(serverName)) {
-        this.lastRefusedServerNames.push(serverName);
-      }
-      process.stderr.write(
-        `qwen serve: MCP server '${serverName}' refused (budget exhausted, ` +
-          `budget=${this.clientBudget}, mode=enforce)\n`,
-      );
+      this.refuseAndLog(serverName);
       return;
     }
     // PR 14 fix (review #4247 wenshao R3-R4): track whether THIS call
@@ -605,6 +679,17 @@ export class McpClientManager {
     try {
       await client.connect();
       await client.discover(cliConfig);
+      // PR 14 fix (review #4247 wenshao R7 line 612): a server that
+      // was refused at a previous discovery pass and is now
+      // successfully (re)connected via this path (e.g. `/mcp
+      // reconnect`, health-monitor retry after another server was
+      // removed) leaves a stale entry in `lastRefusedServerNames`.
+      // The snapshot would then report `error / disabledReason:
+      // 'budget'` for a CONNECTED server until the next discovery
+      // pass clears the per-pass log. Clear it here so post-success
+      // snapshots immediately reflect reality. Mirrors the same
+      // pattern in `readResource`'s late-reserve branch.
+      this.dropRefusalEntry(serverName);
     } catch (error) {
       // PR 14 fix (review #4247 wenshao R3 line 546): two-mode
       // cleanup for connect failure, matching the `readResource`
@@ -630,6 +715,20 @@ export class McpClientManager {
       // (lazy spawn) catch. All three paths now use the same
       // weReserved-driven cleanup.
       if (weReservedSlot) {
+        // PR 14 fix (review #4247 wenshao R7 line 634): transport
+        // leak — when `connect()` succeeded (transport established)
+        // but `discover()` later threw, deleting the client without
+        // calling `disconnect()` left the stdio child process /
+        // socket alive until Node exits. Best-effort disconnect
+        // here closes the transport before dropping our reference.
+        // Errors from disconnect are intentionally swallowed
+        // (we're already in a discovery-failure catch; double-
+        // throwing would lose the original error context).
+        try {
+          await client.disconnect();
+        } catch {
+          // best-effort transport cleanup
+        }
         this.reservedSlots.delete(serverName);
         this.clients.delete(serverName);
       }
@@ -712,10 +811,7 @@ export class McpClientManager {
     // calls `existingClient.disconnect()` directly, NOT this public
     // method, so reconnect still doesn't release the slot.
     this.reservedSlots.delete(serverName);
-    const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
-    if (refusedIdx >= 0) {
-      this.lastRefusedServerNames.splice(refusedIdx, 1);
-    }
+    this.dropRefusalEntry(serverName);
   }
 
   getDiscoveryState(): MCPDiscoveryState {
@@ -1127,10 +1223,7 @@ export class McpClientManager {
         // when a slot becomes free again, and snapshot consumers
         // shouldn't keep tagging a now-slotless server as
         // `disabledReason: 'budget'`.
-        const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
-        if (refusedIdx >= 0) {
-          this.lastRefusedServerNames.splice(refusedIdx, 1);
-        }
+        this.dropRefusalEntry(serverName);
         reject(
           new Error(
             `MCP server '${serverName}' discovery timed out after ${timeoutMs}ms`,
@@ -1222,10 +1315,7 @@ export class McpClientManager {
     // stale-tag the (now-disabled or now-removed) server as
     // `disabledReason: 'budget'`. Operator action wins over the
     // last-pass startup refusal record.
-    const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
-    if (refusedIdx >= 0) {
-      this.lastRefusedServerNames.splice(refusedIdx, 1);
-    }
+    this.dropRefusalEntry(serverName);
 
     // Remove tools for this server from registry
     this.toolRegistry.removeMcpToolsByServer(serverName);
@@ -1292,16 +1382,24 @@ export class McpClientManager {
       // consumer that benefits from a typed error it can render.
       const reservation = this.tryReserveSlot(serverName);
       if (reservation === 'refused') {
-        if (!this.lastRefusedServerNames.includes(serverName)) {
-          this.lastRefusedServerNames.push(serverName);
-        }
+        // R7 #7 helper: refuseAndLog records the entry + emits the
+        // operator-visible stderr breadcrumb. Calling it BEFORE the
+        // throw so operators get the same stderr trail as bulk
+        // discovery refusals — the throw alone doesn't surface to
+        // stderr (caller decides what to do with the typed error).
+        this.refuseAndLog(serverName);
         throw new BudgetExhaustedError(
           serverName,
           this.clientBudget as number,
           this.reservedSlots.size,
         );
       }
-      weReservedSlot = reservation === 'reserved';
+      // R7 #4: align with `discoverMcpToolsForServerInternal` —
+      // `tryReserveSlot` returns `'reserved'` in `off` mode WITHOUT
+      // adding to the set. The `.has` guard ensures we only treat it
+      // as a real reservation when the slot was actually taken.
+      weReservedSlot =
+        reservation === 'reserved' && this.reservedSlots.has(serverName);
 
       // PR 14 fix (review #4247 wenshao R5 line 1268-1): a server
       // that was refused at discovery time stays in
@@ -1313,10 +1411,7 @@ export class McpClientManager {
       // `disabledReason: 'budget'`. Drop the stale entry here so
       // the next snapshot reflects the late-reservation success.
       if (weReservedSlot) {
-        const refusedIdx = this.lastRefusedServerNames.indexOf(serverName);
-        if (refusedIdx >= 0) {
-          this.lastRefusedServerNames.splice(refusedIdx, 1);
-        }
+        this.dropRefusalEntry(serverName);
       }
 
       const sdkCallback = isSdkMcpServerConfig(serverConfig)
@@ -1334,6 +1429,19 @@ export class McpClientManager {
       );
       this.clients.set(serverName, client);
       this.eventEmitter?.emit('mcp-client-update', this.clients);
+    }
+
+    // PR 14 fix (review #4247 wenshao R7 line 1342): when an already-
+    // tracked client exists (the `if (!client)` block above is
+    // skipped), the disabled gate added in R3 #5 doesn't fire. So a
+    // server connected pre-disable, then operator-disabled mid-
+    // session via `/mcp disable <name>` or a settings reload, would
+    // still serve resource reads via its existing CONNECTED client
+    // until the next incremental discovery pass calls `removeServer`.
+    // Re-check disabled state on every readResource, regardless of
+    // whether the client was just lazy-spawned or pre-existing.
+    if (this.cliConfig.isMcpServerDisabled(serverName)) {
+      throw new Error(`MCP server '${serverName}' is disabled.`);
     }
 
     if (client.getStatus() !== MCPServerStatus.CONNECTED) {

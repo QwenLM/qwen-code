@@ -1714,6 +1714,141 @@ describe('McpClientManager — PR 14 guardrails', () => {
     expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['b']);
   });
 
+  it('discoverMcpToolsForServer clears stale refused entry on success (wenshao R7 #1 line 612)', async () => {
+    // Critical: a previously-refused server that connects successfully
+    // (e.g. via /mcp reconnect after another server frees a slot)
+    // would leave a stale entry in lastRefusedServerNames, so the
+    // snapshot reported `disabledReason: 'budget'` for a CONNECTED
+    // server until the next discovery pass cleared the per-pass log.
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    const config = configWithServers({
+      a: { command: 'node' },
+      b: { command: 'node' },
+    });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual(['b']);
+    // Free a slot.
+    await manager.disconnectServer('a');
+    // Manual /mcp reconnect path exercises discoverMcpToolsForServer.
+    await manager.discoverMcpToolsForServer('b', config);
+    // The successful late connect must clear the stale refusal entry.
+    expect(manager.getMcpClientAccounting().refusedServerNames).toEqual([]);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual(['b']);
+  });
+
+  it('discoverMcpToolsForServerInternal rejects disabled servers (wenshao R7 #2 line 528)', async () => {
+    // Reachable from /mcp reconnect, OAuth re-discovery, and health
+    // monitor reconnect. Pre-fix none of these paths checked the
+    // disabled flag, so a disabled server could be resurrected.
+    let createdCount = 0;
+    vi.mocked(McpClient).mockImplementation(() => {
+      createdCount += 1;
+      return makeConnectedMcpClientMock() as unknown as McpClient;
+    });
+    const config = configWithServers(
+      { a: { command: 'node' } },
+      {
+        isMcpServerDisabled: ((name: string) =>
+          name === 'a') as Config['isMcpServerDisabled'],
+      },
+    );
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    await manager.discoverMcpToolsForServer('a', config);
+    expect(createdCount).toBe(0);
+  });
+
+  it('discoverMcpToolsForServerInternal disconnects on discover() failure (wenshao R7 #3 line 634)', async () => {
+    // Pre-fix: `connect()` succeeds + `discover()` throws → catch
+    // deletes the client from the map without calling
+    // `disconnect()`, leaking the stdio child.
+    let disconnectCalls = 0;
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockRejectedValue(new Error('discover failed')),
+          disconnect: vi.fn().mockImplementation(() => {
+            disconnectCalls += 1;
+            return Promise.resolve();
+          }),
+          getStatus: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const config = configWithServers({ x: { command: 'node' } });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverMcpToolsForServer('x', config);
+    // Slot released on weReservedSlot+catch path AND the transport
+    // was closed before dropping the client reference.
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+    expect(disconnectCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it('readBudgetFromEnv emits stderr warning on invalid budget value (wenshao R7 #6 line 191)', async () => {
+    const writeSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    process.env['QWEN_SERVE_MCP_CLIENT_BUDGET'] = 'abc';
+    try {
+      const config = configWithServers({});
+      const manager = new McpClientManager(config, {} as ToolRegistry);
+      expect(manager.getMcpClientBudget()).toBeUndefined();
+      // Operator-visible breadcrumb landed on stderr.
+      const calls = writeSpy.mock.calls.map((c) => String(c[0]));
+      expect(
+        calls.some(
+          (s) =>
+            s.includes('ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET') &&
+            s.includes("'abc'"),
+        ),
+      ).toBe(true);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it('readResource rejects existing-but-now-disabled servers (wenshao R7 #5 line 1342)', async () => {
+    // Pre-fix: a server connected pre-disable and then operator-
+    // disabled mid-session via settings reload would still serve
+    // resource reads via its existing CONNECTED client until the
+    // next incremental discovery pass called removeServer.
+    vi.mocked(McpClient).mockImplementation(
+      () => makeConnectedMcpClientMock() as unknown as McpClient,
+    );
+    let disabled = false;
+    const config = configWithServers(
+      { a: { command: 'node' } },
+      {
+        isMcpServerDisabled: ((name: string) =>
+          name === 'a' && disabled) as Config['isMcpServerDisabled'],
+      },
+    );
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    // First connect while NOT disabled.
+    await manager.discoverAllMcpTools(config);
+    // Now operator disables 'a' mid-session.
+    disabled = true;
+    // readResource on the EXISTING (still CONNECTED) client must
+    // reject — pre-fix this would have proceeded to client.readResource.
+    await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
+      /'a' is disabled/,
+    );
+  });
+
   it('discoverMcpToolsForServer reconnect-attempt connect-failure KEEPS slot (wenshao R4 C2 already_held)', async () => {
     // Distinguish from the previous test: same call signature, but
     // here the slot is already-held (from a prior successful connect
