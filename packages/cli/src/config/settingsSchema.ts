@@ -652,6 +652,16 @@ const SETTINGS_SCHEMA = {
         description: 'Custom theme definitions.',
         showInDialog: false,
       },
+      hideBuiltinWorktreeIndicator: {
+        type: 'boolean',
+        label: 'Hide Built-in Worktree Indicator',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'When true, the built-in `⎇ worktree-<branch> (<slug>)` line in the Footer is hidden. The worktree state is still surfaced to custom statusline scripts via the stdin payload (`worktree.{name, path, branch, original_cwd, original_branch}`). Keep at the default `false` unless your custom statusline renders the worktree itself — otherwise an active worktree silently has no UI affordance.',
+        showInDialog: false,
+      },
       hideWindowTitle: {
         type: 'boolean',
         label: 'Hide Window Title',
