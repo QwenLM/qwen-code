@@ -131,7 +131,7 @@ export interface QuitActionReturn {
  */
 export interface MessageActionReturn {
   type: 'message';
-  messageType: 'info' | 'error';
+  messageType: 'info' | 'warning' | 'error';
   content: string;
 }
 
@@ -142,7 +142,7 @@ export interface MessageActionReturn {
 export interface StreamMessagesActionReturn {
   type: 'stream_messages';
   messages: AsyncGenerator<
-    { messageType: 'info' | 'error'; content: string },
+    { messageType: 'info' | 'warning' | 'error'; content: string },
     void,
     unknown
   >;
@@ -173,6 +173,7 @@ export interface OpenDialogActionReturn {
     | 'theme'
     | 'editor'
     | 'settings'
+    | 'statusline'
     | 'memory'
     | 'model'
     | 'fast-model'
@@ -361,23 +362,22 @@ export interface SlashCommand {
   argumentHint?: string;
 
   /**
+   * Whether command-picker clients should wait for additional user input before
+   * submitting this command. Defaults are inferred from command metadata.
+   */
+  acceptsInput?: boolean;
+
+  /**
    * Describes when to use this command — injected into the model-visible
    * description for modelInvocable commands.
    */
   whenToUse?: string;
 
   /**
-   * Non-localized description reserved for model-visible metadata.
-   * Dynamic command localization may rewrite `description` for UI display while
-   * keeping this value stable for model invocation hints.
+   * Non-localized description reserved for model-visible metadata. Stays stable
+   * across UI locale changes; `description` is what the UI surface renders.
    */
   modelDescription?: string;
-
-  /**
-   * Marks command descriptions that should be localized at runtime to match the
-   * current UI language.
-   */
-  localizeDescription?: boolean;
 
   /** Usage examples shown in Help and completion. */
   examples?: string[];

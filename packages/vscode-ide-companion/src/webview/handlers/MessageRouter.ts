@@ -48,6 +48,7 @@ export class MessageRouter {
       conversationStore,
       currentConversationId,
       sendToWebView,
+      (id) => this.setCurrentConversationId(id),
     );
 
     this.fileHandler = new FileMessageHandler(

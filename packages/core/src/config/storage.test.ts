@@ -4,10 +4,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
+
+const mockRealpathSync = vi.hoisted(() => vi.fn());
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const mocked = {
+    ...actual,
+    realpathSync: mockRealpathSync,
+  };
+  return {
+    ...mocked,
+    default: mocked,
+  };
+});
+
+const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+
+function createEnoent(pathToResolve: string): NodeJS.ErrnoException {
+  const error = new Error(
+    `ENOENT: no such file or directory, realpath '${pathToResolve}'`,
+  ) as NodeJS.ErrnoException;
+  error.code = 'ENOENT';
+  return error;
+}
+
+function mockRealpath(
+  resolutions: Map<string, string>,
+  missingPaths = new Set<string>(),
+): void {
+  mockRealpathSync.mockImplementation((pathToResolve) => {
+    const resolvedPath = pathToResolve.toString();
+    if (missingPaths.has(resolvedPath)) {
+      throw createEnoent(resolvedPath);
+    }
+    return resolutions.get(resolvedPath) ?? resolvedPath;
+  });
+}
 
 describe('Storage – getGlobalSettingsPath', () => {
   it('returns path to ~/.qwen/settings.json', () => {
@@ -154,6 +191,152 @@ describe('Storage – getRuntimeBaseDir / setRuntimeBaseDir', () => {
   it('handles bare tilde (~) as home directory', () => {
     Storage.setRuntimeBaseDir('~');
     expect(Storage.getRuntimeBaseDir()).toBe(os.homedir());
+  });
+});
+
+describe('Storage – getPlansDir', () => {
+  const projectRoot = path.resolve('workspace', 'project');
+
+  beforeEach(() => {
+    mockRealpathSync.mockImplementation((pathToResolve) =>
+      actualFs.realpathSync(pathToResolve),
+    );
+  });
+
+  afterEach(() => {
+    mockRealpathSync.mockReset();
+  });
+
+  it('defaults to ~/.qwen/plans when plansDirectory is not configured', () => {
+    expect(Storage.getPlansDir(projectRoot)).toBe(
+      path.join(Storage.getGlobalQwenDir(), 'plans'),
+    );
+  });
+
+  it('resolves relative plansDirectory values against the project root', () => {
+    expect(Storage.getPlansDir(projectRoot, './project-plans')).toBe(
+      path.join(projectRoot, 'project-plans'),
+    );
+  });
+
+  it('expands tilde in configured plansDirectory values', () => {
+    const projectInHome = path.join(os.homedir(), 'workspace', 'project');
+    expect(
+      Storage.getPlansDir(projectInHome, '~/workspace/project/plans'),
+    ).toBe(path.join(projectInHome, 'plans'));
+  });
+
+  it('allows absolute plansDirectory values inside the project root', () => {
+    const plansDir = path.join(projectRoot, 'nested', 'plans');
+    expect(Storage.getPlansDir(projectRoot, plansDir)).toBe(plansDir);
+  });
+
+  it('rejects relative plansDirectory values that escape the project root', () => {
+    expect(() => Storage.getPlansDir(projectRoot, '../plans')).toThrow(
+      'plansDirectory must resolve within the project root',
+    );
+  });
+
+  it('rejects absolute plansDirectory values outside the project root', () => {
+    const outsideProject = path.join(path.dirname(projectRoot), 'plans');
+    expect(() => Storage.getPlansDir(projectRoot, outsideProject)).toThrow(
+      'plansDirectory must resolve within the project root',
+    );
+  });
+
+  it('requires projectRoot when plansDirectory is configured', () => {
+    expect(() => Storage.getPlansDir(undefined, './plans')).toThrow(
+      'projectRoot is required when plansDirectory is configured',
+    );
+    expect(() => Storage.getPlansDir(null, './plans')).toThrow(
+      'projectRoot is required when plansDirectory is configured',
+    );
+  });
+
+  it('rejects Windows-style absolute path outside the project root', () => {
+    // Simulate project root on C: drive and plansDirectory on D: drive
+    const projectOnC = path.resolve('C:', 'work', 'project');
+    const plansOnD = path.resolve('D:', 'plans');
+    expect(() => Storage.getPlansDir(projectOnC, plansOnD)).toThrow(
+      'plansDirectory must resolve within the project root',
+    );
+  });
+
+  it('rejects path with mixed separators that escapes project root', () => {
+    // On Windows, path.resolve normalizes backslashes as path separators.
+    // On POSIX, backslashes are literal characters, so this traversal
+    // is inherently Windows-specific and should be guarded.
+    if (process.platform !== 'win32') {
+      return;
+    }
+    const tricky = '..\\..\\plans'; // backslashes with traversal
+    expect(() => Storage.getPlansDir(projectRoot, tricky)).toThrow(
+      'plansDirectory must resolve within the project root',
+    );
+  });
+
+  it('rejects symlink pointing outside the project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const outside = path.resolve('tmp', 'outside');
+    const symlink = path.join(project, 'escape-link');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [symlink, outside],
+      ]),
+    );
+
+    expect(() => Storage.getPlansDir(project, './escape-link')).toThrow(
+      'plansDirectory must resolve within the project root',
+    );
+  });
+
+  it('allows legitimate symlink that stays within project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const target = path.join(project, 'plans-target');
+    const symlink = path.join(project, 'plans-link');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [symlink, target],
+      ]),
+    );
+
+    const result = Storage.getPlansDir(project, './plans-link');
+    // The configured symlink path is accepted as long as it stays inside
+    // the project root.
+    expect(result).toBe(symlink);
+  });
+
+  it('rejects missing nested path under symlink that escapes project root', () => {
+    const project = path.resolve('tmp', 'project');
+    const outside = path.resolve('tmp', 'outside');
+    const dataSymlink = path.join(project, 'data');
+    const missingSubdir = path.join(dataSymlink, 'subdir');
+    const missingPlans = path.join(missingSubdir, 'plans');
+    mockRealpath(
+      new Map([
+        [project, project],
+        [dataSymlink, outside],
+      ]),
+      new Set([missingPlans, missingSubdir]),
+    );
+
+    expect(() => Storage.getPlansDir(project, './data/subdir/plans')).toThrow(
+      'plansDirectory must resolve within the project root',
+    );
+  });
+
+  it('uses configured plansDirectory when building plan file paths', () => {
+    expect(Storage.getPlanFilePath('session-123', projectRoot, './plans')).toBe(
+      path.join(projectRoot, 'plans', 'session-123.md'),
+    );
+  });
+
+  it('sanitizes session IDs when building plan file paths', () => {
+    expect(
+      Storage.getPlanFilePath('../../../escape', projectRoot, './plans'),
+    ).toBe(path.join(projectRoot, 'plans', 'escape.md'));
   });
 });
 

@@ -16,6 +16,7 @@ import { SettingInputPrompt } from './SettingInputPrompt.js';
 import { PluginChoicePrompt } from './PluginChoicePrompt.js';
 import { ThemeDialog } from './ThemeDialog.js';
 import { SettingsDialog } from './SettingsDialog.js';
+import { StatusLineDialog } from './StatusLineDialog.js';
 import { QwenOAuthProgress } from './QwenOAuthProgress.js';
 import { ExternalAuthProgress } from './ExternalAuthProgress.js';
 import { AuthDialog } from '../auth/AuthDialog.js';
@@ -245,6 +246,19 @@ export const DialogManager = ({
       </Box>
     );
   }
+  if (uiState.isStatusLineDialogOpen) {
+    return (
+      <StatusLineDialog
+        settings={settings}
+        config={config}
+        uiState={uiState}
+        addItem={addItem}
+        onSaved={uiActions.notifyStatusLineSettingsChanged}
+        onClose={uiActions.closeStatusLineDialog}
+        availableTerminalHeight={terminalHeight - staticExtraHeight}
+      />
+    );
+  }
   if (uiState.isMemoryDialogOpen) {
     return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
   }
@@ -422,6 +436,7 @@ export const DialogManager = ({
   }
 
   if (uiState.isDeleteDialogOpen) {
+    const currentSessionId = config.getSessionId();
     return (
       <SessionPicker
         sessionService={config.getSessionService()}
@@ -429,6 +444,9 @@ export const DialogManager = ({
         onSelect={uiActions.handleDelete}
         onCancel={uiActions.closeDeleteDialog}
         title={t('Delete Session')}
+        enableMultiSelect
+        onConfirmMulti={uiActions.handleDeleteMany}
+        disabledIds={currentSessionId ? [currentSessionId] : undefined}
       />
     );
   }
@@ -439,6 +457,8 @@ export const DialogManager = ({
         history={uiState.history}
         onRewind={uiActions.handleRewindConfirm}
         onCancel={uiActions.closeRewindSelector}
+        fileCheckpointingEnabled={config.getFileCheckpointingEnabled()}
+        fileHistoryService={config.getFileHistoryService()}
       />
     );
   }

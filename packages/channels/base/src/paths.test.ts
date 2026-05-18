@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { getGlobalQwenDir } from './paths.js';
+import { getGlobalQwenDir, resolvePath } from './paths.js';
 
 describe('channels/base paths – getGlobalQwenDir', () => {
   const originalEnv = process.env['QWEN_HOME'];
@@ -43,5 +43,28 @@ describe('channels/base paths – getGlobalQwenDir', () => {
   it('treats bare tilde (~) as home directory', () => {
     process.env['QWEN_HOME'] = '~';
     expect(getGlobalQwenDir()).toBe(os.homedir());
+  });
+});
+
+describe('channels/base paths – resolvePath', () => {
+  it('returns absolute paths unchanged', () => {
+    const abs = path.resolve('/tmp/x');
+    expect(resolvePath(abs)).toBe(abs);
+  });
+
+  it('expands bare tilde (~) to home directory', () => {
+    expect(resolvePath('~')).toBe(os.homedir());
+  });
+
+  it('expands POSIX-style tilde (~/x)', () => {
+    expect(resolvePath('~/xomo')).toBe(path.join(os.homedir(), 'xomo'));
+  });
+
+  it('expands Windows-style tilde (~\\x)', () => {
+    expect(resolvePath('~\\xomo')).toBe(path.join(os.homedir(), 'xomo'));
+  });
+
+  it('resolves relative paths against process.cwd', () => {
+    expect(resolvePath('relative/dir')).toBe(path.resolve('relative/dir'));
   });
 });

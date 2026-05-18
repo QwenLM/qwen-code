@@ -10,7 +10,7 @@ import { getFileName } from '../utils/webviewUtils.js';
 import { showDiffCommand } from '../../commands/index.js';
 import {
   findLeftGroupOfChatWebview,
-  ensureLeftGroupOfChatWebview,
+  findRightGroupOfChatWebview,
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
 import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
@@ -673,16 +673,17 @@ export class FileMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      // Find or ensure left group of chat webview
-      let targetViewColumn = findLeftGroupOfChatWebview();
-      if (targetViewColumn === undefined) {
-        targetViewColumn = await ensureLeftGroupOfChatWebview();
-      }
+      // Find the nearest editor group to the left or right of the chat webview.
+      // Fall back to ViewColumn.Beside when neither neighbor exists or the webview is missing.
+      const targetViewColumn =
+        findLeftGroupOfChatWebview() ??
+        findRightGroupOfChatWebview() ??
+        vscode.ViewColumn.Beside;
 
-      // Open as readonly document in the left group and focus it (single click should be enough)
+      // Open as readonly document in the selected neighboring group and focus it (single click should be enough)
       const document = await vscode.workspace.openTextDocument(uri);
       await vscode.window.showTextDocument(document, {
-        viewColumn: targetViewColumn ?? vscode.ViewColumn.Beside,
+        viewColumn: targetViewColumn,
         preview: false,
         preserveFocus: false,
       });

@@ -393,11 +393,18 @@ export function ProviderSetupSteps({
   useKeypress(
     (key) => {
       if (step === 'advancedConfig') {
-        if (key.name === 'up') {
+        // The context-window row has an embedded TextInput that's conditionally
+        // active. Restrict the focus-row navigation to unambiguous shortcuts —
+        // arrow keys and the readline-style Ctrl+P/Ctrl+N — so typing a letter
+        // into the context-window field never simultaneously moves the focus.
+        const isFocusUp = key.name === 'up' || (key.ctrl && key.name === 'p');
+        const isFocusDown =
+          key.name === 'down' || (key.ctrl && key.name === 'n');
+        if (isFocusUp) {
           flow.moveAdvancedFocusUp();
           return;
         }
-        if (key.name === 'down') {
+        if (isFocusDown) {
           flow.moveAdvancedFocusDown();
           return;
         }

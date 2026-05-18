@@ -8,6 +8,7 @@ import { useState, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { t } from '../../../../i18n/index.js';
 import type { ServerListStepProps, MCPServerDisplayInfo } from '../types.js';
 import {
@@ -44,9 +45,9 @@ export const ServerListStep: React.FC<ServerListStepProps> = ({
 
   useKeypress(
     (key) => {
-      if (key.name === 'up') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setSelectedIndex((prev) => Math.max(0, prev - 1));
-      } else if (key.name === 'down') {
+      } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setSelectedIndex((prev) => Math.min(flatServers.length - 1, prev + 1));
       } else if (key.name === 'return') {
         onSelect(selectedIndex);

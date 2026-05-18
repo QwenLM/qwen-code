@@ -352,7 +352,7 @@ describe('<LiveAgentPanel />', () => {
           agentId: 'fg-1',
           subagentType: 'editor',
           description: 'editor: tighten import order',
-          flavor: 'foreground',
+          isBackgrounded: false,
         }),
       ],
     });
@@ -368,21 +368,28 @@ describe('<LiveAgentPanel />', () => {
   });
 
   it('windows from the tail when entries exceed maxRows', () => {
+    // Entries arrive newest-first from `useBackgroundTaskView`. The
+    // panel reverses internally so it can window from the tail in
+    // launch order, with the newest row sitting closest to the
+    // composer.
     const entries = [
       agentEntry({
-        agentId: 'a-1',
-        subagentType: 'old-agent',
-        description: 'old work',
+        agentId: 'a-3',
+        subagentType: 'fresh-agent',
+        description: 'fresh work',
+        startTime: 300,
       }),
       agentEntry({
         agentId: 'a-2',
         subagentType: 'mid-agent',
         description: 'mid work',
+        startTime: 200,
       }),
       agentEntry({
-        agentId: 'a-3',
-        subagentType: 'fresh-agent',
-        description: 'fresh work',
+        agentId: 'a-1',
+        subagentType: 'old-agent',
+        description: 'old work',
+        startTime: 100,
       }),
     ];
     const { lastFrame } = renderPanel({ entries, maxRows: 2 });

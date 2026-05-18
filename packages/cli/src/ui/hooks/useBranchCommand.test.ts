@@ -6,8 +6,12 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { SessionStartSource } from '@qwen-code/qwen-code-core';
 import { useBranchCommand } from './useBranchCommand.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
+
+vi.mock('../utils/restoreGoal.js', () => ({
+  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
+}));
 
 describe('useBranchCommand', () => {
   let forkSession: ReturnType<typeof vi.fn>;
@@ -17,7 +21,6 @@ describe('useBranchCommand', () => {
   let startNewSessionUI: ReturnType<typeof vi.fn>;
   let recordCustomTitle: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
-  let fireSessionStartEvent: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
   let loadHistory: ReturnType<typeof vi.fn>;
   let setSessionName: ReturnType<typeof vi.fn>;
@@ -51,6 +54,7 @@ describe('useBranchCommand', () => {
   });
 
   beforeEach(() => {
+    vi.mocked(restoreGoalFromHistory).mockClear();
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
@@ -64,7 +68,6 @@ describe('useBranchCommand', () => {
     finalize = vi.fn();
     recordCustomTitle = vi.fn().mockReturnValue(true);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
-    fireSessionStartEvent = vi.fn();
     startNewSessionConfig = vi.fn();
     startNewSessionUI = vi.fn();
     clearItems = vi.fn();
@@ -81,10 +84,7 @@ describe('useBranchCommand', () => {
       }),
       getChatRecordingService: () => ({ finalize, recordCustomTitle }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
-      getHookSystem: () => ({ fireSessionStartEvent }),
       startNewSession: startNewSessionConfig,
-      getModel: () => 'test-model',
-      getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
   });
@@ -124,6 +124,23 @@ describe('useBranchCommand', () => {
       'load', // forked session
       'config.start',
     ]);
+  });
+
+  it('re-arms /goal against the forked sessionId after the UI swap', async () => {
+    // The branched JSONL is a verbatim copy of the parent's, so an active
+    // goal sentinel rides along. Without this restore call the forked
+    // session inherits the goal in transcript only — store stays empty,
+    // footer pill shows nothing, and the Stop hook never fires under the
+    // new sessionId. Same root cause as the /resume gap; pin it here.
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
+      expect.any(Array),
+      config,
+      addItem,
+    );
   });
 
   it('records the user-provided name with a (Branch) suffix', async () => {
@@ -242,17 +259,17 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('fires SessionStart with SessionStartSource.Branch (not Resume)', async () => {
+  it('initializes GeminiClient with SessionStartSource.Branch', async () => {
+    const initialize = vi.fn().mockResolvedValue(undefined);
+    config.getGeminiClient = () => ({ initialize });
+
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
-    expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);
-    expect(fireSessionStartEvent).toHaveBeenCalledWith(
-      SessionStartSource.Branch,
-      expect.any(String),
-      expect.any(String),
-    );
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(initialize).toHaveBeenCalledWith('branch');
   });
 
   it('omits the quoted-title fragment when no name is provided', async () => {

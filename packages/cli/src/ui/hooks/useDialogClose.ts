@@ -34,6 +34,10 @@ export interface DialogCloseOptions {
   isSettingsDialogOpen: boolean;
   closeSettingsDialog: () => void;
 
+  // Status line dialog
+  isStatusLineDialogOpen: boolean;
+  closeStatusLineDialog: () => void;
+
   // Memory dialog
   isMemoryDialogOpen: boolean;
   closeMemoryDialog: () => void;
@@ -88,6 +92,11 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isSettingsDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined, selectedScope)
       options.closeSettingsDialog();
+      return true;
+    }
+
+    if (options.isStatusLineDialogOpen) {
+      options.closeStatusLineDialog();
       return true;
     }
 
