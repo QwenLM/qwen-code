@@ -149,6 +149,95 @@ describe('createAuditPublisher', () => {
     expect(events[0].data).not.toHaveProperty('hint');
   });
 
+  it('attaches pattern field for fs.access on glob intent in raw-paths mode', () => {
+    // `pattern` rides on the same privacy gate as `relPath` /
+    // `message` — glob patterns commonly carry path fragments
+    // (`src/secrets/*.env`, `/Users/alice/ws/**`), so they're
+    // suppressed unless the operator opted into raw paths.
+    const { events, publisher, workspace } = setup({ includeRawPaths: true });
+    publisher.recordAccess(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        absolute: workspace,
+        durationMs: 7,
+        sizeBytes: 12,
+        pattern: '**/*.ts',
+      },
+    );
+    expect(events[0].data).toMatchObject({
+      kind: FS_ACCESS_EVENT_TYPE,
+      intent: 'glob',
+      pattern: '**/*.ts',
+      pathHash: expectedHash(workspace),
+    });
+  });
+
+  it('attaches pattern field for fs.denied on glob intent in raw-paths mode', () => {
+    const { events, publisher } = setup({ includeRawPaths: true });
+    publisher.recordDenied(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        input: '../../**',
+        errorKind: 'parse_error',
+        pattern: '../../**',
+      },
+    );
+    expect(events[0].data).toMatchObject({
+      kind: FS_DENIED_EVENT_TYPE,
+      intent: 'glob',
+      errorKind: 'parse_error',
+      pattern: '../../**',
+    });
+  });
+
+  it('strips pattern from fs.access in privacy mode (default)', () => {
+    // Default `includeRawPaths: false`. Even though the orchestrator
+    // passed a literal pattern, the publisher must not echo it —
+    // glob patterns can leak path content the operator opted out of
+    // logging.
+    const { events, publisher, workspace } = setup();
+    publisher.recordAccess(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        absolute: workspace,
+        durationMs: 1,
+        pattern: 'src/secrets/*.env',
+      },
+    );
+    expect(events[0].data).not.toHaveProperty('pattern');
+    expect(events[0].data).not.toHaveProperty('relPath');
+  });
+
+  it('strips pattern from fs.denied in privacy mode (default)', () => {
+    const { events, publisher } = setup();
+    publisher.recordDenied(
+      { route: 'GET /glob' },
+      {
+        intent: 'glob',
+        input: '../../**',
+        errorKind: 'parse_error',
+        pattern: '../../**',
+      },
+    );
+    expect(events[0].data).not.toHaveProperty('pattern');
+  });
+
+  it('omits pattern when not provided', () => {
+    const { events, publisher, workspace } = setup();
+    publisher.recordAccess(
+      { route: 'GET /file' },
+      {
+        intent: 'read',
+        absolute: path.join(workspace, 'a.ts') as ResolvedPath,
+        durationMs: 0,
+      },
+    );
+    expect(events[0].data).not.toHaveProperty('pattern');
+  });
+
   it('respects QWEN_AUDIT_RAW_PATHS=1 via env when includeRawPaths is unset', () => {
     const original = process.env['QWEN_AUDIT_RAW_PATHS'];
     process.env['QWEN_AUDIT_RAW_PATHS'] = '1';

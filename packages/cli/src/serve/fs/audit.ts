@@ -77,6 +77,16 @@ export interface FsAccessAuditPayload {
   truncated?: boolean;
   matchedIgnore?: 'file' | 'directory';
   durationMs: number;
+  /**
+   * Literal glob pattern. Populated only for `intent === 'glob'`,
+   * where `pathHash` would otherwise hash the bound workspace and
+   * provide no per-call information. The pattern is recorded
+   * verbatim (not hashed) because it does not carry path content
+   * — the per-hit canonical paths are NOT logged here. Audit
+   * consumers correlate the workspace via `pathHash` and the
+   * specific call via `pattern`.
+   */
+  pattern?: string;
 }
 
 export interface FsDeniedAuditPayload {
@@ -99,6 +109,8 @@ export interface FsDeniedAuditPayload {
    * error into an `FsError` whose message we can quote.
    */
   message?: string;
+  /** See `FsAccessAuditPayload.pattern` — same semantics. */
+  pattern?: string;
 }
 
 /**
@@ -128,6 +140,20 @@ export interface AuditPublisher {
     },
   ): void;
 }
+
+// Why the request types `Omit` four fields and pass `pattern`
+// through:
+//
+// `recordAccess` / `recordDenied` callers describe the event in
+// domain terms (intent, durationMs, errorKind, ...); the publisher
+// synthesizes the wire-shaped fields the schema needs: `kind`,
+// `pathHash`, `relPath`, and `route`. Hiding those fields behind
+// `Omit` prevents callers from fabricating values that do not match
+// what the publisher serializes.
+//
+// `pattern` is the one optional field that survives the Omit: only
+// the orchestrator's glob path knows the literal pattern, and the
+// publisher cannot synthesize it from anything else.
 
 /**
  * SHA-256 over the canonical absolute path, truncated to 16 hex
@@ -227,6 +253,16 @@ export function createAuditPublisher(
       if (record.sizeBytes !== undefined) payload.sizeBytes = record.sizeBytes;
       if (record.truncated) payload.truncated = true;
       if (record.matchedIgnore) payload.matchedIgnore = record.matchedIgnore;
+      // `pattern` shares the same privacy gate as `relPath` and
+      // `message`. Glob patterns commonly embed workspace-relative
+      // or absolute path fragments (`src/secrets/*.env`,
+      // `/Users/alice/ws/**`), so emitting the literal pattern in
+      // privacy mode would bypass the same redaction the other
+      // path-bearing fields honor. Operators wanting full forensic
+      // context opt in via `QWEN_AUDIT_RAW_PATHS=1`.
+      if (record.pattern !== undefined && includeRawPaths) {
+        payload.pattern = record.pattern;
+      }
       if (includeRawPaths) {
         payload.relPath = relForAudit(absolute, boundWorkspace);
       }
@@ -261,6 +297,14 @@ export function createAuditPublisher(
       // opt in via `QWEN_AUDIT_RAW_PATHS=1`.
       if (record.message && includeRawPaths) {
         payload.message = record.message;
+      }
+      // Same privacy gate as the success-path `pattern` above
+      // (and as `relPath` / `message` here). Reject-pattern denials
+      // (`../**`, `/etc/**`) are themselves path content; emitting
+      // them in privacy mode would let the audit log echo exactly
+      // what the operator opted out of seeing.
+      if (record.pattern !== undefined && includeRawPaths) {
+        payload.pattern = record.pattern;
       }
       if (includeRawPaths) {
         payload.relPath = relForAudit(record.input, boundWorkspace);
