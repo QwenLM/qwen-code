@@ -647,20 +647,17 @@ if !ERRORLEVEL! NEQ 0 (
     exit /b 1
 )
 
-set "VERSION_POINTER_VALUE="
-for /f "usebackq tokens=* delims= " %%V in ("!TEMP_VERSION_FILE!") do if not defined VERSION_POINTER_VALUE set "VERSION_POINTER_VALUE=%%V"
-set "VERSION_POINTER_VALUE=!VERSION_POINTER_VALUE: =!"
-if not "!VERSION_POINTER_VALUE!"=="" (
-    call :ValidateSemverValue "!VERSION_POINTER_VALUE!"
-    if !ERRORLEVEL! EQU 0 (
-        if /i "!VERSION_POINTER_VALUE:~0,1!"=="v" (
-            set "RESOLVED_VERSION_PATH=!VERSION_POINTER_VALUE!"
-        ) else (
-            set "RESOLVED_VERSION_PATH=v!VERSION_POINTER_VALUE!"
-        )
-    )
+set "NORMALIZED_VERSION_FILE=!TEMP_VERSION_FILE!.normalized"
+set "QWEN_VERSION_POINTER_FILE=!TEMP_VERSION_FILE!"
+set "QWEN_NORMALIZED_VERSION_FILE=!NORMALIZED_VERSION_FILE!"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = [IO.File]::ReadAllText($env:QWEN_VERSION_POINTER_FILE).Trim(); $value = $value.Trim([char]0xfeff); if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { if (-not $value.StartsWith('v')) { $value = 'v' + $value }; [IO.File]::WriteAllText($env:QWEN_NORMALIZED_VERSION_FILE, $value, [Text.UTF8Encoding]::new($false)); exit 0 }; exit 1"
+if !ERRORLEVEL! EQU 0 (
+    for /f "usebackq delims=" %%V in ("!NORMALIZED_VERSION_FILE!") do if not defined RESOLVED_VERSION_PATH set "RESOLVED_VERSION_PATH=%%V"
 )
-set "VERSION_POINTER_VALUE="
+set "QWEN_VERSION_POINTER_FILE="
+set "QWEN_NORMALIZED_VERSION_FILE="
+if exist "!NORMALIZED_VERSION_FILE!" del /F /Q "!NORMALIZED_VERSION_FILE!" >nul 2>&1
+set "NORMALIZED_VERSION_FILE="
 if exist "!TEMP_VERSION_FILE!" del /F /Q "!TEMP_VERSION_FILE!" >nul 2>&1
 set "TEMP_VERSION_FILE="
 set "QWEN_OSS_LATEST_VERSION_URL="
@@ -672,13 +669,6 @@ if "!RESOLVED_VERSION_PATH!"=="" (
 
 echo INFO: Resolved Aliyun latest to !RESOLVED_VERSION_PATH!.
 exit /b 0
-
-:ValidateSemverValue
-set "QWEN_VERSION_VALUE=%~1"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$value = $env:QWEN_VERSION_VALUE; if ([string]::IsNullOrWhiteSpace($value)) { exit 1 }; $value = $value.Trim(); if ($value -match '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$') { exit 0 }; exit 1"
-set "PS_STATUS=%ERRORLEVEL%"
-set "QWEN_VERSION_VALUE="
-exit /b %PS_STATUS%
 
 :VerifyChecksum
 set "ARCHIVE_FILE=%~1"

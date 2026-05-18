@@ -223,15 +223,18 @@ describe('installation scripts', () => {
     expect(script).toContain('Installed to:');
     expect(script).toContain('Uninstall:');
     expect(script).toContain('uninstall-qwen-standalone.ps1');
-    expect(script).toContain('VERSION_POINTER_VALUE');
-    expect(script).toContain('call :ValidateSemverValue');
-    expect(script).toContain('RESOLVED_VERSION_PATH=v!VERSION_POINTER_VALUE!');
-    expect(script).toContain('QWEN_VERSION_VALUE');
-    expect(script).toContain(':ValidateSemverValue');
+    expect(script).toContain('QWEN_VERSION_POINTER_FILE');
+    expect(script).toContain('QWEN_NORMALIZED_VERSION_FILE');
+    expect(script).toContain('NORMALIZED_VERSION_FILE');
+    expect(script).toContain(
+      '[IO.File]::ReadAllText($env:QWEN_VERSION_POINTER_FILE)',
+    );
+    expect(script).toContain(
+      '[IO.File]::WriteAllText($env:QWEN_NORMALIZED_VERSION_FILE',
+    );
     expect(script).not.toContain(
       'findstr /R /C:"^[0-9][0-9]*\\.[0-9][0-9]*\\.[0-9][0-9]*$"',
     );
-    expect(script).not.toContain('QWEN_VERSION_POINTER_FILE');
     expect(script).not.toContain('rmdir /S /Q "!SUMMARY_INSTALL_DIR!"');
     expect(script).not.toContain('del /F /Q "!INSTALLED_BIN!"');
   });
