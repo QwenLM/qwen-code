@@ -3054,6 +3054,70 @@ describe('Windows installer end-to-end', () => {
   });
 });
 
+describe('Windows PowerShell uninstaller end-to-end', () => {
+  itOnWindows('prints help without deleting standalone files', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-uninstall-test-'));
+
+    try {
+      const installRoot = path.join(tmpDir, 'install');
+      const installDir = path.join(installRoot, 'qwen-code');
+      const home = path.join(tmpDir, 'home');
+      createFakeWindowsStandaloneInstall(installRoot);
+
+      const output = runWindowsPowerShellScript(
+        'scripts/installation/uninstall-qwen-standalone.ps1',
+        ['-Help'],
+        {
+          USERPROFILE: home,
+          QWEN_INSTALL_ROOT: installRoot,
+        },
+      ).toString();
+
+      expect(output).toContain('Usage:');
+      expect(output).toContain('-Purge');
+      expect(existsSync(installDir)).toBe(true);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnWindows('purges the source marker while preserving other config', () => {
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-uninstall-test-'));
+
+    try {
+      const installRoot = path.join(tmpDir, 'install');
+      const installDir = path.join(installRoot, 'qwen-code');
+      const installBinDir = path.join(installRoot, 'bin');
+      const home = path.join(tmpDir, 'home');
+      const qwenConfigDir = path.join(home, '.qwen');
+      const sourceMarker = path.join(qwenConfigDir, 'source.json');
+      const settingsFile = path.join(qwenConfigDir, 'settings.json');
+
+      createFakeWindowsStandaloneInstall(installRoot);
+      mkdirSync(qwenConfigDir, { recursive: true });
+      writeFileSync(sourceMarker, '{"source":"smoke"}\n');
+      writeFileSync(settingsFile, '{"theme":"dark"}\n');
+
+      const output = runWindowsPowerShellScript(
+        'scripts/installation/uninstall-qwen-standalone.ps1',
+        ['-Purge'],
+        {
+          USERPROFILE: home,
+          QWEN_INSTALL_ROOT: installRoot,
+        },
+      ).toString();
+
+      expect(output).toContain('Removed');
+      expect(existsSync(installDir)).toBe(false);
+      expect(existsSync(path.join(installBinDir, 'qwen.cmd'))).toBe(false);
+      expect(existsSync(sourceMarker)).toBe(false);
+      expect(readScript(settingsFile)).toContain('"theme":"dark"');
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
 function ensureMinimalDist() {
   const distPath = path.resolve('dist');
   const backupPath = existsSync(distPath)
@@ -3185,6 +3249,30 @@ function createFakeWindowsStandaloneArchive(tmpDir) {
   return archive;
 }
 
+function createFakeWindowsStandaloneInstall(installRoot) {
+  const installDir = path.join(installRoot, 'qwen-code');
+  const installBinDir = path.join(installRoot, 'bin');
+  mkdirSync(path.join(installDir, 'bin'), { recursive: true });
+  mkdirSync(path.join(installDir, 'node'), { recursive: true });
+  mkdirSync(installBinDir, { recursive: true });
+
+  writeFileSync(
+    path.join(installDir, 'manifest.json'),
+    JSON.stringify({ name: '@qwen-code/qwen-code', target: 'win-x64' }),
+  );
+  writeFileSync(
+    path.join(installDir, 'bin', 'qwen.cmd'),
+    ['@echo off', 'echo 0.0.0-smoke', ''].join('\r\n'),
+  );
+  writeFileSync(path.join(installDir, 'node', 'node.exe'), 'fake node.exe\n');
+  writeFileSync(
+    path.join(installBinDir, 'qwen.cmd'),
+    ['@echo off', `"${path.join(installDir, 'bin', 'qwen.cmd')}" %*`, ''].join(
+      '\r\n',
+    ),
+  );
+}
+
 function createFakeWindowsNpmTools(fakeBin) {
   mkdirSync(fakeBin, { recursive: true });
   writeFileSync(
@@ -3222,7 +3310,19 @@ function createFakeWindowsCurlCommand(fakeBin) {
       'if "%~1"=="" goto done_parse',
       'set "arg=%~1"',
       'if "!arg:~0,1!"=="-" (',
-      '  echo(!arg! | findstr /C:"o" >nul && (',
+      '  if /i "!arg!"=="-o" (',
+      '    shift',
+      '    set "destination=%~1"',
+      '    shift',
+      '    goto parse_args',
+      '  )',
+      '  if /i "!arg!"=="--output" (',
+      '    shift',
+      '    set "destination=%~1"',
+      '    shift',
+      '    goto parse_args',
+      '  )',
+      '  if not "!arg:~0,2!"=="--" if /i "!arg:~-1!"=="o" (',
       '    shift',
       '    set "destination=%~1"',
       '    shift',
@@ -3457,18 +3557,61 @@ function runWindowsInstaller(
 
 function runWindowsCommand(command, env = {}) {
   const prepared = prepareWindowsCommand(command, env);
-  return execFileSync(
-    process.env.ComSpec || 'cmd.exe',
-    ['/d', '/c', prepared.command],
-    {
-      env: {
-        ...prepared.env,
+  try {
+    return execFileSync(
+      process.env.ComSpec || 'cmd.exe',
+      ['/d', '/c', prepared.command],
+      {
+        env: {
+          ...prepared.env,
+        },
+        stdio: 'pipe',
+        // cmd.exe parses the command string itself; preserve quoted paths.
+        windowsVerbatimArguments: true,
       },
-      stdio: 'pipe',
-      // cmd.exe parses the command string itself; preserve quoted paths.
-      windowsVerbatimArguments: true,
-    },
-  );
+    );
+  } catch (error) {
+    const processError = error;
+    throw new Error(
+      [
+        processError.message,
+        processError.stdout?.toString() || '',
+        processError.stderr?.toString() || '',
+      ].join('\n'),
+    );
+  }
+}
+
+function runWindowsPowerShellScript(scriptPath, args = [], env = {}) {
+  try {
+    return execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        path.resolve(scriptPath),
+        ...args,
+      ],
+      {
+        env: {
+          ...process.env,
+          ...env,
+        },
+        stdio: 'pipe',
+      },
+    );
+  } catch (error) {
+    const processError = error;
+    throw new Error(
+      [
+        processError.message,
+        processError.stdout?.toString() || '',
+        processError.stderr?.toString() || '',
+      ].join('\n'),
+    );
+  }
 }
 
 const WINDOWS_COMMAND_ENV_OVERRIDES = [

@@ -83,10 +83,76 @@ describe('parseUploadArgs', () => {
 });
 
 describe('uploadAssets (integration)', () => {
+  function prependProcessPath(directory) {
+    const pathKeys = Object.keys(process.env).filter(
+      (key) => key.toLowerCase() === 'path',
+    );
+    const pathKey = pathKeys[0] || 'PATH';
+    const previousValues = new Map(
+      pathKeys.map((key) => [key, process.env[key]]),
+    );
+    const nextValue = `${directory}${path.delimiter}${process.env[pathKey] || ''}`;
+
+    if (pathKeys.length === 0) {
+      process.env[pathKey] = nextValue;
+    } else {
+      for (const key of pathKeys) {
+        process.env[key] = nextValue;
+      }
+    }
+    return () => {
+      if (previousValues.size === 0) {
+        delete process.env[pathKey];
+        return;
+      }
+      for (const key of pathKeys) {
+        const previousValue = previousValues.get(key);
+        if (previousValue === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = previousValue;
+        }
+      }
+    };
+  }
+
   function makeOssutilShim(workDir, behavior = 'success') {
     fs.mkdirSync(workDir, { recursive: true });
-    const ossutilPath = path.join(workDir, 'ossutil');
+    const ossutilPath = path.join(
+      workDir,
+      process.platform === 'win32' ? 'ossutil.cmd' : 'ossutil',
+    );
     const logPath = path.join(workDir, 'ossutil.log');
+    if (process.platform === 'win32') {
+      const successScript = [
+        '@echo off',
+        ':log_args',
+        'if "%~1"=="" goto done_log_args',
+        `>>"${logPath}" echo(%~1`,
+        'shift',
+        'goto log_args',
+        ':done_log_args',
+        'exit /b 0',
+        '',
+      ].join('\r\n');
+      const failScript = [
+        '@echo off',
+        ':log_args',
+        'if "%~1"=="" goto done_log_args',
+        `>>"${logPath}" echo(%~1`,
+        'shift',
+        'goto log_args',
+        ':done_log_args',
+        'exit /b 1',
+        '',
+      ].join('\r\n');
+      fs.writeFileSync(
+        ossutilPath,
+        behavior === 'fail' ? failScript : successScript,
+      );
+      return { ossutilPath, logPath };
+    }
+
     const successScript = `#!/usr/bin/env bash
 printf '%s\\n' "$@" >> "${logPath}"
 exit 0
@@ -115,8 +181,7 @@ exit 1
       const configPath = path.join(tmp, '.ossutilconfig');
       fs.writeFileSync(configPath, '[Credentials]\n');
 
-      const previousPath = process.env.PATH;
-      process.env.PATH = `${tmp}${path.delimiter}${previousPath}`;
+      const restorePath = prependProcessPath(tmp);
       try {
         uploadAssets({
           assets,
@@ -125,7 +190,7 @@ exit 1
           prefix: 'releases/qwen-code/v0.0.0',
         });
       } finally {
-        process.env.PATH = previousPath;
+        restorePath();
       }
 
       const log = fs.readFileSync(logPath, 'utf8');
@@ -145,14 +210,13 @@ exit 1
   it('aggregates failures from ossutil non-zero exits', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-upload-fail-'));
     try {
-      makeOssutilShim(tmp, 'fail');
+      const { logPath } = makeOssutilShim(tmp, 'fail');
       const assetPath = path.join(tmp, 'asset.tar.gz');
       fs.writeFileSync(assetPath, 'asset');
       const configPath = path.join(tmp, '.ossutilconfig');
       fs.writeFileSync(configPath, '[Credentials]\n');
 
-      const previousPath = process.env.PATH;
-      process.env.PATH = `${tmp}${path.delimiter}${previousPath}`;
+      const restorePath = prependProcessPath(tmp);
       try {
         expect(() =>
           uploadAssets({
@@ -162,8 +226,13 @@ exit 1
             prefix: 'releases/qwen-code/v0.0.0',
           }),
         ).toThrow(/ossutil failed after 3 attempts/);
+        const uploadAttempts = fs
+          .readFileSync(logPath, 'utf8')
+          .split(/\r?\n/)
+          .filter((line) => line === assetPath);
+        expect(uploadAttempts).toHaveLength(3);
       } finally {
-        process.env.PATH = previousPath;
+        restorePath();
       }
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
