@@ -21,6 +21,21 @@ export interface WorktreeSession {
   slug: string;
   worktreePath: string;
   worktreeBranch: string;
+  /**
+   * The repo top-level (output of `GitWorktreeService.getRepoTopLevel()`)
+   * captured when the worktree was created — NOT the user's launch cwd.
+   *
+   * Named `originalCwd` for on-disk back-compat with sidecars written
+   * by earlier Phase C builds; semantically this is the value to pass
+   * back to `new GitWorktreeService(...)` for any subsequent cleanup
+   * (e.g. `handleWorktreeExit`'s remove path), because the worktree
+   * always lives under `<repoTopLevel>/.qwen/worktrees/`. When the
+   * CLI is launched from a monorepo subdirectory, `process.cwd()` and
+   * `getRepoTopLevel()` differ — this field stores the latter.
+   *
+   * Consumers expecting `process.cwd()` semantics should NOT use this
+   * field; capture cwd separately at the time of need.
+   */
   originalCwd: string;
   originalBranch: string;
   /**

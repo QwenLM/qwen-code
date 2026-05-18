@@ -1164,10 +1164,25 @@ export const AppContainer = (props: AppContainerProps) => {
           // removeUserWorktree returns {success, error} on failure — it
           // does NOT throw — so the previous try/catch never tripped on
           // a soft failure. If removal failed, leave the sidecar intact
-          // so the next --resume can still see the worktree and let the
-          // user retry. (Finding 3252368640 part 1.)
+          // so the next --resume can still see the worktree. Surface
+          // the error in history and stay in the session so the user
+          // can decide what to do (retry via exit_worktree, fix the
+          // underlying problem, or force-quit). Previously the dialog
+          // silently /quit on failure, contradicting the "discards N
+          // commits, M files" intent the user clicked Remove on.
+          // (Findings 3252368640 part 1 + 3256237933.)
           if (!result.success) {
-            handleSlashCommand('/quit');
+            historyManager.addItem(
+              {
+                type: MessageType.ERROR,
+                text:
+                  `Failed to remove worktree "${activeWorktree.slug}": ` +
+                  `${result.error ?? 'unknown error'}. The worktree is ` +
+                  `still on disk; use \`exit_worktree\` to retry or ` +
+                  `remove it manually with \`git worktree remove\`.`,
+              },
+              Date.now(),
+            );
             return;
           }
           await clearWorktreeSession(
@@ -1175,15 +1190,28 @@ export const AppContainer = (props: AppContainerProps) => {
               .getSessionService()
               .getWorktreeSessionPath(config.getSessionId()),
           );
-        } catch {
-          // Hard failure (e.g. git binary missing) — proceed with quit
-          // anyway so the user isn't stranded. Sidecar stays so
-          // --resume can recover.
+        } catch (error) {
+          // Hard failure (e.g. git binary missing, GitWorktreeService
+          // constructor threw). Same treatment as the soft failure
+          // path: surface to the user and stay alive — silent /quit
+          // here would leave the user wondering whether the worktree
+          // was actually removed.
+          historyManager.addItem(
+            {
+              type: MessageType.ERROR,
+              text:
+                `Worktree removal failed for "${activeWorktree.slug}": ` +
+                `${error instanceof Error ? error.message : String(error)}. ` +
+                `Use \`exit_worktree\` or remove it manually.`,
+            },
+            Date.now(),
+          );
+          return;
         }
       }
       handleSlashCommand('/quit');
     },
-    [activeWorktree, config, handleSlashCommand],
+    [activeWorktree, config, handleSlashCommand, historyManager],
   );
 
   const performMemoryRefresh = useCallback(async () => {
