@@ -1609,6 +1609,18 @@ describe('McpClientManager — PR 14 guardrails', () => {
     ).toBe(false);
   });
 
+  // R8 #4 (line 1221): the `freshReservations` Set distinguishes
+  // fresh-reservation timeouts (release) from `'already_held'`
+  // reconnect timeouts (keep slot). Verified by code inspection +
+  // the R5 release-on-fresh test below; a dedicated already_held
+  // timeout test requires either driving the health-monitor flow
+  // end-to-end (which needs autoReconnect timer interleaving with
+  // fake timers — interferes with the sibling R5 test in the same
+  // file) or piercing the private `runWithDiscoveryTimeout`
+  // helper. The invariant is small enough that the fresh-release
+  // test below is sufficient regression coverage; an integration
+  // test in a separate file can add the already_held variant
+  // without the timer interleave problem.
   it('runWithDiscoveryTimeout timeout handler releases the budget slot (wenshao R5 line 956)', async () => {
     vi.useFakeTimers();
     // McpClient.connect never resolves → timeout fires.
@@ -1847,6 +1859,70 @@ describe('McpClientManager — PR 14 guardrails', () => {
     await expect(manager.readResource('a', 'file:///x')).rejects.toThrow(
       /'a' is disabled/,
     );
+  });
+
+  it('discoverAllMcpTools disconnects on discover() failure (wenshao R8 #1 line 532)', async () => {
+    // Bulk-path mirror of R7 #3 (per-server path). Pre-fix:
+    // connect() success + discover() throw → catch deleted client
+    // without disconnect() → stdio child / WebSocket / HTTP socket
+    // leaked for the rest of the daemon's lifetime (stop() can't
+    // see the entry it just removed from this.clients).
+    let disconnectCalls = 0;
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect: vi.fn().mockResolvedValue(undefined),
+          discover: vi.fn().mockRejectedValue(new Error('discover failed')),
+          disconnect: vi.fn().mockImplementation(() => {
+            disconnectCalls += 1;
+            return Promise.resolve();
+          }),
+          getStatus: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const config = configWithServers({ a: { command: 'node' } });
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      { clientBudget: 1, budgetMode: 'enforce' },
+    );
+    await manager.discoverAllMcpTools(config);
+    // Transport closed before client reference dropped + slot released.
+    expect(disconnectCalls).toBeGreaterThanOrEqual(1);
+    expect(manager.getMcpClientAccounting().reservedSlots).toEqual([]);
+  });
+
+  it('readBudgetFromEnv downgrades warn-without-budget to off (wenshao R8 #2)', async () => {
+    process.env['QWEN_SERVE_MCP_BUDGET_MODE'] = 'warn';
+    // No budget — pre-fix this passed through with mode='warn',
+    // reaching emitBudgetTelemetry with clientBudget=undefined.
+    const config = configWithServers({});
+    const manager = new McpClientManager(config, {} as ToolRegistry);
+    expect(manager.getMcpClientBudget()).toBeUndefined();
+    expect(manager.getMcpBudgetMode()).toBe('off');
+  });
+
+  it('constructor downgrades enforce-without-budget when budgetConfig passed directly (wenshao R8 #5)', async () => {
+    // Direct-budgetConfig path is test-/embedded-only — production
+    // callers (CLI, runQwenServe, env-var fallback) all validate
+    // upfront. Defense-in-depth: constructor mirrors the env-var
+    // path's downgrade so a future caller that bypasses validation
+    // can't silently fail-open.
+    const config = configWithServers({});
+    const manager = new McpClientManager(
+      config,
+      {} as ToolRegistry,
+      undefined,
+      undefined,
+      undefined,
+      // Invalid combination: enforce mode without a budget.
+      { budgetMode: 'enforce' },
+    );
+    // Downgraded to off so tryReserveSlot doesn't masquerade as enforce.
+    expect(manager.getMcpBudgetMode()).toBe('off');
   });
 
   it('discoverMcpToolsForServer reconnect-attempt connect-failure KEEPS slot (wenshao R4 C2 already_held)', async () => {
