@@ -147,8 +147,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
-  'Configure authentication information for login':
-    'ログイン用の認証情報を設定',
+  'Connect an LLM provider': 'LLM プロバイダーに接続',
   'Copy the last result or code snippet to clipboard':
     '最後の結果またはコードスニペットをクリップボードにコピー',
 

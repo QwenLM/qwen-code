@@ -169,8 +169,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'Vollständige Qwen Code Dokumentation im Browser öffnen',
   'Configuration not available.': 'Konfiguration nicht verfügbar.',
-  'Configure authentication information for login':
-    'Authentifizierungsinformationen für die Anmeldung konfigurieren',
+  'Connect an LLM provider': 'LLM-Anbieter verbinden',
   'Copy the last result or code snippet to clipboard':
     'Letztes Ergebnis oder Codeausschnitt in die Zwischenablage kopieren',
 

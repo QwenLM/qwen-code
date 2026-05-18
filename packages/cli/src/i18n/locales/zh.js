@@ -182,7 +182,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
-  'Configure authentication information for login': '配置登录认证信息',
+  'Connect an LLM provider': '连接 LLM 提供商',
   'Copy the last result or code snippet to clipboard':
     '将最后的结果或代码片段复制到剪贴板',
   'Show working-tree change stats versus HEAD':

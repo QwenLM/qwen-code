@@ -190,8 +190,7 @@ export default {
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
-  'Configure authentication information for login':
-    'Configure authentication information for login',
+  'Connect an LLM provider': 'Connect an LLM provider',
   'Copy the last result or code snippet to clipboard':
     'Copy the last result or code snippet to clipboard',
   'Show working-tree change stats versus HEAD':
