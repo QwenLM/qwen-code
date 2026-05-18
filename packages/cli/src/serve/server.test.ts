@@ -4324,4 +4324,101 @@ describe('auth device-flow routes', () => {
     expect(stateRes.body.errorKind).toBe('expired_token');
     registry.dispose();
   });
+
+  // PR #4255 fold-in 10 #4 — HTTP route contract coverage. Round-8
+  // wenshao thread `Cvx93` flagged that the existing 4 it()'s
+  // covered the happy paths but missed the malformed-input,
+  // resource-cap, and strict-bearer error envelopes that SDK
+  // consumers depend on for retry / surface routing. Each case
+  // here is a supertest one-liner asserting status code + `code:`
+  // discriminator.
+
+  it('POST with missing providerId returns 400 invalid_request', async () => {
+    // PR 21 fold-in W2 split the 400 envelope into `invalid_request`
+    // (caller-shape error: missing/non-string body field) vs
+    // `unsupported_provider` (well-shaped but the providerId isn't
+    // in the supported tuple). This pins that split.
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({}); // no providerId at all
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_request');
+    expect(res.body.error).toContain('providerId');
+  });
+
+  it('POST with non-string providerId returns 400 invalid_request', async () => {
+    const { app } = buildApp({ token: 'tkn' });
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 42 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_request');
+  });
+
+  it('POST returns 409 too_many_active_flows when registry cap is reached', async () => {
+    // Inject a fake registry whose `start` always throws the cap error.
+    const { TooManyActiveDeviceFlowsError } = await import(
+      './auth/deviceFlow.js'
+    );
+    const fakeRegistry = {
+      start: async () => {
+        throw new TooManyActiveDeviceFlowsError();
+      },
+      get: () => undefined,
+      cancel: () => undefined,
+      listPending: () => [],
+      dispose: () => {},
+    } as unknown as import('./auth/deviceFlow.js').DeviceFlowRegistry;
+
+    const bridge = fakeBridge();
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      bridge,
+      deviceFlowRegistry: fakeRegistry,
+    });
+
+    const res = await request(app)
+      .post('/workspace/auth/device-flow')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ providerId: 'qwen-oauth' });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('too_many_active_flows');
+  });
+
+  it('DELETE without bearer is rejected 401 token_required (strict-mutation gate)', async () => {
+    const { app } = buildApp({ token: undefined });
+    const res = await request(app)
+      .delete('/workspace/auth/device-flow/some-id')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('token_required');
+  });
+
+  it('GET /workspace/auth/device-flow/:id is strict-gated; GET /workspace/auth/status is read-only', async () => {
+    // The two GETs have ASYMMETRIC auth posture by design:
+    // - `GET /workspace/auth/device-flow/:id` returns `userCode` for
+    //   pending entries, which is shoulder-surf-able if a peer process
+    //   on the same host can read it. fold-in (round-4 #1) added
+    //   `mutate({strict:true})` to close the info-disclosure
+    //   asymmetry vs. the strict POST/DELETE.
+    // - `GET /workspace/auth/status` intentionally redacts userCode
+    //   (lists only deviceFlowId/providerId/expiresAt) so it stays
+    //   bearer-only (passthrough on loopback no-token default).
+    const { app } = buildApp({ token: undefined });
+    const flowGet = await request(app)
+      .get('/workspace/auth/device-flow/no-such-id')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(flowGet.status).toBe(401);
+    expect(flowGet.body.code).toBe('token_required');
+    // Status, by contrast, is reachable on loopback without a token.
+    const status = await request(app)
+      .get('/workspace/auth/status')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(status.status).toBe(200);
+  });
 });

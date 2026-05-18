@@ -781,6 +781,179 @@ describe('DeviceFlowRegistry — abort propagation to provider.poll', () => {
   });
 });
 
+describe('DeviceFlowRegistry — persist failure paths (fold-in 10 #1)', () => {
+  // Round-8 thread Cvho9 (Critical): persist failure branches are the
+  // most consequential code paths in the success arm — `persist_failed`
+  // was specifically introduced for disk-write failures (EACCES,
+  // EROFS, ENOSPC) and the cancel-during-persist + past-expiresAt
+  // branches were added by fold-in 5/9 to handle race conditions.
+  // Every prior test used a persist that always succeeded; this
+  // block exercises the three terminal mappings.
+
+  it('persist throws → entry transitions to error/persist_failed + failed event emitted', async () => {
+    const provider = new FakeProvider();
+    const persistError = new Error('EACCES: permission denied');
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: async () => {
+          throw persistError;
+        },
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('error');
+      expect(snapshot?.errorKind).toBe('persist_failed');
+      const failedEvent = events.find(
+        (e) =>
+          e.emission.type === 'failed' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(failedEvent).toBeDefined();
+      if (failedEvent && failedEvent.emission.type === 'failed') {
+        expect(failedEvent.emission.data.errorKind).toBe('persist_failed');
+        // SSE hint is the static bounded string; no raw EACCES text.
+        expect(failedEvent.emission.data.hint).toContain(
+          'credentials could not be written',
+        );
+      }
+      const failedAudit = auditLines.find(
+        (line) =>
+          line['status'] === 'failed' && line['errorKind'] === 'persist_failed',
+      );
+      expect(failedAudit).toBeDefined();
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('persist throws after cancel() → entry transitions to cancelled (not authorized; not persist_failed)', async () => {
+    const provider = new FakeProvider();
+    // Persist takes a controllable promise so the test can fire cancel
+    // mid-await and then resolve persist (with rejection) afterward.
+    let rejectPersist!: (err: Error) => void;
+    const persistPromise = new Promise<{ expiresAt?: number }>(
+      (_resolve, reject) => {
+        rejectPersist = reject;
+      },
+    );
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: () => persistPromise,
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      // First poll tick: enters success → persist starts.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // While persist is in flight, request cancel via the route
+      // surface (cancellerClientId differs from the initiator).
+      const cancelResult = registry.cancel(view.deviceFlowId, 'sdk-canceller');
+      expect(cancelResult).toEqual({ alreadyTerminal: false });
+      // Persist now fails (signal-aborted by cancel). Resolve with
+      // an abort-shaped error. The registry's persistError branch
+      // routes through `cancelDuringPersist` → `cancelled`.
+      rejectPersist(new Error('aborted: cancel during persist'));
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('cancelled');
+      expect(snapshot?.errorKind).toBeUndefined();
+      // Event emission is on the canceller's id (fold-in 9 #5).
+      const cancelledEvent = events.find(
+        (e) =>
+          e.emission.type === 'cancelled' &&
+          e.emission.data.deviceFlowId === view.deviceFlowId,
+      );
+      expect(cancelledEvent).toBeDefined();
+      expect(cancelledEvent?.clientId).toBe('sdk-canceller');
+      // No `failed`/`persist_failed` event leaked through.
+      expect(
+        events.some(
+          (e) =>
+            e.emission.type === 'failed' &&
+            e.emission.data.errorKind === 'persist_failed',
+        ),
+      ).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+
+  it('persist throws past expiresAt → persist_failed (NOT expired_token; fold-in 9 #13)', async () => {
+    // Round-8 #13: previously the registry classified this branch as
+    // `expired_token`, routing operator remediation to "tell user to
+    // retry" (RFC 8628 expiry) when the actual root cause is disk
+    // I/O. fold-in 9 #13 reclassified to `persist_failed` with a
+    // `persist_also_failed_past_expiry` audit hint preserving the
+    // timing detail.
+    const provider = new FakeProvider();
+    provider.expiresIn = 60; // 60s flow window
+    let rejectPersist!: (err: Error) => void;
+    const persistPromise = new Promise<{ expiresAt?: number }>(
+      (_resolve, reject) => {
+        rejectPersist = reject;
+      },
+    );
+    provider.pollScript = [
+      {
+        kind: 'success',
+        persist: () => persistPromise,
+      },
+    ];
+    const built = buildRegistry(provider);
+    const { registry, env, events, auditLines } = built;
+    try {
+      const { view } = await registry.start({ providerId: 'qwen-oauth' });
+      // Drive first poll → success → persist begins.
+      env.clock.tick(DEVICE_FLOW_DEFAULT_INTERVAL_MS + 1);
+      env.scheduler.flushDue(env.clock.now);
+      await flushAsync();
+      // Advance past `expiresAt` (60s) WHILE persist is still pending.
+      env.clock.tick(120_000);
+      // Now resolve persist with rejection — non-cancel disk error.
+      rejectPersist(new Error('ENOSPC: no space left'));
+      await flushAsync();
+      const snapshot = registry.get(view.deviceFlowId);
+      expect(snapshot?.status).toBe('error');
+      expect(snapshot?.errorKind).toBe('persist_failed');
+      // Audit hint preserves the past-expiry timing detail for
+      // operator visibility (per fold-in 9 #13).
+      const failedAudit = auditLines.find(
+        (line) =>
+          line['status'] === 'failed' &&
+          line['errorKind'] === 'persist_failed' &&
+          typeof line['hint'] === 'string' &&
+          (line['hint'] as string).startsWith(
+            'persist_also_failed_past_expiry',
+          ),
+      );
+      expect(failedAudit).toBeDefined();
+      // Critical: no `expired_token` classification anywhere.
+      expect(
+        events.some(
+          (e) =>
+            e.emission.type === 'failed' &&
+            e.emission.data.errorKind === 'expired_token',
+        ),
+      ).toBe(false);
+    } finally {
+      registry.dispose();
+    }
+  });
+});
+
 describe('DeviceFlowRegistry — cancel', () => {
   it('cancels a pending flow, emits cancelled, idempotent on terminal', async () => {
     const provider = new FakeProvider();
