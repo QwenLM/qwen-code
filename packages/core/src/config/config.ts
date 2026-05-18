@@ -49,7 +49,7 @@ import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
-// Tools â€” only lightweight imports; tool classes are lazy-loaded via dynamic import
+// Tools â€?only lightweight imports; tool classes are lazy-loaded via dynamic import
 import {
   MCPServerStatus,
   getMCPServerStatus,
@@ -289,8 +289,8 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
   }
   // Default to `true` (the schema default) ONLY when the sub-field
   // is genuinely absent. For PRESENT-but-non-boolean values, honor
-  // common string forms (`"true"`/`"yes"`/`"on"`/`"1"` â†’ true,
-  // `"false"`/`"no"`/`"off"`/`"0"`/`""` â†’ false) and treat anything
+  // common string forms (`"true"`/`"yes"`/`"on"`/`"1"` â†?true,
+  // `"false"`/`"no"`/`"off"`/`"0"`/`""` â†?false) and treat anything
   // else as opt-out. settings.json is user-editable, and the previous
   // "default-to-true on mismatch" policy meant a hand-edited
   // `{ "commit": "false" }` silently activated attribution against
@@ -309,10 +309,10 @@ function normalizeGitCoAuthor(value: GitCoAuthorParam | undefined): {
       ) {
         return true;
       }
-      // Known disable-intent forms â€” silent (matches user intent).
+      // Known disable-intent forms â€?silent (matches user intent).
       const knownDisable = ['false', 'no', 'off', '0', 'disabled', ''];
       if (!knownDisable.includes(lowered)) {
-        // Unrecognised string â€” disable (safer-by-default) but log
+        // Unrecognised string â€?disable (safer-by-default) but log
         // so a user wondering "why is my setting being ignored?"
         // can see the actual coercion in QWEN_DEBUG_LOG_FILE.
         gitCoAuthorLogger.warn(
@@ -384,7 +384,7 @@ export class MCPServerConfig {
      * Per-server cap on the discovery handshake (`connect` + `tools/list` +
      * `prompts/list` + `resources/list`). Defaults: 30s for stdio servers,
      * 5s for remote HTTP/SSE. Tool-call timeout (`timeout` above) is
-     * unaffected â€” a long-running tool invocation is not a startup
+     * unaffected â€?a long-running tool invocation is not a startup
      * pathology. Appended at the end of the parameter list to avoid
      * shifting positional arguments at the many `new MCPServerConfig(...)`
      * call sites.
@@ -594,7 +594,7 @@ export interface ConfigParameters {
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
-   * to use disableAllHooks instead (note: inverted logic - enabled:true â†’ disableAllHooks:false).
+   * to use disableAllHooks instead (note: inverted logic - enabled:true â†?disableAllHooks:false).
    */
   disableAllHooks?: boolean;
   /**
@@ -691,7 +691,7 @@ export class Config {
   private readonly backgroundShellRegistry = new BackgroundShellRegistry();
   // Field initializer runs once on the parent Config; child Configs
   // built via Object.create(parent) intentionally do NOT pick this up
-  // â€” see getFileReadCache() for the per-instance lazy initialization
+  // â€?see getFileReadCache() for the per-instance lazy initialization
   // that keeps subagent caches isolated from the parent's.
   private fileReadCache: FileReadCache = new FileReadCache();
   private extensionManager!: ExtensionManager;
@@ -1279,7 +1279,7 @@ export class Config {
     // after the registry exists. This lets `Config.initialize()` (and the
     // cli's `input_enabled` checkpoint) resolve without waiting on MCP
     // server response time. Users can opt back into the legacy synchronous
-    // behavior with `QWEN_CODE_LEGACY_MCP_BLOCKING=1` â€” kept â‰¥ 1 release as
+    // behavior with `QWEN_CODE_LEGACY_MCP_BLOCKING=1` â€?kept â‰?1 release as
     // an escape hatch.
     const legacyBlockingMcp =
       process.env['QWEN_CODE_LEGACY_MCP_BLOCKING'] === '1';
@@ -1327,7 +1327,7 @@ export class Config {
     // earlier `agent` runs that exited before their cleanup helper ran
     // (Ctrl-C, process crash, abrupt shutdown). The sweep only touches
     // `agent-<7hex>` slugs, skips anything newer than 30 days, and
-    // is fail-closed against tracked changes or unpushed commits â€” so
+    // is fail-closed against tracked changes or unpushed commits â€?so
     // running it on every startup cannot destroy user work. We do not
     // await this: it is a hygiene task that must never delay the
     // first model turn.
@@ -1336,7 +1336,7 @@ export class Config {
     // directory the worktree creators (`enter_worktree` and
     // `agent isolation:'worktree'`) write to. Using `this.targetDir`
     // directly would cause launches from a monorepo subdirectory to
-    // scan `<subdir>/.qwen/worktrees/` â€” which never exists â€” and the
+    // scan `<subdir>/.qwen/worktrees/` â€?which never exists â€?and the
     // sweep would silently be a no-op forever.
     if (!this.getBareMode()) {
       void (async () => {
@@ -1356,7 +1356,7 @@ export class Config {
             // Skipped (no worktrees dir) is the common-case happy
             // path on every CLI start for ~99% of users. `debug` so
             // operators can opt in via `--debug` when they actually
-            // want to confirm the sweep is wired up â€” `info` would
+            // want to confirm the sweep is wired up â€?`info` would
             // be log noise.
             this.debugLogger.debug(
               `Stale worktree sweep skipped: ${worktreesDir} does not exist`,
@@ -1366,7 +1366,7 @@ export class Config {
           const removed = await cleanupStaleAgentWorktrees(root);
           if (removed > 0) {
             // Only the "actually removed something" path warrants
-            // `info` â€” that's the signal an operator chasing a leak
+            // `info` â€?that's the signal an operator chasing a leak
             // would grep for. The "ran, found nothing" path is
             // reconstructable at `debug` and is otherwise noise:
             // every CLI start that has any worktree dir would emit
@@ -1408,12 +1408,12 @@ export class Config {
    * `mcp-client-update` event stream the UI subscribes to.
    *
    * Defensive against partially-stubbed `ToolRegistry` in some tests, where
-   * the manager getter is unavailable â€” we'd rather log-and-skip than crash
+   * the manager getter is unavailable â€?we'd rather log-and-skip than crash
    * the init path in tests that don't exercise MCP at all.
    */
   private startMcpDiscoveryInBackground(): void {
     // `getMcpClientManager` is a public method on `ToolRegistry`. The
-    // cast below is NOT defensive against the production type â€” it
+    // cast below is NOT defensive against the production type â€?it
     // exists only because some tests (e.g. those using
     // `createMockToolRegistry`) stub `ToolRegistry` as a plain object
     // that doesn't implement the method. The optional-chaining call
@@ -1421,7 +1421,7 @@ export class Config {
     // of crashing `initialize()` for tests that never exercise MCP.
     //
     // Crucially, the inner shape is `ReturnType<ToolRegistry['getMcpClientManager']>`
-    // â€” not a hand-rolled `{ discoverAllMcpToolsIncremental: ... }` â€” so
+    // â€?not a hand-rolled `{ discoverAllMcpToolsIncremental: ... }` â€?so
     // a future rename of `getMcpClientManager` on `ToolRegistry` still
     // surfaces here as a type error rather than silently falling
     // through to the `if (!manager) return` branch.
@@ -1444,13 +1444,13 @@ export class Config {
         // After background discovery completes, push the newly-registered
         // MCP tools into the active GeminiChat so the next model request
         // sees them. Interactive mode also calls setTools() via
-        // AppContainer's batch-flush effect â€” this trailing call is
+        // AppContainer's batch-flush effect â€?this trailing call is
         // idempotent there, but it's the ONLY path that updates
         // `chat.tools` for non-interactive runs (no AppContainer).
         // Without this, `chat.tools` would be frozen at the built-in-only
-        // snapshot taken inside `geminiClient.initialize()` â†’ `startChat()`,
+        // snapshot taken inside `geminiClient.initialize()` â†?`startChat()`,
         // and `runNonInteractive` / stream-json / ACP would silently lose
-        // every MCP tool â€” a regression vs the legacy synchronous path.
+        // every MCP tool â€?a regression vs the legacy synchronous path.
         try {
           await this.geminiClient?.setTools();
         } catch (err) {
@@ -1473,7 +1473,7 @@ export class Config {
    * first model request sees the same tool surface the legacy
    * synchronous-MCP path produced.
    *
-   * Interactive code paths should NOT call this â€” `AppContainer`'s
+   * Interactive code paths should NOT call this â€?`AppContainer`'s
    * `mcp-client-update` subscriber handles `setTools()` refreshes
    * progressively without blocking the UI.
    *
@@ -1501,7 +1501,7 @@ export class Config {
    * thread and per-server errors logged to stderr). Under PR-A's
    * progressive discovery, per-server errors are caught inside
    * `McpClientManager.discoverAllMcpToolsIncremental` and routed to
-   * profiler events + `mcp-client-update` notifications â€” both of which
+   * profiler events + `mcp-client-update` notifications â€?both of which
    * are invisible to a non-interactive run with only built-in stderr.
    * This helper closes that gap WITHOUT re-introducing the blocking
    * behavior.
@@ -1732,7 +1732,7 @@ export class Config {
     try {
       this.chatRecordingService?.finalize();
     } catch {
-      // Best-effort â€” don't block session switch
+      // Best-effort â€?don't block session switch
     }
 
     const previousSessionId = this.sessionId;
@@ -1750,14 +1750,14 @@ export class Config {
     // placeholder despite the new session never having received the
     // file contents. Use the getter so the lazy own-property
     // initialization in getFileReadCache() applies even for Configs
-    // constructed via Object.create â€” those should clear their own
+    // constructed via Object.create â€?those should clear their own
     // cache, not the parent's.
     this.getFileReadCache().clear();
     this.fileHistoryService = undefined;
     this.fileHistoryRestoredFromSessionData = false;
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
-    // and a session-scoped prompt counter â€” both stop being meaningful
+    // and a session-scoped prompt counter â€?both stop being meaningful
     // when the session resets. Without this, pending attributions
     // from the previous session could attach to a commit in the new
     // one, and the "N-shotted" PR label would span sessions.
@@ -1776,7 +1776,7 @@ export class Config {
     // Only refresh when THIS process established its own sidecar at
     // startup (interactive UI). A non-interactive `/clear` (e.g.
     // qwen --prompt-interactive) must not delete a sibling shell's
-    // sidecar that happens to share the outgoing session id â€”
+    // sidecar that happens to share the outgoing session id â€?
     // mirrors kimi-cli PR #2082's "write only when a session is
     // established for this process" rule.
     if (this.runtimeStatusEnabled && previousSessionId !== this.sessionId) {
@@ -2136,7 +2136,7 @@ export class Config {
         this.chatRecordingService?.finalize();
         await this.chatRecordingService?.flush();
       } catch {
-        // Best-effort â€” don't block shutdown
+        // Best-effort â€?don't block shutdown
       }
 
       this.skillManager?.stopWatching();
@@ -2196,7 +2196,7 @@ export class Config {
    *   - settings.permissions.allow  (persistent rules from all scopes)
    *   - allowedTools param  (SDK / argv auto-approve list)
    *
-   * Note: coreTools is intentionally excluded here â€” it has whitelist semantics
+   * Note: coreTools is intentionally excluded here â€?it has whitelist semantics
    * (only listed tools are registered), not auto-approve semantics. It is
    * handled separately via PermissionManager.coreToolsAllowList.
    *
@@ -2790,9 +2790,15 @@ export class Config {
       !this.fileHistoryRestoredFromSessionData &&
       this.sessionData?.fileHistorySnapshots
     ) {
-      this.fileHistoryService.restoreFromSnapshots(
-        this.sessionData.fileHistorySnapshots,
-      );
+      try {
+        this.fileHistoryService.restoreFromSnapshots(
+          this.sessionData.fileHistorySnapshots,
+        );
+      } catch (e) {
+        this.debugLogger.error(
+          `FileHistory: Failed to restore snapshots from session data: ${e}`,
+        );
+      }
       this.fileHistoryRestoredFromSessionData = true;
     }
     return this.fileHistoryService;
@@ -3307,7 +3313,7 @@ export class Config {
    * codebase constructs its Config via `Object.create(parent)`. That
    * does **not** run instance field initializers, so the parent's
    * `fileReadCache` field is reachable on the child only by prototype
-   * lookup â€” i.e. child and parent end up sharing the same cache. The
+   * lookup â€?i.e. child and parent end up sharing the same cache. The
    * own-property check below detects "this instance was made by
    * Object.create" and lazily attaches a fresh cache, ensuring
    * isolation without requiring every Object.create site to remember
@@ -3316,7 +3322,7 @@ export class Config {
   getFileReadCache(): FileReadCache {
     if (!Object.prototype.hasOwnProperty.call(this, 'fileReadCache')) {
       // The own-property write needs to bypass `private`'s structural
-      // check â€” the field is conceptually still private to the class,
+      // check â€?the field is conceptually still private to the class,
       // we just need TS to let us install an own copy on a child
       // instance produced by `Object.create(parent)`.
       (this as unknown as { fileReadCache: FileReadCache }).fileReadCache =
@@ -3331,7 +3337,7 @@ export class Config {
    * `file_unchanged` placeholder, no future prior-read enforcement).
    * Intended as an escape hatch for sessions where the cache's "model
    * has already seen this content earlier in the conversation"
-   * assumption is unreliable â€” e.g. after context compaction or
+   * assumption is unreliable â€?e.g. after context compaction or
    * transcript transformation.
    */
   getFileReadCacheDisabled(): boolean {
@@ -3423,7 +3429,7 @@ export class Config {
     );
 
     // Helper: check permission then register a lazy factory (no module import
-    // happens here â€” the dynamic import() only runs when the tool is first used).
+    // happens here â€?the dynamic import() only runs when the tool is first used).
     const registerLazy = async (
       toolName: ToolName,
       factory: ToolFactory,
@@ -3450,7 +3456,7 @@ export class Config {
 
     // The synthetic structured_output tool is the terminal contract for
     // --json-schema runs. It must be registered in BOTH the bare-mode
-    // branch and the regular branch â€” without it the model can't finish
+    // branch and the regular branch â€?without it the model can't finish
     // a structured run, so omitting either branch causes
     // `qwen [--bare] --json-schema X -p "..."` to loop until
     // maxSessionTurns and exit via the "plain text" failure path. Hoisted
@@ -3464,7 +3470,7 @@ export class Config {
     // and drain loops detect a successful structured_output call as
     // terminal. A subagent that called the tool would receive the
     // "Session will end now" llmContent, then keep running because its
-    // own loop has no termination handler â€” wasted tokens with no
+    // own loop has no termination handler â€?wasted tokens with no
     // structured payload surfacing on stdout. Strip the registration in
     // those contexts.
     const registerStructuredOutputIfRequested = async (): Promise<void> => {

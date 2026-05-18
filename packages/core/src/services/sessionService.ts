@@ -1298,6 +1298,21 @@ export function replayUiTelemetryFromConversation(
   }
 }
 
+
+function isFileHistorySnapshotRecordPayload(
+  payload: FileHistorySnapshotRecordPayload | undefined,
+): payload is FileHistorySnapshotRecordPayload {
+  const snapshot = payload?.snapshot;
+  return (
+    payload?.version === 1 &&
+    !!snapshot &&
+    typeof snapshot.promptId === 'string' &&
+    !!snapshot.promptId &&
+    !!snapshot.trackedFileBackups &&
+    typeof snapshot.trackedFileBackups === 'object'
+  );
+}
+
 function extractFileHistorySnapshots(
   messages: ChatRecord[],
 ): FileHistorySnapshot[] {
@@ -1310,12 +1325,11 @@ function extractFileHistorySnapshots(
     const payload = record.systemPayload as
       | FileHistorySnapshotRecordPayload
       | undefined;
-    const snapshot = payload?.snapshot;
-    if (payload?.version !== 1 || !snapshot) {
+    if (!isFileHistorySnapshotRecordPayload(payload)) {
       continue;
     }
 
-    snapshots.push(snapshot);
+    snapshots.push(payload.snapshot);
   }
 
   return snapshots;

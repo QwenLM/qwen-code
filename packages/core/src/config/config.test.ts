@@ -457,9 +457,10 @@ describe('Server Config (config.ts)', () => {
       expect(snapshots).toHaveLength(1);
       expect(snapshots[0]?.promptId).toBe('prompt-1');
       expect(snapshots[0]?.timestamp).toBeInstanceOf(Date);
-      expect(
-        snapshots[0]?.trackedFileBackups['/tmp/src/app.ts']?.backupTime,
-      ).toBeInstanceOf(Date);
+      const restoredBackup = Object.values(
+        snapshots[0]?.trackedFileBackups ?? {},
+      )[0];
+      expect(restoredBackup?.backupTime).toBeInstanceOf(Date);
     });
   });
 

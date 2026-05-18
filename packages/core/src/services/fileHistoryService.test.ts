@@ -16,6 +16,7 @@ import {
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { FileHistoryBackup } from './fileHistoryService.js';
 
 const mockStorageDir = vi.hoisted(() => vi.fn());
 vi.mock('../config/storage.js', () => ({
@@ -111,7 +112,7 @@ describe('FileHistoryService', () => {
 
       // Replace the backup storage root with a regular file so the recursive
       // `mkdir(dirname(backupPath))` inside `safeCopyFile` fails with
-      // ENOTDIR â€” a non-ENOENT error that propagates back into `trackEdit`'s
+      // ENOTDIR â€?a non-ENOENT error that propagates back into `trackEdit`'s
       // catch.
       await rm(storageDir, { recursive: true, force: true });
       await writeFile(storageDir, '');
@@ -122,8 +123,8 @@ describe('FileHistoryService', () => {
 
     // The sticky-failed guard symmetry test for trackEdit. After
     // makeSnapshot recorded a `failed: true` marker for a file (e.g.
-    // transient disk full), the next trackEdit invocation â€” typically
-    // triggered by a tool about to modify the same file â€” must NOT
+    // transient disk full), the next trackEdit invocation â€?typically
+    // triggered by a tool about to modify the same file â€?must NOT
     // skip just because the entry exists. It must attempt a fresh
     // backup; on success the failed marker is replaced. Without this
     // the failed flag stays sticky until the file content changes,
@@ -137,7 +138,7 @@ describe('FileHistoryService', () => {
 
       // Force makeSnapshot's per-file backup to throw. The file content
       // is unchanged so checkOriginFileChanged short-circuits to "no
-      // change" â€” but we want the failure path here, so modify the file
+      // change" â€?but we want the failure path here, so modify the file
       // first to ensure createBackup is reached.
       await writeFile(file, 'p2-content');
       await rm(storageDir, { recursive: true, force: true });
@@ -220,7 +221,7 @@ describe('FileHistoryService', () => {
 
     // When a per-file backup attempt throws inside makeSnapshot, the new
     // snapshot must NOT silently inherit the previous snapshot's backup
-    // and present it as the captured state of this turn â€” that would
+    // and present it as the captured state of this turn â€?that would
     // make a later rewind restore older content while reporting success.
     // Instead the snapshot records a `failed: true` marker so rewind
     // surfaces the file via filesFailed and getDiffStats omits it.
@@ -232,7 +233,7 @@ describe('FileHistoryService', () => {
       await service.trackEdit(file);
 
       // Modify the file and break the backup target (replace storageDir
-      // with a regular file â†’ ENOTDIR inside `safeCopyFile`'s recursive
+      // with a regular file â†?ENOTDIR inside `safeCopyFile`'s recursive
       // mkdir). The next makeSnapshot's per-file backup attempt throws.
       await writeFile(file, 'p2-content');
       await rm(storageDir, { recursive: true, force: true });
@@ -314,7 +315,7 @@ describe('FileHistoryService', () => {
       await service.makeSnapshot('p1');
 
       const file = join(projectDir, 'new-file.txt');
-      await service.trackEdit(file); // non-existent â†’ null backup
+      await service.trackEdit(file); // non-existent â†?null backup
       await writeFile(file, 'created');
       await service.makeSnapshot('p2');
 
@@ -512,6 +513,34 @@ describe('FileHistoryService', () => {
       // Path outside cwd should be preserved as-is.
       expect(snapshots[0].trackedFileBackups[externalPath]).toBeDefined();
     });
+
+
+    it('should rehydrate string dates and skip malformed backups', async () => {
+      const fresh = new FileHistoryService('test-session', true, projectDir);
+      const absPath = join(projectDir, 'a.txt');
+
+      fresh.restoreFromSnapshots([
+        {
+          promptId: 'p1',
+          trackedFileBackups: {
+            [absPath]: {
+              backupFileName: 'deadbeefcafebabe@v1',
+              version: 1,
+              backupTime: '2024-01-01T00:00:01.000Z' as unknown as Date,
+            },
+            broken: null as unknown as FileHistoryBackup,
+          },
+          timestamp: '2024-01-01T00:00:02.000Z' as unknown as Date,
+        },
+      ]);
+
+      const snapshot = fresh.getSnapshots()[0];
+      expect(snapshot.timestamp).toBeInstanceOf(Date);
+      expect(snapshot.trackedFileBackups['a.txt']?.backupTime).toBeInstanceOf(
+        Date,
+      );
+      expect(snapshot.trackedFileBackups['broken']).toBeUndefined();
+    });
   });
 
   describe('snapshot eviction', () => {
@@ -540,7 +569,7 @@ describe('FileHistoryService', () => {
         service.getSnapshots()[0].trackedFileBackups['a.txt']!.backupFileName!,
       );
 
-      // 104 more snapshots, each with new content â†’ fresh backup per snapshot.
+      // 104 more snapshots, each with new content â†?fresh backup per snapshot.
       for (let i = 1; i < 105; i++) {
         await writeFile(file, `v${i}`);
         await service.makeSnapshot(`p${i}`);
@@ -573,12 +602,12 @@ describe('FileHistoryService', () => {
       const sharedName =
         service.getSnapshots()[0].trackedFileBackups['a.txt']!.backupFileName!;
 
-      // Content never changes â†’ makeSnapshot reuses the same backup reference.
+      // Content never changes â†?makeSnapshot reuses the same backup reference.
       for (let i = 1; i < 105; i++) {
         await service.makeSnapshot(`p${i}`);
       }
 
-      // Same backupFileName is held by every survivor â†’ must NOT be deleted.
+      // Same backupFileName is held by every survivor â†?must NOT be deleted.
       expect(existsSync(backupPath(sharedName))).toBe(true);
     });
   });

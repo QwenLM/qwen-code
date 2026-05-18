@@ -1284,7 +1284,9 @@ export class GeminiClient {
                 ?.recordFileHistorySnapshot(latestSnapshot);
             }
           } catch (e) {
-            debugLogger.error(`FileHistory: makeSnapshot failed: ${e}`);
+            debugLogger.error(
+              `FileHistory: snapshot/record cycle failed for ${prompt_id}: ${e}`,
+            );
           }
         }
 

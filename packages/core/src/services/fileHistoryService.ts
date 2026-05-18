@@ -61,6 +61,21 @@ export interface RewindResult {
 const MAX_SNAPSHOTS = 100;
 const FILE_HISTORY_DIR = 'file-history';
 
+function toValidDate(value: unknown): Date | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    return null;
+  }
+  const normalized = new Date(value);
+  return Number.isNaN(normalized.getTime()) ? null : normalized;
+}
+
+function isFileHistoryBackupRecord(value: unknown): value is FileHistoryBackup {
+  return !!value && typeof value === 'object';
+}
+
 function isENOENT(e: unknown): boolean {
   return (
     typeof e === 'object' &&
@@ -311,24 +326,40 @@ export class FileHistoryService {
     const trackedFiles = new Set<string>();
     const migrated: FileHistorySnapshot[] = [];
     for (const snapshot of snapshots) {
+      if (
+        !snapshot?.promptId ||
+        !snapshot.trackedFileBackups ||
+        typeof snapshot.trackedFileBackups !== 'object'
+      ) {
+        continue;
+      }
+
+      const timestamp = toValidDate(snapshot.timestamp);
+      if (!timestamp) {
+        continue;
+      }
+
       const trackedFileBackups: Record<string, FileHistoryBackup> = {};
       for (const [p, backup] of Object.entries(snapshot.trackedFileBackups)) {
+        if (!isFileHistoryBackupRecord(backup)) {
+          continue;
+        }
+
+        const backupTime = toValidDate(backup.backupTime);
+        if (!backupTime) {
+          continue;
+        }
+
         const trackingPath = this.maybeShortenFilePath(p);
         trackedFiles.add(trackingPath);
         trackedFileBackups[trackingPath] = {
           ...backup,
-          backupTime:
-            backup.backupTime instanceof Date
-              ? backup.backupTime
-              : new Date(backup.backupTime),
+          backupTime,
         };
       }
       migrated.push({
         ...snapshot,
-        timestamp:
-          snapshot.timestamp instanceof Date
-            ? snapshot.timestamp
-            : new Date(snapshot.timestamp),
+        timestamp,
         trackedFileBackups,
       });
     }
