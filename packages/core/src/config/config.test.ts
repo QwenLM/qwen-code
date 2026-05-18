@@ -2174,6 +2174,48 @@ describe('Server Config (config.ts)', () => {
         registry.__mcpManagerMock.setOnBudgetEvent,
       ).toHaveBeenLastCalledWith(undefined);
     });
+
+    it('does NOT stash the callback when called after initialize() (codex round 7 fix — subagent isolation)', async () => {
+      // Codex round 7 finding: pre-fix, the late-call path assigned
+      // to `pendingMcpBudgetCallback` BEFORE applying directly to
+      // the existing manager. A subsequent `createToolRegistry`
+      // (e.g. subagent override via `createApprovalModeOverride` /
+      // `buildSubagentContextOverride`) would inherit the stash and
+      // wire the parent session's ACP push callback into the
+      // subagent's fresh manager, routing subagent telemetry
+      // through the wrong session.
+      //
+      // Fix: late-call path applies directly + sets
+      // `pendingMcpBudgetCallback = undefined`. Pre-init path still
+      // stashes (the only way to reach a manager that doesn't
+      // exist yet — round 1 fix #2 contract).
+      const config = new Config(baseParams);
+      await config.initialize();
+      const registry = config.getToolRegistry() as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+
+      // Late-call: apply.
+      const cb = vi.fn();
+      config.setMcpBudgetEventCallback(cb);
+      expect(registry.__mcpManagerMock.setOnBudgetEvent).toHaveBeenCalledWith(
+        cb,
+      );
+
+      // Now rebuild a registry as if for a subagent override. With
+      // the round-7 fix, the new manager should NOT receive the
+      // parent session's callback — pre-fix this would re-apply
+      // `cb` to the new manager.
+      const subagentRegistry = (await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      })) as unknown as {
+        __mcpManagerMock: { setOnBudgetEvent: Mock };
+      };
+      expect(
+        subagentRegistry.__mcpManagerMock.setOnBudgetEvent,
+      ).not.toHaveBeenCalled();
+    });
   });
 });
 

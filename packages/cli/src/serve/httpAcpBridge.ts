@@ -1507,7 +1507,18 @@ class BridgeClient implements Client {
    * in-flight stale frames to expire.
    */
   markSessionClosed(sessionId: string): void {
-    this.tombstonedSessionIds.set(sessionId, Date.now() + EARLY_EVENT_TTL_MS);
+    const now = Date.now();
+    // PR 14b fix (codex round 7): bound `tombstonedSessionIds` under
+    // session churn. Pre-fix `sweepExpiredTombstones` was only called
+    // inside `bufferEarlyEvent`; on a daemon that closes/kills many
+    // sessions but rarely receives extNotifications (the common
+    // production pattern when MCP guardrail mode is `off`), the map
+    // grew monotonically and the documented 60s TTL didn't bound
+    // memory. Sweeping at every close is O(map size) but cheap (one
+    // integer compare per entry); under any realistic workload the
+    // map stays small.
+    this.sweepExpiredTombstones(now);
+    this.tombstonedSessionIds.set(sessionId, now + EARLY_EVENT_TTL_MS);
     // Purge any frames already buffered for this id — they're now
     // stale by definition (their session is dead).
     this.earlyEvents.delete(sessionId);
@@ -3005,13 +3016,24 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // PR 14b fix (codex round 6): pair with `markRestoreInFlight`.
       // Once the IIFE settles, either `createSessionEntry` ran
       // (`drainEarlyEvents` already cleared the tombstone) or the
-      // restore failed (no future drain will clear it, but no future
-      // notifications for this id should arrive anyway since the
-      // child either crashed or never recognized the id).
+      // restore failed (handled below).
       ci?.client.clearRestoreInFlight(req.sessionId);
       pendingRestoreEvents.delete(req.sessionId);
       if (!registeredEntry) {
         restoreEvents.close();
+        // PR 14b fix (codex round 7): on restore failure, purge any
+        // guardrail events that the child buffered during this
+        // restore window AND re-tombstone the id. Pre-fix the
+        // round-6 allow-list (`markRestoreInFlight`) let
+        // `bufferEarlyEvent` accept frames during the ACP call;
+        // failure here only cleared the allow-list entry, leaving
+        // queued frames in `earlyEvents`. A subsequent successful
+        // `session/load`/`session/resume` for the same id within
+        // 60s would then `drainEarlyEvents` those stale frames into
+        // the new session — exactly the leak round 5's tombstone
+        // was meant to prevent. `markSessionClosed` already does
+        // both: refresh tombstone + delete `earlyEvents[id]`.
+        ci?.client.markSessionClosed(req.sessionId);
       }
     });
 

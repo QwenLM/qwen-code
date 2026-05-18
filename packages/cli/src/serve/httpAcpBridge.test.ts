@@ -4767,6 +4767,110 @@ describe('createHttpAcpBridge', () => {
 
       await bridge.shutdown();
     });
+
+    it('purges buffered guardrail events when restore fails so retry-success does not replay stale frames (codex round 7 fix)', async () => {
+      // Codex round 7 finding: round-6 added `markRestoreInFlight`
+      // so `bufferEarlyEvent` accepts frames for tombstoned ids
+      // during a restore. If the restore FAILS, pre-fix
+      // `clearRestoreInFlight` only released the allow-list and
+      // left buffered frames in `earlyEvents[id]`. A subsequent
+      // successful retry (`session/load` of the same id within
+      // 60s) would `drainEarlyEvents` those stale frames into the
+      // new session.
+      //
+      // Fix: failure path now calls `markSessionClosed` which both
+      // re-tombstones the id AND purges `earlyEvents[id]`.
+      let capturedConn: AgentSideConnection | undefined;
+      let loadAttempt = 0;
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        // First load attempt fails; second attempt succeeds. The
+        // child's notification fires DURING the failing first
+        // attempt — pre-fix it would survive the failure.
+        const fakeAgent = new FakeAgent({
+          loadSessionImpl: async (req, agent) => {
+            loadAttempt += 1;
+            if (loadAttempt === 1) {
+              // Buffer a guardrail event for this restore window
+              // BEFORE failing, simulating the round-6-allow-list
+              // behavior.
+              void agent;
+              void capturedConn!.extNotification(
+                'qwen/notify/session/mcp-budget-event',
+                {
+                  v: 1,
+                  sessionId: req.sessionId,
+                  kind: 'budget_warning',
+                  liveCount: 4,
+                  reservedCount: 4,
+                  budget: 4,
+                  thresholdRatio: 0.75,
+                  mode: 'warn',
+                },
+              );
+              // Tiny yield so the bridge dispatches the notification
+              // before we throw.
+              await new Promise((r) => setTimeout(r, 5));
+              throw new Error('simulated transient load failure');
+            }
+            return { configOptions: [] };
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+
+      // Pre-tombstone: spawn + close session with the id we'll later load.
+      const sess = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sessionId = sess.sessionId;
+      await bridge.closeSession(sessionId);
+
+      // First load — fails after the child queues a guardrail event.
+      // ACP wraps the agent throw as a JSON-RPC "Internal error";
+      // the original message lives in `data.details` but the assertion
+      // only needs to verify the load rejected.
+      await expect(
+        bridge.loadSession({ sessionId, workspaceCwd: WS_A }),
+      ).rejects.toThrow();
+
+      // Retry — succeeds. Pre-fix this would replay the queued
+      // guardrail event onto the new session's bus.
+      const loaded = await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(loaded.sessionId).toBe(sessionId);
+
+      // Verify no stale guardrail event leaked.
+      const abort = new AbortController();
+      const iter = bridge.subscribeEvents(loaded.sessionId, {
+        signal: abort.signal,
+        lastEventId: 0,
+      });
+      const collected: Array<{ type: string }> = [];
+      const drainPromise = (async () => {
+        for await (const e of iter) {
+          collected.push({ type: e.type });
+        }
+      })();
+      await new Promise((r) => setTimeout(r, 50));
+      abort.abort();
+      await drainPromise;
+      expect(collected.filter((e) => e.type === 'mcp_budget_warning')).toEqual(
+        [],
+      );
+
+      await bridge.shutdown();
+    });
   });
 
   describe('maxSessions cap (chiga0 Rec 3)', () => {

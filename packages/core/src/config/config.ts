@@ -3685,11 +3685,23 @@ export class Config {
   /**
    * PR 14b fix #2 (codex review round 1): register the MCP guardrail
    * push-event callback. Acceptable to call at any point in the
-   * Config lifecycle — before, during, or after `initialize()`. The
-   * callback is stashed and applied lazily inside `createToolRegistry`
-   * (the only construction site for `McpClientManager`); a late call
-   * after `initialize()` already ran applies directly to the existing
-   * manager.
+   * Config lifecycle — before, during, or after `initialize()`.
+   *
+   * Two paths:
+   * - **Pre-init** (no `toolRegistry` yet): stash on
+   *   `pendingMcpBudgetCallback`. `createToolRegistry` will apply it
+   *   to the freshly-constructed manager and clear the stash (round
+   *   6 fix). The stash is the ONLY way to reach a manager that
+   *   doesn't exist yet.
+   * - **Late** (`toolRegistry` already exists): dispatch directly to
+   *   the existing manager. **DO NOT** also stash — that's the
+   *   round-7 fix. Pre-fix, both paths assigned to
+   *   `pendingMcpBudgetCallback` regardless, so a subsequent
+   *   `createToolRegistry` (subagent override via
+   *   `createApprovalModeOverride` /
+   *   `buildSubagentContextOverride`) would re-apply the parent
+   *   session's callback to the subagent's fresh manager — routing
+   *   subagent telemetry through the wrong ACP session.
    *
    * `cb: undefined` clears the registration. `off`-mode managers
    * silently drop the callback (their state machine never runs).
@@ -3697,12 +3709,17 @@ export class Config {
   setMcpBudgetEventCallback(
     cb: ((event: McpBudgetEvent) => void) | undefined,
   ): void {
-    this.pendingMcpBudgetCallback = cb;
     if (this.toolRegistry) {
+      // Late-call path: apply directly. Do NOT stash — see comment
+      // above for the subagent isolation rationale.
       const mgr = this.toolRegistry.getMcpClientManager?.();
       if (mgr && typeof mgr.setOnBudgetEvent === 'function') {
         mgr.setOnBudgetEvent(cb);
       }
+      this.pendingMcpBudgetCallback = undefined;
+      return;
     }
+    // Pre-init path: stash for `createToolRegistry` to consume.
+    this.pendingMcpBudgetCallback = cb;
   }
 }
