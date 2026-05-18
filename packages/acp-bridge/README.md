@@ -43,6 +43,21 @@ extraction is split:
   introduced the boundary; PR 22b will parameterize bridge writes
   through it instead of the inline `BridgeClient.writeTextFile`).
 
+## Imports — root vs subpaths
+
+The package exposes both a barrel root (`@qwen-code/acp-bridge`) and
+per-module subpaths (`/eventBus`, `/inMemoryChannel`, `/channel`,
+`/permission`). They re-export the same symbols, so either form
+resolves to the same module at runtime. Pick by intent:
+
+- **Root** for application/test code that uses several primitives at
+  once — concise and matches how `serve/` imports landed today.
+- **Subpaths** for client adapters (TUI / channels / IDE / future
+  `remoteControl`) that only consume one slice — keeps the
+  dependency surface explicit and lets bundlers tree-shake the rest.
+
+Both variants are stable. PR 22b will not change either set.
+
 ## Backward compatibility
 
 `packages/cli/src/serve/eventBus.ts` and
@@ -59,5 +74,5 @@ package) so any external consumer of those types is unaffected.
 
 - #4175 Wave 5 PR 22 row
 - #3803 `Stage 1.5-prereq AcpChannel lift` (chiga0's original framing)
-- `httpAcpBridge.ts:1144-1154` (FIXME pointing at the four
+- `httpAcpBridge.ts:1096-1106` (FIXME pointing at the four
   `PermissionMediator` strategies this package now declares)

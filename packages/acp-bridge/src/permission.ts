@@ -30,7 +30,7 @@
  *   Use case: workstations where remote control should never grant
  *   privilege escalation.
  *
- * See `httpAcpBridge.ts:1144-1154` for the original FIXME that
+ * See `httpAcpBridge.ts:1096-1106` for the original FIXME that
  * scoped this contract.
  */
 export type PermissionPolicy =
