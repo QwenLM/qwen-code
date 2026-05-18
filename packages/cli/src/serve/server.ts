@@ -39,6 +39,50 @@ import {
   type CapabilitiesEnvelope,
   type ServeOptions,
 } from './types.js';
+import {
+  createWorkspaceFileSystemFactory,
+  type WorkspaceFileSystemFactory,
+} from './fs/index.js';
+
+/**
+ * Build a no-op fs-audit emitter that logs a warning every
+ * `WARN_EVERY` dropped events with as much context as the audit
+ * payload exposes. The default factory uses this so a regression
+ * that silently strips audit events shows up in operator logs
+ * instead of disappearing — the earlier one-shot warn was a
+ * permanent silent no-op after the first event, which made a PR
+ * 19/20 regression where `runQwenServe` forgets to inject the real
+ * factory completely invisible (every write 403s; nothing in
+ * audit; one stale stderr line easy to miss for background
+ * daemons). Periodic warning + dropped-event count + first-event
+ * `errorKind` + `pathHash` make the regression actionable.
+ *
+ * PR 19/20's `runQwenServe` injection replaces this with a real
+ * per-session emit, so legitimate production traffic never hits
+ * the warning.
+ */
+function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
+  const WARN_EVERY = 100;
+  let droppedCount = 0;
+  return (event: BridgeEvent) => {
+    droppedCount += 1;
+    if (droppedCount === 1 || droppedCount % WARN_EVERY === 0) {
+      const data = event.data as
+        | { errorKind?: string; pathHash?: string; intent?: string }
+        | undefined;
+      const ctx: string[] = [];
+      if (data?.errorKind) ctx.push(`errorKind=${data.errorKind}`);
+      if (data?.intent) ctx.push(`intent=${data.intent}`);
+      if (data?.pathHash) ctx.push(`pathHash=${data.pathHash}`);
+      const ctxStr = ctx.length > 0 ? ` (${ctx.join(' ')})` : '';
+      writeStderrLine(
+        `qwen serve: fs audit emit is the default no-op — ${droppedCount} event(s) dropped so far. ` +
+          `Latest type=${event.type}${ctxStr}. ` +
+          `Inject deps.fsFactory in createServeApp to wire audit into the EventBus.`,
+      );
+    }
+  };
+}
 
 export interface ServeAppDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
@@ -56,6 +100,21 @@ export interface ServeAppDeps {
    * process.cwd()` itself.
    */
   boundWorkspace?: string;
+  /**
+   * Workspace filesystem boundary factory (#4175 PR 18). When
+   * supplied, PR 19/20 routes will pull a per-request
+   * `WorkspaceFileSystem` off it; when omitted, `createServeApp`
+   * builds a strict default (`trusted: false`, warn-once no-op
+   * `emit`) so an upstream refactor that forgets to inject
+   * `fsFactory` never silently allows writes against an untrusted
+   * workspace. No PR 18 routes consume the factory yet — the slot
+   * is wired so PR 19 read-only file routes can drop in without
+   * re-shaping `ServeAppDeps`. Once PR 19 lands, `runQwenServe`
+   * will inject a factory whose `trusted` flag mirrors
+   * `Config.isTrustedFolder()` and whose `emit` plumbs into the
+   * per-session EventBus.
+   */
+  fsFactory?: WorkspaceFileSystemFactory;
 }
 
 /**
@@ -151,6 +210,33 @@ export function createServeApp(
         : {}),
       boundWorkspace,
     });
+
+  // Strict-default factory: `trusted: false` so an upstream refactor
+  // that forgets to inject `deps.fsFactory` never silently allows
+  // writes against an untrusted workspace. Read-shaped intents still
+  // succeed (so tests / direct embeds can exercise the read path
+  // without a config), but every mutating intent throws
+  // `untrusted_workspace`. The default `emit` is a no-op that warns
+  // once on first call so a future regression that silently swallows
+  // audit events surfaces in operator logs the first time it bites.
+  // Callers passing `deps.fsFactory` get full control of trust +
+  // audit destination — `runQwenServe` will inject one whose
+  // `trusted` mirrors `Config.isTrustedFolder()` and whose `emit`
+  // plumbs into the per-session EventBus once PR 19/20 lands.
+  const fsFactory: WorkspaceFileSystemFactory =
+    deps.fsFactory ??
+    createWorkspaceFileSystemFactory({
+      boundWorkspace,
+      trusted: false,
+      emit: createDefaultFsAuditEmit(),
+    });
+  // Park the factory on `app.locals` so PR 19/20 route handlers can
+  // pick it up via `req.app.locals.fsFactory` without re-threading
+  // the value through every handler signature, and so PR 18 tests
+  // can assert the factory is reachable. Express types `locals` as
+  // a generic record; we cast to keep a precise property name.
+  (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
+    fsFactory;
 
   // Order matters: rejection guards (CORS / Host allowlist / bearer auth)
   // run BEFORE the JSON body parser. Otherwise an unauthenticated POST

@@ -3583,3 +3583,86 @@ describe('runQwenServe SIGINT handler', () => {
     void vi.fn(); // silence unused-import lint if vitest tree-shakes
   });
 });
+
+describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
+  it('parks a default WorkspaceFileSystemFactory on app.locals when none is injected', async () => {
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+    );
+    const fsFactory = (
+      app.locals as {
+        fsFactory?: { forRequest: (ctx: { route: string }) => unknown };
+      }
+    ).fsFactory;
+    expect(fsFactory).toBeDefined();
+    expect(typeof fsFactory!.forRequest).toBe('function');
+    // The factory is functional — it can build a per-request boundary.
+    const fs = fsFactory!.forRequest({ route: 'TEST /op' });
+    expect(fs).toBeDefined();
+  });
+
+  it('uses the injected fsFactory verbatim when supplied', async () => {
+    const { createServeApp } = await import('./server.js');
+    const sentinel = { forRequest: vi.fn(() => ({ marker: 'injected' })) };
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: '/work/bound',
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { fsFactory: sentinel as any },
+    );
+    expect((app.locals as { fsFactory?: unknown }).fsFactory).toBe(sentinel);
+  });
+
+  it('default fsFactory is built with trusted=false (writes refused)', async () => {
+    const { createServeApp } = await import('./server.js');
+    const { isFsError } = await import('./fs/index.js');
+    const os = await import('node:os');
+    const tmp = await import('node:fs').then((m) =>
+      m.promises.mkdtemp(path.join(os.tmpdir(), 'qwen-serve-default-trust-')),
+    );
+    try {
+      const app = createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: tmp,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+      );
+      type FsCtx = { route: string };
+      type WfsLite = {
+        resolve: (input: string, intent: 'write') => Promise<string>;
+        writeText: (p: string, content: string) => Promise<void>;
+      };
+      const fsFactory = (
+        app.locals as {
+          fsFactory?: { forRequest: (ctx: FsCtx) => WfsLite };
+        }
+      ).fsFactory;
+      expect(fsFactory).toBeDefined();
+      const fs = fsFactory!.forRequest({ route: 'TEST /op' });
+      // Resolve a write target inside the workspace; the resolve
+      // succeeds but writeText must throw `untrusted_workspace` —
+      // that's the safe-default behavior the strict-default factory
+      // exists to enforce.
+      const resolved = await fs.resolve('child.txt', 'write');
+      const err = await fs.writeText(resolved, 'x').catch((e: unknown) => e);
+      expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('untrusted_workspace');
+    } finally {
+      await import('node:fs').then((m) =>
+        m.promises.rm(tmp, { recursive: true, force: true }),
+      );
+    }
+  });
+});
