@@ -100,4 +100,17 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
   });
+
+  it('exposes the PR 21 auth device-flow surface at the public entry', () => {
+    // PR #4255 fold-in 9 review thread #11: the auth surface had
+    // been re-exported from `src/daemon/index.ts` but never from
+    // the published `src/index.ts`, so SDK consumers got
+    // `undefined` for everything except `client.auth.start()`
+    // (which traveled through the already-exported `DaemonClient`).
+    expect(typeof Public.DaemonAuthFlow).toBe('function');
+    expect(typeof Public.reduceDaemonAuthEvent).toBe('function');
+    expect(typeof Public.reduceDaemonAuthEvents).toBe('function');
+    expect(typeof Public.createDaemonAuthState).toBe('function');
+    expect(typeof Public.DEVICE_FLOW_EXPIRY_GRACE_MS).toBe('number');
+  });
 });

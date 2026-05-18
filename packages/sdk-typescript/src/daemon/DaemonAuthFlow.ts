@@ -222,9 +222,19 @@ async function getDeviceFlowOrSynthetic404(
  * was sloppy ("a long timeout") they fall back to the documented
  * default rather than getting a pathological loop.
  */
-function sanitizePositiveMs(raw: number | undefined): number | undefined {
+function sanitizePositiveMs(
+  raw: number | undefined,
+  opts: { allowZero?: boolean } = {},
+): number | undefined {
   if (raw === undefined) return undefined;
-  if (!Number.isFinite(raw) || raw <= 0) return undefined;
+  if (!Number.isFinite(raw)) return undefined;
+  // PR #4255 fold-in 9 review thread #6: `timeoutMs: 0` is the
+  // documented "settle immediately, return current daemon view"
+  // contract — must be honored, not collapsed to falsy. Opt-in via
+  // `allowZero` so `pollOverrideMs: 0` still falls back to the
+  // default (a 0 ms poll interval is a tight loop, not a useful
+  // contract).
+  if (opts.allowZero ? raw < 0 : raw <= 0) return undefined;
   return raw;
 }
 
@@ -247,11 +257,20 @@ async function pollUntilTerminal(
   // numeric inputs BEFORE composing the ceiling / interval. NaN /
   // Infinity slip past the original `?? default` form (they're
   // truthy-ish) and break the loop's wall-clock guard.
-  const sanitizedTimeoutMs = sanitizePositiveMs(opts.timeoutMs);
+  const sanitizedTimeoutMs = sanitizePositiveMs(opts.timeoutMs, {
+    allowZero: true,
+  });
   const sanitizedPollOverrideMs = sanitizePositiveMs(opts.pollOverrideMs);
-  const ceiling = sanitizedTimeoutMs
-    ? Date.now() + sanitizedTimeoutMs
-    : start.expiresAt + DEVICE_FLOW_EXPIRY_GRACE_MS;
+  // PR #4255 fold-in 9 review thread #6: use `!== undefined` (not
+  // truthy check) so `timeoutMs: 0` produces a `ceiling = Date.now()`
+  // — which the loop's `now >= ceiling` guard will satisfy on the
+  // very first iteration, returning the daemon's current snapshot
+  // immediately. The earlier `?` form treated 0 as falsy and
+  // silently fell back to the default.
+  const ceiling =
+    sanitizedTimeoutMs !== undefined
+      ? Date.now() + sanitizedTimeoutMs
+      : start.expiresAt + DEVICE_FLOW_EXPIRY_GRACE_MS;
   let interval = Math.max(
     1_000,
     sanitizedPollOverrideMs ?? start.intervalMs ?? 5_000,

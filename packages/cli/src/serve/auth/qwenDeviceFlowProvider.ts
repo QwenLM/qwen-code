@@ -184,7 +184,7 @@ export class QwenOAuthDeviceFlowProvider implements DeviceFlowProvider {
       // `hint` — `qwenOAuth2.ts` embeds the entire IdP responseText
       // (which can be an HTML error page from a reverse proxy / WAF
       // running into hundreds of bytes) into the message, and that
-      // would flow through `broadcastWorkspaceEvent` to every SSE
+      // would flow through `publishWorkspaceEvent` to every SSE
       // subscriber. Use a stable bounded summary; full detail goes
       // through the registry's stderr audit only.
       //

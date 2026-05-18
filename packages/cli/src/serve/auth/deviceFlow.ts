@@ -72,18 +72,6 @@ export const DEVICE_FLOW_MAX_EXPIRES_IN_SEC = 60 * 60;
  * thread #3.
  */
 export const DEVICE_FLOW_MAX_INTERVAL_MS = 60_000;
-/**
- * Cap on the SSE-broadcast `hint` from `runPollTick`'s defensive
- * catch. PR #4255 fold-in 8 review thread #1: the
- * `DeviceFlowProvider.poll()` `@remarks` contract requires throwers
- * to sanitize `err.message` before it leaves the provider, but a
- * non-conforming future provider could throw raw IdP detail (HTML
- * error page, multi-KB stack trace). Truncating the hint here is
- * defense-in-depth — the SSE event payload stays bounded even if
- * the contract is violated; the full raw detail is preserved on the
- * audit trail (audit's backing impl writes to stderr).
- */
-export const DEVICE_FLOW_POLL_HINT_MAX_LEN = 256;
 
 // PR #4255 fold-in 6 review thread #2: derive the type from the
 // supported-providers tuple so adding/removing a provider id
@@ -254,7 +242,25 @@ export type DeviceFlowPollResult =
        *  on-disk credentials. Rationale: the user already approved on
        *  the IdP page (RFC 8628 device_code is single-use), so the
        *  microsecond cancel race shouldn't waste their approval. The
-       *  audit trail records the race for incident response. */
+       *  audit trail records the race for incident response.
+       *
+       *  @remarks
+       *  **Provider-author contract — `signal` MUST be honored.** The
+       *  registry races this promise against `DEVICE_FLOW_PERSIST_TIMEOUT_MS`
+       *  (currently 30 s). When the timeout fires, the registry
+       *  publishes `persist_failed` to SSE subscribers AND aborts
+       *  `signal`. A non-cooperative provider that ignores `signal`
+       *  and later commits credentials anyway leaves the daemon in a
+       *  split-brain state: every SDK consumer sees `persist_failed`
+       *  via SSE while the credentials are silently on disk. The
+       *  registry detects this and emits a
+       *  `lost_success_after_timeout` audit breadcrumb (PR #4255
+       *  fold-in 9 #7), but it cannot rescue the SDK consumers'
+       *  view. The contract is therefore: every fs / network call
+       *  inside `persist` MUST take `signal` as input AND propagate
+       *  it down to abortable primitives (`fs.writeFile`, `fetch`,
+       *  etc.). `cacheQwenCredentials({signal})` in
+       *  `qwenDeviceFlowProvider` is the canonical example. */
       persist(opts: { signal: AbortSignal }): Promise<{
         expiresAt?: number;
         accountAlias?: string;
@@ -449,6 +455,16 @@ interface DeviceFlowEntry {
    *     (the cancel got its way; no credentials on disk).
    */
   cancelRequestedDuringPersist?: boolean;
+  /**
+   * Client id of the SDK caller that invoked `cancel()` (via
+   * `DELETE /workspace/auth/device-flow/:id`'s
+   * `X-Qwen-Client-Id`). Stamped only on the in-flight
+   * persist-defer path so the persist resolution branch's deferred
+   * event publish + audit can attribute the cancel back to the
+   * actual canceller, not the original initiator. PR #4255 fold-in
+   * 9 review thread #5.
+   */
+  cancellerClientId?: string;
 }
 
 export interface DeviceFlowRegistryDeps {
@@ -705,7 +721,19 @@ export class DeviceFlowRegistry {
             } catch {
               // best-effort
             }
-            reject(new Error('device-flow start timeout'));
+            // PR #4255 fold-in 9 review thread #9: reject with the
+            // typed `UpstreamDeviceFlowError` so the route layer
+            // maps to `502 upstream_error` (the same envelope every
+            // other IdP start failure uses). A hung IdP is a
+            // textbook upstream-not-responding scenario from the
+            // SDK consumer's POV; surfacing it as a generic 500 via
+            // `sendBridgeError`'s default fall-through was
+            // misleading.
+            reject(
+              new UpstreamDeviceFlowError(
+                'device-flow start timeout (upstream IdP unresponsive)',
+              ),
+            );
           });
           provider
             .start({ signal: cancelController.signal })
@@ -835,6 +863,17 @@ export class DeviceFlowRegistry {
     // closed its dialog.
     if (entry.persistInFlight) {
       entry.cancelRequestedDuringPersist = true;
+      // PR #4255 fold-in 9 review thread #5: stash the canceller's
+      // client id on the entry so the persist resolution branch
+      // (which actually emits the deferred event) can attribute it
+      // to the SDK that asked to cancel, not the original
+      // initiator. Without this, the cancellation event's
+      // `originatorClientId` was always `entry.initiatorClientId`,
+      // which broke any SSE consumer that suppresses self-emitted
+      // events to avoid double-handling.
+      if (cancellerClientId) {
+        entry.cancellerClientId = cancellerClientId;
+      }
       try {
         entry.cancelController.abort(new Error('cancel during persist'));
       } catch {
@@ -903,26 +942,7 @@ export class DeviceFlowRegistry {
     if (entry.deviceCode === undefined) return;
     const now = this.now();
     if (now >= entry.expiresAt) {
-      if (this.transitionTerminal(entry, 'expired', 'expired_token')) {
-        this.deps.events.publish(
-          {
-            type: 'failed',
-            data: {
-              deviceFlowId: entry.deviceFlowId,
-              errorKind: 'expired_token',
-              hint: 'device-flow expired without authorization',
-            },
-          },
-          entry.initiatorClientId,
-        );
-        this.deps.audit?.record({
-          deviceFlowId: entry.deviceFlowId,
-          providerId: entry.providerId,
-          clientId: entry.initiatorClientId,
-          status: 'expired',
-          errorKind: 'expired_token',
-        });
-      }
+      this.expireEntry(entry);
       return;
     }
     entry.lastPolledAt = now;
@@ -937,19 +957,22 @@ export class DeviceFlowRegistry {
         { signal: entry.cancelController.signal },
       );
     } catch (err: unknown) {
-      // PR #4255 fold-in 8 review thread #1: the provider's
-      // `@remarks` contract requires throwers to sanitize, but if
-      // violated the unbounded `err.message` would otherwise flow
-      // verbatim to every SSE subscriber via `hint`. Truncate
-      // defensively; preserve the full raw detail on the audit
-      // trail (`rawProviderError` is threaded into the case 'error'
-      // branch's audit emission below) so operators retain
-      // visibility for incident response.
+      // PR #4255 fold-in 9 review thread #1 (refines fold-in 8 #1):
+      // a non-conforming provider that violates the `@remarks`
+      // sanitization contract by throwing raw IdP detail must NOT
+      // leak ANY of that detail to SSE subscribers. fold-in 8
+      // truncated to 256 chars but still forwarded the prefix; that
+      // prefix can still carry secret material (`device_code` if
+      // the provider templated it into the message, internal
+      // hostnames, etc.). Use a STATIC bounded hint here as the
+      // outermost defense layer; the full raw `err.message` flows
+      // through the audit channel (whose backing impl writes to
+      // stderr) for operator visibility.
       rawProviderError = err instanceof Error ? err.message : String(err);
       result = {
         kind: 'error',
         errorKind: 'upstream_error',
-        hint: truncatePollHint(rawProviderError),
+        hint: 'provider.poll() failed; see daemon audit log for details',
       };
     }
     if (entry.status !== 'pending') return;
@@ -993,13 +1016,57 @@ export class DeviceFlowRegistry {
         let metadata: { expiresAt?: number; accountAlias?: string } = {};
         let persistError: unknown;
         let persistTimer: ReturnType<typeof setTimeout> | undefined;
+        let persistTimedOut = false;
         entry.persistInFlight = true;
+        // PR #4255 fold-in 9 review thread #7: track the original
+        // `result.persist(...)` promise INDEPENDENTLY of the race
+        // wrapper so a non-cooperative provider that ignores
+        // `signal` can't silently commit credentials AFTER the
+        // registry already published `persist_failed`. Reachable
+        // scenario: provider's persist runs `mkdir`/`chmod`/`mv`
+        // outside the abortable `fs.writeFile` pathway and the
+        // disk write succeeds 100 ms after the 30 s timeout fires
+        // — daemon now has credentials on disk while every SSE
+        // subscriber thinks the login failed.
+        //
+        // The Qwen provider is signal-honoring (see fold-in 3 #10)
+        // so this is forward-defense for future providers. We
+        // can't pre-commit-rollback (`fs.unlink` would race with
+        // provider-internal state) so the contract stays
+        // "provider's persist MUST honor signal"; this tracker
+        // catches violations and emits a `lost_success_after_timeout`
+        // audit breadcrumb so operators see the inconsistency.
+        const persistTracker = result.persist({
+          signal: entry.cancelController.signal,
+        });
+        persistTracker.then(
+          (lateMeta) => {
+            // Only fire when the race was timed out AND the underlying
+            // persist later succeeded — that's the inconsistency
+            // window. Happy-path resolution (race accepted the value)
+            // leaves `persistTimedOut === false`.
+            if (!persistTimedOut) return;
+            this.deps.audit?.record({
+              deviceFlowId: entry.deviceFlowId,
+              providerId: entry.providerId,
+              clientId: entry.initiatorClientId,
+              status: 'authorized',
+              hint: `lost_success_after_timeout (provider.persist ignored timeout signal; credentials on disk but registry already published persist_failed; expiresAt=${lateMeta.expiresAt ?? 'unknown'})`,
+            });
+          },
+          () => {
+            // Late rejection after the race already drove the
+            // terminal — no-op (persistError carries the original
+            // failure, the registry already published it).
+          },
+        );
         try {
           metadata = await new Promise<{
             expiresAt?: number;
             accountAlias?: string;
           }>((resolve, reject) => {
             persistTimer = this.schedule(DEVICE_FLOW_PERSIST_TIMEOUT_MS, () => {
+              persistTimedOut = true;
               try {
                 entry.cancelController.abort(new Error('persist timeout'));
               } catch {
@@ -1007,9 +1074,7 @@ export class DeviceFlowRegistry {
               }
               reject(new Error('persist timeout'));
             });
-            result
-              .persist({ signal: entry.cancelController.signal })
-              .then(resolve, reject);
+            persistTracker.then(resolve, reject);
           });
         } catch (err: unknown) {
           persistError = err;
@@ -1021,47 +1086,37 @@ export class DeviceFlowRegistry {
         const cancelDuringPersist = entry.cancelRequestedDuringPersist === true;
         if (persistError) {
           // Persist failed (abort triggered by cancel/timeout, or a
-          // genuine fs error). Three possible terminal mappings:
-          //   1. cancelDuringPersist  → `cancelled` (user cancel won)
-          //   2. expiresAt exceeded    → `expired`/`expired_token`
-          //                              (sweeper would have)
-          //   3. otherwise             → `error`/`persist_failed`
-          //                              (genuine disk fault)
-          // Only branch 1 needs a fresh audit emission — the deferred
-          // `cancelled` audit was recorded by `cancel()` already, but
-          // we still need to publish the SSE event since cancel()
-          // deferred it.
-          const now = this.now();
+          // genuine fs error). Two terminal mappings:
+          //   1. cancelDuringPersist → `cancelled` (user cancel won)
+          //   2. otherwise → `error`/`persist_failed` (genuine disk
+          //                  fault — even if now >= expiresAt)
+          //
+          // PR #4255 fold-in 9 review thread #13: previously a
+          // persist-fail × past-`expiresAt` path classified as
+          // `expired`/`expired_token`, which routed operator
+          // remediation toward "user re-authenticates" (RFC 8628
+          // expiry semantic) when the actual root cause was a disk
+          // I/O failure. `persist_failed` was specifically designed
+          // for this scenario (see DeviceFlowErrorKind JSDoc):
+          // distinct from `expired_token` so operators see "fix
+          // disk" rather than "tell user to retry." The
+          // past-expiresAt detail is preserved on the audit hint
+          // for incident-response visibility.
           if (cancelDuringPersist) {
             if (this.transitionTerminal(entry, 'cancelled')) {
+              // PR #4255 fold-in 9 review thread #5: emit on the
+              // canceller's client id (recorded by `cancel()` on
+              // the entry), falling back to the initiator only
+              // when no canceller id was supplied. SSE consumers
+              // that suppress self-emitted events can now
+              // attribute the cancel correctly.
               this.deps.events.publish(
                 {
                   type: 'cancelled',
                   data: { deviceFlowId: entry.deviceFlowId },
                 },
-                entry.initiatorClientId,
+                entry.cancellerClientId ?? entry.initiatorClientId,
               );
-            }
-          } else if (now >= entry.expiresAt) {
-            if (this.transitionTerminal(entry, 'expired', 'expired_token')) {
-              this.deps.events.publish(
-                {
-                  type: 'failed',
-                  data: {
-                    deviceFlowId: entry.deviceFlowId,
-                    errorKind: 'expired_token',
-                    hint: 'device-flow expired without authorization',
-                  },
-                },
-                entry.initiatorClientId,
-              );
-              this.deps.audit?.record({
-                deviceFlowId: entry.deviceFlowId,
-                providerId: entry.providerId,
-                clientId: entry.initiatorClientId,
-                status: 'expired',
-                errorKind: 'expired_token',
-              });
             }
           } else if (
             this.transitionTerminal(entry, 'error', 'persist_failed')
@@ -1069,6 +1124,7 @@ export class DeviceFlowRegistry {
             // S1 sanitize: full err detail goes through stderr audit
             // (debugLogger inside cacheQwenCredentials); only a
             // bounded sentence flows to SSE subscribers.
+            const pastExpiry = this.now() >= entry.expiresAt;
             this.deps.events.publish(
               {
                 type: 'failed',
@@ -1086,6 +1142,11 @@ export class DeviceFlowRegistry {
               clientId: entry.initiatorClientId,
               status: 'failed',
               errorKind: 'persist_failed',
+              ...(pastExpiry
+                ? {
+                    hint: 'persist_also_failed_past_expiry (root cause is disk I/O; entry was past expiresAt by the time persist resolved)',
+                  }
+                : {}),
             });
           }
           return;
@@ -1191,6 +1252,37 @@ export class DeviceFlowRegistry {
   }
 
   /**
+   * Drive a pending entry to the time-based `expired` terminal:
+   * `transitionTerminal` + emit `failed`/`expired_token` event +
+   * audit. PR #4255 fold-in 9 review thread #3: extracted from
+   * the two identical sites (poll-tick top-of-loop + sweeper) so
+   * the event shape lives in one place. No-op if the entry has
+   * already transitioned (the transitionTerminal idempotence guard
+   * handles the sweeper × poll-tick race).
+   */
+  private expireEntry(entry: DeviceFlowEntry): void {
+    if (!this.transitionTerminal(entry, 'expired', 'expired_token')) return;
+    this.deps.events.publish(
+      {
+        type: 'failed',
+        data: {
+          deviceFlowId: entry.deviceFlowId,
+          errorKind: 'expired_token',
+          hint: 'device-flow expired without authorization',
+        },
+      },
+      entry.initiatorClientId,
+    );
+    this.deps.audit?.record({
+      deviceFlowId: entry.deviceFlowId,
+      providerId: entry.providerId,
+      clientId: entry.initiatorClientId,
+      status: 'expired',
+      errorKind: 'expired_token',
+    });
+  }
+
+  /**
    * Move a pending entry to terminal state. Returns **`true` exactly once**
    * — the call site that successfully drove the transition. Subsequent
    * calls (sweeper × poll-tick race, double cancel, etc.) return `false`
@@ -1256,26 +1348,7 @@ export class DeviceFlowRegistry {
       // that the cancel-during-persist case avoids.
       if (entry.persistInFlight) continue;
       if (entry.status === 'pending' && now >= entry.expiresAt) {
-        if (this.transitionTerminal(entry, 'expired', 'expired_token')) {
-          this.deps.events.publish(
-            {
-              type: 'failed',
-              data: {
-                deviceFlowId: entry.deviceFlowId,
-                errorKind: 'expired_token',
-                hint: 'device-flow expired without authorization',
-              },
-            },
-            entry.initiatorClientId,
-          );
-          this.deps.audit?.record({
-            deviceFlowId: entry.deviceFlowId,
-            providerId: entry.providerId,
-            clientId: entry.initiatorClientId,
-            status: 'expired',
-            errorKind: 'expired_token',
-          });
-        }
+        this.expireEntry(entry);
         continue;
       }
       if (
@@ -1326,18 +1399,6 @@ export class DeviceFlowRegistry {
     this.byId.clear();
     this.byProvider.clear();
   }
-}
-
-/**
- * Bound `runPollTick`'s defensive-catch hint to
- * `DEVICE_FLOW_POLL_HINT_MAX_LEN`. The full raw detail is preserved
- * on the audit trail; this helper only shapes the SSE-visible
- * surface. PR #4255 fold-in 8 review thread #1.
- */
-function truncatePollHint(raw: string): string {
-  if (raw.length <= DEVICE_FLOW_POLL_HINT_MAX_LEN) return raw;
-  const dropped = raw.length - DEVICE_FLOW_POLL_HINT_MAX_LEN;
-  return `${raw.slice(0, DEVICE_FLOW_POLL_HINT_MAX_LEN)}…[+${dropped} bytes truncated]`;
 }
 
 function toPublicView(entry: DeviceFlowEntry): DeviceFlowPublicView {

@@ -370,7 +370,28 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
     }
 
     const result = (await response.json()) as DeviceAuthorizationResponse;
-    debugLogger.debug('Device authorization result:', result);
+    // PR #4255 fold-in 9 review thread #12: do NOT log the full
+    // result. `device_code` is an RFC 8628 bearer-equivalent
+    // credential — anyone holding it within the grant's lifetime
+    // can complete the token exchange. The daemon device-flow
+    // registry's `BrandedSecret` keeps `device_code` out of HTTP
+    // bodies / events / logs, but a debug-mode `console.log(result)`
+    // here would write the raw `device_code` to stderr / journald,
+    // bypassing the entire redaction layer. Log only the
+    // operationally-useful timing fields (size + presence of error
+    // envelope + lifetimes); secrets stay in memory.
+    if (isDeviceAuthorizationSuccess(result)) {
+      debugLogger.debug('Device authorization result (sanitized):', {
+        ok: true,
+        expires_in: result.expires_in,
+      });
+    } else {
+      const errorData = result as ErrorData;
+      debugLogger.debug('Device authorization result (sanitized):', {
+        ok: false,
+        error: errorData?.error,
+      });
+    }
 
     // Check if the response indicates success
     if (!isDeviceAuthorizationSuccess(result)) {

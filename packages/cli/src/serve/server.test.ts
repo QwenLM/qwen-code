@@ -586,11 +586,6 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     killAllSync() {
       shutdownCalls += 1;
     },
-    // Issue #4175 PR 21 — workspace-level event fan-out.
-    broadcastWorkspaceEvent() {
-      // No-op stub for the test fake; tests that need fan-out behavior
-      // construct a real bridge.
-    },
   };
 }
 

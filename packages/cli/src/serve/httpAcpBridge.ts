@@ -498,18 +498,13 @@ export interface HttpAcpBridge {
    * subscriber overflow) do NOT throw. Workspace events are
    * authoritative via the GET routes; SSE is the convenience path.
    *
-   * **Replaces with PR 16:** PR #4249 introduces `publishWorkspaceEvent`
-   * with the same fan-out semantics. Once PR 16 lands, this helper is
-   * a fold-in candidate — collapse to the shared method, drop this
-   * inline copy. Keeping the name distinct (`broadcastWorkspaceEvent`
-   * vs `publishWorkspaceEvent`) avoids a merge conflict and makes the
-   * fold-in PR a search-and-replace.
+   * Removed in PR #4255 fold-in 9: PR 16 (#4249) landed
+   * `publishWorkspaceEvent` with identical fan-out semantics; the
+   * closed-bus + all-failed-stderr operator-visibility features
+   * that PR 21 added here have been folded INTO
+   * `publishWorkspaceEvent`. Use that helper for all workspace-
+   * scoped fan-outs (memory, agents, auth device-flow, future).
    */
-  broadcastWorkspaceEvent(event: {
-    type: string;
-    data: unknown;
-    originatorClientId?: string;
-  }): void;
 }
 
 /**
@@ -2705,45 +2700,6 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       return pendingPermissions.size;
     },
 
-    broadcastWorkspaceEvent(envelope) {
-      // Snapshot to a list before iterating so a publish-driven mutation
-      // of `byId` (would only happen on a closed-bus terminal frame
-      // racing with the broadcast) doesn't break the loop.
-      const sessions = Array.from(byId.values());
-      // PR #4255 review S5: track per-session success/fail. Per-session
-      // failures are debug-noise (a closed bus on one session shouldn't
-      // page anyone), but a 100%-fail broadcast (every session bus
-      // refused) is operationally interesting — clients won't see the
-      // event and the GET fallback is the only path. Elevate to
-      // unconditional stderr so monitoring catches it.
-      let successCount = 0;
-      let failureCount = 0;
-      for (const entry of sessions) {
-        try {
-          entry.events.publish({
-            type: envelope.type,
-            data: envelope.data,
-            ...(envelope.originatorClientId
-              ? { originatorClientId: envelope.originatorClientId }
-              : {}),
-          });
-          successCount += 1;
-        } catch (err) {
-          failureCount += 1;
-          writeServeDebugLine(
-            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      }
-      if (sessions.length > 0 && successCount === 0) {
-        writeStderrLine(
-          `qwen serve: broadcastWorkspaceEvent type=${envelope.type} dropped on ALL ${failureCount} session bus(es); SSE subscribers will miss this event (GET fallback still authoritative)`,
-        );
-      }
-    },
-
     async loadSession(req) {
       return restoreSession('load', req);
     },
@@ -3326,8 +3282,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // (mid-shutdown, or evicted under load) is silently skipped, same
       // posture as `permission_resolved` at line 1717.
       //
-      // We deliberately do NOT track delivery success per session here:
-      // the route handler's contract is "read-after-write" and any SSE
+      // The route handler's contract is "read-after-write" and any SSE
       // subscriber that misses the event can re-fetch via the route's
       // GET sibling. Stage 5 PR 24 PermissionMediator can layer a
       // proper workspace event bus on top if adapters need stricter
@@ -3342,10 +3297,32 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
       // route layer (200 OK) while SSE subscribers stop seeing
       // events. The shutdown gate keeps the common race noise out of
       // the production log without hiding actual bugs.
-      for (const entry of byId.values()) {
+      //
+      // PR #4255 fold-in 9: track per-session success/fail. A
+      // closed-bus return (`undefined` from `EventBus.publish` —
+      // see eventBus.ts:195-207) counts as a failure (operator
+      // signal), distinct from a thrown exception (regression
+      // signal). When zero sessions are active OR every active bus
+      // dropped the event, we elevate to unconditional stderr so
+      // monitoring catches the all-buses-dropped scenario.
+      // Inherited from the (now removed) `broadcastWorkspaceEvent`
+      // PR 21 added — PR 16's helper is now the single fan-out.
+      const sessions = Array.from(byId.values());
+      let successCount = 0;
+      let failureCount = 0;
+      for (const entry of sessions) {
         try {
-          entry.events.publish(event);
+          const published = entry.events.publish(event);
+          if (published === undefined) {
+            failureCount += 1;
+            writeServeDebugLine(
+              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+            );
+          } else {
+            successCount += 1;
+          }
         } catch (err) {
+          failureCount += 1;
           const detail =
             `publishWorkspaceEvent: bus publish failed for session ` +
             `${JSON.stringify(entry.sessionId)} (type=${event.type}): ` +
@@ -3356,6 +3333,11 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
             writeStderrLine(`qwen serve: ${detail}`);
           }
         }
+      }
+      if (sessions.length > 0 && successCount === 0 && !shuttingDown) {
+        writeStderrLine(
+          `qwen serve: publishWorkspaceEvent type=${event.type} dropped on ALL ${failureCount} session bus(es); SSE subscribers will miss this event (GET fallback still authoritative)`,
+        );
       }
     },
 

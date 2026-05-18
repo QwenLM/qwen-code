@@ -684,12 +684,14 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
     }
   });
 
-  it('runPollTick catch truncates the SSE hint and preserves raw on the audit (fold-in 8 #1)', async () => {
+  it('runPollTick catch uses a static SSE hint and preserves raw on the audit (fold-in 9 #1)', async () => {
     // Models a non-conforming provider that violates the @remarks
-    // sanitization contract by throwing a multi-KB raw payload (here,
-    // an HTML-error-page-shaped string).
+    // sanitization contract by throwing a multi-KB raw payload that
+    // could include secret material (here, an HTML-error-page-shaped
+    // string with a fake-secret marker).
     const provider = new FakeProvider();
-    const longRaw = 'X'.repeat(4_000); // > 256 char hint cap
+    const secretMarker = 'CONFIDENTIAL-DEVICE-CODE-DO-NOT-LEAK';
+    const longRaw = `${secretMarker} ${'X'.repeat(4_000)}`;
     provider.pollThrowsWith = new Error(longRaw);
     const built = buildRegistry(provider);
     const { registry, env, events, auditLines } = built;
@@ -708,14 +710,18 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
         failedEvent && failedEvent.emission.type === 'failed'
           ? failedEvent.emission.data.hint
           : undefined;
-      // SSE-broadcast hint must be bounded — the raw 4_000-char body
-      // would otherwise reach every subscriber.
+      // fold-in 9 strengthens fold-in 8: SSE hint is now a STATIC
+      // bounded message — even the truncated prefix could carry
+      // secret material if the provider templated it into
+      // err.message. Static keeps SSE broadcasters fully isolated
+      // from raw provider text.
       expect(sseHint).toBeDefined();
-      expect(sseHint!.length).toBeLessThan(longRaw.length);
-      expect(sseHint!.length).toBeLessThan(400);
-      expect(sseHint).toContain('truncated');
-      // Audit line must retain the FULL raw detail for operator
-      // incident response.
+      expect(sseHint).not.toContain(secretMarker);
+      expect(sseHint).toBe(
+        'provider.poll() failed; see daemon audit log for details',
+      );
+      // Audit line still retains the FULL raw detail (including the
+      // secret marker) for operator incident response.
       const failedAudit = auditLines.find(
         (line) =>
           line['status'] === 'failed' &&
@@ -723,7 +729,7 @@ describe('DeviceFlowRegistry — authoritative timeouts (fold-in 7)', () => {
           typeof line['hint'] === 'string',
       );
       expect(failedAudit).toBeDefined();
-      expect(failedAudit?.['hint']).toContain(longRaw);
+      expect(failedAudit?.['hint']).toContain(secretMarker);
     } finally {
       registry.dispose();
     }

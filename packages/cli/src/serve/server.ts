@@ -137,7 +137,7 @@ export interface ServeAppDeps {
    * (`now` / `schedule` overrides for deterministic timer control,
    * stubbed providers, captured event sink). Production callers omit
    * this and `createServeApp` constructs a default wired to the
-   * shipped Qwen provider, the bridge's `broadcastWorkspaceEvent`,
+   * shipped Qwen provider, the bridge's `publishWorkspaceEvent`,
    * and a stderr audit sink.
    */
   deviceFlowRegistry?: DeviceFlowRegistry;
@@ -321,7 +321,13 @@ export function createServeApp(
   }
   const deviceFlowEventSink: DeviceFlowEventSink = {
     publish(emission, originatorClientId) {
-      bridge.broadcastWorkspaceEvent({
+      // PR #4255 fold-in 9: PR 16 (#4249) landed
+      // `publishWorkspaceEvent` with the same fan-out semantics as
+      // PR 21's `broadcastWorkspaceEvent`. The closed-bus +
+      // all-failed-stderr operator-visibility features that PR 21
+      // added have been folded INTO `publishWorkspaceEvent`; PR 21
+      // now uses the canonical helper.
+      bridge.publishWorkspaceEvent({
         type: `auth_device_flow_${emission.type}`,
         data: emission.data,
         ...(originatorClientId ? { originatorClientId } : {}),

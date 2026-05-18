@@ -15,6 +15,7 @@ export {
 } from './DaemonClient.js';
 export {
   DaemonAuthFlow,
+  DEVICE_FLOW_EXPIRY_GRACE_MS,
   type AwaitCompletionOptions,
   type DaemonAuthFlowHandle,
 } from './DaemonAuthFlow.js';
