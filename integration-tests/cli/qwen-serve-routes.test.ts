@@ -220,6 +220,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_read',
       'session_approval_mode_control',
       'workspace_tool_toggle',
+      'workspace_init',
     ]);
   });
 });

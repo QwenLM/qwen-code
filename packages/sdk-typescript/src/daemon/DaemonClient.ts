@@ -45,6 +45,7 @@ import type {
   SessionMetadataResult,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
+  DaemonInitWorkspaceResult,
   DaemonToolToggleResult,
 } from './types.js';
 
@@ -916,6 +917,39 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonToolToggleResult;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Scaffold a `QWEN.md` at the daemon's bound
+   * workspace root. Mechanical only — does NOT invoke the LLM. The
+   * daemon writes an empty file; clients that want AI-driven content
+   * fill should follow up with `POST /session/:id/prompt`.
+   *
+   * Default refuses to overwrite — when the file exists with non-
+   * whitespace content the daemon returns 409
+   * `workspace_init_conflict` with the existing path and size in the
+   * body. Pass `opts.force: true` to overwrite unconditionally.
+   *
+   * Pre-flight `caps.features.workspace_init` before calling.
+   */
+  async initWorkspace(
+    opts?: { force?: boolean },
+    clientId?: string,
+  ): Promise<DaemonInitWorkspaceResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace/init`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(opts?.force === true ? { force: true } : {}),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspace/init');
+        }
+        return (await res.json()) as DaemonInitWorkspaceResult;
       },
     );
   }

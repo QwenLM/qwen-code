@@ -45,7 +45,11 @@ import {
 } from './status.js';
 import { buildEnvStatusFromProcess } from './envSnapshot.js';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { TrustGateError, canUseRipgrep } from '@qwen-code/qwen-code-core';
+import {
+  TrustGateError,
+  canUseRipgrep,
+  getCurrentGeminiMdFilename,
+} from '@qwen-code/qwen-code-core';
 import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
 import type {
   CancelNotification,
@@ -481,6 +485,29 @@ export interface HttpAcpBridge {
     enabled: boolean,
     originatorClientId: string | undefined,
   ): Promise<{ toolName: string; enabled: boolean }>;
+
+  /**
+   * Scaffold an empty `QWEN.md` (or whatever
+   * `getCurrentGeminiMdFilename()` returns) at the bound workspace
+   * root. Mechanical only — does NOT invoke the LLM. The caller is
+   * expected to follow up with `POST /session/:id/prompt` if it wants
+   * AI-driven content fill.
+   *
+   * Default refuses to overwrite: when the target file already exists
+   * with non-whitespace content, throws `WorkspaceInitConflictError`
+   * (translated to HTTP 409 by the route). `opts.force === true`
+   * overwrites unconditionally.
+   *
+   * Fan-outs a `workspace_initialized` event with `{path, action:
+   * 'created' | 'overwrote'}` to every live session SSE bus.
+   */
+  initWorkspace(
+    opts: { force?: boolean },
+    originatorClientId: string | undefined,
+  ): Promise<{
+    path: string;
+    action: 'created' | 'overwrote';
+  }>;
 
   /**
    * Kill the agent process for the session and remove it from the maps.
@@ -1162,6 +1189,28 @@ export class InvalidSessionMetadataError extends Error {
     super(`Invalid session metadata: ${field} ${reason}`);
     this.name = 'InvalidSessionMetadataError';
     this.field = field;
+  }
+}
+
+/**
+ * #4175 Wave 4 PR 17. Thrown by `initWorkspace` when the target file
+ * already exists with non-whitespace content and the caller did not
+ * pass `force: true`. Translated to HTTP 409 by the route. The
+ * `path` and `existingSize` fields let SDK clients render a clear
+ * "file already exists; pass `force: true` to overwrite" prompt
+ * without re-stat'ing the workspace.
+ */
+export class WorkspaceInitConflictError extends Error {
+  readonly path: string;
+  readonly existingSize: number;
+  constructor(path: string, existingSize: number) {
+    super(
+      `Workspace file ${path} already exists ` +
+        `(${existingSize} bytes); pass {force: true} to overwrite.`,
+    );
+    this.name = 'WorkspaceInitConflictError';
+    this.path = path;
+    this.existingSize = existingSize;
   }
 }
 
@@ -3757,6 +3806,44 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         ...(originatorClientId ? { originatorClientId } : {}),
       });
       return { toolName, enabled };
+    },
+
+    async initWorkspace(initOpts, originatorClientId) {
+      // #4175 Wave 4 PR 17. Mechanical scaffold of an empty `QWEN.md`
+      // (or whatever `getCurrentGeminiMdFilename()` returns under
+      // `--memory-file-name` overrides). No ACP roundtrip, no LLM
+      // call — clients that want AI-fill follow up with
+      // `POST /session/:id/prompt`.
+      const filename = getCurrentGeminiMdFilename();
+      const target = path.join(boundWorkspace, filename);
+      let existingSize: number | undefined;
+      let action: 'created' | 'overwrote' = 'created';
+      try {
+        const existing = await fs.readFile(target, 'utf8');
+        // Whitespace-only is treated as absent — matches the behavior
+        // of the local `/init` slash command (initCommand.ts) so a
+        // half-broken init left an empty file behind doesn't trigger
+        // a confusing 409.
+        if (existing.trim().length > 0) {
+          existingSize = Buffer.byteLength(existing, 'utf8');
+          if (initOpts.force !== true) {
+            throw new WorkspaceInitConflictError(target, existingSize);
+          }
+          action = 'overwrote';
+        }
+      } catch (err) {
+        if (err instanceof WorkspaceInitConflictError) throw err;
+        const code = (err as { code?: unknown } | null | undefined)?.code;
+        if (code !== 'ENOENT') throw err;
+        // ENOENT — fall through to create.
+      }
+      await fs.writeFile(target, '', 'utf8');
+      broadcastWorkspaceEvent({
+        type: 'workspace_initialized',
+        data: { path: target, action },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+      return { path: target, action };
     },
 
     async killSession(sessionId, opts) {

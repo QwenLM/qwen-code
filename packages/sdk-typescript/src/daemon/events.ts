@@ -37,6 +37,7 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // #4175 Wave 4 PR 17 — mutation control events.
   'approval_mode_changed',
   'tool_toggled',
+  'workspace_initialized',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -278,6 +279,21 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+/**
+ * #4175 Wave 4 PR 17. Workspace-scoped: fan-outs to every active
+ * session SSE bus when `POST /workspace/init` scaffolds the daemon's
+ * `QWEN.md`. `action: 'created'` for fresh creates (or whitespace-
+ * only files); `'overwrote'` when `force: true` replaced non-empty
+ * content. The `path` is absolute on the daemon host filesystem (see
+ * runtime-locality contract).
+ */
+export interface DaemonWorkspaceInitializedData {
+  path: string;
+  action: 'created' | 'overwrote';
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -342,6 +358,10 @@ export type DaemonToolToggledEvent = DaemonEventEnvelope<
   'tool_toggled',
   DaemonToolToggledData
 >;
+export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
+  'workspace_initialized',
+  DaemonWorkspaceInitializedData
+>;
 
 export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
   'auth_device_flow_started',
@@ -384,7 +404,8 @@ export type DaemonControlEvent =
   | DaemonPermissionResolvedEvent
   | DaemonPermissionAlreadyResolvedEvent
   | DaemonApprovalModeChangedEvent
-  | DaemonToolToggledEvent;
+  | DaemonToolToggledEvent
+  | DaemonWorkspaceInitializedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -467,6 +488,14 @@ export interface DaemonSessionViewState {
    */
   toolToggleCount: number;
   lastToolToggle?: DaemonToolToggledData;
+  /**
+   * #4175 Wave 4 PR 17. Workspace-scoped — every session bus receives
+   * `workspace_initialized` events. `lastWorkspaceInit` records the
+   * most recent envelope so adapters can render a "QWEN.md was just
+   * scaffolded by another client" notice without polling.
+   */
+  workspaceInitCount: number;
+  lastWorkspaceInit?: DaemonWorkspaceInitializedData;
 }
 
 export function createDaemonSessionViewState(
@@ -500,6 +529,8 @@ export function createDaemonSessionViewState(
     lastApprovalModeChange: seed.lastApprovalModeChange,
     toolToggleCount: seed.toolToggleCount ?? 0,
     lastToolToggle: seed.lastToolToggle,
+    workspaceInitCount: seed.workspaceInitCount ?? 0,
+    lastWorkspaceInit: seed.lastWorkspaceInit,
   };
 }
 
@@ -604,6 +635,10 @@ export function asKnownDaemonEvent(
     case 'tool_toggled':
       return isToolToggledData(event.data)
         ? (event as DaemonToolToggledEvent)
+        : undefined;
+    case 'workspace_initialized':
+      return isWorkspaceInitializedData(event.data)
+        ? (event as DaemonWorkspaceInitializedEvent)
         : undefined;
     default:
       return undefined;
@@ -787,6 +822,14 @@ export function reduceDaemonSessionEvent(
         ...base,
         toolToggleCount: base.toolToggleCount + 1,
         lastToolToggle: event.data,
+      };
+    case 'workspace_initialized':
+      // Workspace-scoped fan-out. Non-terminal — just records that a
+      // QWEN.md scaffold was performed.
+      return {
+        ...base,
+        workspaceInitCount: base.workspaceInitCount + 1,
+        lastWorkspaceInit: event.data,
       };
     default: {
       const _exhaustive: never = event;
@@ -1274,6 +1317,15 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
     isNonEmptyString(value['toolName']) &&
     typeof value['enabled'] === 'boolean'
   );
+}
+
+function isWorkspaceInitializedData(
+  value: unknown,
+): value is DaemonWorkspaceInitializedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['path'])) return false;
+  const action = value['action'];
+  return action === 'created' || action === 'overwrote';
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {

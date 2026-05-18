@@ -1318,6 +1318,54 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('initWorkspace (#4175 Wave 4 PR 17)', () => {
+    it('POSTs an empty body when force is omitted', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { path: '/work/QWEN.md', action: 'created' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.initWorkspace();
+      expect(result).toEqual({ path: '/work/QWEN.md', action: 'created' });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/init');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('forwards force:true in the body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { path: '/work/QWEN.md', action: 'overwrote' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.initWorkspace({ force: true });
+      expect(result.action).toBe('overwrote');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ force: true });
+    });
+
+    it('omits force when explicitly false (default-empty body)', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { path: '/work/QWEN.md', action: 'created' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.initWorkspace({ force: false });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('throws on 409 conflict', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(409, {
+          error: 'file exists',
+          code: 'workspace_init_conflict',
+          path: '/work/QWEN.md',
+          existingSize: 1234,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.initWorkspace()).rejects.toMatchObject({
+        status: 409,
+      });
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(

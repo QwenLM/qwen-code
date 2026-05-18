@@ -89,6 +89,7 @@ export {
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   type AcpChannel,
   type BridgeOptions,
   type BridgeSession,

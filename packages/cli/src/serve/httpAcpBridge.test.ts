@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import { randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
@@ -44,6 +44,7 @@ import {
   MAX_WORKSPACE_PATH_LENGTH,
   RestoreInProgressError,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   WorkspaceMismatchError,
   type AcpChannel,
   type BridgeOptions,
@@ -4393,6 +4394,113 @@ describe('createHttpAcpBridge', () => {
         [Symbol.asyncIterator]();
       await bridge.setWorkspaceToolEnabled('Bash', false, session.clientId);
       const next = await it.next();
+      expect(next.value?.originatorClientId).toBe(session.clientId);
+      abort.abort();
+      await bridge.shutdown();
+    });
+  });
+
+  describe('initWorkspace (#4175 Wave 4 PR 17)', () => {
+    /**
+     * Per-test workspace temp dir so the bridge's writeFile lands on a
+     * real path the tests can stat. Cleaned up by `afterEach`.
+     */
+    let tmpWs: string;
+
+    beforeEach(async () => {
+      tmpWs = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-init-workspace-'));
+    });
+
+    afterEach(async () => {
+      await fsp.rm(tmpWs, { recursive: true, force: true });
+    });
+
+    it('creates an empty QWEN.md on a fresh workspace', async () => {
+      const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+      const res = await bridge.initWorkspace({}, undefined);
+      expect(res.action).toBe('created');
+      expect(res.path).toBe(path.join(tmpWs, 'QWEN.md'));
+      const written = await fsp.readFile(res.path, 'utf8');
+      expect(written).toBe('');
+    });
+
+    it('treats whitespace-only file as absent (no 409)', async () => {
+      const target = path.join(tmpWs, 'QWEN.md');
+      await fsp.writeFile(target, '   \n\t\n', 'utf8');
+      const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+      const res = await bridge.initWorkspace({}, undefined);
+      expect(res.action).toBe('created');
+      const written = await fsp.readFile(target, 'utf8');
+      expect(written).toBe('');
+    });
+
+    it('throws WorkspaceInitConflictError when content exists and force is omitted', async () => {
+      const target = path.join(tmpWs, 'QWEN.md');
+      const original = '# Project notes\n\nimportant stuff';
+      await fsp.writeFile(target, original, 'utf8');
+      const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+      const err = await bridge.initWorkspace({}, undefined).catch((e) => e);
+      expect(err).toBeInstanceOf(WorkspaceInitConflictError);
+      expect((err as WorkspaceInitConflictError).path).toBe(target);
+      expect((err as WorkspaceInitConflictError).existingSize).toBe(
+        Buffer.byteLength(original, 'utf8'),
+      );
+      // Original content must be preserved on conflict.
+      expect(await fsp.readFile(target, 'utf8')).toBe(original);
+    });
+
+    it('overwrites with action:overwrote when force is true', async () => {
+      const target = path.join(tmpWs, 'QWEN.md');
+      await fsp.writeFile(target, '# Old', 'utf8');
+      const bridge = createHttpAcpBridge({ boundWorkspace: tmpWs });
+      const res = await bridge.initWorkspace({ force: true }, undefined);
+      expect(res.action).toBe('overwrote');
+      expect(await fsp.readFile(target, 'utf8')).toBe('');
+    });
+
+    it('does NOT spawn an ACP child', async () => {
+      let factoryCalls = 0;
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        channelFactory: async () => {
+          factoryCalls += 1;
+          throw new Error('channel factory should not be invoked');
+        },
+      });
+      await bridge.initWorkspace({}, undefined);
+      expect(factoryCalls).toBe(0);
+    });
+
+    it('fan-outs workspace_initialized to live session buses', async () => {
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        new AgentSideConnection(() => new FakeAgent() as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = createHttpAcpBridge({
+        boundWorkspace: tmpWs,
+        channelFactory: factory,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: tmpWs });
+      const abort = new AbortController();
+      const it = bridge
+        .subscribeEvents(session.sessionId, { signal: abort.signal })
+        [Symbol.asyncIterator]();
+      const res = await bridge.initWorkspace({}, session.clientId);
+      const next = await it.next();
+      expect(next.value?.type).toBe('workspace_initialized');
+      expect(next.value?.data).toEqual({
+        path: res.path,
+        action: 'created',
+      });
       expect(next.value?.originatorClientId).toBe(session.clientId);
       abort.abort();
       await bridge.shutdown();

@@ -740,6 +740,21 @@ export interface DaemonToolToggleResult {
 }
 
 /**
+ * #4175 Wave 4 PR 17. Result body of `POST /workspace/init`.
+ * `action: 'created'` means the file did not exist (or contained only
+ * whitespace) and was scaffolded fresh; `'overwrote'` means it had
+ * non-empty content and the caller passed `force: true`.
+ *
+ * Note: `path` is the absolute path on the daemon host filesystem —
+ * not the client's. Per the runtime-locality contract, file ops
+ * resolve in the daemon environment.
+ */
+export interface DaemonInitWorkspaceResult {
+  path: string;
+  action: 'created' | 'overwrote';
+}
+
+/**
  * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
  * server-side `Date.now()` epoch (ms) the daemon stored for this
  * session. `clientId` is echoed back only when the caller supplied a

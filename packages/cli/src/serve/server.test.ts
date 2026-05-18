@@ -38,6 +38,7 @@ import {
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   WorkspaceMismatchError,
   type BridgeHeartbeatResult,
   type BridgeHeartbeatState,
@@ -124,6 +125,7 @@ const EXPECTED_STAGE1_FEATURES = [
   // #4175 Wave 4 PR 17.
   'session_approval_mode_control',
   'workspace_tool_toggle',
+  'workspace_init',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -206,6 +208,10 @@ interface FakeBridgeOpts {
     enabled: boolean,
     originatorClientId: string | undefined,
   ) => Promise<{ toolName: string; enabled: boolean }>;
+  initWorkspaceImpl?: (
+    initOpts: { force?: boolean },
+    originatorClientId: string | undefined,
+  ) => Promise<{ path: string; action: 'created' | 'overwrote' }>;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -275,6 +281,10 @@ interface FakeBridge extends HttpAcpBridge {
   setToolEnabledCalls: Array<{
     toolName: string;
     enabled: boolean;
+    originatorClientId?: string;
+  }>;
+  initWorkspaceCalls: Array<{
+    initOpts: { force?: boolean };
     originatorClientId?: string;
   }>;
   closeCalls: Array<{
@@ -433,6 +443,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       toolName,
       enabled,
     }));
+  const initWorkspaceCalls: FakeBridge['initWorkspaceCalls'] = [];
+  const initWorkspaceImpl =
+    opts.initWorkspaceImpl ??
+    (async () => ({
+      path: path.resolve(WS_BOUND, 'QWEN.md'),
+      action: 'created' as const,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -470,6 +487,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     setModelCalls,
     setApprovalModeCalls,
     setToolEnabledCalls,
+    initWorkspaceCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -609,6 +627,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(originatorClientId !== undefined ? { originatorClientId } : {}),
       });
       return setToolEnabledImpl(toolName, enabled, originatorClientId);
+    },
+    async initWorkspace(initOpts, originatorClientId) {
+      initWorkspaceCalls.push({
+        initOpts,
+        ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+      });
+      return initWorkspaceImpl(initOpts, originatorClientId);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -2254,6 +2279,90 @@ describe('createServeApp', () => {
       ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /workspace/init (#4175 Wave 4 PR 17)', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/workspace/init')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('200 with action:created and force=false on success', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(200);
+      expect(res.body.action).toBe('created');
+      expect(res.body.path).toContain('QWEN.md');
+      expect(bridge.initWorkspaceCalls[0]).toMatchObject({
+        initOpts: { force: false },
+      });
+    });
+
+    it('forwards force:true to the bridge', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => ({
+          path: path.resolve(WS_BOUND, 'QWEN.md'),
+          action: 'overwrote' as const,
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({
+        force: true,
+      });
+      expect(res.status).toBe(200);
+      expect(res.body.action).toBe('overwrote');
+      expect(bridge.initWorkspaceCalls[0]?.initOpts).toEqual({ force: true });
+    });
+
+    it('passes client identity into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      await auth(request(app).post('/workspace/init'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({});
+      expect(bridge.initWorkspaceCalls[0]?.originatorClientId).toBe('client-1');
+    });
+
+    it('400 when force is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({
+        force: 'yes',
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_force_flag');
+      expect(bridge.initWorkspaceCalls).toHaveLength(0);
+    });
+
+    it('409 with structured payload when bridge throws WorkspaceInitConflictError', async () => {
+      const bridge = fakeBridge({
+        initWorkspaceImpl: async () => {
+          throw new WorkspaceInitConflictError('/work/bound/QWEN.md', 1234);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).post('/workspace/init')).send({});
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'workspace_init_conflict',
+        path: '/work/bound/QWEN.md',
+        existingSize: 1234,
+      });
     });
   });
 

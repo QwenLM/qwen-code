@@ -40,6 +40,7 @@ import {
   RestoreInProgressError,
   SessionLimitExceededError,
   SessionNotFoundError,
+  WorkspaceInitConflictError,
   WorkspaceMismatchError,
   type HttpAcpBridge,
 } from './httpAcpBridge.js';
@@ -1356,6 +1357,32 @@ export function createServeApp(
     },
   );
 
+  app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
+    // #4175 Wave 4 PR 17. Scaffold-only init: the bridge writes an
+    // empty QWEN.md without invoking the LLM. Default refuses
+    // overwrite (409); body `{force: true}` overrides.
+    const body = safeBody(req);
+    const force = body['force'];
+    if (force !== undefined && typeof force !== 'boolean') {
+      res.status(400).json({
+        error: '`force` must be a boolean when provided',
+        code: 'invalid_force_flag',
+      });
+      return;
+    }
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    try {
+      const result = await bridge.initWorkspace(
+        { force: force === true },
+        clientId,
+      );
+      res.status(200).json(result);
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /workspace/init' });
+    }
+  });
+
   app.post(
     '/workspace/tools/:name/enable',
     mutate({ strict: true }),
@@ -2103,6 +2130,20 @@ function sendBridgeError(
   err: unknown,
   ctx?: { route?: string; sessionId?: string },
 ): void {
+  if (err instanceof WorkspaceInitConflictError) {
+    // #4175 Wave 4 PR 17. The target file already exists with non-
+    // whitespace content and the caller did not pass `force: true`.
+    // Body carries the resolved path + size so SDK clients can render
+    // a "file already exists; pass force: true to overwrite" prompt
+    // without re-stat'ing the workspace.
+    res.status(409).json({
+      error: err.message,
+      code: 'workspace_init_conflict',
+      path: err.path,
+      existingSize: err.existingSize,
+    });
+    return;
+  }
   if (err instanceof TrustGateError) {
     // #4175 Wave 4 PR 17: trust-folder rejection from
     // `Config.setApprovalMode`. 403 because the daemon understood the

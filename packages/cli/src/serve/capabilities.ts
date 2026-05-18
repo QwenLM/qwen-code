@@ -131,6 +131,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // unregistered — the toggle takes effect on the next ACP child spawn
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
+  // #4175 Wave 4 PR 17. `POST /workspace/init` scaffolds an empty
+  // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
+  // the bound workspace root. Body: `{force?: boolean}`. Default
+  // refuses with 409 when the file already exists; `force: true`
+  // overwrites. Mechanical only — does NOT call the LLM. To AI-fill
+  // the file, the caller should follow up with
+  // `POST /session/:id/prompt`.
+  workspace_init: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so
