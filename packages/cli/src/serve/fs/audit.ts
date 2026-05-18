@@ -141,24 +141,19 @@ export interface AuditPublisher {
   ): void;
 }
 
-/**
- * Why the request types `Omit` four fields and pass `pattern`
- * through:
- *
- * `recordAccess` / `recordDenied` callers describe the event in
- * domain terms (intent, durationMs, errorKind, …); the publisher
- * synthesizes the wire-shaped fields the schema needs — `kind`
- * (the discriminator), `pathHash` (computed via SHA-256), `relPath`
- * (env-gated), `route` (pulled off `AuditContext`). Hiding those
- * four behind `Omit` prevents callers from fabricating values that
- * don't match what the publisher will actually serialize.
- *
- * `pattern` is the one optional field that survives the Omit:
- * only the orchestrator's glob path knows the literal pattern and
- * tests need a typed way to forward it through. The publisher
- * cannot synthesize it from anything else, so it stays on the
- * request shape as an explicit passthrough.
- */
+// Why the request types `Omit` four fields and pass `pattern`
+// through:
+//
+// `recordAccess` / `recordDenied` callers describe the event in
+// domain terms (intent, durationMs, errorKind, ...); the publisher
+// synthesizes the wire-shaped fields the schema needs: `kind`,
+// `pathHash`, `relPath`, and `route`. Hiding those fields behind
+// `Omit` prevents callers from fabricating values that do not match
+// what the publisher serializes.
+//
+// `pattern` is the one optional field that survives the Omit: only
+// the orchestrator's glob path knows the literal pattern, and the
+// publisher cannot synthesize it from anything else.
 
 /**
  * SHA-256 over the canonical absolute path, truncated to 16 hex

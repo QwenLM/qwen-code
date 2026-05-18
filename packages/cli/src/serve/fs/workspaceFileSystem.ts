@@ -71,6 +71,7 @@ export interface ReadMeta {
   encoding?: string;
   bom?: boolean;
   lineEnding: 'crlf' | 'lf';
+  sizeBytes?: number;
   truncated?: boolean;
   matchedIgnore?: 'file' | 'directory';
   originalLineCount?: number;
@@ -94,6 +95,8 @@ export interface ReadTextOptions {
 export interface ListOptions {
   /** When true, ignored entries are returned with `ignored: true` rather than dropped. */
   includeIgnored?: boolean;
+  /** Stop after this many returned entries have been collected. */
+  maxEntries?: number;
 }
 
 export interface GlobOptions {
@@ -359,6 +362,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         encoding: result._meta?.encoding,
         bom: result._meta?.bom,
         lineEnding: (result._meta?.lineEnding ?? 'lf') as 'crlf' | 'lf',
+        sizeBytes: st.size,
         originalLineCount: result._meta?.originalLineCount,
       };
       let truncatedContent = result.content;
@@ -471,9 +475,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     const start = performance.now();
     try {
       assertTrustedForIntent(this.deps.trusted, 'list');
-      const dirents = await fsp.readdir(p as string, { withFileTypes: true });
       const entries: FsEntry[] = [];
-      for (const d of dirents) {
+      const dir = await fsp.opendir(p as string);
+      for await (const d of dir) {
         // `path.join(p, d.name)` is a shallow extension of an
         // already-canonical workspace path. Symlinked dirents are
         // tagged as `kind: 'symlink'` rather than auto-followed —
@@ -490,12 +494,20 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         );
         if (verdict.ignored && !opts.includeIgnored) continue;
         entries.push({ name: d.name, kind, ignored: verdict.ignored });
+        if (
+          opts.maxEntries !== undefined &&
+          entries.length >= opts.maxEntries
+        ) {
+          break;
+        }
       }
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'list',
         absolute: p,
         durationMs: performance.now() - start,
         sizeBytes: entries.length,
+        truncated:
+          opts.maxEntries !== undefined && entries.length >= opts.maxEntries,
       });
       return entries;
     } catch (err) {

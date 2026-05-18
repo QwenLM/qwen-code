@@ -14,13 +14,12 @@ import {
 } from '../fs/index.js';
 
 /**
- * Hard cap on entries returned from `GET /list`. The directory walk
- * runs in a single tick (`fsp.readdir`), so an unbounded listing of
- * a `node_modules`-style directory pins the event loop and the
- * resulting JSON payload (which the JSON.stringify pass already
- * holds in memory) is too large to be useful. 2000 is generous for
- * legitimate listings while staying well under the 10MB request
- * limit when each entry serializes to ~80 bytes.
+ * Hard cap on entries returned from `GET /list`. The boundary probes
+ * with `MAX_LIST_ENTRIES + 1` and stops collecting once it knows the
+ * response is truncated, avoiding full materialization of very large
+ * directories. 2000 is generous for legitimate listings while staying
+ * well under the 10MB request limit when each entry serializes to ~80
+ * bytes.
  *
  * Ties into the response's `truncated: true` flag so SDK consumers
  * can ask the daemon to paginate (PR 19 emits the flag; pagination
@@ -243,6 +242,7 @@ async function handleGetFile(
   try {
     const resolved = await fs.resolve(queryPath, 'read');
     const out = await fs.readText(resolved, { maxBytes, line, limit });
+    const returnedBytes = Buffer.byteLength(out.content, 'utf-8');
     applyReadHeaders(res);
     res.status(200).json({
       kind: 'file',
@@ -251,10 +251,11 @@ async function handleGetFile(
       encoding: out.meta.encoding ?? 'utf-8',
       bom: out.meta.bom === true,
       lineEnding: out.meta.lineEnding,
-      sizeBytes: Buffer.byteLength(out.content, 'utf-8'),
+      sizeBytes: out.meta.sizeBytes ?? returnedBytes,
+      returnedBytes,
       truncated: out.meta.truncated === true,
       matchedIgnore: out.meta.matchedIgnore ?? null,
-      originalLineCount: out.meta.originalLineCount,
+      originalLineCount: out.meta.originalLineCount ?? null,
     });
   } catch (err) {
     sendFsError(res, err, ROUTE);
@@ -312,16 +313,13 @@ async function handleGetList(
   });
   try {
     const resolved = await fs.resolve(queryPath, 'list');
-    const entries = await fs.list(resolved, { includeIgnored });
+    const entries = await fs.list(resolved, {
+      includeIgnored,
+      maxEntries: MAX_LIST_ENTRIES + 1,
+    });
     let truncated = false;
     let returned = entries;
     if (returned.length > MAX_LIST_ENTRIES) {
-      // Slice on the route side rather than passing a cap into
-      // `list()` so the boundary's audit row reports the FULL
-      // directory size (`sizeBytes` = entries.length) — operators
-      // see the directory's true cardinality, not just what the
-      // route handed back. PR 18's `list()` doesn't accept a cap
-      // anyway; pagination support lives inside the route.
       returned = returned.slice(0, MAX_LIST_ENTRIES);
       truncated = true;
     }

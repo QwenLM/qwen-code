@@ -85,6 +85,7 @@ describe('GET /file', () => {
       matchedIgnore: null,
     });
     expect(res.body.sizeBytes).toBe(12);
+    expect(res.body.returnedBytes).toBe(12);
   });
 
   it('returns the requested line window', async () => {
@@ -135,8 +136,7 @@ describe('GET /file', () => {
   });
 
   it('returns 422 binary_file when target contains NULs', async () => {
-    const buf = Buffer.alloc(64);
-    buf[5] = 0;
+    const buf = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x00, 0x61, 0x01]);
     await fsp.writeFile(path.join(h.workspace, 'bin.dat'), buf);
     const res = await request(h.app)
       .get('/file?path=bin.dat')
@@ -152,6 +152,8 @@ describe('GET /file', () => {
       .set('Host', loopbackHost());
     expect(res.status).toBe(200);
     expect(res.body.truncated).toBe(true);
+    expect(res.body.sizeBytes).toBe(2048);
+    expect(res.body.returnedBytes).toBeLessThanOrEqual(512);
     expect(res.body.content.length).toBeLessThanOrEqual(512);
   });
 
@@ -391,11 +393,10 @@ describe('GET /glob', () => {
       .get('/glob?pattern=.')
       .set('Host', loopbackHost());
     expect(res.status).toBe(200);
-    if (res.body.matches.length > 0) {
-      for (const m of res.body.matches) {
-        expect(m).not.toBe('');
-        expect(typeof m).toBe('string');
-      }
+    expect(res.body.matches).toContain('.');
+    for (const m of res.body.matches) {
+      expect(m).not.toBe('');
+      expect(typeof m).toBe('string');
     }
   });
 

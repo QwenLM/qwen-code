@@ -115,6 +115,7 @@ describe('WorkspaceFileSystem - readText', () => {
     const out = await h.fs.readText(r);
     expect(out.content).toBe('hello\nworld\n');
     expect(out.meta.lineEnding).toBe('lf');
+    expect(out.meta.sizeBytes).toBe(12);
     expect(out.meta.truncated).toBeUndefined();
   });
 
@@ -252,6 +253,15 @@ describe('WorkspaceFileSystem - list', () => {
     const entries = await h.fs.list(r, { includeIgnored: true });
     const log = entries.find((e) => e.name === 'b.log');
     expect(log?.ignored).toBe(true);
+  });
+
+  it('stops collecting entries once maxEntries is reached', async () => {
+    const r = await h.fs.resolve('.', 'list');
+    const entries = await h.fs.list(r, {
+      includeIgnored: true,
+      maxEntries: 2,
+    });
+    expect(entries).toHaveLength(2);
   });
 });
 
