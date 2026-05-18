@@ -68,6 +68,7 @@ export interface ProviderSetupState {
 
   // BaseUrl
   baseUrl: string;
+  baseUrlPlaceholder: string;
   baseUrlOptionIndex: number;
   baseUrlError: string | null;
 
@@ -109,6 +110,7 @@ export function useProviderSetupFlow(
 
   const [protocol, setProtocol] = useState<AuthType>(AuthType.USE_OPENAI);
   const [baseUrl, setBaseUrl] = useState('');
+  const [baseUrlPlaceholder, setBaseUrlPlaceholder] = useState('');
   const [baseUrlOptionIndex, setBaseUrlOptionIndex] = useState(0);
   const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState('');
@@ -141,9 +143,12 @@ export function useProviderSetupFlow(
 
       const proto = initialProtocol ?? config.protocol;
       setProtocol(proto);
-      const defaultUrl =
-        resolveBaseUrl(config) || DEFAULT_BASE_URLS[proto] || '';
-      setBaseUrl(defaultUrl);
+      // For presets the baseUrl is fixed (string) or selected from options;
+      // for the custom provider it's empty and the placeholder hints at the
+      // default endpoint for the chosen protocol.
+      const resolved = resolveBaseUrl(config);
+      setBaseUrl(resolved);
+      setBaseUrlPlaceholder(resolved ? '' : (DEFAULT_BASE_URLS[proto] ?? ''));
       setBaseUrlOptionIndex(0);
       setBaseUrlError(null);
 
@@ -151,7 +156,7 @@ export function useProviderSetupFlow(
       if (existingEnv) {
         const envKeyName =
           typeof config.envKey === 'function'
-            ? config.envKey(proto, defaultUrl)
+            ? config.envKey(proto, resolved)
             : config.envKey;
         prefillKey = existingEnv[envKeyName] ?? '';
       }
@@ -196,8 +201,10 @@ export function useProviderSetupFlow(
   const selectProtocol = useCallback(
     (selectedProtocol: AuthType) => {
       setProtocol(selectedProtocol);
-      const nextBaseUrl = DEFAULT_BASE_URLS[selectedProtocol] ?? '';
-      setBaseUrl(nextBaseUrl);
+      // Clear baseUrl so the user types fresh; show the protocol's default
+      // endpoint as a placeholder (used if they submit blank).
+      setBaseUrl('');
+      setBaseUrlPlaceholder(DEFAULT_BASE_URLS[selectedProtocol] ?? '');
       setApiKey('');
       setApiKeyError(null);
       goNext();
@@ -215,19 +222,24 @@ export function useProviderSetupFlow(
   );
 
   const submitBaseUrl = useCallback((): boolean => {
-    const trimmed = baseUrl.trim();
-    if (!trimmed) {
+    // Empty input falls back to the placeholder default so the visible hint
+    // matches what gets written.
+    const effective = baseUrl.trim() || baseUrlPlaceholder.trim();
+    if (!effective) {
       setBaseUrlError(t('Base URL cannot be empty.'));
       return false;
     }
-    if (!/^https?:\/\//i.test(trimmed)) {
+    if (!/^https?:\/\//i.test(effective)) {
       setBaseUrlError(t('Base URL must start with http:// or https://.'));
       return false;
+    }
+    if (!baseUrl.trim()) {
+      setBaseUrl(effective);
     }
     setBaseUrlError(null);
     goNext();
     return true;
-  }, [baseUrl, goNext]);
+  }, [baseUrl, baseUrlPlaceholder, goNext]);
 
   const changeBaseUrl = useCallback((value: string) => {
     setBaseUrl(value);
@@ -462,6 +474,7 @@ export function useProviderSetupFlow(
     totalSteps: visibleSteps.length,
     protocol,
     baseUrl,
+    baseUrlPlaceholder,
     baseUrlOptionIndex,
     baseUrlError,
     apiKey,

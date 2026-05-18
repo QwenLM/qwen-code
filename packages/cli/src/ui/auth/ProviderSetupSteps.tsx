@@ -106,7 +106,9 @@ function BaseUrlInputStep({
           value={flow.state.baseUrl}
           onChange={flow.changeBaseUrl}
           onSubmit={flow.submitBaseUrl}
-          placeholder="https://api.openai.com/v1"
+          placeholder={
+            flow.state.baseUrlPlaceholder || 'https://api.openai.com/v1'
+          }
         />
       </Box>
       {flow.state.baseUrlError && (
