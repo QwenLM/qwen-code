@@ -214,6 +214,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         const suggestions = results.map((p) => ({
           label: p,
           value: escapePath(p),
+          isDirectory: p.endsWith('/'),
         }));
         dispatch({ type: 'SEARCH_SUCCESS', payload: suggestions });
       } catch (error) {
