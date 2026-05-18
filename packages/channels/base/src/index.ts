@@ -3,6 +3,7 @@ export { AcpBridge } from './AcpBridge.js';
 export type {
   AcpBridgeOptions,
   AvailableCommand,
+  ChannelBridge,
   ToolCallEvent,
 } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';

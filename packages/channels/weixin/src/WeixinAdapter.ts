@@ -12,7 +12,7 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelBridge,
 } from '@qwen-code/channel-base';
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
@@ -38,7 +38,7 @@ export class WeixinChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);

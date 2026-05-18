@@ -35,7 +35,22 @@ export interface ToolCallEvent {
   rawInput?: Record<string, unknown>;
 }
 
-export class AcpBridge extends EventEmitter {
+export interface ChannelBridge extends EventEmitter {
+  readonly availableCommands: AvailableCommand[];
+  start(): Promise<void>;
+  newSession(cwd: string): Promise<string>;
+  loadSession(sessionId: string, cwd: string): Promise<string>;
+  prompt(
+    sessionId: string,
+    text: string,
+    options?: { imageBase64?: string; imageMimeType?: string },
+  ): Promise<string>;
+  cancelSession(sessionId: string): Promise<void>;
+  stop(): void;
+  readonly isConnected: boolean;
+}
+
+export class AcpBridge extends EventEmitter implements ChannelBridge {
   private child: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;

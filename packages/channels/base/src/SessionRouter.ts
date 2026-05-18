@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import type { SessionScope, SessionTarget } from './types.js';
-import type { AcpBridge } from './AcpBridge.js';
+import type { ChannelBridge } from './AcpBridge.js';
 
 interface PersistedEntry {
   sessionId: string;
@@ -13,14 +13,14 @@ export class SessionRouter {
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
 
-  private bridge: AcpBridge;
+  private bridge: ChannelBridge;
   private defaultCwd: string;
   private defaultScope: SessionScope;
   private channelScopes: Map<string, SessionScope> = new Map();
   private persistPath: string | undefined;
 
   constructor(
-    bridge: AcpBridge,
+    bridge: ChannelBridge,
     defaultCwd: string,
     scope: SessionScope = 'user',
     persistPath?: string,
@@ -32,7 +32,7 @@ export class SessionRouter {
   }
 
   /** Replace the bridge instance (used after crash recovery restart). */
-  setBridge(bridge: AcpBridge): void {
+  setBridge(bridge: ChannelBridge): void {
     this.bridge = bridge;
   }
 

@@ -4,10 +4,17 @@ import { ProxyAgent, setGlobalDispatcher } from 'undici';
 import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
+import {
+  AcpBridge,
+  DaemonChannelBridge,
+  SessionRouter,
+} from '@qwen-code/channel-base';
 import type {
   ChannelBase,
+  ChannelBridge,
   ChannelPlugin,
+  DaemonChannelSessionFactoryRequest,
+  SessionScope,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import { getPlugin, registerPlugin } from './channel-registry.js';
@@ -22,6 +29,18 @@ import { getExtensionManager } from '../extensions/utils.js';
 const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
+
+interface ChannelStartRuntimeOptions {
+  proxy?: string;
+  daemonUrl?: string;
+  daemonToken?: string;
+}
+
+interface ChannelStartArgs {
+  name?: string;
+  'daemon-url'?: string;
+  'daemon-token'?: string;
+}
 
 /**
  * Resolve and apply proxy settings for the channel service process.
@@ -129,7 +148,7 @@ async function loadChannelsFromExtensions(): Promise<number> {
 async function createChannel(
   name: string,
   config: Awaited<ReturnType<typeof parseChannelConfig>>,
-  bridge: AcpBridge,
+  bridge: ChannelBridge,
   options?: { router?: SessionRouter; proxy?: string },
 ): Promise<ChannelBase> {
   const channelPlugin = await getPlugin(config.type);
@@ -140,7 +159,7 @@ async function createChannel(
 }
 
 function registerToolCallDispatch(
-  bridge: AcpBridge,
+  bridge: ChannelBridge,
   router: SessionRouter,
   channels: Map<string, ChannelBase>,
 ): void {
@@ -153,6 +172,64 @@ function registerToolCallDispatch(
       }
     }
   });
+}
+
+function resolveDaemonUrl(cliDaemonUrl?: string): string | undefined {
+  return (
+    cliDaemonUrl ||
+    process.env['QWEN_CHANNEL_DAEMON_URL'] ||
+    process.env['QWEN_DAEMON_URL']
+  );
+}
+
+function resolveDaemonToken(cliDaemonToken?: string): string | undefined {
+  return cliDaemonToken || process.env['QWEN_SERVER_TOKEN'];
+}
+
+function toDaemonSessionScope(scope: SessionScope | undefined): 'thread' {
+  // SessionRouter already owns channel/user/thread/single routing. Force daemon
+  // sessions to be distinct so daemon-level `single` coalescing cannot collapse
+  // independent channel conversations.
+  void scope;
+  return 'thread';
+}
+
+async function createBridge(
+  bridgeOpts: { cliEntryPath: string; cwd: string; model?: string },
+  options: ChannelStartRuntimeOptions,
+  sessionScope?: SessionScope,
+): Promise<ChannelBridge> {
+  if (!options.daemonUrl) {
+    const bridge = new AcpBridge(bridgeOpts);
+    await bridge.start();
+    return bridge;
+  }
+
+  const { DaemonClient, DaemonSessionClient } = await import('@qwen-code/sdk');
+  const client = new DaemonClient({
+    baseUrl: options.daemonUrl,
+    token: options.daemonToken,
+  });
+  const bridge = new DaemonChannelBridge({
+    cwd: bridgeOpts.cwd,
+    modelServiceId: bridgeOpts.model,
+    sessionScope: toDaemonSessionScope(sessionScope),
+    sessionFactory: async (req: DaemonChannelSessionFactoryRequest) => {
+      if (req.sessionId) {
+        return await DaemonSessionClient.load(client, req.sessionId, {
+          workspaceCwd: req.workspaceCwd,
+        });
+      }
+      return await DaemonSessionClient.createOrAttach(client, {
+        workspaceCwd: req.workspaceCwd,
+        modelServiceId: req.modelServiceId,
+        sessionScope: toDaemonSessionScope(req.sessionScope),
+      });
+    },
+  });
+  await bridge.start();
+  writeStdoutLine(`[Channel] Using daemon bridge at ${options.daemonUrl}.`);
+  return bridge;
 }
 
 /** Check for duplicate instance and abort if one is already running. */
@@ -168,7 +245,10 @@ function checkDuplicateInstance(): void {
 }
 
 /** Start a single channel with its own bridge + crash recovery. */
-async function startSingle(name: string, proxy?: string): Promise<void> {
+async function startSingle(
+  name: string,
+  options: ChannelStartRuntimeOptions,
+): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
@@ -199,8 +279,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   const crashTimestamps: number[] = [];
 
   const bridgeOpts = { cliEntryPath, cwd: config.cwd, model: config.model };
-  let bridge = new AcpBridge(bridgeOpts);
-  await bridge.start();
+  let bridge = await createBridge(bridgeOpts, options, config.sessionScope);
 
   const router = new SessionRouter(
     bridge,
@@ -210,7 +289,10 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   );
   const channels: Map<string, ChannelBase> = new Map();
 
-  const channel = await createChannel(name, config, bridge, { router, proxy });
+  const channel = await createChannel(name, config, bridge, {
+    router,
+    proxy: options.proxy,
+  });
   channels.set(name, channel);
   registerToolCallDispatch(bridge, router, channels);
 
@@ -227,7 +309,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   writeServiceInfo([name]);
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
-  const attachDisconnectHandler = (b: AcpBridge): void => {
+  const attachDisconnectHandler = (b: ChannelBridge): void => {
     b.on('disconnected', async () => {
       if (shuttingDown) return;
 
@@ -254,8 +336,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
       await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
       try {
-        bridge = new AcpBridge(bridgeOpts);
-        await bridge.start();
+        bridge = await createBridge(bridgeOpts, options, config.sessionScope);
         router.setBridge(bridge);
         channel.setBridge(bridge);
         registerToolCallDispatch(bridge, router, channels);
@@ -290,7 +371,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
 }
 
 /** Start all configured channels with a shared bridge + crash recovery. */
-async function startAll(proxy?: string): Promise<void> {
+async function startAll(options: ChannelStartRuntimeOptions): Promise<void> {
   checkDuplicateInstance();
   const channelsConfig = loadChannelsConfig();
 
@@ -342,8 +423,7 @@ async function startAll(proxy?: string): Promise<void> {
     cwd: defaultCwd,
     model: models[0],
   };
-  let bridge = new AcpBridge(bridgeOpts);
-  await bridge.start();
+  let bridge = await createBridge(bridgeOpts, options, 'thread');
 
   const router = new SessionRouter(bridge, defaultCwd, 'user', sessionsPath());
   // Register per-channel scope overrides so each channel uses its own sessionScope
@@ -359,7 +439,10 @@ async function startAll(proxy?: string): Promise<void> {
   for (const { name, config } of parsed) {
     channels.set(
       name,
-      await createChannel(name, config, bridge, { router, proxy }),
+      await createChannel(name, config, bridge, {
+        router,
+        proxy: options.proxy,
+      }),
     );
   }
   registerToolCallDispatch(bridge, router, channels);
@@ -389,7 +472,7 @@ async function startAll(proxy?: string): Promise<void> {
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );
 
-  const attachDisconnectHandler = (b: AcpBridge): void => {
+  const attachDisconnectHandler = (b: ChannelBridge): void => {
     b.on('disconnected', async () => {
       if (shuttingDown) return;
 
@@ -421,8 +504,7 @@ async function startAll(proxy?: string): Promise<void> {
       await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
       try {
-        bridge = new AcpBridge(bridgeOpts);
-        await bridge.start();
+        bridge = await createBridge(bridgeOpts, options, 'thread');
         router.setBridge(bridge);
         for (const channel of channels.values()) {
           channel.setBridge(bridge);
@@ -465,24 +547,40 @@ async function startAll(proxy?: string): Promise<void> {
   await new Promise<void>(() => {});
 }
 
-export const startCommand: CommandModule<object, { name?: string }> = {
+export const startCommand: CommandModule<object, ChannelStartArgs> = {
   command: 'start [name]',
   describe: 'Start channels (all if no name given, or a single named channel)',
   builder: (yargs) =>
-    yargs.positional('name', {
-      type: 'string',
-      describe: 'Channel name (omit to start all configured channels)',
-    }),
+    yargs
+      .positional('name', {
+        type: 'string',
+        describe: 'Channel name (omit to start all configured channels)',
+      })
+      .option('daemon-url', {
+        type: 'string',
+        description:
+          'Experimental: use a running qwen serve daemon instead of spawning an ACP bridge. Defaults to QWEN_CHANNEL_DAEMON_URL or QWEN_DAEMON_URL.',
+      })
+      .option('daemon-token', {
+        type: 'string',
+        description:
+          'Bearer token for the daemon bridge. Defaults to QWEN_SERVER_TOKEN.',
+      }),
   handler: async (argv) => {
     const settings = loadSettings(process.cwd());
     const proxy = resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
       settings.merged.proxy as string | undefined,
     );
+    const runtimeOptions = {
+      proxy,
+      daemonUrl: resolveDaemonUrl(argv['daemon-url']),
+      daemonToken: resolveDaemonToken(argv['daemon-token']),
+    };
     if (argv.name) {
-      await startSingle(argv.name, proxy);
+      await startSingle(argv.name, runtimeOptions);
     } else {
-      await startAll(proxy);
+      await startAll(runtimeOptions);
     }
   },
 };

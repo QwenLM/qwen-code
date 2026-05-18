@@ -13,7 +13,7 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelBridge,
 } from '@qwen-code/channel-base';
 
 export class TelegramChannel extends ChannelBase {
@@ -24,7 +24,7 @@ export class TelegramChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
