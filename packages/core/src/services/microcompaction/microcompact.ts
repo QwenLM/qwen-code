@@ -13,6 +13,9 @@ import { ToolNames } from '../../tools/tool-names.js';
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
 
+// IMPORTANT: any new file-touching tool added here MUST also be added
+// to FILE_PATH_TOOLS below, or microcompaction will blank its output
+// without reporting the eviction — silently reintroducing issue #4239.
 const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.SHELL,
@@ -36,14 +39,20 @@ const FILE_PATH_TOOLS = new Set<string>([
 ]);
 
 /**
- * Build a `callId → file_path` map for every file-tool call. The path
+ * Build a `callId → file_path[]` map for every file-tool call. The path
  * lives on the request-side `functionCall.args`, not on the
  * `functionResponse` microcompaction blanks, so this is the only way
  * to recover which file a cleared result referred to. Calls missing an
  * id or file_path are absent (the caller treats that as unresolvable).
+ *
+ * Paths accumulate per id rather than overwrite: if a (malformed or
+ * resumed) history reuses a `functionCall.id` across different files,
+ * disarming *all* candidate paths is the safe choice — over-disarming
+ * costs at most a redundant re-read, whereas keeping the wrong file
+ * armed would resurrect the dangling-placeholder hazard (issue #4239).
  */
-function buildCallIdToFilePath(history: Content[]): Map<string, string> {
-  const map = new Map<string, string>();
+function buildCallIdToFilePath(history: Content[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
   for (const content of history) {
     // functionCall parts are always model-role; skip user/system turns
     // (mirrors collectCompactablePartRefs' role short-circuit).
@@ -56,7 +65,9 @@ function buildCallIdToFilePath(history: Content[]): Map<string, string> {
       const filePath = (call.args as { file_path?: unknown } | undefined)
         ?.file_path;
       if (typeof filePath === 'string' && filePath.length > 0) {
-        map.set(call.id, filePath);
+        const existing = map.get(call.id);
+        if (existing) existing.push(filePath);
+        else map.set(call.id, [filePath]);
       }
     }
   }
@@ -341,11 +352,11 @@ export function microcompactHistory(
         // fast-path; if unrecoverable, count it so the caller falls
         // back to the blanket wipe (issue #4239).
         if (FILE_PATH_TOOLS.has(part.functionResponse.name)) {
-          const filePath = part.functionResponse.id
+          const filePaths = part.functionResponse.id
             ? callIdToFilePath.get(part.functionResponse.id)
             : undefined;
-          if (filePath) {
-            evictedReadPaths.add(filePath);
+          if (filePaths && filePaths.length > 0) {
+            for (const p of filePaths) evictedReadPaths.add(p);
           } else {
             unresolvedEvictedReads++;
           }

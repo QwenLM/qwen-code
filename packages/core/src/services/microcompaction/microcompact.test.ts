@@ -700,6 +700,33 @@ describe('microcompactHistory evictedReadPaths (issue #4239)', () => {
     expect(result.meta!.unresolvedEvictedReads).toBe(0);
   });
 
+  it('disarms ALL paths sharing a reused functionCall.id (mimo F1)', () => {
+    // Pathological/resumed history reuses one id across two files.
+    // The blanked result must disarm BOTH candidate paths — keeping
+    // the wrong one armed would resurrect the dangling-placeholder
+    // hazard. Over-disarming only costs a redundant re-read.
+    const history: Content[] = [
+      fileCall('dup', 'read_file', '/proj/first.ts'),
+      fileResult('dup', 'read_file', 'first old content '.repeat(50)),
+      fileCall('dup', 'read_file', '/proj/second.ts'),
+      fileResult('dup', 'read_file', 'second old content '.repeat(50)),
+      fileCall('c2', 'read_file', '/proj/keep.ts'),
+      fileResult('c2', 'read_file', 'kept'),
+    ];
+
+    const result = microcompactHistory(history, TWO_HOURS_AGO, {
+      toolResultsThresholdMinutes: 5,
+      toolResultsNumToKeep: 1,
+    });
+
+    expect(result.meta!.toolsCleared).toBe(2);
+    expect([...result.meta!.evictedReadPaths].sort()).toEqual([
+      '/proj/first.ts',
+      '/proj/second.ts',
+    ]);
+    expect(result.meta!.unresolvedEvictedReads).toBe(0);
+  });
+
   it('reports edit and write_file paths too, deduplicated', () => {
     const history: Content[] = [
       fileCall('c0', 'edit', '/proj/a.ts'),

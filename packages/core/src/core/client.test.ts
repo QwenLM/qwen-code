@@ -1724,6 +1724,76 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).not.toHaveBeenCalled();
     });
 
+    it('falls back to a blanket clear on a MIXED batch — one path on disk, one a ghost (mimo F9)', async () => {
+      // Most realistic production case: several files evicted, most on
+      // disk, one deleted since. A single unresolvable path must still
+      // force the safe blanket wipe rather than a partial disarm.
+      const { clear, markReadEvictedFromHistory } = mockFileReadCacheStub();
+
+      // keepRecent = 5 in this suite, so 7 results blank the 2 oldest:
+      // index 0 (real, stats OK) and index 1 (ghost, stat fails).
+      const realPath = join(mcTmpDir, 'mixed-real.ts');
+      await writeFile(realPath, 'real content');
+      const ghostPath = join(mcTmpDir, 'mixed-ghost.ts'); // never created
+
+      const history: Content[] = [];
+      for (let i = 0; i < 7; i++) {
+        const callId = `mc-mixed-${i}`;
+        const p =
+          i === 0
+            ? realPath
+            : i === 1
+              ? ghostPath
+              : join(mcTmpDir, `mixed-keep-${i}.ts`);
+        history.push({
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: callId,
+                name: 'read_file',
+                args: { file_path: p },
+              },
+            },
+          ],
+        });
+        history.push({
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'read_file',
+                response: { output: `content of ${i}` },
+              },
+            },
+          ],
+        });
+      }
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-clear-mixed',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // The ghost path makes the batch not-fully-disarmed → safe wipe.
+      expect(clear).toHaveBeenCalled();
+      // The on-disk path was still attempted before the batch was
+      // deemed unresolvable.
+      expect(markReadEvictedFromHistory).toHaveBeenCalled();
+    });
+
     it('falls back to a blanket clear when an evicted path stats to a different inode (Codex P2)', async () => {
       // Path stats fine, but resolves to an inode the cache never
       // recorded (file replaced / symlink retargeted since the read),

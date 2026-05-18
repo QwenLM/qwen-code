@@ -212,6 +212,10 @@ export class FileReadCache {
     } else {
       // Drift detected (or fresh entry): the prior flags described
       // different bytes. Reset to what this read actually produced.
+      // `readResidentInHistory` is intentionally NOT reset here — it
+      // tracks whether the read is still quotable from history, which
+      // is orthogonal to the on-disk fingerprint and already handled
+      // by the `opts.full` branch above.
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
     }
