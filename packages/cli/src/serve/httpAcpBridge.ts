@@ -6,7 +6,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { promises as fs, realpathSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import {
@@ -15,6 +15,7 @@ import {
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { canonicalizeWorkspace } from './fs/paths.js';
 import {
   EventBus,
   DEFAULT_RING_SIZE,
@@ -3770,74 +3771,14 @@ function sliceLineRange(
 }
 
 /**
- * Canonicalize a workspace path so the boot-time bound path and every
- * request's `workspaceCwd` collapse to the same key. `path.resolve`
- * alone normalizes `..` and `.` segments and absolutizes, but on
- * case-insensitive filesystems (macOS APFS, Windows NTFS) `/Work/A`
- * and `/work/a` are the same directory yet `resolve` returns them
- * verbatim — without normalization the `boundWorkspace` check would
- * reject every request that spelled the path with different casing
- * and `sessionScope: 'single'` re-attach would silently degrade to
- * "one per spelling".
- *
- * `realpathSync.native` (when the path exists) walks symlinks and returns
- * the on-disk casing; this matches what `config.ts` / `settings.ts` /
- * `sandbox.ts` use for their own workspace resolution. When the path
- * doesn't exist (test fixtures, ahead-of-mkdir flows) we fall back to
- * the resolved-but-uncanonicalized form rather than throwing — the
- * downstream `spawn({cwd})` will fail with a useful ENOENT if the
- * workspace truly doesn't exist.
- *
- * NOTE: This is a **cross-module contract** (BX9_q) — `config.ts`,
- * `settings.ts`, `sandbox.ts`, and this file all need to canonicalize
- * the same way for the bound-workspace check + `sessionScope:
- * 'single'` re-attach to work correctly across paths. The contract:
- * use `realpathSync.native` on the resolved absolute path; fall back
- * to `path.resolve` only when the path doesn't exist yet. If a future
- * change breaks this alignment (e.g. one module starts lowercasing on
- * Windows but this one doesn't), the canonicalized request path
- * won't match the canonicalized bound path → every request returns
- * `workspace_mismatch` even though the human-readable paths look
- * equivalent. There's no test that pins the alignment; the
- * integration suite would catch a divergence only if it tested the
- * specific casing / symlink path the affected module changed.
- *
- * Stage 2 in-process (#3803 §10) collapses the bridge into core,
- * removing the bridge-side path resolution entirely. Stage 1.5
- * `@qwen-code/acp-bridge` lift (chiga0 finding 1) is the natural
- * place to extract a shared `canonicalizeWorkspace` primitive that
- * all four modules consume — the lowest-common-denominator
- * extraction is fine THERE because the package boundary forces the
- * call sites to converge. Until then, *any* change to how those
- * modules resolve workspace paths needs a matching change here.
+ * Re-export of the workspace canonicalizer for callers that historically
+ * imported it from `httpAcpBridge.ts`. The implementation was extracted
+ * to `./fs/paths.ts` in #4175 PR 18 (commit 1) so the forthcoming
+ * `WorkspaceFileSystem` boundary can reuse the same primitive without
+ * pulling in the 3.6k-line bridge module. See `./fs/paths.ts` for the
+ * cross-module contract that governs this function.
  */
-export function canonicalizeWorkspace(p: string): string {
-  const resolved = path.resolve(p);
-  try {
-    // FIXME(stage-2): switch to `fs.promises.realpath` once the
-    // bridge call sites become async-friendly. This sync syscall
-    // runs on the hot `spawnOrAttach` path and blocks the event
-    // loop for one filesystem stat per call. Single-user loopback
-    // (Stage 1's design target) doesn't notice; high-concurrency
-    // deployments will. Stage 2 in-process refactor removes the
-    // entire bridge-side path resolution anyway, but if Stage 2
-    // ever lands without that change, switch to the async version.
-    return realpathSync.native(resolved);
-  } catch (err) {
-    // Only fall back to path.resolve for ENOENT (path doesn't exist
-    // yet). Other filesystem errors (EACCES, EIO, ELOOP) should
-    // propagate — swallowing them would hide transient I/O failures
-    // behind misleading workspace_mismatch rejections.
-    if (
-      err &&
-      typeof err === 'object' &&
-      (err as { code?: unknown }).code === 'ENOENT'
-    ) {
-      return resolved;
-    }
-    throw err;
-  }
-}
+export { canonicalizeWorkspace };
 
 /**
  * Race `p` against a timeout. The timeout REJECTS the returned
