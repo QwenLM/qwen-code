@@ -9,8 +9,8 @@
 
 import { providerMatchesCredentials } from './provider-config.js';
 import type { ProviderConfig } from './types.js';
-import { codingPlanProvider } from './presets/coding-plan.js';
-import { tokenPlanProvider } from './presets/token-plan.js';
+import { codingPlanProvider } from './presets/alibaba-coding-plan.js';
+import { tokenPlanProvider } from './presets/alibaba-token-plan.js';
 import { alibabaStandardProvider } from './presets/alibaba-standard.js';
 import { openRouterProvider } from './presets/openrouter.js';
 import { deepseekProvider } from './presets/deepseek.js';

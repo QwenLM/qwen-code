@@ -58,11 +58,11 @@ export {
   CODING_PLAN_CHINA_BASE_URL,
   CODING_PLAN_ENV_KEY,
   CODING_PLAN_GLOBAL_BASE_URL,
-} from './presets/coding-plan.js';
+} from './presets/alibaba-coding-plan.js';
 export {
   TOKEN_PLAN_BASE_URL,
   TOKEN_PLAN_ENV_KEY,
-} from './presets/token-plan.js';
+} from './presets/alibaba-token-plan.js';
 export {
   OPENROUTER_BASE_URL,
   OPENROUTER_ENV_KEY,
