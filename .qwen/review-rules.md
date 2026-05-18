@@ -1,16 +1,22 @@
 # Qwen Code Review Rules
 
-These rules guide automated PR review readiness checks before detailed code
-review. Apply them conservatively: the bot should reduce review noise and route
-unclear PRs to maintainers, not make final product decisions on weak evidence.
+These rules guide the current bundled `/review` behavior and the future
+preflight readiness checks. Apply them conservatively: the bot should reduce
+review noise and route unclear PRs to maintainers, not make final product
+decisions on weak evidence.
 
 ## Gate Behavior
 
-- **Blocking gates**: When a blocking gate fails, the review stops before
-  detailed code analysis. The bot posts a process comment explaining which gate
-  failed, why, and what the author should address (e.g., split the PR, provide
-  design rationale, add validation evidence). The PR stays open — the author
-  can address the concern and re-trigger review with `@qwen /review`.
+- **Current workflow behavior**: Until the Design Gate preflight is enabled,
+  these rules are loaded by bundled `/review` as project review guidance.
+  A blocking gate should be treated as an actionable process finding, but the
+  workflow may still continue into detailed code review.
+- **Design Gate behavior**: Once the preflight gate is enabled, a blocking gate
+  failure stops before detailed code analysis. The bot posts a process comment
+  explaining which gate failed, why, and what the author should address (e.g.,
+  split the PR, provide design rationale, add validation evidence). The PR stays
+  open — the author can address the concern and re-trigger review with
+  `@qwen /review`.
 - **Advisory gates**: When an advisory gate has concerns, the bot flags them
   in the review body but proceeds with code review.
 

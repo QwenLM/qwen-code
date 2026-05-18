@@ -1,8 +1,8 @@
 # Code Review Roadmap
 
-按"先 wiring 后 logic、先 workflow 后 skill、能小则小"的原则分阶段实施。每个阶段对应一个独立 PR，可分别 review、独立合入。
+按"先 wiring 后 logic、先 workflow 后 skill、能小则小"的原则分阶段实施。Phase 1-3 当前在同一分支内完成，用于一次性补齐基础 workflow、增量 cache wiring 和设计 anchor；Phase 4 以后继续按独立 PR 推进。
 
-## Phase 1：Bundled action 切换（PR #4067 — 当前 PR）
+## Phase 1：Bundled action 切换（当前分支）
 
 **范围**：
 
@@ -10,15 +10,13 @@
 - 加 `.qwen/review-rules.md` 项目级规则
 - 加 `--output-format json` / `--channel=CI` / size gate / cross-repo gate / fallback comment
 
-**不在此 PR**：
+**不在此 Phase**：
 
-- 增量评审 wiring（推后到 Phase 2）
 - Design Gate / Direction Gate（推后到 Phase 4）
-- 任何 design 文档（本文档也不在 PR #4067 内）
 
-**状态**：In review。
+**状态**：In review（当前分支）。
 
-## Phase 2：增量评审 wiring（独立 PR）
+## Phase 2：增量评审 wiring（当前分支）
 
 **范围**：
 
@@ -27,20 +25,20 @@
 - 在 review step 前后加 `actions/cache/restore` + `actions/cache/save`，path 指向主项目目录 `.qwen/review-cache/`
 - cache key 用 `qwen-review-<pr#>-<merge_base_sha>-<head_sha>`，`restore-keys` 用 `qwen-review-<pr#>-<merge_base_sha>-` 前缀。**必须用 merge base 而非 baseRefOid**：base 没动但作者 Update branch 时 baseRefOid 不变，restore-keys 仍能 hit 旧 cache，bundled skill 会把 merge 引入的上游 commits 当成 PR 改动评审；merge base 在 Update branch / rebase / retarget 时会前移，正好匹配 cache 应该失效的边界
 - 只有 `pull_request_target.synchronize` 在 review 前 restore cache；评论触发和 `workflow_dispatch` 默认强制重跑，避免同 SHA cache 命中后直接 "No new changes" 退出
-- **Save cache 必须在 `Post review summary comment` 之后执行**，并依赖 `steps.post-summary.outcome == 'success'`。否则 `gh pr comment` 失败时 cache 推进会丢评论但保留"已评"状态，下次 synchronize 把 findings 弄丢
-- 加本地 fixture 覆盖 `opened` / `synchronize` / comment / workflow_dispatch / "Update branch" 引起的 merge base 前移 / `gh pr comment` 失败导致 Save 跳过 等场景的 PR context 解析和 cache key 生成
+- **Save cache 必须在 `Post review summary comment` 之后执行**，并依赖 `steps.post-summary.outcome == 'success'`。保存前用 `actions/cache/restore` 的 `lookup-only: true` 检查 exact key，避免 rerun `opened/reopened/ready_for_review` 时重复保存同一个 key。否则 `gh pr comment` 失败时 cache 推进会丢评论但保留"已评"状态，下次 synchronize 把 findings 弄丢
+- 加本地 fixture 覆盖 `opened` / `synchronize` / comment / workflow_dispatch / "Update branch" 引起的 merge base 前移 / `gh pr comment` 失败导致 Save 跳过 等场景的 PR context 解析和 cache key 生成（后续 helper 化时补齐）
 
-**不在此 PR**：
+**不在此 Phase**：
 
 - bundled skill 内部不动（已支持 incremental，无需改）
 - 不引入 debounce（push 多了再说）
 - 不改 bundled skill；如果未来需要手动增量评审，再单独加显式 `--incremental` / `--force` 语义
 
-**依赖**：Phase 1 合入。
+**依赖**：Phase 1。
 
-**预估改动**：~25-35 行 YAML。
+**状态**：In review（当前分支）。
 
-## Phase 3：Code Review 设计文档（独立 PR）
+## Phase 3：Code Review 设计文档（当前分支）
 
 **范围**：
 
@@ -53,13 +51,13 @@
 - 沉淀本设计供后续 PR 引用（"per docs/design/code-review/... Phase X，本 PR 实现 Y"）
 - 让 maintainer 和外部贡献者理解 review 自动化的整体架构
 
-**不在此 PR**：
+**不在此 Phase**：
 
 - 不动任何 workflow / skill / 代码
 
 **依赖**：可与 Phase 2 并行，但建议先于 Phase 4-6 合入，作为后续 PR 的 anchor。
 
-**预估改动**：~3 个 markdown 文件，纯文档。
+**状态**：In review（当前分支）。
 
 ## Phase 4：Design Gate preflight（独立 PR，workflow helper）
 
@@ -84,7 +82,7 @@
 
 **预估改动**：~120-180 行 helper/workflow，~20 行 review-rules.md，若干 fixture。
 
-## Phase 5：历史 PR / Issue 感知（独立 PR，需动上游 skill）
+## Phase 5：历史 PR / Issue 感知（独立 PR，workflow helper）
 
 **范围**：
 
@@ -103,7 +101,6 @@
 
 **依赖**：Phase 4 合入（Design Gate 作为载体）。
 
-**预估改动**：~80 行 SKILL.md，新增 1 个 review subcommand（`qwen review history-scan`）做实际 `gh search` 调用。
 **预估改动**：~80 行 helper/subcommand 逻辑，可拆出 `qwen review history-scan` 供 Design Gate 复用。
 
 ## Phase 6：轮次抑制（独立 PR，需动上游 skill）
@@ -142,29 +139,27 @@
 ## 上线顺序总览
 
 ```
-Phase 1 (PR #4067)          ─── merge
-                                  │
-       ┌──────────────────────────┼──────────────────────────┐
-       ▼                          ▼                          ▼
-Phase 2 (cache+sync)        Phase 3 (design 文档)       Phase 7 (App, async)
-       │                          │
-       │                          ▼
-       │                    Phase 4 (Design Gate preflight)
-       │                          │
-       │                          ▼
-       │                    Phase 5 (历史 PR 感知)
-       │                          │
-       ▼                          ▼
-       └──────────────────►  Phase 6 (轮次抑制)
+Phase 1-3 (current branch)  ─── merge
+             │
+             ├────────────► Phase 7 (App, async)
+             │
+             ▼
+       Phase 4 (Design Gate preflight)
+             │
+             ▼
+       Phase 5 (历史 PR 感知)
+             │
+             ▼
+       Phase 6 (轮次抑制)
 ```
 
-Phase 2/3/7 可并行。Phase 4/5 必须串行，但不依赖 bundled skill release；Phase 6 需要改 bundled `/review`，依赖 release 节奏。
+Phase 1-3 当前一起合入。Phase 7 可与 Phase 4-6 并行推进；Phase 4/5 必须串行，但不依赖 bundled skill release；Phase 6 需要改 bundled `/review`，依赖 release 节奏。
 
 ## 验收标准
 
 每个 Phase 合入前的 acceptance：
 
-- **P1**：现有 review 在 main 上跑成功，新 PR 触发 bundled action 评审，加了 `.qwen/review-rules.md` 后 gate 按预期工作（用 dry-run 验证）
+- **P1**：现有 review 在 main 上跑成功，新 PR 触发 bundled action 评审，加了 `.qwen/review-rules.md` 后规则能被 bundled `/review` 加载并作为当前 workflow 的 review guidance 生效（用 dry-run 验证）
 - **P2**：同一 PR 连续 push 两次，第二次评审从 cache restore，bundled skill 日志显示 "incremental review (last sha: ...)"；同一 SHA 下评论 `@qwen /review focus text` 仍会强制重跑，不出现 "No new changes since last review" 直接退出；点 "Update branch from base"（merge base 前移）后 cache 不被 prefix-match 命中，bundled skill 走 full review；模拟 `gh pr comment` 失败，下次 synchronize 重跑评审而不是 short-circuit（验证 Save 依赖 post-summary 成功）
 - **P3**：合入后任何后续 PR 都能 cite `docs/design/code-review/*`
 - **P4**：故意造一个"明显偏离 roadmap"的测试 PR，Design Gate 输出 BLOCK 并 cite roadmap 行号；workflow 不调用 bundled `/review`；缺少 validation evidence 的普通 feature 输出 ADVISORY_ONLY，高风险 feature 输出 BLOCK

@@ -180,12 +180,12 @@ jobs:
             Additional reviewer focus: $additional_instructions"
           fi
 
-          echo "number=$pr_number" >> "$GITHUB_OUTPUT"
-          echo "review_mode=$review_mode" >> "$GITHUB_OUTPUT"
-          echo "should_comment=$should_comment" >> "$GITHUB_OUTPUT"
-          echo "should_run_review=$should_run_review" >> "$GITHUB_OUTPUT"
           output_delimiter="QWEN_REVIEW_PROMPT_$(date +%s%N)"
           {
+            echo "number=$pr_number"
+            echo "review_mode=$review_mode"
+            echo "should_comment=$should_comment"
+            echo "should_run_review=$should_run_review"
             echo "review_prompt<<$output_delimiter"
             printf '%s\n' "$review_prompt"
             echo "$output_delimiter"
@@ -201,6 +201,10 @@ jobs:
           SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
         run: |-
           set -euo pipefail
+
+          write_output() {
+            echo "$1" >> "$GITHUB_OUTPUT"
+          }
 
           if [ -z "${OPENAI_MODEL:-}" ]; then
             echo "::error::Repository variable QWEN_PR_REVIEW_MODEL is required for this workflow (maps to env var OPENAI_MODEL)."
@@ -278,11 +282,11 @@ jobs:
             fi
           fi
 
-          echo "changed_lines=$changed_lines" >> "$GITHUB_OUTPUT"
-          echo "changed_files=$changed_files" >> "$GITHUB_OUTPUT"
-          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
-          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
-          echo "merge_base_sha=$merge_base_sha" >> "$GITHUB_OUTPUT"
+          write_output "changed_lines=$changed_lines"
+          write_output "changed_files=$changed_files"
+          write_output "head_sha=$head_sha"
+          write_output "base_sha=$base_sha"
+          write_output "merge_base_sha=$merge_base_sha"
           echo "Review target: PR #$PR_NUMBER"
           echo "Review title: $title"
           echo "Review branch: $base_ref ($base_sha) <- $head_owner/$head_repo:$head_ref ($head_sha)"
@@ -294,11 +298,12 @@ jobs:
           echo "Review scope: $changed_files files, +$additions/-$deletions ($changed_lines changed lines)"
 
           if [ "$is_cross_repository" = "true" ]; then
-            echo "should_review=false" >> "$GITHUB_OUTPUT"
-            {
-              printf 'Qwen Code automated PR review is disabled for cross-repository PRs because this workflow runs with review credentials and the bundled `/review` flow may install dependencies from the PR head.\n\n'
-              printf 'A maintainer can still review this PR manually, or copy trusted patches into a branch in this repository before requesting automated review.\n'
-            } > qwen-pr-review-fork-comment.md
+            write_output "should_review=false"
+            cat > qwen-pr-review-fork-comment.md <<'EOF'
+          Qwen Code automated PR review is disabled for cross-repository PRs because this workflow runs with review credentials and the bundled "/review" flow may install dependencies from the PR head.
+
+          A maintainer can still review this PR manually, or copy trusted patches into a branch in this repository before requesting automated review.
+          EOF
             if [ "$SHOULD_COMMENT" = "true" ]; then
               gh pr comment "$PR_NUMBER" \
                 --repo "$GITHUB_REPOSITORY" \
@@ -307,19 +312,19 @@ jobs:
               {
                 printf '### Qwen PR review dry run\n\n'
                 cat qwen-pr-review-fork-comment.md
-                printf '\nReview mode: `%s`; no PR comments were posted.\n' "$REVIEW_MODE"
+                printf "\nReview mode: \`%s\`; no PR comments were posted.\n" "$REVIEW_MODE"
               } >> "$GITHUB_STEP_SUMMARY"
             fi
             exit 0
           fi
 
           if [ "$changed_lines" -gt "$QWEN_PR_REVIEW_MAX_CHANGED_LINES" ]; then
-            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            write_output "should_review=false"
             {
               printf 'This PR changes %s lines across %s files, which is above the current automated review threshold of %s changed lines.\n\n' \
                 "$changed_lines" "$changed_files" "$QWEN_PR_REVIEW_MAX_CHANGED_LINES"
               printf 'Please consider splitting it into smaller, focused PRs before requesting a full Qwen Code review. Smaller PRs are easier to validate, easier to dogfood, and less likely to mix product direction, refactoring, and implementation details in one review.\n\n'
-              printf '_Qwen Code PR review did not run a detailed code review for this oversized changeset. Model configured for review: `%s`._\n' \
+              printf "_Qwen Code PR review did not run a detailed code review for this oversized changeset. Model configured for review: \`%s\`._\n" \
                 "$OPENAI_MODEL"
             } > qwen-pr-review-size-comment.md
             if [ "$SHOULD_COMMENT" = "true" ]; then
@@ -330,11 +335,11 @@ jobs:
               {
                 printf '### Qwen PR review dry run\n\n'
                 cat qwen-pr-review-size-comment.md
-                printf '\n\nReview mode: `%s`; no PR comments were posted.\n' "$REVIEW_MODE"
+                printf "\n\nReview mode: \`%s\`; no PR comments were posted.\n" "$REVIEW_MODE"
               } >> "$GITHUB_STEP_SUMMARY"
             fi
           else
-            echo "should_review=true" >> "$GITHUB_OUTPUT"
+            write_output "should_review=true"
           fi
 
       # Restore the bundled /review skill's per-PR cache only on synchronize.
@@ -416,6 +421,25 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body-file qwen-pr-review-summary-comment.md
 
+      # Check the exact cache key after the review comment is delivered.
+      # lookup-only avoids downloading/restoring cache contents here; it only
+      # prevents actions/cache/save from attempting to create a key that already
+      # exists, which can happen on reruns of opened/reopened/ready_for_review
+      # where the pre-review restore step intentionally did not run.
+      - name: 'Check review cache key'
+        id: 'cache-lookup'
+        if: |-
+          steps.review.outcome == 'success' &&
+          steps.post-summary.outcome == 'success' &&
+          github.event_name == 'pull_request_target' &&
+          steps.size.outputs.head_sha != '' &&
+          steps.size.outputs.merge_base_sha != ''
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '.qwen/review-cache'
+          key: 'qwen-review-${{ steps.pr.outputs.number }}-${{ steps.size.outputs.merge_base_sha }}-${{ steps.size.outputs.head_sha }}'
+          lookup-only: true
+
       # Save cache only AFTER the review summary comment was successfully
       # posted. Saving before publication would persist "this head was
       # reviewed" state even if `gh pr comment` later failed (rate-limit,
@@ -424,14 +448,16 @@ jobs:
       # "No new changes since last review" or scope to a tiny incremental
       # diff, and the findings that never reached the PR would be lost.
       # Gating on post-summary.outcome makes cache advancement track
-      # comment delivery, not just model success.
+      # comment delivery, not just model success. The lookup step above skips
+      # duplicate exact-key saves on reruns.
       - name: 'Save review cache'
         if: |-
           steps.review.outcome == 'success' &&
           steps.post-summary.outcome == 'success' &&
           github.event_name == 'pull_request_target' &&
           steps.size.outputs.head_sha != '' &&
-          steps.size.outputs.merge_base_sha != ''
+          steps.size.outputs.merge_base_sha != '' &&
+          steps.cache-lookup.outputs.cache-hit != 'true'
         uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '.qwen/review-cache'
@@ -450,7 +476,7 @@ jobs:
 
           {
             printf '_Qwen Code automated PR review did not complete successfully. See the workflow logs for details: %s_\n' "$RUN_URL"
-            printf '\nThis is an automated message; please retry by commenting `@qwen /review` once the underlying issue is resolved.\n'
+            printf "\nThis is an automated message; please retry by commenting \`@qwen /review\` once the underlying issue is resolved.\n"
           } > qwen-pr-review-failure-comment.md
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
