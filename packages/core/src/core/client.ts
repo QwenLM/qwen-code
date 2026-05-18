@@ -1466,7 +1466,8 @@ export class GeminiClient {
         };
       }
       let lastEmittedActiveGoal: ActiveGoal | undefined = activeGoalAtTurnStart;
-      const createActiveGoalChangeEvent = (
+      // Mutates lastEmittedActiveGoal to suppress duplicate stream updates.
+      const maybeEmitActiveGoalChange = (
         nextActiveGoal: ActiveGoal | undefined,
       ): ServerGeminiStreamEvent | undefined => {
         if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
@@ -1579,9 +1580,6 @@ export class GeminiClient {
             .map((p) => p.text)
             .join('') || '[no response text]';
 
-        const activeGoalBeforeStopHook = getActiveGoal(
-          this.config.getSessionId(),
-        );
         const response = await messageBus.request<
           HookExecutionRequest,
           HookExecutionResponse
@@ -1598,8 +1596,20 @@ export class GeminiClient {
           MessageBusType.HOOK_EXECUTION_RESPONSE,
         );
 
+        // Stop hook callbacks can mutate active goal state during request().
+        // Capture it before cancellation returns so clear events are not lost.
+        const activeGoalAfterStopHook = getActiveGoal(
+          this.config.getSessionId(),
+        );
+
         // Check if aborted after hook execution
         if (signal.aborted) {
+          const activeGoalEvent = maybeEmitActiveGoalChange(
+            activeGoalAfterStopHook,
+          );
+          if (activeGoalEvent) {
+            yield activeGoalEvent;
+          }
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return turn;
         }
@@ -1609,13 +1619,6 @@ export class GeminiClient {
           : undefined;
 
         const stopOutput = hookOutput as StopHookOutput | undefined;
-        const activeGoalAfterStopHook = getActiveGoal(
-          this.config.getSessionId(),
-        );
-        const didActiveGoalChange = !activeGoalEquals(
-          activeGoalBeforeStopHook,
-          activeGoalAfterStopHook,
-        );
 
         // This should happen regardless of the hook's decision
         if (stopOutput?.systemMessage) {
@@ -1665,7 +1668,7 @@ export class GeminiClient {
               this.config.getSessionId(),
             );
             const activeGoalEvent =
-              createActiveGoalChangeEvent(activeGoalAfterCap);
+              maybeEmitActiveGoalChange(activeGoalAfterCap);
             if (activeGoalEvent) {
               yield activeGoalEvent;
             }
@@ -1678,13 +1681,11 @@ export class GeminiClient {
             return turn;
           }
 
-          if (didActiveGoalChange) {
-            const activeGoalEvent = createActiveGoalChangeEvent(
-              activeGoalAfterStopHook,
-            );
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
+          const activeGoalEvent = maybeEmitActiveGoalChange(
+            activeGoalAfterStopHook,
+          );
+          if (activeGoalEvent) {
+            yield activeGoalEvent;
           }
 
           yield {
@@ -1718,13 +1719,11 @@ export class GeminiClient {
           return hookTurn;
         }
 
-        if (didActiveGoalChange) {
-          const activeGoalEvent = createActiveGoalChangeEvent(
-            activeGoalAfterStopHook,
-          );
-          if (activeGoalEvent) {
-            yield activeGoalEvent;
-          }
+        const activeGoalEvent = maybeEmitActiveGoalChange(
+          activeGoalAfterStopHook,
+        );
+        if (activeGoalEvent) {
+          yield activeGoalEvent;
         }
       }
 
