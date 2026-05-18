@@ -135,6 +135,7 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     debugMessage: '',
     quittingMessages: null,
     isSettingsDialogOpen: false,
+    isStatusLineDialogOpen: false,
     isMemoryDialogOpen: false,
     isModelDialogOpen: false,
     isFastModelMode: false,

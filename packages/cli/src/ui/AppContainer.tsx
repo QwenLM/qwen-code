@@ -25,9 +25,11 @@ import {
 import { ConfigContext } from './contexts/ConfigContext.js';
 import {
   type HistoryItem,
+  type HistoryItemUser,
   ToolCallStatus,
   type HistoryItemWithoutId,
 } from './types.js';
+import type { RestoreOption } from './components/RewindSelector.js';
 import { MessageType, StreamingState } from './types.js';
 import {
   type EditorType,
@@ -60,6 +62,8 @@ import {
   ToolNames,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
+import { loadLowlight } from './utils/lowlightLoader.js';
+import { restoreGoalFromHistory } from './utils/restoreGoal.js';
 import {
   getStickyTodos,
   getStickyTodoMaxVisibleItems,
@@ -153,6 +157,7 @@ import { useMessageQueue } from './hooks/useMessageQueue.js';
 import { useAutoAcceptIndicator } from './hooks/useAutoAcceptIndicator.js';
 import { useSessionStats } from './contexts/SessionContext.js';
 import { useGitBranchName } from './hooks/useGitBranchName.js';
+import type { StatusLinePresetConfig } from './statusLinePresets.js';
 import {
   useExtensionUpdates,
   useConfirmUpdateRequests,
@@ -435,6 +440,33 @@ export const AppContainer = (props: AppContainerProps) => {
   const lastTitleRef = useRef<string | null>(null);
   const staticExtraHeight = 3;
 
+  // Prefetch the lowlight chunk on mount so the dynamic import is already
+  // in flight before the first code block needs colorizing. Without this
+  // kick-off, code blocks committed to ink's append-only <Static> region
+  // before the import resolves stay plain text for the rest of the session
+  // — Static can only be re-rendered via `refreshStatic`, which is not
+  // wired to lowlight load completion. Common reachable paths: short
+  // `--prompt -p` runs that finalize quickly, Ctrl+C-cancelled first turns,
+  // and the first-paint history replay on `--resume`. Firing the load
+  // from mount keeps the startup parse-cost win (V8 still parses off the
+  // critical path) while restoring the "first paint sees a loaded
+  // instance" guarantee. Errors are silently swallowed; CodeColorizer
+  // already falls back to plain text on miss.
+  useEffect(() => {
+    void loadLowlight().catch((err) => {
+      // The loader caches rejection with a cooldown (see
+      // `LOWLIGHT_RETRY_COOLDOWN_MS` / `lowlightLastFailureAt` in
+      // `lowlightLoader.ts`). This useEffect runs once on mount, so this
+      // catch fires at most once per session regardless. Log to the debug
+      // channel so a degraded syntax-highlight state (corrupted install,
+      // missing chunk) leaves a breadcrumb without spamming the user's
+      // TTY — `CodeColorizer` already falls back to plain text.
+      debugLogger.warn(
+        `Failed to load lowlight chunk; code blocks will render as plain text: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, []);
+
   // Initialize config (runs once on mount)
   useEffect(() => {
     (async () => {
@@ -461,6 +493,13 @@ export const AppContainer = (props: AppContainerProps) => {
           config,
         );
         historyManager.loadHistory(historyItems);
+
+        // Re-arm any `/goal` that was active when the prior session ended.
+        try {
+          restoreGoalFromHistory(historyItems, config, historyManager.addItem);
+        } catch {
+          // Restore is best-effort — never block resume on it.
+        }
 
         const recovered = await config.loadPausedBackgroundAgents(
           config.getSessionId(),
@@ -861,6 +900,26 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const [isStatusLineDialogOpen, setStatusLineDialogOpen] = useState(false);
+  const openStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(true),
+    [],
+  );
+  const closeStatusLineDialog = useCallback(
+    () => setStatusLineDialogOpen(false),
+    [],
+  );
+  const [statusLineSettingsVersion, setStatusLineSettingsVersion] = useState(0);
+  const [statusLineConfigOverride, setStatusLineConfigOverride] = useState<
+    StatusLinePresetConfig | undefined
+  >(undefined);
+  const notifyStatusLineSettingsChanged = useCallback(
+    (newConfig: StatusLinePresetConfig) => {
+      setStatusLineConfigOverride(newConfig);
+      setStatusLineSettingsVersion((version) => version + 1);
+    },
+    [],
+  );
   const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
     useMemoryDialog();
 
@@ -955,6 +1014,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openTrustDialog,
@@ -989,6 +1049,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEditorDialog,
       openMemoryDialog,
       openSettingsDialog,
+      openStatusLineDialog,
       openModelDialog,
       openManageModelsDialog,
       openArenaDialog,
@@ -2032,6 +2093,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
     isManageModelsDialogOpen ||
@@ -2152,14 +2214,25 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   // --- Rewind selector callbacks ---
+  // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
+  // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
   const openRewindSelector = useCallback(() => {
     if (streamingState !== StreamingState.Idle) return;
-    if (config.getIdeMode()) return;
     if (dialogsVisibleRef.current) return;
+    if (config.getIdeMode()) {
+      historyManager.addItem(
+        {
+          type: 'info',
+          text: 'Rewind is disabled in IDE mode.',
+        },
+        Date.now(),
+      );
+      return;
+    }
     const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
     if (!hasUserTurns) return;
     setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager.history]);
+  }, [streamingState, config, historyManager]);
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
@@ -2167,75 +2240,189 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
 
   const handleRewindConfirm = useCallback(
-    (userItem: HistoryItem) => {
-      const geminiClient = config.getGeminiClient();
-      if (!geminiClient) return;
+    async (userItem: HistoryItem, option: RestoreOption) => {
+      try {
+        // For 'both', validate that conversation can be truncated BEFORE
+        // touching files — otherwise we'd roll back the workspace while
+        // the conversation stays at the newer state.
+        const needsConversation =
+          option === 'conversation' || option === 'both';
+        const geminiClient = needsConversation
+          ? config.getGeminiClient()
+          : null;
+        let apiTruncateIndex = -1;
+        let conversationSkippedNoClient = false;
+        if (needsConversation) {
+          if (!geminiClient) {
+            if (option === 'conversation') {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Cannot rewind conversation: no active model client.',
+                  ),
+                },
+                Date.now(),
+              );
+              return;
+            }
+            // 'both' with no client: skip conversation, still try files,
+            // and surface a warning after the restore output.
+            conversationSkippedNoClient = true;
+          } else {
+            apiTruncateIndex = computeApiTruncationIndex(
+              historyManager.history,
+              userItem.id,
+              geminiClient.getHistory(),
+            );
+            if (apiTruncateIndex < 0) {
+              historyManager.addItem(
+                {
+                  type: 'error',
+                  text: t(
+                    'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+                  ),
+                },
+                Date.now(),
+              );
+              if (option === 'both') {
+                // Abort file restore too — don't create inconsistent state
+                return;
+              }
+              return;
+            }
+          }
+        }
 
-      // 1. Compute values from current history BEFORE truncation
-      const originalHistory = historyManager.history;
-      const originalLength = originalHistory.length;
+        // Restore code (files on disk). For 'code'-only, don't truncate
+        // the snapshot timeline — the conversation turns remain visible
+        // and their snapshots must stay available for future rewinds.
+        let fileRestoreMessage: string | undefined;
+        let fileRestoreError: string | undefined;
+        let hasRestoreFailure = false;
+        if (option === 'code' || option === 'both') {
+          const promptId = (userItem as HistoryItemUser).promptId;
+          if (promptId) {
+            try {
+              const truncateHistory =
+                option === 'both' && !!geminiClient && apiTruncateIndex >= 0;
+              const result = await config
+                .getFileHistoryService()
+                .rewind(promptId, truncateHistory);
+              if (result.filesChanged.length > 0) {
+                fileRestoreMessage = t('Restored {{count}} file(s).', {
+                  count: String(result.filesChanged.length),
+                });
+              } else if (result.filesFailed.length === 0) {
+                fileRestoreMessage = t('No files needed to be restored.');
+              }
+              if (result.filesFailed.length > 0) {
+                hasRestoreFailure = true;
+                fileRestoreError = t(
+                  'Failed to restore {{count}} file(s): {{files}}',
+                  {
+                    count: String(result.filesFailed.length),
+                    files: result.filesFailed
+                      .map((f) => f.split('/').pop())
+                      .join(', '),
+                  },
+                );
+              }
+            } catch (error) {
+              hasRestoreFailure = true;
+              fileRestoreError = t('Failed to restore files: {{error}}', {
+                error: error instanceof Error ? error.message : String(error),
+              });
+            }
+          } else {
+            hasRestoreFailure = true;
+            fileRestoreError = t(
+              'Cannot restore files: this turn was created before file checkpointing was enabled.',
+            );
+          }
+        }
 
-      let targetTurnIndex = 0;
-      for (const h of originalHistory) {
-        if (h.id === userItem.id) break;
-        if (isRealUserTurn(h)) targetTurnIndex++;
-      }
+        // Truncate conversation (already validated above).
+        // Skip if file restore had failures in "both" mode to avoid inconsistent state.
+        if (
+          needsConversation &&
+          geminiClient &&
+          apiTruncateIndex >= 0 &&
+          !(option === 'both' && hasRestoreFailure)
+        ) {
+          const originalHistory = historyManager.history;
+          const originalLength = originalHistory.length;
 
-      // 2. Compute API truncation point
-      const apiHistory = geminiClient.getHistory();
-      const apiTruncateIndex = computeApiTruncationIndex(
-        originalHistory,
-        userItem.id,
-        apiHistory,
-      );
+          let targetTurnIndex = 0;
+          for (const h of originalHistory) {
+            if (h.id === userItem.id) break;
+            if (isRealUserTurn(h)) targetTurnIndex++;
+          }
 
-      // Abort if the target turn is unreachable (e.g., absorbed by compression)
-      if (apiTruncateIndex < 0) {
+          geminiClient.truncateHistory(apiTruncateIndex);
+
+          const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
+          historyManager.loadHistory(truncatedUi);
+
+          refreshStatic();
+
+          if (userItem.type === 'user' && userItem.text) {
+            buffer.setText(userItem.text);
+          }
+
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Conversation rewound. Edit your prompt and press Enter to continue.',
+              ),
+            },
+            Date.now(),
+          );
+
+          config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
+            truncatedCount: originalLength - truncatedUi.length,
+          });
+        }
+
+        // Show file restore result after conversation truncation so the
+        // message isn't immediately removed by loadHistory.
+        if (fileRestoreMessage) {
+          historyManager.addItem(
+            { type: 'info', text: fileRestoreMessage },
+            Date.now(),
+          );
+        }
+        if (fileRestoreError) {
+          historyManager.addItem(
+            { type: 'error', text: fileRestoreError },
+            Date.now(),
+          );
+        }
+        if (conversationSkippedNoClient) {
+          historyManager.addItem(
+            {
+              type: 'info',
+              text: t(
+                'Code restored, but conversation could not be rewound (no active client).',
+              ),
+            },
+            Date.now(),
+          );
+        }
+      } catch (error) {
         historyManager.addItem(
           {
             type: 'error',
-            text: 'Cannot rewind to a turn that was compressed. Try a more recent turn.',
+            text: t('Rewind failed: {{error}}', {
+              error: error instanceof Error ? error.message : String(error),
+            }),
           },
           Date.now(),
         );
+      } finally {
         setIsRewindSelectorOpen(false);
-        return;
       }
-
-      // 3. Truncate API history to the target point.
-      // Do NOT strip thought parts — reasoning models (e.g. DeepSeek) require
-      // reasoning_content continuity across all turns in the conversation.
-      geminiClient.truncateHistory(apiTruncateIndex);
-
-      // 4. Truncate UI history (keep everything before the target item)
-      const truncatedUi = originalHistory.filter((h) => h.id < userItem.id);
-      historyManager.loadHistory(truncatedUi);
-
-      // 5. Re-render the terminal
-      refreshStatic();
-
-      // 6. Pre-populate input with the original user text
-      if (userItem.type === 'user' && userItem.text) {
-        buffer.setText(userItem.text);
-      }
-
-      // 7. Add info message
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
-        },
-        Date.now(),
-      );
-
-      // 8. Record the rewind event — re-roots the parentUuid chain so
-      //    rewound messages end up on a dead branch during resume.
-      config.getChatRecordingService()?.rewindRecording(targetTurnIndex, {
-        truncatedCount: originalLength - truncatedUi.length,
-      });
-
-      // 9. Close the selector
-      setIsRewindSelectorOpen(false);
     },
     [config, historyManager, refreshStatic, buffer],
   );
@@ -2382,6 +2569,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isStatusLineDialogOpen,
+    closeStatusLineDialog,
     isMemoryDialogOpen,
     closeMemoryDialog,
     activeArenaDialog,
@@ -2551,7 +2740,8 @@ export const AppContainer = (props: AppContainerProps) => {
         // Input is empty and idle — double-ESC opens rewind selector
         if (
           streamingState === StreamingState.Idle &&
-          !dialogsVisibleRef.current
+          !dialogsVisibleRef.current &&
+          !config.getIdeMode()
         ) {
           if (escapeTimerRef.current) {
             clearTimeout(escapeTimerRef.current);
@@ -2813,6 +3003,9 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -2932,6 +3125,9 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isStatusLineDialogOpen,
+      statusLineSettingsVersion,
+      statusLineConfigOverride,
       isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
@@ -3056,6 +3252,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
@@ -3130,6 +3328,8 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeStatusLineDialog,
+      notifyStatusLineSettingsChanged,
       closeMemoryDialog,
       closeModelDialog,
       openModelDialog,

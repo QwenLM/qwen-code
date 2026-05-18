@@ -130,6 +130,47 @@ export default {
     'Renommer la conversation en cours. --auto laisse le modèle rapide choisir un titre.',
   'Rewind conversation to a previous turn':
     'Revenir à un tour précédent de la conversation',
+  'Rewind Conversation': 'Rembobiner la conversation',
+  'No user turns to rewind to.':
+    'Aucun tour utilisateur vers lequel rembobiner.',
+  'Rewind to: ': 'Rembobiner vers : ',
+  'Restore code and conversation': 'Restaurer le code et la conversation',
+  'Restore conversation only': 'Restaurer la conversation uniquement',
+  'Restore code only': 'Restaurer le code uniquement',
+  'Never mind': 'Annuler',
+  'Computing file changes...': 'Calcul des modifications de fichiers...',
+  'Restoring...': 'Restauration en cours...',
+  'Restored {{count}} file(s).': '{{count}} fichier(s) restauré(s).',
+  'Failed to restore files: {{error}}':
+    'Échec de la restauration des fichiers : {{error}}',
+  'Rewind failed: {{error}}': 'Échec du retour en arrière : {{error}}',
+  'Cannot rewind conversation: no active model client.':
+    'Impossible de revenir en arrière sur la conversation : aucun client de modèle actif.',
+  'Code restored, but conversation could not be rewound (no active client).':
+    'Code restauré, mais la conversation n’a pas pu être ramenée en arrière (aucun client actif).',
+  'Conversation rewound. Edit your prompt and press Enter to continue.':
+    'Conversation ramenée en arrière. Modifiez votre invite et appuyez sur Entrée pour continuer.',
+  'Rewinding does not affect files edited manually or via shell commands.':
+    'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
+  'Cannot rewind to a turn that was compressed. Try a more recent turn.':
+    'Impossible de revenir à un tour qui a été compressé. Essayez un tour plus récent.',
+  'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
+    'La restauration des fichiers est indisponible pour ce tour (aucune modification capturée, ou ce tour est antérieur à la session actuelle).',
+  '(+{{insertions}} -{{deletions}} in {{count}} file)':
+    '(+{{insertions}} -{{deletions}} dans {{count}} fichier)',
+  '(+{{insertions}} -{{deletions}} in {{count}} files)':
+    '(+{{insertions}} -{{deletions}} dans {{count}} fichiers)',
+  'Failed to restore {{count}} file(s): {{files}}':
+    'Échec de la restauration de {{count}} fichier(s) : {{files}}',
+  'Cannot restore files: this turn was created before file checkpointing was enabled.':
+    "Impossible de restaurer les fichiers : ce tour a été créé avant l'activation des points de contrôle de fichiers.",
+  'No files needed to be restored.':
+    "Aucun fichier n'a eu besoin d'être restauré.",
+  '↑↓ to navigate · Enter to select · Esc to go back':
+    '↑↓ naviguer · Enter sélectionner · Esc retour',
+  '↑↓ to navigate · Enter to select · Esc to cancel':
+    '↑↓ naviguer · Enter sélectionner · Esc annuler',
+  'Enter/Y to confirm · Esc/N to go back': 'Enter/Y confirmer · Esc/N retour',
   'change the theme': 'changer le thème',
   'Select Theme': 'Sélectionner un thème',
   Preview: 'Aperçu',

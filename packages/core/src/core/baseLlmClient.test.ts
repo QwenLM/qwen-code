@@ -117,6 +117,19 @@ const createMockResponseWithoutFunctionCall = (): GenerateContentResponse =>
     ],
   }) as GenerateContentResponse;
 
+const createMockTextResponse = (text: string): GenerateContentResponse =>
+  ({
+    candidates: [
+      {
+        content: {
+          role: 'model',
+          parts: [{ text }],
+        },
+        index: 0,
+      },
+    ],
+  }) as GenerateContentResponse;
+
 describe('BaseLlmClient', () => {
   let client: BaseLlmClient;
   let abortController: AbortController;
@@ -316,6 +329,50 @@ describe('BaseLlmClient', () => {
     it('should return empty object when no function calls are returned', async () => {
       const mockResponse = createMockResponseWithoutFunctionCall();
       mockGenerateContent.mockResolvedValue(mockResponse);
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
+
+    it('should parse a loose JSON object from text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('Result:\n{"color":"purple","count":2}\nDone.'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'purple', count: 2 });
+    });
+
+    it('should parse fenced JSON text when no function call is returned', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":"orange"}\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({ color: 'orange' });
+    });
+
+    it('should ignore malformed loose JSON text', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('```json\n{"color":\n```'),
+      );
+      vi.mocked(getFunctionCalls).mockReturnValue(undefined);
+
+      const result = await client.generateJson(defaultOptions);
+
+      expect(result).toEqual({});
+    });
+
+    it('should reject loose JSON arrays', async () => {
+      mockGenerateContent.mockResolvedValue(
+        createMockTextResponse('[{"color":"blue"}]'),
+      );
       vi.mocked(getFunctionCalls).mockReturnValue(undefined);
 
       const result = await client.generateJson(defaultOptions);

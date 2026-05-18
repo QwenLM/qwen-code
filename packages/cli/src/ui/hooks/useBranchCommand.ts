@@ -14,6 +14,7 @@ import {
   SessionStartSource,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
 
@@ -190,6 +191,22 @@ export function useBranchCommand(
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
         uiSwapped = true;
+
+        // Re-arm /goal under the fork's new sessionId. The branched JSONL
+        // is a verbatim copy of the parent's, so an active goal sentinel
+        // carries over — but `config.startNewSession` rebuilt the hook
+        // system under `newSessionId`, leaving the parent's `activeGoal`
+        // store entry stale and the Stop hook unregistered. Same rationale
+        // as the /resume path; see [[useResumeCommand]] for details.
+        try {
+          restoreGoalFromHistory(
+            uiHistoryItems,
+            config,
+            historyManager.addItem,
+          );
+        } catch {
+          // Best-effort — branch must not fail on goal restoration.
+        }
 
         // 7. Compute and apply the branch customTitle.
         //    The forked transcript is identical to the parent's, so reading

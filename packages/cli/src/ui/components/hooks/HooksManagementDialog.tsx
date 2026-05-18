@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../keyMatchers.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
 import {
@@ -54,6 +55,9 @@ function isValidHookConfig(config: unknown): config is HookConfig {
   }
   if (obj['type'] === 'function') {
     return 'callback' in obj && typeof obj['callback'] === 'function';
+  }
+  if (obj['type'] === 'prompt') {
+    return 'prompt' in obj && typeof obj['prompt'] === 'string';
   }
   return false;
 }
@@ -197,9 +201,9 @@ export function HooksManagementDialog({
           break;
 
         case HOOKS_MANAGEMENT_STEPS.HOOKS_LIST:
-          if (key.name === 'up') {
+          if (keyMatchers[Command.SELECTION_UP](key)) {
             setListSelectedIndex((prev) => Math.max(0, prev - 1));
-          } else if (key.name === 'down') {
+          } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
             setListSelectedIndex((prev) =>
               Math.min(hooks.length - 1, prev + 1),
             );
@@ -222,9 +226,9 @@ export function HooksManagementDialog({
           if (key.name === 'escape') {
             handleNavigateBack();
           } else if (selectedHook && selectedHook.configs.length > 0) {
-            if (key.name === 'up') {
+            if (keyMatchers[Command.SELECTION_UP](key)) {
               setDetailSelectedIndex((prev) => Math.max(0, prev - 1));
-            } else if (key.name === 'down') {
+            } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
               setDetailSelectedIndex((prev) =>
                 Math.min(selectedHook.configs.length - 1, prev + 1),
               );

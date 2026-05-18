@@ -818,7 +818,7 @@ export class HookEventHandler {
    */
   private getHookTypeFromResult(
     result: HookExecutionResult,
-  ): 'command' | 'http' | 'function' {
+  ): 'command' | 'http' | 'function' | 'prompt' {
     return result.hookConfig.type;
   }
 }

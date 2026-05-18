@@ -89,7 +89,7 @@
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/express": "^5.0.3",
-    "@types/node": "^20.11.24",
+    "@types/node": "^22.0.0",
     "@types/prompts": "^2.4.9",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

@@ -154,6 +154,36 @@ export interface FunctionHookConfig {
 }
 
 /**
+ * LLM Hook response format - used by prompt hooks
+ */
+export interface LLMHookResponse {
+  /** true = allow operation, false = block operation */
+  ok: boolean;
+  /** Decision reason (required when ok=false, shown to user) */
+  reason?: string;
+  /** Optional additional context to add to conversation */
+  additionalContext?: string;
+}
+
+/**
+ * Hook configuration entry for prompt hooks
+ * Sends hook input to LLM for single-turn evaluation
+ */
+export interface PromptHookConfig {
+  type: HookType.Prompt;
+  /** Prompt template with $ARGUMENTS placeholder for hook input JSON */
+  prompt: string;
+  /** Optional model override (defaults to the user's current model) */
+  model?: string;
+  /** Timeout in seconds (default 30) */
+  timeout?: number;
+  name?: string;
+  description?: string;
+  source?: HooksConfigSource;
+  statusMessage?: string;
+}
+
+/**
  * Messages provider callback type for automatically passing conversation history
  * to function hooks during execution
  */
@@ -162,7 +192,8 @@ export type MessagesProvider = () => Array<Record<string, unknown>> | undefined;
 export type HookConfig =
   | CommandHookConfig
   | HttpHookConfig
-  | FunctionHookConfig;
+  | FunctionHookConfig
+  | PromptHookConfig;
 
 /**
  * Hook definition with matcher
@@ -180,6 +211,7 @@ export enum HookType {
   Command = 'command',
   Http = 'http',
   Function = 'function',
+  Prompt = 'prompt',
 }
 
 /**
@@ -196,6 +228,8 @@ export function getHookKey(hook: HookConfig): string {
       return name
         ? `${name}:${hook.id ?? 'function'}`
         : (hook.id ?? 'function');
+    case HookType.Prompt:
+      return name ? `${name}:${hook.prompt}` : hook.prompt;
     default:
       return name || 'unknown';
   }

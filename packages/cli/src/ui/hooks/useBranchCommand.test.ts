@@ -7,6 +7,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
+import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
+
+vi.mock('../utils/restoreGoal.js', () => ({
+  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
+}));
 
 describe('useBranchCommand', () => {
   let forkSession: ReturnType<typeof vi.fn>;
@@ -49,6 +54,7 @@ describe('useBranchCommand', () => {
   });
 
   beforeEach(() => {
+    vi.mocked(restoreGoalFromHistory).mockClear();
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
@@ -118,6 +124,23 @@ describe('useBranchCommand', () => {
       'load', // forked session
       'config.start',
     ]);
+  });
+
+  it('re-arms /goal against the forked sessionId after the UI swap', async () => {
+    // The branched JSONL is a verbatim copy of the parent's, so an active
+    // goal sentinel rides along. Without this restore call the forked
+    // session inherits the goal in transcript only — store stays empty,
+    // footer pill shows nothing, and the Stop hook never fires under the
+    // new sessionId. Same root cause as the /resume gap; pin it here.
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
+      expect.any(Array),
+      config,
+      addItem,
+    );
   });
 
   it('records the user-provided name with a (Branch) suffix', async () => {
