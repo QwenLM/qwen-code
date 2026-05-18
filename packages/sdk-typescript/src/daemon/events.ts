@@ -34,6 +34,8 @@ const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'auth_device_flow_authorized',
   'auth_device_flow_failed',
   'auth_device_flow_cancelled',
+  // #4175 Wave 4 PR 17 — mutation control events.
+  'approval_mode_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(
@@ -238,6 +240,27 @@ export interface DaemonAuthDeviceFlowCancelledData {
   [key: string]: unknown;
 }
 
+/**
+ * #4175 Wave 4 PR 17. Fired after `POST /session/:id/approval-mode`
+ * successfully changes a live session's approval mode. `persisted`
+ * reflects whether the change was also written to workspace settings
+ * (set via the route's optional `persist: true` body flag).
+ *
+ * `previous` and `next` are typed as `string` here rather than the
+ * `DaemonApprovalMode` union so SDK consumers built against an older
+ * daemon don't crash on a future fifth mode literal — the daemon-side
+ * enum is the source of truth and SDK reducers should branch on the
+ * known values they care about.
+ */
+export interface DaemonApprovalModeChangedData {
+  sessionId: string;
+  previous: string;
+  next: string;
+  persisted: boolean;
+  originatorClientId?: string;
+  [key: string]: unknown;
+}
+
 export type DaemonSessionUpdateEvent = DaemonEventEnvelope<
   'session_update',
   DaemonSessionUpdateData
@@ -294,6 +317,10 @@ export type DaemonAgentChangedEvent = DaemonEventEnvelope<
   'agent_changed',
   DaemonAgentChangedData
 >;
+export type DaemonApprovalModeChangedEvent = DaemonEventEnvelope<
+  'approval_mode_changed',
+  DaemonApprovalModeChangedData
+>;
 
 export type DaemonAuthDeviceFlowStartedEvent = DaemonEventEnvelope<
   'auth_device_flow_started',
@@ -334,7 +361,8 @@ export type DaemonSessionEvent =
 export type DaemonControlEvent =
   | DaemonPermissionRequestEvent
   | DaemonPermissionResolvedEvent
-  | DaemonPermissionAlreadyResolvedEvent;
+  | DaemonPermissionAlreadyResolvedEvent
+  | DaemonApprovalModeChangedEvent;
 
 export type DaemonStreamLifecycleEvent =
   | DaemonClientEvictedEvent
@@ -401,6 +429,14 @@ export interface DaemonSessionViewState {
    */
   lastWorkspaceMutation?: DaemonMemoryChangedData | DaemonAgentChangedData;
   lastWorkspaceMutationType?: 'memory_changed' | 'agent_changed';
+  /**
+   * #4175 Wave 4 PR 17. The most recent approval-mode change observed
+   * for this session, plus a count for diagnostic UIs that want to
+   * render "approval mode toggled N times this session". Non-terminal.
+   */
+  approvalMode?: string;
+  approvalModeChangedCount: number;
+  lastApprovalModeChange?: DaemonApprovalModeChangedData;
 }
 
 export function createDaemonSessionViewState(
@@ -429,6 +465,9 @@ export function createDaemonSessionViewState(
     lastSlowClientWarning: seed.lastSlowClientWarning,
     lastWorkspaceMutation: seed.lastWorkspaceMutation,
     lastWorkspaceMutationType: seed.lastWorkspaceMutationType,
+    approvalMode: seed.approvalMode,
+    approvalModeChangedCount: seed.approvalModeChangedCount ?? 0,
+    lastApprovalModeChange: seed.lastApprovalModeChange,
   };
 }
 
@@ -525,6 +564,10 @@ export function asKnownDaemonEvent(
     case 'auth_device_flow_cancelled':
       return isAuthDeviceFlowCancelledData(event.data)
         ? (event as DaemonAuthDeviceFlowCancelledEvent)
+        : undefined;
+    case 'approval_mode_changed':
+      return isApprovalModeChangedData(event.data)
+        ? (event as DaemonApprovalModeChangedEvent)
         : undefined;
     default:
       return undefined;
@@ -690,6 +733,16 @@ export function reduceDaemonSessionEvent(
     case 'auth_device_flow_failed':
     case 'auth_device_flow_cancelled':
       return base;
+    case 'approval_mode_changed':
+      // #4175 Wave 4 PR 17. Non-terminal — just refreshes the
+      // approval-mode mirror. UIs render the new mode + count for
+      // "this session has been retoggled N times" diagnostics.
+      return {
+        ...base,
+        approvalMode: event.data.next,
+        approvalModeChangedCount: base.approvalModeChangedCount + 1,
+        lastApprovalModeChange: event.data,
+      };
     default: {
       const _exhaustive: never = event;
       return _exhaustive;
@@ -1153,6 +1206,21 @@ function isAuthDeviceFlowErrorKind(
   // exhaustively in consumer `switch` statements; unknown kinds fall
   // into the `(string & {})` arm of the union for graceful handling.
   return typeof value === 'string' && value.length > 0;
+}
+
+function isApprovalModeChangedData(
+  value: unknown,
+): value is DaemonApprovalModeChangedData {
+  // `previous` and `next` are typed as bare strings in the public
+  // shape (forward-compat for a future fifth approval-mode literal),
+  // so the predicate only checks the structural envelope here.
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['previous']) &&
+    isNonEmptyString(value['next']) &&
+    typeof value['persisted'] === 'boolean'
+  );
 }
 
 function isPermissionOption(value: unknown): value is DaemonPermissionOption {

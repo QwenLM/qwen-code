@@ -29,6 +29,7 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
+import { ApprovalMode, TrustGateError } from '@qwen-code/qwen-code-core';
 import {
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -120,6 +121,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_file_write',
   // Issue #4175 PR 21 — auth device-flow surface advertised unconditionally.
   'auth_device_flow',
+  // #4175 Wave 4 PR 17.
+  'session_approval_mode_control',
 ] as const;
 
 // Issue #4175 PR 15. `require_auth` is registered but conditionally
@@ -186,6 +189,17 @@ interface FakeBridgeOpts {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ) => Promise<SetSessionModelResponse>;
+  setApprovalModeImpl?: (
+    sessionId: string,
+    mode: ApprovalMode,
+    opts: { persist: boolean },
+    context?: BridgeClientRequestContext,
+  ) => Promise<{
+    sessionId: string;
+    mode: ApprovalMode;
+    previous: ApprovalMode;
+    persisted: boolean;
+  }>;
   closeImpl?: (
     sessionId: string,
     context?: BridgeClientRequestContext,
@@ -244,6 +258,12 @@ interface FakeBridge extends HttpAcpBridge {
   setModelCalls: Array<{
     sessionId: string;
     req: SetSessionModelRequest;
+    context?: BridgeClientRequestContext;
+  }>;
+  setApprovalModeCalls: Array<{
+    sessionId: string;
+    mode: ApprovalMode;
+    opts: { persist: boolean };
     context?: BridgeClientRequestContext;
   }>;
   closeCalls: Array<{
@@ -382,6 +402,19 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       availableSkills: [],
     }));
   const setModelImpl = opts.setModelImpl ?? (async () => ({}));
+  const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
+  const setApprovalModeImpl =
+    opts.setApprovalModeImpl ??
+    (async (
+      sessionId: string,
+      mode: ApprovalMode,
+      o: { persist: boolean },
+    ) => ({
+      sessionId,
+      mode,
+      previous: ApprovalMode.DEFAULT,
+      persisted: o.persist,
+    }));
   const closeImpl = opts.closeImpl ?? (async () => {});
   const updateMetadataImpl =
     opts.updateMetadataImpl ??
@@ -417,6 +450,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionContextCalls,
     sessionSupportedCommandsCalls,
     setModelCalls,
+    setApprovalModeCalls,
     closeCalls,
     updateMetadataCalls,
     heartbeatCalls,
@@ -539,6 +573,15 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async setSessionApprovalMode(sessionId, mode, o, context) {
+      setApprovalModeCalls.push({
+        sessionId,
+        mode,
+        opts: o,
+        ...(context ? { context } : {}),
+      });
+      return setApprovalModeImpl(sessionId, mode, o, context);
     },
     async closeSession(sessionId, context) {
       closeCalls.push({ sessionId, ...(context ? { context } : {}) });
@@ -2049,6 +2092,139 @@ describe('createServeApp', () => {
         .post('/session/missing/model')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ modelId: 'qwen3-coder' });
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('missing');
+    });
+  });
+
+  describe('POST /session/:id/approval-mode (#4175 Wave 4 PR 17)', () => {
+    // Strict-gated route: refuses on no-token loopback defaults. All
+    // tests configure a token and forward `Authorization: Bearer …`.
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('401 on no-token daemon: strict gate refuses without bearer auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/approval-mode')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ mode: 'yolo' });
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('200 with the typed result on success and persist defaults to false', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        previous: 'default',
+        persisted: false,
+      });
+      expect(bridge.setApprovalModeCalls).toHaveLength(1);
+      expect(bridge.setApprovalModeCalls[0]).toMatchObject({
+        sessionId: 'session-A',
+        mode: 'yolo',
+        opts: { persist: false },
+      });
+    });
+
+    it('forwards persist:true to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'auto-edit', persist: true });
+      expect(res.status).toBe(200);
+      expect(res.body.persisted).toBe(true);
+      expect(bridge.setApprovalModeCalls[0]?.opts).toEqual({ persist: true });
+    });
+
+    it('passes client identity context into the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      )
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ mode: 'plan' });
+      expect(res.status).toBe(200);
+      expect(bridge.setApprovalModeCalls[0]?.context).toEqual({
+        clientId: 'client-1',
+      });
+    });
+
+    it('400 on missing or unknown mode literal', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const missing = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({});
+      expect(missing.status).toBe(400);
+      expect(missing.body.code).toBe('invalid_approval_mode');
+      expect(missing.body.allowed).toEqual([
+        'plan',
+        'default',
+        'auto-edit',
+        'yolo',
+      ]);
+      const unknown = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'super-yolo' });
+      expect(unknown.status).toBe(400);
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('400 when persist is non-boolean', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo', persist: 'truthy' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_persist_flag');
+      expect(bridge.setApprovalModeCalls).toHaveLength(0);
+    });
+
+    it('403 with errorKind=auth_env_error when bridge throws TrustGateError', async () => {
+      const bridge = fakeBridge({
+        setApprovalModeImpl: async () => {
+          throw new TrustGateError(
+            'Cannot enable privileged approval modes in an untrusted folder.',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/session-A/approval-mode'),
+      ).send({ mode: 'yolo' });
+      expect(res.status).toBe(403);
+      expect(res.body).toMatchObject({
+        code: 'trust_gate',
+        errorKind: 'auth_env_error',
+      });
+    });
+
+    it('404 when bridge reports unknown session', async () => {
+      const bridge = fakeBridge({
+        setApprovalModeImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).post('/session/missing/approval-mode'),
+      ).send({ mode: 'yolo' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
     });

@@ -116,6 +116,13 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // gate. Clients should still pre-flight `require_auth` separately for
   // deployment posture; this tag only means the route contract exists.
   workspace_file_write: { since: 'v1' },
+  // #4175 Wave 4 PR 17. Daemon hosts the session-level approval-mode
+  // control route `POST /session/:id/approval-mode` (gated by the
+  // mutation gate, strict). The route accepts `{mode, persist?}` —
+  // `persist:true` also writes `tools.approvalMode` to workspace
+  // settings via the daemon's `loadedSettings` handle. SDK helper:
+  // `DaemonClient.setSessionApprovalMode`.
+  session_approval_mode_control: { since: 'v1' },
   // Issue #4175 PR 15. Daemon was booted with `--require-auth` (or
   // `requireAuth: true`), so even loopback callers must carry a bearer
   // token. Advertised CONDITIONALLY — only when the flag is on — so

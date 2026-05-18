@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from './eventBus.js';
 import { getDeviceFlowRegistry } from './auth/deviceFlow.js';
+import { loadSettings, SettingScope } from '../config/settings.js';
 import {
   canonicalizeWorkspace,
   createHttpAcpBridge,
@@ -278,6 +279,16 @@ export async function runQwenServe(
         : {}),
       boundWorkspace,
       childEnvOverrides,
+      // #4175 Wave 4 PR 17: `POST /session/:id/approval-mode` accepts
+      // an opt-in `persist: true` flag. We re-load settings on each
+      // persist call rather than caching a `LoadedSettings` handle —
+      // another writer (CLI, another daemon, an editor) could have
+      // touched the file between calls, so the freshest state wins
+      // over a stale in-memory cache.
+      persistApprovalMode: async (workspace, mode) => {
+        const fresh = loadSettings(workspace);
+        fresh.setValue(SettingScope.Workspace, 'tools.approvalMode', mode);
+      },
     });
   let actualPort = opts.port;
   // Pass the already-canonical `boundWorkspace` into `createServeApp`

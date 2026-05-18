@@ -1182,6 +1182,92 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('setSessionApprovalMode (#4175 Wave 4 PR 17)', () => {
+    it('POSTs the mode and returns the typed result', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'yolo',
+          previous: 'default',
+          persisted: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setSessionApprovalMode('s-1', 'yolo');
+      expect(result).toEqual({
+        sessionId: 's-1',
+        mode: 'yolo',
+        previous: 'default',
+        persisted: false,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/approval-mode');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ mode: 'yolo' });
+    });
+
+    it('forwards persist:true in the body when requested', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'auto-edit',
+          previous: 'default',
+          persisted: true,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.setSessionApprovalMode('s-1', 'auto-edit', {
+        persist: true,
+      });
+      expect(result.persisted).toBe(true);
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        mode: 'auto-edit',
+        persist: true,
+      });
+    });
+
+    it('omits persist field when persist is undefined or false', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'yolo',
+          previous: 'default',
+          persisted: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionApprovalMode('s-1', 'yolo', { persist: false });
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ mode: 'yolo' });
+    });
+
+    it('sends X-Qwen-Client-Id when supplied', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessionId: 's-1',
+          mode: 'plan',
+          previous: 'default',
+          persisted: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.setSessionApprovalMode('s-1', 'plan', undefined, 'client-1');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws on 403 trust-gate rejection', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(403, {
+          error: 'untrusted folder',
+          code: 'trust_gate',
+          errorKind: 'auth_env_error',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.setSessionApprovalMode('s-1', 'yolo'),
+      ).rejects.toMatchObject({ status: 403 });
+    });
+  });
+
   describe('error coercion', () => {
     it('falls back to text body when the response is not JSON', async () => {
       const { fetch } = recordingFetch(

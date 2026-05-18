@@ -59,6 +59,17 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
 } as const;
 
+/**
+ * Control-plane (mutation) ACP extMethods introduced in #4175 Wave 4 PR 17.
+ * Distinct from `SERVE_STATUS_EXT_METHODS` so reviewers can grep mutation
+ * surface independently from read-only diagnostics. Each route in
+ * `server.ts` forwards through the matching extMethod into `acpAgent.ts`
+ * which then mutates Config / ToolRegistry / McpClientManager state.
+ */
+export const SERVE_CONTROL_EXT_METHODS = {
+  sessionApprovalMode: 'qwen/control/session/approval_mode',
+} as const;
+
 export type ServeStatus =
   | 'ok'
   | 'warning'

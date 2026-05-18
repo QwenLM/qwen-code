@@ -694,6 +694,40 @@ export interface SetModelResult {
 }
 
 /**
+ * #4175 Wave 4 PR 17. Closed enumeration of session approval modes the
+ * daemon exposes via `POST /session/:id/approval-mode`. Mirrors core's
+ * `ApprovalMode` enum — the drift detector test in
+ * `packages/cli/src/acp-integration/approvalMode.test.ts` walks the
+ * core enum and fails CI if any value is missing here.
+ *
+ * Order matters for diagnostic UIs that render the modes in the
+ * advertised sequence.
+ */
+export const DAEMON_APPROVAL_MODES = [
+  'plan',
+  'default',
+  'auto-edit',
+  'yolo',
+] as const;
+export type DaemonApprovalMode = (typeof DAEMON_APPROVAL_MODES)[number];
+
+/**
+ * Result body of `POST /session/:id/approval-mode`. `previous` and
+ * `mode` are typed as `string` (rather than `DaemonApprovalMode`) so
+ * older SDK builds against a hypothetical future fifth mode literal
+ * still parse — branch on the values you handle and treat the rest as
+ * opaque. `persisted: true` indicates the change was also written to
+ * `tools.approvalMode` in workspace settings (set via the route's
+ * optional `persist: true` body flag).
+ */
+export interface DaemonApprovalModeResult {
+  sessionId: string;
+  mode: string;
+  previous: string;
+  persisted: boolean;
+}
+
+/**
  * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
  * server-side `Date.now()` epoch (ms) the daemon stored for this
  * session. `clientId` is echoed back only when the caller supplied a

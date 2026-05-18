@@ -21,10 +21,13 @@ import {
   getMCPServerStatus,
   MCPDiscoveryState,
   MCPServerStatus,
-  type Config,
-  type ConversationRecord,
-  type DeviceAuthorizationData,
   SessionEndReason,
+} from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  Config,
+  ConversationRecord,
+  DeviceAuthorizationData,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -84,6 +87,7 @@ import { runExitCleanup } from '../utils/cleanup.js';
 import {
   ACP_PREFLIGHT_KINDS,
   STATUS_SCHEMA_VERSION,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
@@ -1432,6 +1436,52 @@ class QwenAgent implements Agent {
         return (await this.buildSessionSupportedCommandsStatus(
           sessionId,
         )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
+        // #4175 Wave 4 PR 17: remote callers change a live session's
+        // approval mode via this ACP extMethod. `Config.setApprovalMode`
+        // throws `TrustGateError` for privileged modes in an untrusted
+        // folder; we let it propagate — the bridge's mapping helper
+        // converts the name to `errorKind: 'auth_env_error'` on the
+        // wire so the SDK consumer gets a structured failure.
+        const sessionId = params['sessionId'];
+        const mode = params['mode'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof mode !== 'string' ||
+          !APPROVAL_MODES.includes(mode as ApprovalMode)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Invalid approval mode; allowed: ${APPROVAL_MODES.join(', ')}`,
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const previous = config.getApprovalMode();
+        try {
+          config.setApprovalMode(mode as ApprovalMode);
+        } catch (err) {
+          // `TrustGateError` is the core's structured rejection for
+          // untrusted-folder + privileged-mode. We re-raise it as a
+          // JSON-RPC error whose `data.errorKind` is the literal the
+          // bridge looks for to reconstruct a typed `TrustGateError` on
+          // the daemon side (JSON-RPC strips the class name across the
+          // wire). Other errors propagate unchanged.
+          if (err instanceof Error && err.name === 'TrustGateError') {
+            throw new RequestError(-32003, err.message, {
+              errorKind: 'trust_gate',
+            });
+          }
+          throw err;
+        }
+        const current = config.getApprovalMode();
+        return { previous, current };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;

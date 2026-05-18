@@ -7,6 +7,12 @@
 import * as path from 'node:path';
 import express from 'express';
 import type { Application } from 'express';
+import type {
+  ApprovalMode} from '@qwen-code/qwen-code-core';
+import {
+  APPROVAL_MODES,
+  TrustGateError,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import {
   bearerAuth,
@@ -1302,6 +1308,58 @@ export function createServeApp(
     }
   });
 
+  app.post(
+    '/session/:id/approval-mode',
+    mutate({ strict: true }),
+    async (req, res) => {
+      // #4175 Wave 4 PR 17 — first strict-gated session mutation
+      // surface after PR 14 v1. Validates `mode` against the closed
+      // `APPROVAL_MODES` enum and an optional `persist: boolean` flag.
+      // The bridge applies the change inside the ACP child's per-session
+      // `Config` and (when `persist: true`) writes `tools.approvalMode`
+      // to workspace settings via the `persistApprovalMode` hook wired
+      // in `runQwenServe.ts`.
+      const sessionId = req.params['id'];
+      const body = safeBody(req);
+      const mode = body['mode'];
+      const persist = body['persist'];
+      if (
+        typeof mode !== 'string' ||
+        !APPROVAL_MODES.includes(mode as ApprovalMode)
+      ) {
+        res.status(400).json({
+          error: '`mode` is required and must be one of the allowed values',
+          code: 'invalid_approval_mode',
+          allowed: APPROVAL_MODES,
+        });
+        return;
+      }
+      if (persist !== undefined && typeof persist !== 'boolean') {
+        res.status(400).json({
+          error: '`persist` must be a boolean when provided',
+          code: 'invalid_persist_flag',
+        });
+        return;
+      }
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      try {
+        const response = await bridge.setSessionApprovalMode(
+          sessionId,
+          mode as ApprovalMode,
+          { persist: persist === true },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      } catch (err) {
+        sendBridgeError(res, err, {
+          route: 'POST /session/:id/approval-mode',
+          sessionId,
+        });
+      }
+    },
+  );
+
   app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
     const sessionId = req.params['id'];
     const requestId = req.params['requestId'];
@@ -2004,6 +2062,20 @@ function sendBridgeError(
   err: unknown,
   ctx?: { route?: string; sessionId?: string },
 ): void {
+  if (err instanceof TrustGateError) {
+    // #4175 Wave 4 PR 17: trust-folder rejection from
+    // `Config.setApprovalMode`. 403 because the daemon understood the
+    // request but the workspace's trust posture forbids the privileged
+    // mode. `errorKind: 'auth_env_error'` shares the closed PR 13
+    // taxonomy so SDK consumers branch on the same enum already used by
+    // preflight / env diagnostics.
+    res.status(403).json({
+      error: err.message,
+      code: 'trust_gate',
+      errorKind: 'auth_env_error',
+    });
+    return;
+  }
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
     return;

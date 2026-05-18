@@ -43,6 +43,8 @@ import type {
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
+  DaemonApprovalMode,
+  DaemonApprovalModeResult,
 } from './types.js';
 
 /**
@@ -834,6 +836,46 @@ export class DaemonClient {
           throw await this.failOnError(res, `POST /session/:id/${action}`);
         }
         return (await res.json()) as DaemonRestoredSession;
+      },
+    );
+  }
+
+  /**
+   * #4175 Wave 4 PR 17. Change the approval mode of a live session.
+   * The daemon applies the change in the ACP child's per-session
+   * `Config` and publishes an `approval_mode_changed` event. Pass
+   * `opts.persist: true` to also write `tools.approvalMode` to the
+   * workspace settings file (default is ephemeral so a remote caller
+   * does not pollute the user's host settings unless asked).
+   *
+   * Pre-flight `caps.features.session_approval_mode_control` before
+   * calling — older daemons reject the route with 404.
+   *
+   * The trust-folder gate inside core's `setApprovalMode` rejects
+   * privileged modes in untrusted folders; the route surfaces that
+   * with HTTP 403 + `errorKind: 'auth_env_error'`.
+   */
+  async setSessionApprovalMode(
+    sessionId: string,
+    mode: DaemonApprovalMode,
+    opts?: { persist?: boolean },
+    clientId?: string,
+  ): Promise<DaemonApprovalModeResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/approval-mode`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({
+          mode,
+          ...(opts?.persist === true ? { persist: true } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/approval-mode');
+        }
+        return (await res.json()) as DaemonApprovalModeResult;
       },
     );
   }

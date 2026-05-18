@@ -218,6 +218,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_metadata',
       'mcp_guardrails',
       'workspace_file_read',
+      'session_approval_mode_control',
     ]);
   });
 });

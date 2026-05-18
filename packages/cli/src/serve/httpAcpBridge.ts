@@ -24,6 +24,7 @@ import {
 } from './eventBus.js';
 import {
   BridgeTimeoutError,
+  SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
@@ -43,7 +44,12 @@ import {
   type ServeWorkspaceSkillsStatus,
 } from './status.js';
 import { buildEnvStatusFromProcess } from './envSnapshot.js';
-import { canUseRipgrep } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode} from '@qwen-code/qwen-code-core';
+import {
+  TrustGateError,
+  canUseRipgrep,
+} from '@qwen-code/qwen-code-core';
 import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
 import type {
   CancelNotification,
@@ -426,6 +432,35 @@ export interface HttpAcpBridge {
     req: SetSessionModelRequest,
     context?: BridgeClientRequestContext,
   ): Promise<SetSessionModelResponse>;
+
+  /**
+   * Change the approval mode of a live session and broadcast an
+   * `approval_mode_changed` event. Forwards through the
+   * `qwen/control/session/approval_mode` ACP extMethod so the change
+   * lands inside the ACP child's own `Config` instance.
+   *
+   * `opts.persist === true` also writes `tools.approvalMode` to the
+   * workspace settings file so a future ACP child or a future daemon
+   * restart picks up the new default. Default is ephemeral
+   * (`persist: false`) — the remote caller does not pollute the
+   * user's on-disk settings unless they ask for it.
+   *
+   * Throws `SessionNotFoundError` for unknown sessions. The ACP-side
+   * trust-folder rejection surfaces as a `TrustGateError` from core
+   * which the route maps via `mapDomainErrorToErrorKind` to
+   * `auth_env_error`.
+   */
+  setSessionApprovalMode(
+    sessionId: string,
+    mode: ApprovalMode,
+    opts: { persist: boolean },
+    context?: BridgeClientRequestContext,
+  ): Promise<{
+    sessionId: string;
+    mode: ApprovalMode;
+    previous: ApprovalMode;
+    persisted: boolean;
+  }>;
 
   /**
    * Kill the agent process for the session and remove it from the maps.
@@ -816,6 +851,21 @@ export interface BridgeOptions {
    * typically ignore it; the production factory merges it).
    */
   childEnvOverrides?: Readonly<Record<string, string | undefined>>;
+  /**
+   * #4175 Wave 4 PR 17 — optional callback for persisting `tools.
+   * approvalMode` to the workspace settings file. Invoked by
+   * `setSessionApprovalMode` ONLY when the route caller passes
+   * `{persist: true}`. The default `runQwenServe` wires this to
+   * `loadSettings(boundWorkspace).setValue(SettingScope.Workspace,
+   * 'tools.approvalMode', mode)`. Bridge tests and embedded callers
+   * may omit it; when omitted, `setSessionApprovalMode` still applies
+   * the in-process change and returns `persisted: false` regardless
+   * of the request flag.
+   */
+  persistApprovalMode?: (
+    boundWorkspace: string,
+    mode: ApprovalMode,
+  ) => Promise<void>;
 }
 
 /**
@@ -1606,6 +1656,7 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
     );
   }
   const boundWorkspace = opts.boundWorkspace;
+  const persistApprovalMode = opts.persistApprovalMode;
 
   // #3803 §02 single-workspace model: the bridge hosts AT MOST one
   // ATTACH-AVAILABLE channel and one default attach-target entry.
@@ -3529,6 +3580,97 @@ export function createHttpAcpBridge(opts: BridgeOptions): HttpAcpBridge {
         /* bus closed */
       }
       return response;
+    },
+
+    async setSessionApprovalMode(sessionId, mode, opts, context) {
+      // #4175 Wave 4 PR 17. Forwards through `qwen/control/session/
+      // approval_mode` so the change lands inside the ACP child's own
+      // `Config` (per-session `setApprovalMode`). The bridge layer adds
+      // two things on top: trusted `originatorClientId` resolution and
+      // an opt-in persist hook that writes `tools.approvalMode` to the
+      // workspace settings file. Persist is OFF by default — see the
+      // interface doc for the reasoning.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const originatorClientId = resolveTrustedClientId(
+        entry,
+        context?.clientId,
+      );
+      let response: { previous: ApprovalMode; current: ApprovalMode };
+      try {
+        response = (await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+              { sessionId, mode },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionApprovalMode,
+          ),
+          getTransportClosedReject(entry),
+        ])) as { previous: ApprovalMode; current: ApprovalMode };
+      } catch (err) {
+        // The ACP child rethrows `TrustGateError` as a JSON-RPC error
+        // whose `data.errorKind` is the literal `'trust_gate'`. On the
+        // wire it arrives as a plain `{code, message, data}` object —
+        // re-instantiate the typed class here so the HTTP route layer
+        // recognizes it via `instanceof` / `err.name` and maps the
+        // failure to HTTP 403 with the `auth_env_error` errorKind.
+        const data = (err as { data?: unknown })?.data;
+        if (
+          data &&
+          typeof data === 'object' &&
+          'errorKind' in data &&
+          (data as { errorKind?: unknown }).errorKind === 'trust_gate'
+        ) {
+          const message =
+            (err as { message?: unknown })?.message instanceof String ||
+            typeof (err as { message?: unknown })?.message === 'string'
+              ? String((err as { message: string }).message)
+              : 'Trust-gate rejection from ACP child';
+          throw new TrustGateError(message);
+        }
+        throw err;
+      }
+      let persisted = false;
+      if (opts.persist) {
+        try {
+          await persistApprovalMode?.(boundWorkspace, mode);
+          persisted = persistApprovalMode !== undefined;
+        } catch (err) {
+          // Persist failure is non-fatal — the in-process change already
+          // took effect inside the ACP child. Log to stderr so operators
+          // notice but don't fail the route (the SDK consumer would have
+          // no good recovery path; the runtime change is real).
+          writeStderrLine(
+            `setSessionApprovalMode: persist failed: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+      try {
+        entry.events.publish({
+          type: 'approval_mode_changed',
+          data: {
+            sessionId: entry.sessionId,
+            previous: response.previous,
+            next: response.current,
+            persisted,
+          },
+          ...(originatorClientId ? { originatorClientId } : {}),
+        });
+      } catch {
+        /* bus closed */
+      }
+      return {
+        sessionId: entry.sessionId,
+        mode: response.current,
+        previous: response.previous,
+        persisted,
+      };
     },
 
     async killSession(sessionId, opts) {

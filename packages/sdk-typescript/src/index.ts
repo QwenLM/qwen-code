@@ -5,6 +5,7 @@ export { SdkLogger } from './utils/logger.js';
 
 // Daemon HTTP client (talks to `qwen serve`; see GitHub issue #3803)
 export {
+  DAEMON_APPROVAL_MODES,
   DAEMON_ERROR_KINDS,
   DaemonCapabilityMissingError,
   DaemonClient,
@@ -21,6 +22,10 @@ export {
   requireWorkspaceCwd,
   SseFramingError,
   type CreateSessionRequest,
+  type DaemonApprovalMode,
+  type DaemonApprovalModeChangedData,
+  type DaemonApprovalModeChangedEvent,
+  type DaemonApprovalModeResult,
   type DaemonAvailableCommand,
   type DaemonCapabilities,
   type DaemonEnvCell,
