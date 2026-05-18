@@ -66,7 +66,6 @@ describe('customProvider', () => {
       protocol: AuthType.USE_OPENAI,
       baseUrl: undefined,
       models: undefined,
-      authMethod: 'input',
       showAdvancedConfig: true,
       uiGroup: 'custom',
     });

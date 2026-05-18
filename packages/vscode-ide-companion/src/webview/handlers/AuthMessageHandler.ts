@@ -213,20 +213,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
         return;
       }
 
-      // OAuth providers need special handling (browser flow)
-      if (provider.authMethod === 'oauth') {
-        // For OAuth providers, delegate to the handler with empty inputs.
-        // The actual OAuth flow is managed by the handler implementation.
-        if (this.authInteractiveHandler) {
-          await this.authInteractiveHandler(provider, {
-            baseUrl: resolveBaseUrl(provider),
-            apiKey: '', // OAuth — key comes from browser flow
-            modelIds: getDefaultModelIds(provider),
-          });
-        }
-        return;
-      }
-
       // Run generic setup flow
       await this.runProviderSetupFlow(provider);
     } catch (error) {

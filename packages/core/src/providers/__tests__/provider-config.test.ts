@@ -25,7 +25,6 @@ function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
     protocol: AuthType.USE_OPENAI,
     baseUrl: 'https://api.test.com/v1',
     envKey: 'TEST_API_KEY',
-    authMethod: 'input',
     models: [{ id: 'model-a', contextWindowSize: 8192, enableThinking: true }],
     modelNamePrefix: 'Test',
     ...overrides,
@@ -367,13 +366,8 @@ describe('shouldShowStep', () => {
     ).toBe(false);
   });
 
-  it('hides apiKey step for oauth providers', () => {
-    expect(shouldShowStep(makeConfig({ authMethod: 'input' }), 'apiKey')).toBe(
-      true,
-    );
-    expect(shouldShowStep(makeConfig({ authMethod: 'oauth' }), 'apiKey')).toBe(
-      false,
-    );
+  it('always shows the apiKey step', () => {
+    expect(shouldShowStep(makeConfig(), 'apiKey')).toBe(true);
   });
 
   it('shows models step only when editable or undefined', () => {

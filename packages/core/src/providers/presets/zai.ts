@@ -27,7 +27,6 @@ export const zaiProvider: ProviderConfig = {
     },
   ],
   envKey: 'ZAI_API_KEY',
-  authMethod: 'input',
   models: [
     { id: 'GLM-5.1', contextWindowSize: 204800, enableThinking: true },
     { id: 'GLM-5', contextWindowSize: 204800 },

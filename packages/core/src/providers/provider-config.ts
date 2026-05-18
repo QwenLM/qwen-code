@@ -288,7 +288,7 @@ export function shouldShowStep(
     case 'baseUrl':
       return config.baseUrl === undefined || Array.isArray(config.baseUrl);
     case 'apiKey':
-      return config.authMethod !== 'oauth';
+      return true;
     case 'models':
       return !config.models || config.modelsEditable === true;
     case 'advancedConfig':

@@ -75,7 +75,6 @@ export const codingPlanProvider: ProviderConfig = {
     },
   ],
   envKey: CODING_PLAN_ENV_KEY,
-  authMethod: 'input',
   models: MODELSTUDIO_MODELS,
   modelsEditable: true,
   modelNamePrefix: (baseUrl) =>

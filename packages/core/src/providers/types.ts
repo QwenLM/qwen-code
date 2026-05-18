@@ -50,9 +50,6 @@ export interface ProviderConfig {
   /** Environment variable key, or a function to generate one. */
   envKey: string | ((protocol: AuthType, baseUrl: string) => string);
 
-  /** API key acquisition method. */
-  authMethod: 'input' | 'oauth';
-
   /**
    * - `ModelSpec[]`  → model definitions with optional per-model metadata
    * - `undefined`    → user must type all model IDs (custom provider)

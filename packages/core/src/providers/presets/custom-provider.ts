@@ -37,7 +37,6 @@ export const customProvider: ProviderConfig = {
   ],
   baseUrl: undefined,
   envKey: generateCustomEnvKey,
-  authMethod: 'input',
   models: undefined,
   modelNamePrefix: '',
   showAdvancedConfig: true,

@@ -27,7 +27,6 @@ export const minimaxProvider: ProviderConfig = {
     },
   ],
   envKey: 'MINIMAX_API_KEY',
-  authMethod: 'input',
   models: [
     { id: 'MiniMax-M2.7', contextWindowSize: 204800 },
     { id: 'MiniMax-M2.7-highspeed', contextWindowSize: 204800 },

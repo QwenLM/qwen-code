@@ -1300,7 +1300,7 @@ export class WebViewProvider {
     providerConfig: import('@qwen-code/qwen-code-core').ProviderConfig,
     inputs: import('@qwen-code/qwen-code-core').ProviderSetupInputs,
   ): Promise<void> {
-    if (!inputs.apiKey && providerConfig.authMethod !== 'oauth') {
+    if (!inputs.apiKey) {
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: 'API key is required.' },

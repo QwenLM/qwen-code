@@ -15,7 +15,6 @@ export const idealabProvider: ProviderConfig = {
   protocol: AuthType.USE_OPENAI,
   baseUrl: 'https://idealab.alibaba-inc.com/api/openai/v1',
   envKey: 'IDEALAB_API_KEY',
-  authMethod: 'input',
   models: [
     {
       id: 'Qwen3.6-Plus-DogFooding',

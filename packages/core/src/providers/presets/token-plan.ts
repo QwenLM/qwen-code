@@ -39,7 +39,6 @@ export const tokenPlanProvider: ProviderConfig = {
   protocol: AuthType.USE_OPENAI,
   baseUrl: TOKEN_PLAN_BASE_URL,
   envKey: TOKEN_PLAN_ENV_KEY,
-  authMethod: 'input',
   models: TOKEN_PLAN_MODELS,
   modelsEditable: true,
   modelNamePrefix: 'ModelStudio Token Plan',

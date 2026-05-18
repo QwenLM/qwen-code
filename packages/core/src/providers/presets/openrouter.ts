@@ -18,7 +18,6 @@ export const openRouterProvider: ProviderConfig = {
   protocol: AuthType.USE_OPENAI,
   baseUrl: OPENROUTER_BASE_URL,
   envKey: OPENROUTER_ENV_KEY,
-  authMethod: 'input',
   models: [
     { id: 'z-ai/glm-4.5-air:free', contextWindowSize: 128000 },
     { id: 'openai/gpt-oss-120b:free', contextWindowSize: 131072 },

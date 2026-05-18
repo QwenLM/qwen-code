@@ -14,7 +14,6 @@ export const deepseekProvider: ProviderConfig = {
   protocol: AuthType.USE_OPENAI,
   baseUrl: 'https://api.deepseek.com',
   envKey: 'DEEPSEEK_API_KEY',
-  authMethod: 'input',
   models: [
     {
       id: 'deepseek-v4-pro',
