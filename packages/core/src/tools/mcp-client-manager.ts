@@ -388,8 +388,17 @@ export class McpClientManager {
    * entry in `lastRefusedServerNames`, captured at refusal time. The
    * `'refused_batch'` event payload includes the per-server transport
    * so dashboards can break down "which kind of servers got refused"
-   * without re-walking config. Same lifetime as
-   * `lastRefusedServerNames` — reset per pass, cleared on emit.
+   * without re-walking config.
+   *
+   * Lifetime mirrors `lastRefusedServerNames`: reset at the start of
+   * each `discoverAllMcpTools*` pass + on `stop()` + on
+   * `dropRefusalEntry` (operator removed/disconnected the server).
+   * NOT cleared on `emitRefusedBatchIfAny` — the snapshot-visible
+   * refusal state survives between passes per the PR 14 contract,
+   * so a snapshot taken between passes still reports the last
+   * refusal set with correct transport metadata. The push-event
+   * idempotency invariant is held by the separate
+   * `pendingRefusalNames` queue, not by clearing this map.
    */
   private lastRefusedTransports = new Map<string, McpTransportKind>();
   /**
@@ -743,7 +752,18 @@ export class McpClientManager {
     const ratio = this.reservedSlots.size / this.clientBudget;
     if (this.warnArmed && ratio >= MCP_BUDGET_WARN_FRACTION) {
       this.warnArmed = false;
-      this.onBudgetEvent?.({
+      // PR 14b fix #1 (codex round 3): visibility for oncall —
+      // pre-fix `evaluateBudgetState` had ZERO log output, so
+      // operators couldn't distinguish "events emitted but
+      // dropped downstream" from "events never emitted." Mirrors
+      // the stderr breadcrumb in `refuseAndLog` for the refusal
+      // side; warning side now has its own debug trail.
+      debugLogger.info(
+        `MCP budget warning fired (ratio=${ratio.toFixed(2)}, ` +
+          `reservedCount=${this.reservedSlots.size}, ` +
+          `budget=${this.clientBudget}, mode=${this.budgetMode})`,
+      );
+      this.emitBudgetEvent({
         kind: 'budget_warning',
         liveCount: this.getMcpClientAccounting().total,
         reservedCount: this.reservedSlots.size,
@@ -753,6 +773,14 @@ export class McpClientManager {
       });
     } else if (!this.warnArmed && ratio < MCP_BUDGET_REARM_FRACTION) {
       this.warnArmed = true;
+      // PR 14b fix #1 (codex round 3): re-arm transitions are silent
+      // by design (no SDK event), but operators dashboarding budget
+      // pressure benefit from knowing the manager has re-armed —
+      // the next 75% crossing will fire a fresh warning.
+      debugLogger.info(
+        `MCP budget warning re-armed (ratio=${ratio.toFixed(2)}, ` +
+          `budget=${this.clientBudget}; next 75% crossing will fire)`,
+      );
     }
   }
 
@@ -763,10 +791,20 @@ export class McpClientManager {
    * spawn refusal path (where it emits a length-1 batch for shape
    * consistency).
    *
-   * Idempotent on no-refusals: an empty `lastRefusedServerNames`
-   * short-circuits without firing or clearing. Clears both the names
-   * list and the transport map after firing so the next pass starts
-   * fresh.
+   * Idempotent on empty queue: when `pendingRefusalNames.size === 0`
+   * the call short-circuits without firing or clearing.
+   *
+   * What gets cleared on a successful emit:
+   * - `pendingRefusalNames` — drained, so a follow-up
+   *   `emitRefusedBatchIfAny` in the same pass is a no-op.
+   *
+   * What does NOT get cleared on emit (codex round 3 doc fix):
+   * - `lastRefusedServerNames` — snapshot-visible, must survive
+   *   between passes so `GET /workspace/mcp` reports the last
+   *   refusal set even after the push event fired.
+   * - `lastRefusedTransports` — sidecar of the names list, same
+   *   lifetime: reset at start of each pass / `stop()` /
+   *   `dropRefusalEntry`, NOT on emit.
    *
    * `mode: 'enforce'` is a literal: `warn` mode never refuses, so the
    * code path that calls `refuseAndLog` (the only writer of
@@ -810,7 +848,7 @@ export class McpClientManager {
       transport: this.lastRefusedTransports.get(name) ?? 'unknown',
       reason: 'budget_exhausted' as const,
     }));
-    this.onBudgetEvent?.({
+    this.emitBudgetEvent({
       kind: 'refused_batch',
       refusedServers,
       budget: this.clientBudget,
@@ -819,6 +857,35 @@ export class McpClientManager {
       mode: 'enforce',
     });
     this.pendingRefusalNames.clear();
+  }
+
+  /**
+   * PR 14b fix (codex round 3): single boundary for `onBudgetEvent`
+   * invocation. The manager's state machine and refused-batch
+   * coalescer both call this — the production ACP adapter wraps its
+   * extNotification in `void ... .catch()` so async failures don't
+   * leak, but the callback ITSELF could throw synchronously (a future
+   * test fixture, a buggy adapter, an unexpected serialization
+   * crash). Without this guard, the throw would propagate into MCP
+   * discovery / `readResource` / `disconnectServer` paths and abort
+   * unrelated work — budget push events are best-effort telemetry,
+   * NEVER critical-path.
+   *
+   * Logs at `debug` level so production daemons stay quiet on the
+   * happy path; oncall flips debug on when investigating an MCP
+   * guardrail incident and sees both delivery successes (via
+   * `evaluateBudgetState`'s info logs) and failures.
+   */
+  private emitBudgetEvent(event: McpBudgetEvent): void {
+    if (!this.onBudgetEvent) return;
+    try {
+      this.onBudgetEvent(event);
+    } catch (err) {
+      debugLogger.debug(
+        `MCP budget event callback threw (kind=${event.kind}): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**

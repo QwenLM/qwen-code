@@ -750,6 +750,14 @@ describe('daemon event schema', () => {
   // event types are siblings on the per-session SSE bus and use the
   // same KnownDaemonEvent narrowing.
   it('recognizes mcp_budget_warning frames as known events', () => {
+    // PR 14b fix (codex round 3): `satisfies DaemonEvent` keeps the
+    // discriminator literals (`v: 1`, `type: 'mcp_budget_warning'`)
+    // narrow without widening to `number`/`string`. Required so the
+    // fixture passes through `asKnownDaemonEvent`'s `event.type`
+    // switch under strict typecheck. The sdk package's tsconfig
+    // currently scopes `tsc --noEmit` to `src/**/*.ts` only — tests
+    // aren't gated yet — but the fixture stays type-safe for when
+    // they are.
     const warning = {
       id: 7,
       v: 1,
@@ -761,7 +769,7 @@ describe('daemon event schema', () => {
         thresholdRatio: 0.75,
         mode: 'warn',
       },
-    };
+    } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(warning);
     expect(known?.type).toBe('mcp_budget_warning');
 
@@ -861,6 +869,10 @@ describe('daemon event schema', () => {
   });
 
   it('recognizes mcp_child_refused_batch frames as known events', () => {
+    // PR 14b fix (codex round 3): `satisfies DaemonEvent` preserves
+    // the literal discriminator (`v: 1`, `type:
+    // 'mcp_child_refused_batch'`) — see sibling fixture above for
+    // the full rationale.
     const batch = {
       id: 9,
       v: 1,
@@ -875,7 +887,7 @@ describe('daemon event schema', () => {
         reservedCount: 1,
         mode: 'enforce',
       },
-    };
+    } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(batch);
     expect(known?.type).toBe('mcp_child_refused_batch');
 
@@ -998,8 +1010,8 @@ describe('daemon event schema', () => {
       },
     ]);
 
-    expect(state.mcpRefusedBatchCount).toBe(2);
-    expect(state.lastMcpRefusedBatch).toEqual({
+    expect(state.mcpChildRefusedBatchCount).toBe(2);
+    expect(state.lastMcpChildRefusedBatch).toEqual({
       refusedServers: [
         { name: 'c', transport: 'http', reason: 'budget_exhausted' },
       ],
@@ -1040,8 +1052,8 @@ describe('daemon event schema', () => {
     );
     // Refused-batch counter NOT incremented — the malformed payload
     // didn't reach the typed reducer arm.
-    expect(state.mcpRefusedBatchCount).toBe(0);
-    expect(state.lastMcpRefusedBatch).toBeUndefined();
+    expect(state.mcpChildRefusedBatchCount).toBe(0);
+    expect(state.lastMcpChildRefusedBatch).toBeUndefined();
   });
   it('narrows memory_changed events and rejects malformed payloads', () => {
     const valid: DaemonEvent = {

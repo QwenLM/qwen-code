@@ -1692,14 +1692,28 @@ class QwenAgent implements Agent {
         // unhandled rejections — a mid-flight ACP disconnect would
         // otherwise crash the child. Snapshot still carries the state
         // for clients that reconnect.
+        //
+        // PR 14b fix (codex round 3 — DeepSeek): pre-fix the catch
+        // handler was `() => {}`, silently dropping every error
+        // including "real" ones (serialization bugs, protocol
+        // violations) — operators had no debug trail. Now logs at
+        // `debug` level: ACP channel closure during shutdown is the
+        // expected case and would spam at higher levels, but `debug`
+        // is opt-in so when an oncall engineer DOES turn it on for
+        // an MCP guardrail incident, they see exactly which event
+        // dropped and why.
         void this.connection
           .extNotification('qwen/notify/session/mcp-budget-event', {
             v: 1,
             sessionId: sid,
             ...event,
           })
-          .catch(() => {
-            // ACP channel closed or peer disconnected — drop event.
+          .catch((err: unknown) => {
+            debugLogger.debug(
+              `MCP budget extNotification dropped ` +
+                `(session=${sid}, kind=${event.kind}): ` +
+                `${err instanceof Error ? err.message : String(err)}`,
+            );
           });
       });
     }

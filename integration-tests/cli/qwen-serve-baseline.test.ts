@@ -463,18 +463,29 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
         }
       }, 120_000);
 
-      // PR 14b cross-check: validate the in-process counter against
-      // external `pgrep -P` measurement. The push-event channel
-      // (`mcp_budget_warning` / `mcp_child_refused_batch`) reads
-      // `getMcpClientAccounting().total` for `liveCount` and the
-      // `subprocessCount` field is the same arithmetic
-      // (`stdio + websocket`). If the daemon's in-process counter
-      // diverges from what `pgrep -P` actually observes, the events
-      // would lie. Skip-gated like the parent describe (POSIX, non-
-      // sandbox); idle MCP fixtures are stdio-only so
-      // `subprocessCount` should equal `mcpGrandchildren.length`
-      // exactly (no amplification slack required).
-      it('in-process subprocessCount matches external pgrep observation', async () => {
+      // PR 14b cross-check: validate the daemon's in-process MCP
+      // accounting against external `pgrep -P` measurement. The
+      // snapshot at `GET /workspace/mcp` exposes `clientCount`
+      // (live CONNECTED clients, `getMcpClientAccounting().total`)
+      // — that's the field SDK consumers and dashboards actually
+      // see, and it's the same source the push-event channel
+      // (`mcp_budget_warning` / `mcp_child_refused_batch`) reads.
+      // If `clientCount` diverges from what `pgrep -P` observes for
+      // the daemon's MCP grandchildren, the events lie.
+      //
+      // (Codex round 3 doc fix — codex/copilot finding: this test
+      // was named "in-process subprocessCount matches external pgrep"
+      // but actually asserts on `clientCount`. The snapshot's
+      // `clientCount` and the manager-internal `subprocessCount`
+      // (`stdio + websocket`) match for stdio-only fixtures, so the
+      // assertion is numerically correct — but the test name now
+      // matches the field it actually validates.)
+      //
+      // Skip-gated like the parent describe (POSIX, non-sandbox);
+      // idle MCP fixtures are stdio-only so `clientCount` should
+      // equal `mcpGrandchildren.length` exactly (no amplification
+      // slack required).
+      it('clientCount matches external pgrep observation', async () => {
         const ws = makeTempWorkspace('mcp-counter');
         let daemon: SpawnedDaemon | undefined;
         try {
@@ -498,23 +509,23 @@ async function measureRssAtSessionCount(sessionCount: number): Promise<{
           const snapshot = await daemon.client.workspaceMcp();
 
           // PR 14b invariant: stdio-only fixtures →
-          // `subprocessCount === mcpGrandchildren.length`.
-          // The PR 14 amplification slack
+          // `clientCount === mcpGrandchildren.length`. The PR 14
+          // amplification slack
           // (`MCP_SERVERS_CONFIGURED * mcpAmplificationFactor`) is
           // for connect-storm transient overhead, not steady-state
           // counter drift. At idle the daemon's accounting MUST
           // match `pgrep -P` exactly (no zombies, no orphans).
           //
-          // `clientCount` (CONNECTED clients) is allowed to be
-          // lower than `subprocessCount` if the OS still sees a
-          // process the daemon already considers disconnected
-          // (rare race, kept as `<=`); but for fresh-spawn idle
-          // fixtures we expect equality.
+          // `clientCount` is the snapshot's authoritative live
+          // count; validating it against pgrep closes the loop on
+          // PR 14b's event-source assumption (the push events read
+          // the same accounting).
           expect(snapshot.clientCount).toBe(MCP_SERVERS_CONFIGURED);
           expect(observed.mcpGrandchildren.length).toBe(MCP_SERVERS_CONFIGURED);
-          // `clientCount` is the snapshot's authoritative live count.
-          // Validating it against pgrep closes the loop on PR 14b's
-          // event-source assumption.
+          // Defense-in-depth: even if a future race lets the OS
+          // observe a process the daemon already considers
+          // disconnected, `clientCount` must NEVER exceed the
+          // observed pgrep count. Equality at idle, `<=` always.
           expect(snapshot.clientCount).toBeLessThanOrEqual(
             observed.mcpGrandchildren.length,
           );

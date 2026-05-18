@@ -103,7 +103,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // length-1 per readResource refusal, only in `enforce` mode). SDK
   // reducer narrows both via `KnownDaemonEvent` (`DaemonSessionViewState`
   // exposes `mcpBudgetWarningCount`, `lastMcpBudgetWarning`,
-  // `mcpRefusedBatchCount`, `lastMcpRefusedBatch`). Always-on once
+  // `mcpChildRefusedBatchCount`, `lastMcpChildRefusedBatch`). Always-on once
   // PR 14b lands; orthogonal to `mcp_guardrails` (the snapshot
   // surface). Listed alongside `mcp_guardrails` to keep the MCP-related
   // tags grouped.

@@ -383,8 +383,8 @@ export interface DaemonSessionViewState {
    * reflects batches not refused-server entries. Mirrors the
    * snapshot's `disabledReason: 'budget'` per-server tag.
    */
-  mcpRefusedBatchCount: number;
-  lastMcpRefusedBatch?: DaemonMcpChildRefusedBatchData;
+  mcpChildRefusedBatchCount: number;
+  lastMcpChildRefusedBatch?: DaemonMcpChildRefusedBatchData;
   /**
    * Issue #4175 PR 16: most recent workspace mutation observed on this
    * stream (memory or agent change). Non-terminal — adapters render a
@@ -423,8 +423,8 @@ export function createDaemonSessionViewState(
     lastSlowClientWarning: seed.lastSlowClientWarning,
     mcpBudgetWarningCount: seed.mcpBudgetWarningCount ?? 0,
     lastMcpBudgetWarning: seed.lastMcpBudgetWarning,
-    mcpRefusedBatchCount: seed.mcpRefusedBatchCount ?? 0,
-    lastMcpRefusedBatch: seed.lastMcpRefusedBatch,
+    mcpChildRefusedBatchCount: seed.mcpChildRefusedBatchCount ?? 0,
+    lastMcpChildRefusedBatch: seed.lastMcpChildRefusedBatch,
     lastWorkspaceMutation: seed.lastWorkspaceMutation,
     lastWorkspaceMutationType: seed.lastWorkspaceMutationType,
   };
@@ -663,8 +663,8 @@ export function reduceDaemonSessionEvent(
       // session keeps running with a smaller MCP fleet.
       return {
         ...base,
-        mcpRefusedBatchCount: base.mcpRefusedBatchCount + 1,
-        lastMcpRefusedBatch: event.data,
+        mcpChildRefusedBatchCount: base.mcpChildRefusedBatchCount + 1,
+        lastMcpChildRefusedBatch: event.data,
       };
     case 'memory_changed':
       // Non-terminal: adapters render a "memory just changed" hint and
