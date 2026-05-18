@@ -1942,7 +1942,8 @@ export class Session implements SessionContext {
           return earlyErrorResponse(
             new Error(
               decision.unavailable
-                ? `Auto mode classifier unavailable; action blocked for safety`
+                ? `Auto mode classifier unavailable; action blocked for safety` +
+                  (decision.reason ? ` (${decision.reason})` : '')
                 : `Blocked by auto mode policy: ${decision.reason}`,
             ),
             fc.name,

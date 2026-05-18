@@ -199,6 +199,15 @@ tightened over time.
 - **Not a substitute for `deny` rules.** The classifier is best-effort.
   For commands you're sure should never run, put them in
   `permissions.deny`.
+- **MCP tools default to conservative blocking.** Third-party MCP tools
+  (`mcp__*`) opt-in to argument forwarding via the
+  `toAutoClassifierInput` override. Tools that have not opted in expose
+  only their name to the classifier — most such calls are
+  conservatively blocked unless you've written an explicit `allow`
+  rule. This is fail-closed by design (credentials and voluminous
+  content do not leak into the classifier LLM). If you trust a
+  specific MCP tool, add `permissions.allow: ["mcp__server__tool"]` so
+  it bypasses the classifier entirely.
 
 ## FAQ
 
@@ -220,10 +229,22 @@ projection exposes:
 - `run_shell_command`: the full command (it has to — that's what the
   classifier judges).
 - `web_fetch`: the URL only. The prompt field is not forwarded.
-- `agent`: subagent type plus the first 200 characters of the prompt.
+- `agent`: subagent type plus the full prompt. The prompt is the
+  instruction the sub-agent will follow, so the classifier needs it
+  in full to detect attacks that would steer the sub-agent toward
+  destructive actions — same reason `run_shell_command` forwards the
+  full command.
 
 Tool results (the actual content returned by tools) are stripped from
 the classifier transcript entirely.
+
+MCP tools (`mcp__*`) follow a stricter default: their parameters are
+not forwarded unless the MCP tool author explicitly opted in via the
+`toAutoClassifierInput` override. The classifier sees the tool name
+but no arguments, so most MCP calls will be conservatively blocked
+unless the user has written an explicit allow rule. This is fail-
+closed by design — third-party tools should not leak credentials or
+voluminous file content into the classifier LLM without intent.
 
 **Can I disable the first-time information message?**
 

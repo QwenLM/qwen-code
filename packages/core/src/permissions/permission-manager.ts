@@ -768,7 +768,15 @@ export class PermissionManager {
       // every subsequent AUTO call would bypass the classifier. See
       // dangerousRules.ts for the classifier-bypass criteria.
       if (this.strippedAllowRules && isDangerousAllowRule(rule)) {
-        this.strippedAllowRules.session.push(rule);
+        // Deduplicate on raw string — matches the persistent-stash branch
+        // in addPersistentRule. A repeated "Always allow" choice for the
+        // same rule must not pile copies into the session stash.
+        const exists = this.strippedAllowRules.session.some(
+          (r) => r.raw === rule.raw,
+        );
+        if (!exists) {
+          this.strippedAllowRules.session.push(rule);
+        }
         debugLogger.info(
           `Stashed newly added dangerous allow rule while in AUTO mode: ${rule.raw}`,
         );
