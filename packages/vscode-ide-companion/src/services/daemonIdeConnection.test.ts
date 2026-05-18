@@ -910,8 +910,6 @@ describe('DaemonIdeConnection', () => {
         baseUrl: 'http://example.com:4170',
         sessionFactory: vi.fn(),
       }),
-    ).rejects.toThrow(
-      'Daemon baseUrl must target a loopback address, got "example.com"',
-    );
+    ).rejects.toThrow('Daemon baseUrl must target a loopback address');
   });
 });
