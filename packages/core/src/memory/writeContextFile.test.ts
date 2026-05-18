@@ -9,7 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../config/storage.js';
-import { DEFAULT_CONTEXT_FILENAME, MEMORY_SECTION_HEADER } from './const.js';
+import {
+  AGENT_CONTEXT_FILENAME,
+  DEFAULT_CONTEXT_FILENAME,
+  MEMORY_SECTION_HEADER,
+  setGeminiMdFilename,
+} from './const.js';
 import { writeWorkspaceContextFile } from './writeContextFile.js';
 
 describe('writeWorkspaceContextFile', () => {
@@ -167,9 +172,12 @@ describe('writeWorkspaceContextFile', () => {
 
       const written = await fs.readFile(filePath, 'utf8');
       expect(written).toBe('preserved\n');
-      expect(result.bytesWritten).toBe(
-        Buffer.byteLength('preserved\n', 'utf8'),
-      );
+      // `bytesWritten: 0` because the no-op short-circuit wrote zero
+      // bytes — NOT the existing file size. Earlier revisions returned
+      // `stat.size` here, which conflated two semantics and let
+      // clients accumulating `sum(bytesWritten)` count the existing
+      // file every whitespace POST.
+      expect(result.bytesWritten).toBe(0);
       expect(result.changed).toBe(false);
       // The no-op short-circuit must not call writeFile at all.
       expect(writeFileSpy).not.toHaveBeenCalled();
@@ -352,5 +360,35 @@ describe('writeWorkspaceContextFile', () => {
     });
     expect(result.changed).toBe(false);
     await expect(fs.access(nested)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('honors setGeminiMdFilename overrides so POST targets the same file GET surfaces', async () => {
+    // Round-trip the `setGeminiMdFilename` override: with the prior
+    // `DEFAULT_CONTEXT_FILENAME` hard-code, a deployment that switched
+    // the context filename to `AGENTS.md` saw GET list the new file
+    // but POST keep writing to `QWEN.md`. The fix routes
+    // `resolveContextFilePath` through `getCurrentGeminiMdFilename()`
+    // so both surfaces agree.
+    try {
+      setGeminiMdFilename(AGENT_CONTEXT_FILENAME);
+      const result = await writeWorkspaceContextFile({
+        scope: 'workspace',
+        mode: 'append',
+        content: '- entry',
+        projectRoot: workspace,
+      });
+      expect(result.filePath).toBe(
+        path.join(workspace, AGENT_CONTEXT_FILENAME),
+      );
+      const written = await fs.readFile(result.filePath, 'utf8');
+      expect(written).toContain('- entry');
+      // The legacy QWEN.md must NOT have been written — the prior
+      // hard-coded behavior would have created it here.
+      await expect(
+        fs.access(path.join(workspace, DEFAULT_CONTEXT_FILENAME)),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      setGeminiMdFilename(DEFAULT_CONTEXT_FILENAME);
+    }
   });
 });

@@ -13,7 +13,7 @@ import {
   type MutexInterface,
 } from 'async-mutex';
 import { Storage } from '../config/storage.js';
-import { DEFAULT_CONTEXT_FILENAME, MEMORY_SECTION_HEADER } from './const.js';
+import { getCurrentGeminiMdFilename, MEMORY_SECTION_HEADER } from './const.js';
 
 /**
  * Per-resolved-file mutex map. Two simultaneous `writeWorkspaceContextFile`
@@ -98,6 +98,12 @@ export interface WriteContextFileOptions {
 
 export interface WriteContextFileResult {
   filePath: string;
+  /**
+   * Bytes actually written by this call. `0` on the no-op short-
+   * circuit path (`changed: false`). NOT a measurement of the file's
+   * on-disk size — callers that need that should `fs.stat` the
+   * returned `filePath` directly.
+   */
   bytesWritten: number;
   /**
    * `true` when the call actually mutated the file on disk; `false`
@@ -179,14 +185,16 @@ async function runWrite(
     // so the parent dir mtime isn't bumped on a request that
     // changed nothing — the whitespace-only `\n\n` case from a
     // flaky pipeline must not reach the filesystem at all.
-    let bytes = 0;
-    try {
-      const stat = await fs.stat(filePath);
-      bytes = stat.size;
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    return { filePath, bytesWritten: bytes, changed: false };
+    //
+    // `bytesWritten` is `0` (zero bytes were actually written),
+    // not the existing file's `stat.size`. Earlier revisions returned
+    // `stat.size` here so the response carried "current file size",
+    // but that conflated two semantics under one field: clients
+    // accumulating writes via `sum(bytesWritten)` got the file size
+    // added in for every whitespace POST. `changed: false` already
+    // gives clients the no-op signal; the byte count should remain
+    // true to its field name.
+    return { filePath, bytesWritten: 0, changed: false };
   }
 
   await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -216,10 +224,19 @@ function resolveContextFilePath(
   scope: WriteContextFileScope,
   projectRoot: string,
 ): string {
+  // Honor `setGeminiMdFilename()` overrides so POST writes to the same
+  // file GET surfaces. With the prior `DEFAULT_CONTEXT_FILENAME` hard-
+  // code, a deployment that switched the context filename to
+  // `AGENTS.md` would have GET listing the new file while POST kept
+  // appending to a stale `QWEN.md` — clients then observed "I just
+  // wrote content but it's missing from /workspace/memory". Mirrors the
+  // discovery path's `getAllGeminiMdFilenames()` usage in
+  // `workspaceMemory.ts:collectWorkspaceMemoryStatus`.
+  const filename = getCurrentGeminiMdFilename();
   if (scope === 'workspace') {
-    return path.join(projectRoot, DEFAULT_CONTEXT_FILENAME);
+    return path.join(projectRoot, filename);
   }
-  return path.join(Storage.getGlobalQwenDir(), DEFAULT_CONTEXT_FILENAME);
+  return path.join(Storage.getGlobalQwenDir(), filename);
 }
 
 /**

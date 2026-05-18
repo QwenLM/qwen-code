@@ -331,6 +331,13 @@ export interface DaemonWriteMemoryRequest {
 export interface DaemonWriteMemoryResult {
   ok: true;
   filePath: string;
+  /**
+   * Bytes actually written by THIS request. `0` when the daemon
+   * short-circuited the write (`changed: false`) — e.g. whitespace-
+   * only append. NOT the on-disk file size; callers needing that
+   * should issue a `GET /workspace/memory` for the file's current
+   * `bytes`.
+   */
   bytesWritten: number;
   mode: 'append' | 'replace';
   /**
