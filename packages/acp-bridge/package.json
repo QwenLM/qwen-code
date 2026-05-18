@@ -31,6 +31,34 @@
       "types": "./dist/permission.d.ts",
       "import": "./dist/permission.js"
     },
+    "./status": {
+      "types": "./dist/status.d.ts",
+      "import": "./dist/status.js"
+    },
+    "./workspacePaths": {
+      "types": "./dist/workspacePaths.d.ts",
+      "import": "./dist/workspacePaths.js"
+    },
+    "./bridgeErrors": {
+      "types": "./dist/bridgeErrors.d.ts",
+      "import": "./dist/bridgeErrors.js"
+    },
+    "./bridgeTypes": {
+      "types": "./dist/bridgeTypes.d.ts",
+      "import": "./dist/bridgeTypes.js"
+    },
+    "./bridgeOptions": {
+      "types": "./dist/bridgeOptions.d.ts",
+      "import": "./dist/bridgeOptions.js"
+    },
+    "./bridge": {
+      "types": "./dist/bridge.d.ts",
+      "import": "./dist/bridge.js"
+    },
+    "./spawnChannel": {
+      "types": "./dist/spawnChannel.d.ts",
+      "import": "./dist/spawnChannel.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
@@ -45,7 +73,8 @@
     "dist"
   ],
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.14.1"
+    "@agentclientprotocol/sdk": "^0.14.1",
+    "@qwen-code/qwen-code-core": "file:../core"
   },
   "devDependencies": {
     "typescript": "^5.3.3",
