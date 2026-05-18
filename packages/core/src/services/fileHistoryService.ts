@@ -602,9 +602,17 @@ export class FileHistoryService {
   async getTurnDiff(promptId: string): Promise<TurnDiff | undefined> {
     if (!this.enabled) return undefined;
 
-    const targetIdx = this.state.snapshots.findIndex(
-      (s) => s.promptId === promptId,
-    );
+    // Match `findSnapshot` semantics (last-occurrence wins) so `/rewind`
+    // and `/diff` agree if a promptId is ever reused. In normal sessions
+    // promptIds are unique per submission, so this is a defensive tie-break,
+    // not a behavioral change.
+    let targetIdx = -1;
+    for (let i = this.state.snapshots.length - 1; i >= 0; i--) {
+      if (this.state.snapshots[i]!.promptId === promptId) {
+        targetIdx = i;
+        break;
+      }
+    }
     if (targetIdx < 0) return undefined;
 
     const target = this.state.snapshots[targetIdx]!;
@@ -672,10 +680,13 @@ export class FileHistoryService {
       afterFromWorktree = true;
     }
 
+    // Fast path: when both endpoints point at the exact same backup file,
+    // we know without reading anything that the file did not change during
+    // this turn. `makeSnapshot` reuses unchanged backups verbatim, so this
+    // skips the bulk of files in any long-running session.
     if (
       !afterFromWorktree &&
-      beforeBackup?.backupFileName ===
-        (afterBackup?.backupFileName ?? undefined) &&
+      beforeBackup?.backupFileName === afterBackup?.backupFileName &&
       beforeBackup?.version === afterBackup?.version
     ) {
       return null;
