@@ -2,7 +2,7 @@ name: 'Qwen Pull Request Review'
 
 on:
   pull_request_target:
-    types: ['opened', 'reopened', 'ready_for_review', 'synchronize']
+    types: ['opened', 'reopened', 'ready_for_review', 'synchronize', 'edited']
   issue_comment:
     types: ['created', 'edited']
   pull_request_review_comment:
@@ -33,18 +33,18 @@ jobs:
     if: |-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request_target' &&
-       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review' || github.event.action == 'synchronize') &&
+       (github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review' || github.event.action == 'synchronize' || (github.event.action == 'edited' && github.event.changes.body)) &&
        (github.event.pull_request.author_association == 'OWNER' ||
         github.event.pull_request.author_association == 'MEMBER' ||
         github.event.pull_request.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
-        contains(github.event.comment.body, '@qwen /review') &&
+        (contains(github.event.comment.body, '@qwen /review') || contains(github.event.comment.body, '@qwen /design-gate')) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request_review_comment' &&
-        contains(github.event.comment.body, '@qwen /review') &&
+        (contains(github.event.comment.body, '@qwen /review') || contains(github.event.comment.body, '@qwen /design-gate')) &&
         (github.event.comment.author_association == 'OWNER' ||
          github.event.comment.author_association == 'MEMBER' ||
          github.event.comment.author_association == 'COLLABORATOR')) ||
@@ -70,126 +70,41 @@ jobs:
       QWEN_PR_REVIEW_MAX_CHANGED_LINES: "${{ vars.QWEN_PR_REVIEW_MAX_CHANGED_LINES || '1500' }}"
     steps:
       - name: 'Checkout base branch'
+        if: |-
+          env.ACT != 'true'
         uses: 'actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683' # v4.2.2
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
           ref: 'main'
           fetch-depth: 0
 
+      - name: 'Install GitHub CLI for local act'
+        if: |-
+          env.ACT == 'true'
+        run: |-
+          set -euo pipefail
+          if command -v gh >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          sudo mkdir -p -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg |
+            sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg >/dev/null
+          sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" |
+            sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y gh jq
+
       - name: 'Resolve PR context'
         id: 'pr'
         env:
-          EVENT_NAME: '${{ github.event_name }}'
           WORKFLOW_PR_NUMBER: '${{ github.event.inputs.pr_number }}'
           WORKFLOW_REVIEW_MODE: '${{ github.event.inputs.review_mode }}'
           WORKFLOW_ADDITIONAL_INSTRUCTIONS: '${{ github.event.inputs.additional_instructions }}'
         run: |-
           set -euo pipefail
-
-          additional_instructions=""
-          case "$EVENT_NAME" in
-            workflow_dispatch)
-              pr_number="$WORKFLOW_PR_NUMBER"
-              review_mode="${WORKFLOW_REVIEW_MODE:-dry-run}"
-              additional_instructions="${WORKFLOW_ADDITIONAL_INSTRUCTIONS:-}"
-              comment_body=""
-              ;;
-            pull_request_target|pull_request_review_comment|pull_request_review)
-              pr_number="$(jq -r '.pull_request.number' "$GITHUB_EVENT_PATH")"
-              review_mode="comment"
-              comment_body="$(jq -r '.comment.body // .review.body // ""' "$GITHUB_EVENT_PATH")"
-              ;;
-            issue_comment)
-              pr_number="$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")"
-              review_mode="comment"
-              comment_body="$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")"
-              ;;
-            *)
-              echo "::error::Unsupported event: $EVENT_NAME"
-              exit 1
-              ;;
-          esac
-
-          if [ -z "$pr_number" ] || [ "$pr_number" = "null" ]; then
-            echo "::error::Could not resolve pull request number"
-            exit 1
-          fi
-
-          case "$review_mode" in
-            dry-run|comment)
-              ;;
-            *)
-              echo "::error::Unsupported review mode: $review_mode"
-              exit 1
-              ;;
-          esac
-
-          should_run_review="true"
-
-          # Use grep -qE with end-boundary so '@qwen /review' does not match
-          # '@qwen /reviewer' or similar variants.
-          if [ "$EVENT_NAME" != "workflow_dispatch" ] && [ "$EVENT_NAME" != "pull_request_target" ]; then
-            if printf '%s' "$comment_body" | grep -qE '@qwen /review($|[[:space:]])'; then
-              additional_instructions="$(
-                printf '%s' "$comment_body" |
-                  awk '
-                    BEGIN { found = 0 }
-                    !found {
-                      if (match($0, /@qwen \/review([[:space:]]|$)/)) {
-                        found = 1
-                        rest = substr($0, RSTART + RLENGTH)
-                        if (length(rest) > 0) print rest
-                      }
-                      next
-                    }
-                    { print }
-                  ' |
-                  sed 's/^[[:space:]]*//'
-              )"
-            else
-              should_run_review="false"
-            fi
-          fi
-          # Strip leading blank lines so the prompt doesn't start with an
-          # empty line when @qwen /review is on its own line.
-          additional_instructions="$(printf '%s' "$additional_instructions" | sed '/./,$!d')"
-          # Keep maintainer focus text from changing the slash-command flags.
-          additional_instructions="$(printf '%s' "$additional_instructions" | LC_ALL=C perl -0pe 's/(?<!\S)--comment(?!\S)/`--comment`/g')"
-          # Hard-cap to 2048 characters to keep prompt-injection surface
-          # bounded without using a pipe that can trip pipefail on SIGPIPE.
-          # Reviewers should keep instructions short.
-          additional_instructions="${additional_instructions:0:2048}"
-
-          # Build the review prompt for qwen-code-action.
-          # Pass the full PR URL so the skill can resolve owner/repo unambiguously.
-          review_target="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY}/pull/${pr_number}"
-          if [ "$review_mode" = "comment" ]; then
-            # Do not pass /review --comment here: the bundled skill may submit
-            # an APPROVE review when no findings are found. This workflow is
-            # intentionally comment-only, so it posts the action summary below.
-            review_prompt="/review $review_target"
-            should_comment="true"
-          else
-            review_prompt="/review $review_target"
-            should_comment="false"
-          fi
-
-          if [ -n "$additional_instructions" ]; then
-            review_prompt="$review_prompt
-
-            Additional reviewer focus: $additional_instructions"
-          fi
-
-          output_delimiter="QWEN_REVIEW_PROMPT_$(date +%s%N)"
-          {
-            echo "number=$pr_number"
-            echo "review_mode=$review_mode"
-            echo "should_comment=$should_comment"
-            echo "should_run_review=$should_run_review"
-            echo "review_prompt<<$output_delimiter"
-            printf '%s\n' "$review_prompt"
-            echo "$output_delimiter"
-          } >> "$GITHUB_OUTPUT"
+          node .github/scripts/resolve-review-context.mjs
 
       - name: 'Check PR size'
         id: 'size'
@@ -304,7 +219,7 @@ jobs:
 
           A maintainer can still review this PR manually, or copy trusted patches into a branch in this repository before requesting automated review.
           EOF
-            if [ "$SHOULD_COMMENT" = "true" ]; then
+            if [ "$SHOULD_COMMENT" = "true" ] && [ "${ACT:-}" != "true" ]; then
               gh pr comment "$PR_NUMBER" \
                 --repo "$GITHUB_REPOSITORY" \
                 --body-file qwen-pr-review-fork-comment.md
@@ -327,7 +242,7 @@ jobs:
               printf "_Qwen Code PR review did not run a detailed code review for this oversized changeset. Model configured for review: \`%s\`._\n" \
                 "$OPENAI_MODEL"
             } > qwen-pr-review-size-comment.md
-            if [ "$SHOULD_COMMENT" = "true" ]; then
+            if [ "$SHOULD_COMMENT" = "true" ] && [ "${ACT:-}" != "true" ]; then
               gh pr comment "$PR_NUMBER" \
                 --repo "$GITHUB_REPOSITORY" \
                 --body-file qwen-pr-review-size-comment.md
@@ -345,7 +260,8 @@ jobs:
       - name: 'Generate PR shape'
         id: 'pr-shape'
         if: |-
-          steps.size.outputs.should_review == 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.bypass_design_gate != 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
         run: |-
@@ -359,7 +275,8 @@ jobs:
       - name: 'Scan review history'
         id: 'history-scan'
         if: |-
-          steps.size.outputs.should_review == 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.bypass_design_gate != 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
         run: |-
@@ -373,7 +290,8 @@ jobs:
       - name: 'Run Design Gate'
         id: 'design-gate'
         if: |-
-          steps.size.outputs.should_review == 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.bypass_design_gate != 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
@@ -415,10 +333,13 @@ jobs:
             cat "$process_comment"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: 'Post Design Gate block comment'
+      - name: 'Post Design Gate status comment'
         if: |-
-          steps.design-gate.outputs.status == 'BLOCK' &&
-          steps.pr.outputs.should_comment == 'true'
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.bypass_design_gate != 'true' &&
+          (steps.design-gate.outputs.status == 'BLOCK' || steps.pr.outputs.gate_only == 'true') &&
+          steps.pr.outputs.should_comment == 'true' &&
+          env.ACT != 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           PROCESS_COMMENT: '${{ steps.design-gate.outputs.process_comment }}'
@@ -428,11 +349,40 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --body-file "$PROCESS_COMMENT"
 
+      - name: 'Post Design Gate override audit'
+        if: |-
+          steps.size.outputs.should_review == 'true' &&
+          steps.pr.outputs.bypass_design_gate == 'true'
+        env:
+          PR_NUMBER: '${{ steps.pr.outputs.number }}'
+          OVERRIDE_ACTOR: '${{ steps.pr.outputs.override_actor }}'
+          OVERRIDE_REASON: '${{ steps.pr.outputs.override_reason }}'
+          SHOULD_COMMENT: '${{ steps.pr.outputs.should_comment }}'
+        run: |-
+          set -euo pipefail
+          {
+            printf '## Qwen Design Gate: Maintainer Override\n\n'
+            printf 'Design Gate was bypassed by @%s.\n\n' "$OVERRIDE_ACTOR"
+            printf 'Reason: %s\n' "$OVERRIDE_REASON"
+          } > qwen-design-gate-override-comment.md
+
+          {
+            printf '### Qwen Design Gate override\n\n'
+            cat qwen-design-gate-override-comment.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$SHOULD_COMMENT" = "true" ] && [ "${ACT:-}" != "true" ]; then
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file qwen-design-gate-override-comment.md
+          fi
+
       - name: 'Prepare final review prompt'
         id: 'review-prompt'
         if: |-
           steps.size.outputs.should_review == 'true' &&
-          steps.design-gate.outputs.should_review == 'true'
+          steps.pr.outputs.gate_only != 'true' &&
+          (steps.pr.outputs.bypass_design_gate == 'true' || steps.design-gate.outputs.should_review == 'true')
         env:
           BASE_PROMPT: '${{ steps.pr.outputs.review_prompt }}'
           PROMPT_APPEND: '${{ steps.design-gate.outputs.prompt_append }}'
@@ -443,7 +393,7 @@ jobs:
           {
             echo "review_prompt<<$delimiter"
             printf '%s\n' "$BASE_PROMPT"
-            if [ -s "$PROMPT_APPEND" ]; then
+            if [ -n "${PROMPT_APPEND:-}" ] && [ -s "$PROMPT_APPEND" ]; then
               printf '\n'
               cat "$PROMPT_APPEND"
             fi
@@ -469,7 +419,8 @@ jobs:
         id: 'restore-cache'
         if: |-
           steps.size.outputs.should_review == 'true' &&
-          steps.design-gate.outputs.should_review == 'true' &&
+          steps.pr.outputs.gate_only != 'true' &&
+          (steps.pr.outputs.bypass_design_gate == 'true' || steps.design-gate.outputs.should_review == 'true') &&
           github.event_name == 'pull_request_target' &&
           github.event.action == 'synchronize'
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
@@ -483,7 +434,8 @@ jobs:
         id: 'review'
         if: |-
           steps.size.outputs.should_review == 'true' &&
-          steps.design-gate.outputs.should_review == 'true'
+          steps.pr.outputs.gate_only != 'true' &&
+          (steps.pr.outputs.bypass_design_gate == 'true' || steps.design-gate.outputs.should_review == 'true')
         uses: 'QwenLM/qwen-code-action@a08dc886c2094312d6cf2df08ba5fd0437c53339' # main pinned on 2026-05-14
         with:
           openai_api_key: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
@@ -508,7 +460,8 @@ jobs:
         id: 'post-summary'
         if: |-
           steps.review.outcome == 'success' &&
-          steps.pr.outputs.should_comment == 'true'
+          steps.pr.outputs.should_comment == 'true' &&
+          env.ACT != 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           REVIEW_SUMMARY: '${{ steps.review.outputs.summary }}'
@@ -577,7 +530,8 @@ jobs:
         if: |-
           failure() &&
           steps.review.conclusion == 'failure' &&
-          steps.pr.outputs.should_comment == 'true'
+          steps.pr.outputs.should_comment == 'true' &&
+          env.ACT != 'true'
         env:
           PR_NUMBER: '${{ steps.pr.outputs.number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'

@@ -28,6 +28,7 @@ import {
   buildQwenArgs,
   buildQwenNpxArgs,
 } from '../../.github/scripts/lib/llm.mjs';
+import { resolveReviewContext } from '../../.github/scripts/lib/review-context-core.mjs';
 
 describe('GitHub review helper contracts', () => {
   it('summarizes PR shape from a unified diff without checking out PR code', () => {
@@ -227,5 +228,108 @@ describe('GitHub review helper contracts', () => {
     expect(npxArgs[0]).toBe('-y');
     expect(npxArgs[1]).toBe('@qwen-code/qwen-code@latest');
     expect([...promptArgs, ...npxArgs]).not.toContain('design-gate');
+  });
+
+  it('treats @qwen /design-gate as a gate-only rerun', () => {
+    const context = resolveReviewContext({
+      eventName: 'issue_comment',
+      event: {
+        issue: { number: 42, pull_request: {} },
+        comment: {
+          body: '@qwen /design-gate',
+          author_association: 'MEMBER',
+        },
+        sender: { login: 'maintainer' },
+      },
+      repository: 'QwenLM/qwen-code',
+      serverUrl: 'https://github.com',
+    });
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        number: '42',
+        should_run_review: 'true',
+        gate_only: 'true',
+        bypass_design_gate: 'false',
+        should_comment: 'true',
+      }),
+    );
+    expect(context.review_prompt).toBe(
+      '/review https://github.com/QwenLM/qwen-code/pull/42',
+    );
+  });
+
+  it('allows owner and member override with an audit reason', () => {
+    const context = resolveReviewContext({
+      eventName: 'issue_comment',
+      event: {
+        issue: { number: 99, pull_request: {} },
+        comment: {
+          body: '@qwen /review --override-design-gate prior decision no longer applies',
+          author_association: 'OWNER',
+        },
+        sender: { login: 'owner' },
+      },
+      repository: 'QwenLM/qwen-code',
+      serverUrl: 'https://github.com',
+    });
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        number: '99',
+        should_run_review: 'true',
+        gate_only: 'false',
+        bypass_design_gate: 'true',
+        override_reason: 'prior decision no longer applies',
+        override_actor: 'owner',
+      }),
+    );
+    expect(context.review_prompt).not.toContain('override-design-gate');
+  });
+
+  it('does not let collaborators bypass Design Gate', () => {
+    const context = resolveReviewContext({
+      eventName: 'issue_comment',
+      event: {
+        issue: { number: 99, pull_request: {} },
+        comment: {
+          body: '@qwen /review --override-design-gate prior decision no longer applies',
+          author_association: 'COLLABORATOR',
+        },
+      },
+      repository: 'QwenLM/qwen-code',
+      serverUrl: 'https://github.com',
+    });
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        should_run_review: 'true',
+        bypass_design_gate: 'false',
+        override_reason: '',
+      }),
+    );
+    expect(context.review_prompt).not.toContain('override-design-gate');
+  });
+
+  it('runs only Design Gate when PR body is edited', () => {
+    const context = resolveReviewContext({
+      eventName: 'pull_request_target',
+      event: {
+        action: 'edited',
+        changes: { body: { from: 'old body' } },
+        pull_request: { number: 7 },
+      },
+      repository: 'QwenLM/qwen-code',
+      serverUrl: 'https://github.com',
+    });
+
+    expect(context).toEqual(
+      expect.objectContaining({
+        number: '7',
+        should_run_review: 'true',
+        gate_only: 'true',
+        should_comment: 'true',
+      }),
+    );
   });
 });
