@@ -61,6 +61,8 @@ import {
   abortGoalForStopHookCap,
   formatStopHookBlockingCapWarning,
   evaluateAutoMode,
+  formatClassifierBlockMessage,
+  isApproveOutcome,
   recordAllow,
   recordBlock,
   recordFallbackApprove,
@@ -1921,8 +1923,13 @@ export class Session implements SessionContext {
       // existing manual-approval flow below.
       if (!autoModeAllowed && shouldRunAutoModeForCall(approvalMode, fc.name)) {
         const denialState = this.config.getAutoModeDenialState();
+        // `buildClassifierContents` retains only the most recent 40
+        // messages; ask the chat client for exactly that tail rather
+        // than triggering a `structuredClone` of the whole session
+        // on every non-fast-path AUTO call. Parallels
+        // coreToolScheduler.ts.
         const messages =
-          this.config.getGeminiClient?.()?.getHistory(false) ?? [];
+          this.config.getGeminiClient?.()?.getHistoryTail(40, false) ?? [];
         const decision = await evaluateAutoMode({
           ctx: pmCtx,
           pmForcedAsk,
@@ -1940,13 +1947,7 @@ export class Session implements SessionContext {
               : recordBlock(denialState),
           );
           return earlyErrorResponse(
-            new Error(
-              decision.unavailable
-                ? decision.reason
-                  ? `Auto mode classifier unavailable (${decision.reason}); action blocked for safety`
-                  : `Auto mode classifier unavailable; action blocked for safety`
-                : `Blocked by auto mode policy: ${decision.reason}`,
-            ),
+            new Error(formatClassifierBlockMessage(decision)),
             fc.name,
           );
         }
@@ -2089,18 +2090,10 @@ export class Session implements SessionContext {
           // mode is toggled. Parallels coreToolScheduler.ts:1705-1717.
           // Cancel / abort do NOT reset — treating rejection as a signal
           // the classifier was right to block.
-          if (approvalMode === ApprovalMode.AUTO) {
-            const isApproveOutcome =
-              outcome === ToolConfirmationOutcome.ProceedOnce ||
-              outcome === ToolConfirmationOutcome.ProceedAlways ||
-              outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
-              outcome === ToolConfirmationOutcome.ProceedAlwaysUser ||
-              outcome === ToolConfirmationOutcome.ModifyWithEditor;
-            if (isApproveOutcome) {
-              this.config.setAutoModeDenialState(
-                recordFallbackApprove(this.config.getAutoModeDenialState()),
-              );
-            }
+          if (approvalMode === ApprovalMode.AUTO && isApproveOutcome(outcome)) {
+            this.config.setAutoModeDenialState(
+              recordFallbackApprove(this.config.getAutoModeDenialState()),
+            );
           }
 
           await confirmationDetails.onConfirm(outcome, {

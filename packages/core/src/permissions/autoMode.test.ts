@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   SAFE_TOOL_ALLOWLIST,
   evaluateAutoMode,
+  formatClassifierBlockMessage,
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
 } from './autoMode.js';
@@ -280,5 +281,72 @@ describe('evaluateAutoMode — fast-path gating', () => {
       signal: new AbortController().signal,
     });
     expect(decision.via).toBe('fallback');
+  });
+
+  it('routes to fallback when skipClassifier=true (denialTracking armed)', async () => {
+    // Regression guard: when denialTracking has already armed a fallback
+    // (3 consecutive blocks / 2 consecutive unavailables), the scheduler
+    // passes `skipClassifier: true` so the in-progress call drops to
+    // manual approval without burning another classifier request. Fast
+    // paths still fire — only the classifier dispatch is suppressed.
+    // Tool here is SHELL (not on the allowlist, not an edit), so neither
+    // fast-path applies; without skipClassifier this would dispatch the
+    // classifier.
+    const decision = await evaluateAutoMode({
+      ctx: { toolName: ToolNames.SHELL, command: 'rm -rf /' },
+      pmForcedAsk: false,
+      toolParams: {},
+      messages: [],
+      config: baseConfig,
+      signal: new AbortController().signal,
+      skipClassifier: true,
+    });
+    expect(decision.via).toBe('fallback');
+  });
+});
+
+// ─── formatClassifierBlockMessage ────────────────────────────────────────
+
+describe('formatClassifierBlockMessage', () => {
+  // Shared between coreToolScheduler.ts and acp-integration/session/
+  // Session.ts. Drift between the two used to give CLI vs ACP users
+  // different diagnostics for the same failure — guard it once.
+  const baseDecision = {
+    via: 'classifier' as const,
+    shouldBlock: true,
+    stage: 'thinking' as const,
+    durationMs: 100,
+  };
+
+  it('renders a policy-block message including the reason', () => {
+    expect(
+      formatClassifierBlockMessage({
+        ...baseDecision,
+        reason: 'Irreversible filesystem destruction',
+        unavailable: false,
+      }),
+    ).toBe('Blocked by auto mode policy: Irreversible filesystem destruction');
+  });
+
+  it('renders an unavailable message with cause when reason is present', () => {
+    expect(
+      formatClassifierBlockMessage({
+        ...baseDecision,
+        reason: 'Conversation transcript exceeds classifier context window',
+        unavailable: true,
+      }),
+    ).toBe(
+      'Auto mode classifier unavailable (Conversation transcript exceeds classifier context window); action blocked for safety',
+    );
+  });
+
+  it('falls back to a bare unavailable message when reason is empty', () => {
+    expect(
+      formatClassifierBlockMessage({
+        ...baseDecision,
+        reason: '',
+        unavailable: true,
+      }),
+    ).toBe('Auto mode classifier unavailable; action blocked for safety');
   });
 });

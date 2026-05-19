@@ -19,6 +19,7 @@
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { isContextLengthExceededError } from '../utils/contextLengthError.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import {
   buildClassifierSystemPrompt,
@@ -26,6 +27,11 @@ import {
   STAGE2_SUFFIX,
 } from './classifier-prompts/system-prompt.js';
 import { buildClassifierContents } from './classifier-transcript.js';
+
+// Tag-scoped logger so an operator debugging "every AUTO call gets
+// unavailable=true" can grep for [CLASSIFIER] in the debug log and see
+// the underlying API / timeout / context-overflow error.
+const debugLogger = createDebugLogger('CLASSIFIER');
 
 /** Stage-1 timeout: fast model p99 is ~1.5s; 3s catches stuck cases. */
 export const STAGE1_TIMEOUT_MS = 3_000;
@@ -215,6 +221,9 @@ export async function classifyAction(
     // Stage 1 said block; stage 2 review failed. Honor stage 1's signal but
     // surface as unavailable so the UI / denialTracking treat it as
     // infrastructure failure, not a policy decision.
+    debugLogger.warn(
+      `Stage 2 review unavailable (durationMs=${Date.now() - overallStart}): ${errMessage(err)}`,
+    );
     return {
       shouldBlock: true,
       reason: 'Stage 1 flagged this as risky; stage 2 review was unavailable.',
@@ -287,6 +296,14 @@ function failClosed(
   const reason = isContextLengthExceededError(err)
     ? 'Conversation transcript exceeds classifier context window'
     : `${baseMessage} - blocked for safety`;
+  // Log the underlying error so operators can distinguish timeout / API /
+  // schema-validation / context-overflow failure modes when AUTO mode
+  // starts silently blocking every call. The public `ClassifierResult`
+  // only carries the sanitized `reason` and `unavailable` flag.
+  debugLogger.warn(
+    `failClosed stage=${stage} durationMs=${Date.now() - startedAt} ` +
+      `reason="${reason}" cause="${errMessage(err)}"`,
+  );
   return {
     shouldBlock: true,
     reason,
@@ -295,6 +312,15 @@ function failClosed(
     durationMs: Date.now() - startedAt,
     stage,
   };
+}
+
+function errMessage(err: unknown): string {
+  if (err instanceof Error) return `${err.name}: ${err.message}`;
+  try {
+    return String(err);
+  } catch {
+    return '<unstringifiable error>';
+  }
 }
 
 function getModelLabel(config: Config): string {

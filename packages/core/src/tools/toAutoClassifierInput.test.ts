@@ -32,9 +32,14 @@ function minimalConfig(over: Partial<Record<string, unknown>> = {}): Config {
 describe('EditTool.toAutoClassifierInput', () => {
   const tool = new EditTool(minimalConfig());
 
-  it('truncates old_string and new_string to 80 chars and reports line delta', () => {
-    const longOld = 'a'.repeat(200);
-    const longNew = 'b'.repeat(200) + '\nextra line';
+  it('truncates old_string and new_string to 300 chars and reports line delta + truncation flags', () => {
+    // 300-char window (raised from 80 in PR #4151 review feedback) so the
+    // classifier has enough headroom to spot a malicious registry / shell
+    // / env line hidden behind a benign-looking prefix for
+    // out-of-workspace edits (in-workspace edits take the acceptEdits
+    // fast-path and never reach this projection).
+    const longOld = 'a'.repeat(500);
+    const longNew = 'b'.repeat(500) + '\nextra line';
     const result = tool.toAutoClassifierInput({
       file_path: '/x/y.ts',
       old_string: longOld,
@@ -42,10 +47,22 @@ describe('EditTool.toAutoClassifierInput', () => {
     } as never);
     expect(result).toEqual({
       file_path: '/x/y.ts',
-      old_string_preview: 'a'.repeat(80),
-      new_string_preview: 'b'.repeat(80),
+      old_string_preview: 'a'.repeat(300),
+      new_string_preview: 'b'.repeat(300),
+      old_string_truncated: true,
+      new_string_truncated: true,
       lines_changed: 1,
     });
+  });
+
+  it('does not mark truncation flags when content fits in 300 chars', () => {
+    const result = tool.toAutoClassifierInput({
+      file_path: '/x/y.ts',
+      old_string: 'short',
+      new_string: 'short2',
+    } as never) as Record<string, unknown>;
+    expect(result['old_string_truncated']).toBe(false);
+    expect(result['new_string_truncated']).toBe(false);
   });
 
   it('reports zero lines_changed when no newlines are present', () => {
@@ -63,7 +80,11 @@ describe('EditTool.toAutoClassifierInput', () => {
 describe('WriteFileTool.toAutoClassifierInput', () => {
   const tool = new WriteFileTool(minimalConfig());
 
-  it('reports byte count and first 80 chars only', () => {
+  it('reports byte count and a 300-char content preview', () => {
+    // Raised from 80 → 300 chars in PR #4151 review feedback — same
+    // rationale as EditTool: out-of-workspace writes need enough
+    // headroom for the classifier to spot a hostile payload after a
+    // benign prefix.
     const content = 'a'.repeat(500);
     const result = tool.toAutoClassifierInput({
       file_path: '/x/y.ts',
@@ -72,7 +93,8 @@ describe('WriteFileTool.toAutoClassifierInput', () => {
     expect(result).toEqual({
       file_path: '/x/y.ts',
       byte_count: 500,
-      first_80_chars: 'a'.repeat(80),
+      content_preview: 'a'.repeat(300),
+      content_truncated: true,
     });
   });
 

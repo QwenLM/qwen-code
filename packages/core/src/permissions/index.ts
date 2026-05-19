@@ -12,6 +12,7 @@ export { extractShellOperations } from './shell-semantics.js';
 export type { ShellOperation } from './shell-semantics.js';
 export {
   evaluateAutoMode,
+  formatClassifierBlockMessage,
   type AutoModeDecision,
   type EvaluateAutoModeInput,
   SAFE_TOOL_ALLOWLIST,
@@ -24,10 +25,10 @@ export {
   type DenialFallbackReason,
   AUTO_MODE_DENIAL_LIMITS,
   createDenialState,
+  isApproveOutcome,
   recordAllow,
   recordBlock,
   recordFallbackApprove,
-  recordFallbackReject,
   recordUnavailable,
   resetDenialState,
   shouldFallback,

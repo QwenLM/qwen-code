@@ -132,14 +132,29 @@ export function recordFallbackApprove(
   return { ...state, consecutiveBlock: 0, consecutiveUnavailable: 0 };
 }
 
+// (No `recordFallbackReject` helper: rejection deliberately leaves
+// counters unchanged. The invariant is enforced by simply not calling
+// any state-mutating function on the reject path — adding a no-op
+// helper would invite future maintainers to wire it in and create
+// drift between the doc'd "reject preserves state" rule and code.)
+
 /**
- * Called after the user rejects a fallback-prompted tool call.
- * Counters unchanged — rejection doesn't tell us the classifier is fixed.
+ * True when a `ToolConfirmationOutcome` represents the user approving
+ * the call (any kind of "proceed"). Shared between the CLI scheduler's
+ * outcome handler and the ACP Session's outcome handler so adding a new
+ * approve-shaped outcome can't drift between the two paths.
+ *
+ * Cancel / abort intentionally not handled — they leave denialTracking
+ * untouched on the AUTO-fallback path. Caller decides.
  */
-export function recordFallbackReject(
-  state: AutoModeDenialState,
-): AutoModeDenialState {
-  return state;
+export function isApproveOutcome(outcome: string): boolean {
+  return (
+    outcome === 'proceed_once' ||
+    outcome === 'proceed_always' ||
+    outcome === 'proceed_always_project' ||
+    outcome === 'proceed_always_user' ||
+    outcome === 'modify_with_editor'
+  );
 }
 
 /**

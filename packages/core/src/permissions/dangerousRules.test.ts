@@ -82,6 +82,27 @@ describe('isDangerousBashRule', () => {
     expect(isDangerousBashRule(bashRule('python script.py'))).toBe(false);
   });
 
+  it('does NOT flag specific colon-form rules (concrete suffix is a user-allowed concrete command)', () => {
+    // Regression: `Bash(python3:run-tests)` and similar are concrete
+    // user-allow rules — same shape as `Bash(npm run test)`. They were
+    // previously over-flagged as "interpreter + colon = dangerous",
+    // silently stripping intentional user allow lists in AUTO mode.
+    expect(isDangerousBashRule(bashRule('python3:run-tests'))).toBe(false);
+    expect(isDangerousBashRule(bashRule('python:./scripts/build.py'))).toBe(
+      false,
+    );
+    expect(isDangerousBashRule(bashRule('node:dist/index.js'))).toBe(false);
+    expect(isDangerousBashRule(bashRule('cargo:build'))).toBe(false);
+  });
+
+  it('DOES flag empty-suffix and wildcard-suffix colon-form rules', () => {
+    // `python:` (empty suffix) and `python:*` are interpreter-with-no-
+    // specifier — every command runs. Still dangerous.
+    expect(isDangerousBashRule(bashRule('python:'))).toBe(true);
+    expect(isDangerousBashRule(bashRule('python:*'))).toBe(true);
+    expect(isDangerousBashRule(bashRule('node:*'))).toBe(true);
+  });
+
   it('is case-insensitive on the specifier', () => {
     expect(isDangerousBashRule(bashRule('PYTHON'))).toBe(true);
     expect(isDangerousBashRule(bashRule('NODE*'))).toBe(true);

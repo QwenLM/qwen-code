@@ -8,10 +8,10 @@ import { describe, it, expect } from 'vitest';
 import {
   AUTO_MODE_DENIAL_LIMITS,
   createDenialState,
+  isApproveOutcome,
   recordAllow,
   recordBlock,
   recordFallbackApprove,
-  recordFallbackReject,
   recordUnavailable,
   resetDenialState,
   shouldFallback,
@@ -169,18 +169,6 @@ describe('recordFallbackApprove', () => {
   });
 });
 
-describe('recordFallbackReject', () => {
-  it('leaves all counters unchanged', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordBlock(s);
-    s = recordBlock(s);
-    s = recordBlock(s);
-    const before = { ...s };
-    s = recordFallbackReject(s);
-    expect(s).toEqual(before);
-  });
-});
-
 describe('resetDenialState', () => {
   it('clears every counter (e.g. when user switches ApprovalMode)', () => {
     let s: AutoModeDenialState = FRESH;
@@ -189,6 +177,25 @@ describe('resetDenialState', () => {
     s = recordBlock(s);
     s = resetDenialState();
     expect(s).toEqual(FRESH);
+  });
+});
+
+describe('isApproveOutcome', () => {
+  // Single source of truth for "user said yes" — shared between the CLI
+  // scheduler and the ACP Session. Drift between them was a previous
+  // round's bug; this test guards both call sites at once.
+  it('returns true for every proceed_* outcome plus modify_with_editor', () => {
+    expect(isApproveOutcome('proceed_once')).toBe(true);
+    expect(isApproveOutcome('proceed_always')).toBe(true);
+    expect(isApproveOutcome('proceed_always_project')).toBe(true);
+    expect(isApproveOutcome('proceed_always_user')).toBe(true);
+    expect(isApproveOutcome('modify_with_editor')).toBe(true);
+  });
+
+  it('returns false for cancel and unknown outcomes', () => {
+    expect(isApproveOutcome('cancel')).toBe(false);
+    expect(isApproveOutcome('')).toBe(false);
+    expect(isApproveOutcome('unknown_outcome')).toBe(false);
   });
 });
 

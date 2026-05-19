@@ -129,6 +129,27 @@ export type AutoModeDecision =
     }
   | { via: 'fallback' };
 
+/**
+ * Build the tool-error message the scheduler / ACP session returns when
+ * the classifier blocks or is unavailable. Shared between
+ * `coreToolScheduler.ts` and `acp-integration/session/Session.ts` so the
+ * CLI and ACP paths surface identical diagnostic signal to operators
+ * (context overflow vs API timeout vs construction failure).
+ *
+ * Callers are responsible for only invoking this on classifier verdicts —
+ * `decision.via === 'classifier'` with `decision.shouldBlock === true`.
+ */
+export function formatClassifierBlockMessage(
+  decision: Extract<AutoModeDecision, { via: 'classifier' }>,
+): string {
+  if (decision.unavailable) {
+    return decision.reason
+      ? `Auto mode classifier unavailable (${decision.reason}); action blocked for safety`
+      : `Auto mode classifier unavailable; action blocked for safety`;
+  }
+  return `Blocked by auto mode policy: ${decision.reason}`;
+}
+
 export interface EvaluateAutoModeInput {
   ctx: PermissionCheckContext;
   /**

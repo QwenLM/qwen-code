@@ -66,9 +66,11 @@ import {
 } from './permissionFlow.js';
 import {
   evaluateAutoMode,
+  formatClassifierBlockMessage,
   shouldRunAutoModeForCall,
 } from '../permissions/autoMode.js';
 import {
+  isApproveOutcome,
   recordAllow,
   recordBlock,
   recordFallbackApprove,
@@ -1379,8 +1381,12 @@ export class CoreToolScheduler {
           if (shouldRunAutoModeForCall(approvalMode, canonicalName)) {
             const denialState = this.config.getAutoModeDenialState();
             const fallback = shouldFallback(denialState);
+            // `buildClassifierContents` retains only the most recent 40
+            // messages; ask the chat client for exactly that tail rather
+            // than triggering a `structuredClone` of the whole session
+            // on every non-fast-path AUTO call.
             const messages =
-              this.config.getGeminiClient?.()?.getHistory(false) ?? [];
+              this.config.getGeminiClient?.()?.getHistoryTail(40, false) ?? [];
             const decision = await evaluateAutoMode({
               ctx: pmCtx,
               pmForcedAsk,
@@ -1420,13 +1426,7 @@ export class CoreToolScheduler {
                   'error',
                   createErrorResponse(
                     reqInfo,
-                    new Error(
-                      decision.unavailable
-                        ? decision.reason
-                          ? `Auto mode classifier unavailable (${decision.reason}); action blocked for safety`
-                          : `Auto mode classifier unavailable; action blocked for safety`
-                        : `Blocked by auto mode policy: ${decision.reason}`,
-                    ),
+                    new Error(formatClassifierBlockMessage(decision)),
                     ToolErrorType.EXECUTION_DENIED,
                   ),
                 );
@@ -1738,18 +1738,13 @@ export class CoreToolScheduler {
     // the session even after the user explicitly approves the next call.
     // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
     // signal that the classifier was correct to block.
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO) {
-      const isApproveOutcome =
-        outcome === ToolConfirmationOutcome.ProceedOnce ||
-        outcome === ToolConfirmationOutcome.ProceedAlways ||
-        outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
-        outcome === ToolConfirmationOutcome.ProceedAlwaysUser ||
-        outcome === ToolConfirmationOutcome.ModifyWithEditor;
-      if (isApproveOutcome) {
-        this.config.setAutoModeDenialState(
-          recordFallbackApprove(this.config.getAutoModeDenialState()),
-        );
-      }
+    if (
+      this.config.getApprovalMode() === ApprovalMode.AUTO &&
+      isApproveOutcome(outcome)
+    ) {
+      this.config.setAutoModeDenialState(
+        recordFallbackApprove(this.config.getAutoModeDenialState()),
+      );
     }
 
     if (outcome === ToolConfirmationOutcome.Cancel || signal.aborted) {

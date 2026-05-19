@@ -139,4 +139,22 @@ export class CronCreateTool extends BaseDeclarativeTool<
   ): ToolInvocation<CronCreateParams, ToolResult> {
     return new CronCreateInvocation(this.config, params);
   }
+
+  /**
+   * Forward the prompt and cadence to the classifier. The scheduled
+   * prompt will be enqueued and executed against the agent at fire-time,
+   * so it must go through the same scrutiny as a direct command. Without
+   * this override the default projection returns `''` and the classifier
+   * sees `cron_create({})` — blind to what the agent will be asked to
+   * do in 8 hours.
+   */
+  override toAutoClassifierInput(
+    params: CronCreateParams,
+  ): Record<string, unknown> {
+    return {
+      cron: params.cron,
+      prompt: params.prompt,
+      recurring: params.recurring ?? true,
+    };
+  }
 }

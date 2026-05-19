@@ -126,28 +126,36 @@ export function isDangerousBashRule(rule: PermissionRule): boolean {
   const content = rule.specifier.trim().toLowerCase();
   if (content === '' || content === '*') return true;
 
-  const firstToken = content.split(/\s+/)[0] ?? '';
-  const beforeColon = content.includes(':')
-    ? (content.split(':')[0] ?? '')
-    : '';
-  const startsWithInterpreter =
-    isInterpreterToken(firstToken) || isInterpreterToken(beforeColon);
+  // Treat both whitespace and `:` as token delimiters: an interpreter is
+  // dangerous when it appears as the first token of either form
+  // (`python -c *` or `python:*`). For colon-form, the part after `:` is
+  // the specifier — we'll separately check whether it's concrete below.
+  const firstToken = content.split(/[\s:]/)[0] ?? '';
+  if (!isInterpreterToken(firstToken)) return false;
 
-  if (!startsWithInterpreter) return false;
-
-  // Bare interpreter name (`python`, `/usr/bin/python3`) is always dangerous
-  // — it means "run this interpreter, the caller decides what to do".
+  // Bare interpreter name (`python`, `/usr/bin/python3`) — caller decides
+  // what to do, classifier never sees it. Dangerous.
   if (firstToken === content) return true;
 
-  // Wildcard anywhere in the specifier, paired with an interpreter, defeats
-  // the classifier: covers `python *`, `python -c *`, `bun run *`,
-  // `/usr/bin/python3 *`, `python:*`, `node*`, etc.
+  // Wildcard anywhere paired with an interpreter defeats the classifier:
+  // `python *`, `python -c *`, `bun run *`, `/usr/bin/python3 *`,
+  // `python:*`, `node*`, etc.
   if (content.includes('*')) return true;
 
-  // Colon form without `*` (e.g. `python:eval`) — still dangerous because
-  // the colon grammar tells the matcher "any command under this verb".
-  if (content.includes(':') && isInterpreterToken(beforeColon)) return true;
+  // Colon form: only the wildcard variants are dangerous.
+  //   `python:` (empty suffix) and `python:*` (caught above by `*` branch)
+  // are interpreter-with-no-specifier — every command runs.
+  // `python:run-tests` / `python3:./script.py` are concrete user-allow
+  // rules — same shape as `Bash(npm run test)`, which the docstring above
+  // commits to NOT flagging. Strip them and we'd silently disable
+  // intentional user allow lists in AUTO.
+  if (content.includes(':')) {
+    const afterColon = content.slice(content.indexOf(':') + 1).trim();
+    return afterColon === '';
+  }
 
+  // Multi-token form without colon and without wildcard
+  // (`python script.py`, `bun run test`) is concrete — don't flag.
   return false;
 }
 
