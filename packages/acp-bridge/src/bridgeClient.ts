@@ -19,17 +19,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { BridgeEvent, EventBus } from './eventBus.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
-
-/**
- * Inline `writeStderrLine` (lifted from `cli/src/utils/stdioHelpers.ts` in
- * #4175 F1) so acp-bridge has no reverse dependency on `cli`. Behavior is
- * byte-identical to the cli helper: writes the message to stderr followed
- * by a newline, avoiding a double newline if the message already ends with
- * one.
- */
-function writeStderrLine(message: string): void {
-  process.stderr.write(message.endsWith('\n') ? message : `${message}\n`);
-}
+import { writeStderrLine } from './internal/stderrLine.js';
 
 /**
  * Bounded duplicate-vote cache. Stores only requestId/sessionId/outcome, so

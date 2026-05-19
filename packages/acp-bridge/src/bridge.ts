@@ -67,6 +67,7 @@ import type {
 } from './bridgeTypes.js';
 import type { BridgeOptions } from './bridgeOptions.js';
 import { defaultSpawnChannelFactory } from './spawnChannel.js';
+import { writeStderrLine } from './internal/stderrLine.js';
 import {
   BridgeClient,
   MAX_RESOLVED_PERMISSION_RECORDS,
@@ -106,17 +107,6 @@ import {
  * ACP-equivalent API. The `HttpAcpBridge` interface stays the same so HTTP
  * route handlers don't need to change.
  */
-
-/**
- * Inline `writeStderrLine` (lifted from `cli/src/utils/stdioHelpers.ts` in
- * #4175 F1) so acp-bridge has no reverse dependency on `cli`. Behavior is
- * byte-identical to the cli helper: writes the message to stderr followed
- * by a newline, avoiding a double newline if the message already ends with
- * one.
- */
-function writeStderrLine(message: string): void {
-  process.stderr.write(message.endsWith('\n') ? message : `${message}\n`);
-}
 
 interface ChannelInfo {
   channel: AcpChannel;
