@@ -3459,13 +3459,11 @@ async function verifyParentWithinWorkspace(
 
 /**
  * Re-export of the workspace canonicalizer for callers that historically
- * imported it from `httpAcpBridge.ts`. The implementation was first
- * extracted to `cli/src/serve/fs/paths.ts` in #4175 PR 18 (commit 1)
- * and then lifted to `./workspacePaths.ts` here in #4175 PR 22b/1, so
- * the `WorkspaceFileSystem` boundary can reuse the same primitive
- * without pulling in the 3.6k-line bridge module. See
- * `./workspacePaths.ts` for the cross-module contract that governs
- * this function.
+ * imported it from `httpAcpBridge.ts`. The implementation lives in
+ * `./workspacePaths.ts` so the `WorkspaceFileSystem` boundary can
+ * reuse the same primitive without pulling in the 3.6k-line bridge
+ * module. See `./workspacePaths.ts` for the cross-module contract
+ * that governs this function.
  */
 export { canonicalizeWorkspace };
 

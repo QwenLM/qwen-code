@@ -17,7 +17,7 @@
  *      proxy is fully bypassed — no `fs.writeFile` syscall);
  *   2. when `fileSystem` is omitted, the inline proxy runs and
  *      reads / writes real disk (sanity check that the fallback
- *      path the 14-arg constructor's positional slot opt-outs to
+ *      path the 7-arg constructor's positional slot opt-outs to
  *      still works).
  *
  * Regression guard: the constructor takes 7 positional args; the
