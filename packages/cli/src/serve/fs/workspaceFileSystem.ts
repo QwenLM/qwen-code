@@ -128,7 +128,21 @@ export interface ReadBytesOutcome {
   hash?: ContentHash;
 }
 
-export type WriteMode = 'create' | 'replace';
+/**
+ * Atomic write modes.
+ *
+ *   - `'create'`   — fails with `file_already_exists` if the target exists.
+ *   - `'replace'`  — requires `expectedHash`; fails with `hash_mismatch` if
+ *                    the on-disk hash doesn't match (optimistic concurrency).
+ *   - `'overwrite'` — unconditional create-or-overwrite, no hash check. Used
+ *                     by callers whose protocol has no client-side hash
+ *                     (e.g. ACP `WriteTextFileRequest` has only
+ *                     `{path, content, sessionId}`). Still goes through the
+ *                     atomic tmp+rename + mode-preservation path so a
+ *                     `0o600` secret edit does NOT downgrade to umask-default
+ *                     and a SIGKILL mid-write does NOT truncate the target.
+ */
+export type WriteMode = 'create' | 'replace' | 'overwrite';
 
 export interface WriteTextAtomicOptions extends WriteTextFileOptions {
   mode: WriteMode;
@@ -177,6 +191,22 @@ export interface WorkspaceFileSystem {
     p: ResolvedPath,
     content: string,
     opts: WriteTextAtomicOptions,
+  ): Promise<WriteTextAtomicOutcome>;
+  /**
+   * Unconditional create-or-overwrite (no `expectedHash` gate). Atomic
+   * temp+rename with target-mode preservation: a `0o600` secret survives
+   * the edit at `0o600`; a new file is created at `0o600` (NOT umask
+   * default). Used by protocols whose wire format carries no client-side
+   * hash — e.g. ACP `WriteTextFileRequest` is just `{path, content,
+   * sessionId}` so the CAS-gated `writeTextAtomic` doesn't fit.
+   *
+   * Symlinks at the target are rejected (`symlink_escape`) consistent
+   * with `writeTextAtomic` and HTTP `POST /file` from PR 20.
+   */
+  writeTextOverwrite(
+    p: ResolvedPath,
+    content: string,
+    opts?: WriteTextFileOptions,
   ): Promise<WriteTextAtomicOutcome>;
   writeText(
     p: ResolvedPath,
@@ -793,6 +823,71 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
   }
 
+  async writeTextOverwrite(
+    p: ResolvedPath,
+    content: string,
+    opts: WriteTextFileOptions = {},
+  ): Promise<WriteTextAtomicOutcome> {
+    const start = performance.now();
+    try {
+      assertTrustedForIntent(this.deps.trusted, 'write');
+      const decodedSizeBytes = Buffer.byteLength(content, 'utf-8');
+      enforceWriteSize(decodedSizeBytes);
+      const out = await this.deps.pathLocks.runExclusive(
+        p as string,
+        async () => {
+          // Best-effort read of existing meta so we preserve detected
+          // encoding / BOM / line-ending across overwrites — matches the
+          // posture of `writeTextAtomic({mode:'replace'})` whose existing
+          // meta is sourced the same way. ENOENT (new file) leaves
+          // `existingMeta` undefined and `mergeWriteMeta` falls back to
+          // its UTF-8 / no-BOM / lf defaults.
+          let existingMeta: ReadMeta | undefined;
+          try {
+            existingMeta = await readExistingTextMeta(p);
+          } catch (err) {
+            // ENOENT (lstat) is the new-file path; bubble everything else.
+            if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+              throw err;
+            }
+          }
+          const meta = mergeWriteMeta(existingMeta, opts);
+          const result = await atomicWriteTextResolvedFile({
+            target: p,
+            content,
+            mode: 'overwrite',
+            meta,
+          });
+          const verdict = shouldIgnore(
+            p,
+            this.deps.boundWorkspace,
+            this.deps.ignore,
+            'file',
+          );
+          if (verdict.ignored) meta.matchedIgnore = verdict.category;
+          meta.sizeBytes = result.sizeBytes;
+          meta.hash = result.hash;
+          this.deps.audit.recordAccess(this.deps.ctx, {
+            intent: 'write',
+            absolute: p,
+            durationMs: performance.now() - start,
+            sizeBytes: result.sizeBytes,
+            matchedIgnore: meta.matchedIgnore,
+          });
+          return {
+            created: existingMeta === undefined,
+            sizeBytes: result.sizeBytes,
+            hash: result.hash,
+            meta,
+          };
+        },
+      );
+      return out;
+    } catch (err) {
+      throw this.recordAndWrap(err, 'write', p as string);
+    }
+  }
+
   async writeText(
     p: ResolvedPath,
     content: string,
@@ -1151,10 +1246,14 @@ interface AtomicWriteTextOutcome {
 }
 
 function validateWriteTextAtomicOptions(opts: WriteTextAtomicOptions): void {
-  if (opts.mode !== 'create' && opts.mode !== 'replace') {
+  if (
+    opts.mode !== 'create' &&
+    opts.mode !== 'replace' &&
+    opts.mode !== 'overwrite'
+  ) {
     throw new FsError(
       'parse_error',
-      'mode must be either "create" or "replace"',
+      'mode must be one of "create", "replace", "overwrite"',
     );
   }
   if (opts.expectedHash !== undefined && !isContentHash(opts.expectedHash)) {
@@ -1169,6 +1268,11 @@ function validateWriteTextAtomicOptions(opts: WriteTextAtomicOptions): void {
       'expectedHash is required when mode is "replace"',
     );
   }
+  // `'overwrite'` deliberately does NOT require expectedHash — it's the
+  // primitive for protocols (e.g. ACP `WriteTextFileRequest`) whose wire
+  // format has no client-side hash. expectedHash IS still accepted on
+  // overwrite, but callers that pass it should use `'replace'` instead
+  // since hash-mismatch detection is the whole point of that mode.
   if (
     opts.lineEnding !== undefined &&
     opts.lineEnding !== 'lf' &&
@@ -1516,6 +1620,37 @@ async function assertAtomicTargetPrecondition(input: {
   if (input.mode === 'create') {
     await assertCreateTargetAbsent(input.target);
     return {};
+  }
+  if (input.mode === 'overwrite') {
+    // Tolerate missing target (new file path); reject symlinks and
+    // non-regular files (parity with 'replace'). When the target
+    // exists, return its mode so the caller can preserve it on the
+    // temp file before rename.
+    let pre: Awaited<ReturnType<typeof fsp.lstat>>;
+    try {
+      pre = await fsp.lstat(input.target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return {};
+      }
+      throw err;
+    }
+    if (pre.isSymbolicLink()) {
+      throw new FsError(
+        'symlink_escape',
+        `path is a symlink and cannot be overwritten atomically: ${input.target}`,
+        {
+          hint: 're-resolve the target file instead of writing through a link',
+        },
+      );
+    }
+    if (!pre.isFile()) {
+      throw new FsError(
+        'parse_error',
+        `path is not a regular file: ${input.target}`,
+      );
+    }
+    return { mode: pre.mode & 0o7777 };
   }
   if (!isContentHash(input.expectedHash)) {
     throw new FsError(

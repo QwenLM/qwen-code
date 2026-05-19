@@ -25,9 +25,13 @@
  * The adapter is a thin translation layer:
  *   - ACP request → `WorkspaceFileSystem.resolve(path, intent)` to
  *     materialize the `ResolvedPath` brand
- *   - For writes: `wfs.writeText(resolved, content)` (the PR 18 write
- *     path applies trust gate + atomic temp-file + symlink resolution
- *     + audit emit internally)
+ *   - For writes: `wfs.writeTextOverwrite(resolved, content)` — the PR
+ *     18 primitive that does atomic temp+rename with target-mode
+ *     preservation (existing `0o600` survives the edit; new files
+ *     default to `0o600`, NOT umask). Picked over `wfs.writeText` (no
+ *     mode handling, non-atomic) and over `wfs.writeTextAtomic` (whose
+ *     `expectedHash` CAS gate doesn't map to ACP's hash-less
+ *     `WriteTextFileRequest` wire shape).
  *   - For reads: `wfs.readText(resolved, { line, limit })` (PR 18's
  *     read path enforces size caps + line/limit windowing + audit)
  *   - Error propagation is by reference — the bridge's existing
@@ -93,7 +97,7 @@ export function createBridgeFileSystemAdapter(
         buildAuditContext(params, ACP_WRITE_ROUTE),
       );
       const resolved = await wfs.resolve(params.path, 'write');
-      await wfs.writeText(resolved, params.content);
+      await wfs.writeTextOverwrite(resolved, params.content);
       return {};
     },
 

@@ -86,6 +86,62 @@ describe('createBridgeFileSystemAdapter', () => {
       expect(onDisk).toBe('adapter-content');
     });
 
+    it('creates new files at 0o600 (NOT umask default — BridgeFileSystem contract)', async () => {
+      // BridgeFileSystem contract requires `0o600` for newly-created
+      // files (NOT umask defaults — agent writes don't know the file's
+      // intended audience, so default to "owner-only"). The old inline
+      // BridgeClient.writeTextFile proxy did this via fs.writeFile's
+      // `mode` arg; the F1 follow-up wiring delegates to PR 18's new
+      // `writeTextOverwrite` primitive which opens the tmp file with
+      // `0o600` and chmods to that default before rename. Pinning this
+      // here prevents a future refactor that switches the adapter back
+      // to `wfs.writeText` (no mode handling → umask default 0o644).
+      // Skipped on Windows since POSIX permission bits are not honored.
+      if (process.platform === 'win32') return;
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      const target = path.join(tmpDir, 'new-secret.txt');
+      await adapter.writeText({
+        path: target,
+        content: 'secret',
+        sessionId: 'sess:test',
+      });
+      const st = await fsp.stat(target);
+      expect(st.mode & 0o7777).toBe(0o600);
+    });
+
+    it('preserves target mode when overwriting an existing file', async () => {
+      // Editing a `0o600` secret must NOT downgrade it to `0o644` via
+      // umask. The PR 18 atomic write path snapshots the existing
+      // target's mode and applies it to the temp file before rename.
+      // Skipped on Windows for the same reason as the 0o600 test.
+      if (process.platform === 'win32') return;
+      const target = path.join(tmpDir, 'existing-secret.txt');
+      await fsp.writeFile(target, 'before', { mode: 0o600 });
+      await fsp.chmod(target, 0o600);
+      const adapter = createBridgeFileSystemAdapter(
+        buildFactory({ trusted: true }),
+      );
+      await adapter.writeText({
+        path: target,
+        content: 'after',
+        sessionId: 'sess:test',
+      });
+      const st = await fsp.stat(target);
+      expect(st.mode & 0o7777).toBe(0o600);
+      expect(await fsp.readFile(target, 'utf8')).toBe('after');
+    });
+
+    // Symlink-rejection posture (BridgeFileSystem contract divergence
+    // from the pre-F1 inline proxy) is enforced by `writeTextOverwrite`
+    // and verified at the lower layer in
+    // `workspaceFileSystem.test.ts > writeTextOverwrite rejects symlink
+    // targets planted post-resolve (symlink_escape)`. Re-testing at the
+    // adapter layer would only re-exercise the same code path; the
+    // adapter contract is "delegate to writeTextOverwrite", and the
+    // mode-preservation assertions above already pin THAT.
+
     it('emits an audit event with route="ACP writeTextFile"', async () => {
       const adapter = createBridgeFileSystemAdapter(
         buildFactory({ trusted: true }),
@@ -242,6 +298,12 @@ describe('createBridgeFileSystemAdapter', () => {
             glob: vi.fn(),
             writeTextAtomic: vi.fn(),
             writeText: vi.fn(async () => {}),
+            writeTextOverwrite: vi.fn(async () => ({
+              created: true,
+              sizeBytes: 0,
+              hash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000' as const,
+              meta: { lineEnding: 'lf' as const },
+            })),
             edit: vi.fn(),
             editAtomic: vi.fn(),
           };
@@ -286,6 +348,12 @@ describe('createBridgeFileSystemAdapter', () => {
             glob: vi.fn(),
             writeTextAtomic: vi.fn(),
             writeText: vi.fn(async () => {}),
+            writeTextOverwrite: vi.fn(async () => ({
+              created: true,
+              sizeBytes: 0,
+              hash: 'sha256:0000000000000000000000000000000000000000000000000000000000000000' as const,
+              meta: { lineEnding: 'lf' as const },
+            })),
             edit: vi.fn(),
             editAtomic: vi.fn(),
           };
