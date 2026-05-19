@@ -3253,7 +3253,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFolderTrustSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
-      onSuggestionsVisibilityChange: setHasTabConsumer,
+      onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
